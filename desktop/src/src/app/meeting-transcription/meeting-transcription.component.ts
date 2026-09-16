@@ -184,13 +184,10 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
 
   /** Checks model availability on first paint and re-checks on re-activation. */
   async ngOnInit(): Promise<void> {
-    // Registered before any await so a rejected resume below can never skip them.
     window.addEventListener('focus', this.onActivate);
     document.addEventListener('visibilitychange', this.onActivate);
     await this.refreshModelReady();
     try {
-      // Re-attach the live stream if a recording was left running while this tab
-      // was destroyed on navigation (the backend driver never stopped).
       await this.transcription.resumeActiveRecording();
     } catch (err) {
       this.log.warn(`resume active recording failed: ${String(err)}`);
@@ -214,7 +211,6 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
       const ack = await this.transcription.listModels();
       this.modelReady.set(ack.whisper.some((m) => m.downloaded));
     } catch (err) {
-      // Don't trap the user behind the gate on a transient read error.
       this.log.warn(`model-availability check failed: ${String(err)}`);
       this.modelReady.set(true);
     }

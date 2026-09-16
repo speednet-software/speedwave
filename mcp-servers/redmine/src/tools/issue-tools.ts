@@ -54,7 +54,6 @@ async function resolveAssignedTo(
   return undefined;
 }
 
-// Tool Definitions
 const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
   description:

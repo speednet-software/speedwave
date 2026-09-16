@@ -5,7 +5,6 @@ import jsdoc from 'eslint-plugin-jsdoc';
 import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
 
 export default tseslint.config(
-  // Global ignores (replaces .eslintignore)
   {
     ignores: [
       '**/dist/**',
@@ -19,13 +18,11 @@ export default tseslint.config(
     ],
   },
 
-  // Base configs
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   jsdoc.configs['flat/recommended-typescript'],
   eslintPluginPrettierRecommended,
 
-  // Custom rules for TypeScript files
   {
     files: ['**/src/**/*.ts'],
     languageOptions: {
@@ -35,9 +32,9 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-empty': ['error', { allowEmptyCatch: true }],
       'no-console': 'off',
 
-      // JSDoc - strict enforcement
       'jsdoc/require-jsdoc': [
         'error',
         {
@@ -70,7 +67,6 @@ export default tseslint.config(
       'jsdoc/no-defaults': 'off',
       'jsdoc/require-returns': 'off',
 
-      // Override defaults from recommended-typescript to be errors instead of warnings
       'jsdoc/require-param': 'error',
       'jsdoc/escape-inline-tags': 'error',
     },

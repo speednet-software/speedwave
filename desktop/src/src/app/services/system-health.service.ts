@@ -45,13 +45,11 @@ export class SystemHealthService implements OnDestroy {
       if (!report || typeof report !== 'object' || !('vm' in report) || !('ide_bridge' in report)) {
         return;
       }
-      // Skip the signal write when the snapshot is byte-identical to the previous one.
       const serialised = JSON.stringify(report);
       if (serialised === this.lastSerialised) return;
       this.lastSerialised = serialised;
       this.health.set(report);
     } catch (err) {
-      // Health is non-critical; keep the previous snapshot and log at debug level.
       if (this.tauri.isRunningInTauri()) {
         this.log.debug(`[SystemHealth] get_health failed: ${String(err)}`);
       }

@@ -41,7 +41,6 @@ def _add_chart(ws, chart_spec: dict) -> None:
         chart.title = str(chart_spec["title"])
 
     def parse_ref(s: str) -> Reference:
-        # Accept "Sheet!A1:B10" or "A1:B10" (defaults to ws).
         if "!" in s:
             sheet_name, rng = s.split("!", 1)
             target = _sheet(ws.parent, sheet_name)

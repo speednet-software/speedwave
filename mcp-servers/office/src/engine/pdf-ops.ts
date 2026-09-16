@@ -88,7 +88,6 @@ export async function splitPdf(
       throw new ValidationError(`Page range end ${r[1]} exceeds the ${MAX_PDF_PAGES}-page limit`);
     }
   }
-  // Ranges write to independent output paths from the same read-only input — run in parallel.
   const base = (outName ?? `split-${Date.now()}.pdf`).replace(/\.pdf$/i, '');
   return Promise.all(
     ranges.map(async (range, i) => {
@@ -183,7 +182,6 @@ export async function fillPdfForm(
   if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) {
     throw new ValidationError('fillPdfForm: fields must be an object of name → value');
   }
-  // Contract is name→string; non-string values are rejected, not coerced.
   const strFields: Record<string, string> = {};
   for (const [k, v] of Object.entries(fields)) {
     if (typeof v !== 'string') {

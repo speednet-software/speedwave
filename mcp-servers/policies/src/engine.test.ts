@@ -183,7 +183,6 @@ describe('keyword masking', () => {
       expect(v.note).toBe('brandex shipped');
       expect(v.tags[0]).toBe('BRANDEX');
       expect(v.tags[1]).toBe(7);
-      // Keyword masking is not a detection: the audit contract carries PII categories only.
       expect(detections).toEqual([]);
     });
   });

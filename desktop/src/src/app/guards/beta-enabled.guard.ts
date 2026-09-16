@@ -14,7 +14,6 @@ export const betaEnabledGuard: CanActivateFn = async () => {
     const enabled = await tauri.invoke<boolean>('get_beta_enabled');
     return enabled ? true : router.createUrlTree(['/chat']);
   } catch {
-    // No Tauri host (web tests) — treat as disabled.
     return router.createUrlTree(['/chat']);
   }
 };

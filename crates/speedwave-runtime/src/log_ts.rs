@@ -18,8 +18,6 @@ where
     dt.to_rfc3339_opts(SecondsFormat::Millis, false)
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -48,7 +46,6 @@ mod tests {
             .unwrap()
             .with_nanosecond(814_000_000)
             .unwrap();
-        // `to_rfc3339_opts(.., false)` uses `+00:00`, never `Z`.
         assert_eq!(format_log_timestamp(&dt), "2026-05-12T12:34:02.814+00:00");
     }
 
@@ -69,7 +66,6 @@ mod tests {
             parsed.is_ok(),
             "log_timestamp must be RFC-3339 parseable: {s}"
         );
-        // millisecond fractional-seconds slot is present
         assert!(s.contains('.'), "must carry millis: {s}");
     }
 }

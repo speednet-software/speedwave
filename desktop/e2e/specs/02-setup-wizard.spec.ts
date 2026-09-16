@@ -1,4 +1,3 @@
-
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
 import {
   openSettings,
@@ -15,8 +14,10 @@ const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-proje
 
 async function isSetupComplete(): Promise<boolean> {
   return browser.executeAsync((done: (result: boolean) => void) => {
-    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<boolean> } })
-      .__TAURI_INTERNALS__.invoke('is_setup_complete')
+    (
+      window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<boolean> } }
+    ).__TAURI_INTERNALS__
+      .invoke('is_setup_complete')
       .then((result: boolean) => done(result))
       .catch(() => done(false));
   });
@@ -41,7 +42,7 @@ async function waitForStepTerminal(index: number, timeout: number): Promise<stri
         }
         return false;
       },
-      { timeout, timeoutMsg: `Step ${index} did not reach terminal state within ${timeout}ms` },
+      { timeout, timeoutMsg: `Step ${index} did not reach terminal state within ${timeout}ms` }
     );
   } catch (e) {
     const complete = await isSetupComplete();
@@ -87,10 +88,10 @@ describe('Setup Wizard — Full Flow', function () {
     const btn = await $('[data-testid="setup-start-btn"]');
     await btn.click();
 
-    await browser.waitUntil(
-      async () => (await $$('[data-testid="setup-step"]').length) === 6,
-      { timeout: 30_000, timeoutMsg: 'Expected 6 setup steps but not all rendered' },
-    );
+    await browser.waitUntil(async () => (await $$('[data-testid="setup-step"]').length) === 6, {
+      timeout: 30_000,
+      timeoutMsg: 'Expected 6 setup steps but not all rendered',
+    });
     const stepElements = await $$('[data-testid="setup-step"]');
     expect(await stepElements.length).toBe(6);
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env bats
-# Guard audio-capture.plist: must have com.apple.security.device.audio-input entitlement, no broader (ADR-056).
 
 PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/audio-capture.plist"
 
@@ -29,7 +28,6 @@ PY
 }
 
 @test "audio-capture.plist declares exactly one <key>" {
-    # Only the mic entitlement is needed; a second key is a regression.
     local keys
     keys="$(grep -c '<key>' "$PLIST")"
     [ "$keys" = "1" ]

@@ -21,11 +21,9 @@ import type {
 } from './client.js';
 import fs from 'fs/promises';
 
-// Mock axios
 vi.mock('axios');
 const mockedAxios = vi.mocked(axios, true);
 
-// Mock fs/promises
 vi.mock('fs/promises');
 const mockedFs = vi.mocked(fs, true);
 
@@ -36,7 +34,6 @@ describe('RedmineClient', () => {
   let mockInterceptors: any;
 
   beforeEach(() => {
-    // Setup mock axios instance
     mockInterceptors = {
       response: {
         use: vi.fn(),
@@ -64,8 +61,6 @@ describe('RedmineClient', () => {
   afterEach(() => {
     vi.clearAllMocks();
   });
-
-  // ── Constructor and Initialization ─────────────────────────────────────────────────────────────
 
   describe('constructor', () => {
     it('should create axios instance with correct config', () => {
@@ -185,8 +180,6 @@ describe('RedmineClient', () => {
       expect(result.url).toBe('https://redmine.example.com');
     });
   });
-
-  // ── Issue Operations ───────────────────────────────────────────────────────────────────────────
 
   describe('listIssues', () => {
     it('should fetch issues with default parameters', async () => {
@@ -807,7 +800,7 @@ describe('RedmineClient', () => {
             id: 123,
             subject: 'Test Issue',
             status: { id: 6, name: 'Odrzucony' },
-            assigned_to: null, // Redmine rejected assignment for closed issue
+            assigned_to: null,
             project: { id: 1, name: 'Test' },
           },
         },
@@ -817,7 +810,6 @@ describe('RedmineClient', () => {
         assigned_to_id: 5,
       });
 
-      // Caller can now verify if assignment was actually applied
       expect(result.assigned_to).toBeNull();
     });
   });
@@ -843,8 +835,6 @@ describe('RedmineClient', () => {
       expect(call[1].issue.notes).toContain('Good comment');
     });
   });
-
-  // ── Time Entry Operations ──────────────────────────────────────────────────────────────────────
 
   describe('listTimeEntries', () => {
     it('should fetch time entries with default parameters', async () => {
@@ -890,7 +880,6 @@ describe('RedmineClient', () => {
         limit: 50,
       });
 
-      // When issue_id is present, project_id is not sent to API (issue_id filter is sufficient)
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
         params: {
           limit: 50,
@@ -971,7 +960,6 @@ describe('RedmineClient', () => {
         spent_on: '2024-01-15',
       });
 
-      // When issue_id is present, project_id is not sent to Redmine (Redmine derives project from issue)
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/time_entries.json', {
         time_entry: {
           issue_id: 123,
@@ -1016,8 +1004,6 @@ describe('RedmineClient', () => {
       expect(call[1].time_entry).toHaveProperty('comments', '');
     });
   });
-
-  // ── Journal Operations ─────────────────────────────────────────────────────────────────────────
 
   describe('listJournals', () => {
     it('should fetch journals for an issue', async () => {
@@ -1093,8 +1079,6 @@ describe('RedmineClient', () => {
       expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/issues/1/journals/2.json');
     });
   });
-
-  // ── User Operations ────────────────────────────────────────────────────────────────────────────
 
   describe('getCurrentUser', () => {
     it('should fetch current user', async () => {
@@ -1238,8 +1222,6 @@ describe('RedmineClient', () => {
       expect(result).toBeNull();
     });
   });
-
-  // ── Relation Operations ────────────────────────────────────────────────────────────────────────
 
   describe('listRelations', () => {
     it('should list relations for an issue', async () => {
@@ -1388,8 +1370,6 @@ describe('RedmineClient', () => {
       expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/relations/123.json');
     });
   });
-
-  // ── Relation Error Handling ────────────────────────────────────────────────────────────────────
 
   describe('listRelations - error handling', () => {
     it('should throw when issue does not exist (404)', async () => {
@@ -1577,11 +1557,8 @@ describe('RedmineClient', () => {
     });
   });
 
-  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
-
   describe('formatError', () => {
     beforeEach(() => {
-      // Mock axios.isAxiosError to return true for our test errors
       vi.spyOn(axios, 'isAxiosError').mockReturnValue(true);
     });
 
@@ -1780,7 +1757,6 @@ describe('RedmineClient', () => {
     });
 
     it('should format network error', () => {
-      // Create an error without response (network error)
       const error = {
         isAxiosError: true,
         request: {},
@@ -1825,11 +1801,8 @@ describe('RedmineClient', () => {
     });
   });
 
-  // ── Retry Mechanism ────────────────────────────────────────────────────────────────────────────
-
   describe('retry interceptor', () => {
     it('should retry failed requests up to 3 times', async () => {
-      // Get the interceptor
       const interceptorCall = mockInterceptors.response.use.mock.calls[0];
       const errorHandler = interceptorCall[1];
 
@@ -1838,16 +1811,13 @@ describe('RedmineClient', () => {
         message: 'Network error',
       };
 
-      // First retry
       void errorHandler(mockError);
       expect(mockError.config.__retryCount).toBe(1);
 
-      // Second retry
       mockError.config.__retryCount = 2;
       void errorHandler(mockError);
       expect(mockError.config.__retryCount).toBe(3);
 
-      // Third retry should reject
       mockError.config.__retryCount = 3;
       await expect(errorHandler(mockError)).rejects.toEqual(mockError);
     });
@@ -1872,10 +1842,8 @@ describe('RedmineClient', () => {
         message: 'Network error',
       };
 
-      // Start the retry (but don't await - it has a delay)
       void errorHandler(mockError);
 
-      // The retry count should be set
       expect(mockError.config.__retryCount).toBe(1);
     });
 
@@ -1892,16 +1860,13 @@ describe('RedmineClient', () => {
     it('should call axios instance with config on retry after delay', async () => {
       vi.useFakeTimers();
 
-      // Make mockAxiosInstance callable as a function (it is used as this.client(config))
       const callableInstance = Object.assign(
         vi.fn().mockResolvedValue({ data: { retried: true } }),
         mockAxiosInstance
       );
       const newClient = new RedmineClient(config);
-      // Access the private client and replace it with our callable version
       (newClient as any).client = callableInstance;
 
-      // Grab the NEW interceptor registered by newClient
       const newInterceptorCall =
         mockInterceptors.response.use.mock.calls[
           mockInterceptors.response.use.mock.calls.length - 1
@@ -1915,7 +1880,6 @@ describe('RedmineClient', () => {
 
       const retryPromise = newErrorHandler(mockError);
 
-      // Advance timers to trigger the setTimeout delay (2^1 * 1000 = 2000ms)
       await vi.advanceTimersByTimeAsync(2001);
 
       await retryPromise;
@@ -1925,8 +1889,6 @@ describe('RedmineClient', () => {
       vi.useRealTimers();
     });
   });
-
-  // ── Redirect Handling ──────────────────────────────────────────────────────────────────────────
 
   describe('redirect handling (maxRedirects: 0)', () => {
     /** Build a client for `url` and return the response-error interceptor it registered. */
@@ -2070,8 +2032,6 @@ describe('RedmineClient', () => {
     });
   });
 
-  // ── Input Sanitization ─────────────────────────────────────────────────────────────────────────
-
   describe('input sanitization', () => {
     it('should remove script tags from input', async () => {
       mockAxiosInstance.post.mockResolvedValue({
@@ -2167,8 +2127,6 @@ describe('RedmineClient', () => {
     });
   });
 
-  // ── Project Scoping ────────────────────────────────────────────────────────────────────────────
-
   describe('Project Scoping', () => {
     const scopedProjectConfig: RedmineProjectConfig = {
       host_url: 'https://redmine.example.com',
@@ -2230,8 +2188,6 @@ describe('RedmineClient', () => {
       });
     }
 
-    // ─── getProjectScope() ───────────────────────────────────────────────
-
     describe('getProjectScope()', () => {
       it('should return null when projectConfig is null', () => {
         const c = new RedmineClient(config, null);
@@ -2267,8 +2223,6 @@ describe('RedmineClient', () => {
         expect(c.getProjectScope()).toBe('my-project');
       });
     });
-
-    // ─── _enforceProjectId() via listIssues() ────────────────────────────
 
     describe('_enforceProjectId() via listIssues()', () => {
       it('should throw ProjectScopeError when scoped and project_id mismatches', async () => {
@@ -2319,8 +2273,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── _resolveProjectNumericId() cache via showIssue() ────────────────
-
     describe('_resolveProjectNumericId() cache via showIssue()', () => {
       it('should cache the numeric ID after the first call', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -2328,7 +2280,6 @@ describe('RedmineClient', () => {
 
         await scopedClient.showIssue(1);
 
-        // First call: GET /issues/1.json (showIssue fetch) + GET /projects/my-project.json (resolve numeric ID)
         expect(mockAxiosInstance.get).toHaveBeenCalledTimes(2);
         const firstCallUrls = mockAxiosInstance.get.mock.calls.map((c: any[]) => c[0]);
         expect(firstCallUrls).toContain('/projects/my-project.json');
@@ -2339,7 +2290,6 @@ describe('RedmineClient', () => {
 
         await scopedClient.showIssue(1);
 
-        // Second call: only GET /issues/1.json (cache hit for project numeric ID)
         expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
         expect(mockAxiosInstance.get.mock.calls[0][0]).toBe('/issues/1.json');
       });
@@ -2350,7 +2300,6 @@ describe('RedmineClient', () => {
           project_id: 'nonexistent',
         });
 
-        // Create a plain error with response.status to simulate Axios 404
         const axiosLikeError = Object.assign(new Error('Not Found'), {
           isAxiosError: true,
           response: { status: 404, statusText: 'Not Found', headers: {}, config: {}, data: {} },
@@ -2379,7 +2328,6 @@ describe('RedmineClient', () => {
 
         const networkError = new Error('Network error');
 
-        // First call: fails
         mockAxiosInstance.get.mockImplementation((url: string) => {
           if (url === '/projects/flaky.json') {
             return Promise.reject(networkError);
@@ -2391,7 +2339,6 @@ describe('RedmineClient', () => {
 
         await expect(scopedClient.showIssue(1)).rejects.toThrow('Network error');
 
-        // Second call: succeeds (cache was cleared)
         mockAxiosInstance.get.mockImplementation((url: string) => {
           if (url === '/projects/flaky.json') {
             return Promise.resolve({ data: { project: { id: 42, identifier: 'flaky' } } });
@@ -2405,8 +2352,6 @@ describe('RedmineClient', () => {
         expect(issue.project.id).toBe(42);
       });
     });
-
-    // ─── showProject() scoping ──────────────────────────────────────────
 
     describe('showProject() scoping', () => {
       it('should succeed when scoped and identifier matches', async () => {
@@ -2457,7 +2402,6 @@ describe('RedmineClient', () => {
 
       it('should succeed when Redmine returns lowercase identifier matching scope', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
-        // Request "My-Project" but Redmine canonicalizes to "my-project"
         mockAxiosInstance.get.mockResolvedValue({
           data: { project: scopedProject },
         });
@@ -2489,7 +2433,7 @@ describe('RedmineClient', () => {
         };
         const numericScopeClient = new RedmineClient(config, numericScopeConfig);
         mockAxiosInstance.get.mockResolvedValue({
-          data: { project: scopedProject }, // project.id=42, identifier='my-project'
+          data: { project: scopedProject },
         });
 
         const result = await numericScopeClient.showProject('42');
@@ -2503,14 +2447,12 @@ describe('RedmineClient', () => {
         };
         const numericScopeClient = new RedmineClient(config, numericScopeConfig);
         mockAxiosInstance.get.mockResolvedValue({
-          data: { project: scopedProject }, // project.id=42, identifier='my-project'
+          data: { project: scopedProject },
         });
 
         await expect(numericScopeClient.showProject('99')).rejects.toThrow(ProjectScopeError);
       });
     });
-
-    // ─── listProjects() scoping ─────────────────────────────────────────
 
     describe('listProjects() scoping', () => {
       it('should return only configured project when scoped', async () => {
@@ -2602,7 +2544,6 @@ describe('RedmineClient', () => {
 
       it('should filter projects by closed status when unscoped', async () => {
         const activeProject = { ...scopedProject, status: 1 };
-        // status 9 = closed per REDMINE_STATUS_MAP
         const closedProject = {
           id: 99,
           identifier: 'closed-proj',
@@ -2676,8 +2617,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── showProject() include option ───────────────────────────────────
-
     describe('showProject() include option', () => {
       it('should pass include param when options.include is non-empty', async () => {
         mockAxiosInstance.get.mockResolvedValue({
@@ -2715,8 +2654,6 @@ describe('RedmineClient', () => {
         });
       });
     });
-
-    // ─── searchProjects() scoping ───────────────────────────────────────
 
     describe('searchProjects() scoping', () => {
       it('should return project when scoped and query matches name', async () => {
@@ -2842,8 +2779,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── listIssues() / searchIssues() scoping ──────────────────────────
-
     describe('listIssues() / searchIssues() scoping', () => {
       it('should force scope in params when scoped and no project_id', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -2901,8 +2836,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── showIssue() scoping ────────────────────────────────────────────
-
     describe('showIssue() scoping', () => {
       it('should succeed when scoped and issue.project.id matches', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -2931,8 +2864,6 @@ describe('RedmineClient', () => {
         expect(result.project.id).toBe(99);
       });
     });
-
-    // ─── updateIssue() scoping ──────────────────────────────────────────
 
     describe('updateIssue() scoping', () => {
       it('should validate issue scope before PUT when scoped', async () => {
@@ -2974,8 +2905,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── listTimeEntries() scoping ──────────────────────────────────────
-
     describe('listTimeEntries() scoping', () => {
       it('should force project_id when scoped and no issue_id or project_id', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -3014,8 +2943,6 @@ describe('RedmineClient', () => {
         );
       });
     });
-
-    // ─── createTimeEntry() scoping ──────────────────────────────────────
 
     describe('createTimeEntry() scoping', () => {
       it('should validate issue and omit project_id when scoped with issue_id only', async () => {
@@ -3097,14 +3024,11 @@ describe('RedmineClient', () => {
           hours: 2,
         });
 
-        // issue_id present -> project_id omitted from payload (Redmine derives it)
         const postPayload = mockAxiosInstance.post.mock.calls[0][1].time_entry;
         expect(postPayload.issue_id).toBe(1);
         expect(postPayload).not.toHaveProperty('project_id');
       });
     });
-
-    // ─── updateTimeEntry() scoping ──────────────────────────────────────
 
     describe('updateTimeEntry() scoping', () => {
       it('should succeed when scoped and time entry belongs to scoped project', async () => {
@@ -3154,8 +3078,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── listUsers() scoping ────────────────────────────────────────────
-
     describe('listUsers() scoping', () => {
       it('should use memberships endpoint with scope when scoped and no projectId', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -3187,8 +3109,6 @@ describe('RedmineClient', () => {
         expect(mockAxiosInstance.get).toHaveBeenCalledWith('/users.json');
       });
     });
-
-    // ─── createRelation() scoping ───────────────────────────────────────
 
     describe('createRelation() scoping', () => {
       it('should succeed when scoped and both issues are in scope', async () => {
@@ -3245,10 +3165,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── deleteRelation() scoping ───────────────────────────────────────
-
-    // ─── createIssue() scoping ──────────────────────────────────────────
-
     describe('createIssue() scoping', () => {
       it('should succeed when scoped and project_id matches', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -3271,8 +3187,6 @@ describe('RedmineClient', () => {
         expect(mockAxiosInstance.post).not.toHaveBeenCalled();
       });
     });
-
-    // ─── commentIssue() scoping ──────────────────────────────────────────
 
     describe('commentIssue() scoping', () => {
       it('should succeed when scoped and issue is in scope', async () => {
@@ -3306,8 +3220,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── listJournals() transitive scoping ───────────────────────────────
-
     describe('listJournals() transitive scoping', () => {
       it('should throw when scoped and issue is out of scope', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -3324,8 +3236,6 @@ describe('RedmineClient', () => {
         await expect(scopedClient.listJournals(2)).rejects.toThrow(ProjectScopeError);
       });
     });
-
-    // ─── updateJournal()/deleteJournal() scoping ─────────────────────────
 
     describe('updateJournal()/deleteJournal() scoping', () => {
       it('should validate issue scope before updating journal', async () => {
@@ -3394,7 +3304,6 @@ describe('RedmineClient', () => {
           if (url === '/issues/1.json') return Promise.resolve({ data: { issue: inScopeIssue } });
           return Promise.reject(new Error(`Unexpected GET ${url}`));
         });
-        // Redmine returns 404 when journalId doesn't belong to issueId
         const notFoundError = Object.assign(new Error('Not Found'), {
           response: { status: 404 },
           isAxiosError: true,
@@ -3404,8 +3313,6 @@ describe('RedmineClient', () => {
         await expect(scopedClient.updateJournal(1, 999, 'notes')).rejects.toThrow();
       });
     });
-
-    // ─── listRelations() scoping ─────────────────────────────────────────
 
     describe('listRelations() scoping', () => {
       it('should validate issue scope before listing relations', async () => {
@@ -3437,8 +3344,6 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── Additional listTimeEntries() scoping variants ───────────────────
-
     describe('listTimeEntries() additional scoping', () => {
       it('should succeed when scoped + matching project_id, no issue_id', async () => {
         const scopedClient = new RedmineClient(config, scopedProjectConfig);
@@ -3467,14 +3372,11 @@ describe('RedmineClient', () => {
           issue_id: 1,
           project_id: 'my-project',
         });
-        // project_id NOT in params when issue_id is present
         expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
           params: { limit: 25, issue_id: 1 },
         });
       });
     });
-
-    // ─── Additional createTimeEntry() scoping variants ───────────────────
 
     describe('createTimeEntry() additional scoping', () => {
       it('should throw when scoped + mismatching project_id, no issue_id', async () => {
@@ -3514,23 +3416,17 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── updateTimeEntry() unscoped ──────────────────────────────────────
-
     describe('updateTimeEntry() unscoped', () => {
       it('should update without validation when unscoped', async () => {
-        // client is unscoped (created in beforeEach without projectConfig)
         mockAxiosInstance.put.mockResolvedValue({ data: {} });
 
         await client.updateTimeEntry(1, { hours: 5 });
         expect(mockAxiosInstance.put).toHaveBeenCalledWith('/time_entries/1.json', {
           time_entry: { hours: 5 },
         });
-        // No GET to /time_entries/1.json (no scope validation)
         expect(mockAxiosInstance.get).not.toHaveBeenCalled();
       });
     });
-
-    // ─── listUsers() additional scoping ──────────────────────────────────
 
     describe('listUsers() additional scoping', () => {
       it('should succeed when scoped + explicit matching projectId', async () => {
@@ -3544,20 +3440,15 @@ describe('RedmineClient', () => {
       });
     });
 
-    // ─── deleteRelation() unscoped ───────────────────────────────────────
-
     describe('deleteRelation() unscoped', () => {
       it('should delete without validation when unscoped', async () => {
         mockAxiosInstance.delete.mockResolvedValue({ data: {} });
 
         await client.deleteRelation(5);
         expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/relations/5.json');
-        // No GET to /relations/5.json (no scope validation)
         expect(mockAxiosInstance.get).not.toHaveBeenCalled();
       });
     });
-
-    // ─── _resolveProjectNumericId() concurrent deduplication ─────────────
 
     describe('_resolveProjectNumericId() concurrent deduplication', () => {
       it('should share the same promise for concurrent calls', async () => {
@@ -3573,16 +3464,13 @@ describe('RedmineClient', () => {
           return Promise.reject(new Error(`Unexpected GET ${url}`));
         });
 
-        // Start two concurrent showIssue calls
         const p1 = scopedClient.showIssue(1);
         const p2 = scopedClient.showIssue(1);
 
-        // Resolve the project fetch
         resolveProject!({ data: { project: scopedProject } });
 
         await Promise.all([p1, p2]);
 
-        // Only ONE GET to /projects/my-project.json despite two concurrent calls
         const projectCalls = mockAxiosInstance.get.mock.calls.filter(
           (call: string[]) => call[0] === '/projects/my-project.json'
         );
@@ -3650,8 +3538,6 @@ describe('RedmineClient', () => {
     });
   });
 });
-
-// ── Client Factory Tests ─────────────────────────────────────────────────────────────────────────
 
 describe('initializeRedmineClient', () => {
   let mockAxiosInstance: any;
@@ -3750,7 +3636,7 @@ describe('initializeRedmineClient', () => {
   it('should return null when API key is empty', async () => {
     mockedFs.readFile.mockImplementation(async (path: any) => {
       if (path.includes('api_key')) {
-        return '   \n  '; // Empty after trim
+        return '   \n  ';
       }
       throw new Error('Should not reach here');
     });
@@ -3814,7 +3700,6 @@ describe('initializeRedmineClient', () => {
       throw new Error('File not found');
     });
 
-    // config.json parse error returns null config, then no URL => null
     const result = await initializeRedmineClient();
     expect(result).toBeNull();
     expect(console.warn).toHaveBeenCalled();
@@ -3859,8 +3744,6 @@ describe('initializeRedmineClient', () => {
     expect(client?.getMappings()).toEqual({});
   });
 
-  // ── Eager project_name fetch ───────────────────────────────────────────────────────────────────
-
   describe('lazy project_name fetch', () => {
     it('should fetch project_name when project_id is set but project_name is absent', async () => {
       mockedFs.readFile.mockImplementation(async (path: any) => {
@@ -3883,8 +3766,6 @@ describe('initializeRedmineClient', () => {
       const client = await initializeRedmineClient();
 
       expect(client).not.toBeNull();
-      // Fire-and-forget warm-up + explicit getConfig both resolve to the
-      // network result; assert getConfig sees the project name.
       const cfg = await client!.getConfig();
       expect(cfg.project_name).toBe('My Project');
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project.json', {
@@ -4163,7 +4044,6 @@ describe('initializeRedmineClient', () => {
         throw new Error('File not found');
       });
 
-      // showProject hangs forever — init must NOT wait on it.
       mockAxiosInstance.get.mockImplementation(() => new Promise(() => {}));
 
       const t0 = Date.now();
@@ -4224,8 +4104,6 @@ describe('initializeRedmineClient', () => {
     });
 
     it('caches successful result on subsequent calls (memo across N calls)', async () => {
-      // showProject catches rejections and returns null (no caller-visible rejection path);
-      // once a name is resolved, repeated calls must not re-hit HTTP.
       mockAxiosInstance.get.mockResolvedValue({
         data: { project: { id: 42, name: 'My Project', identifier: 'my-project' } },
       });
@@ -4242,8 +4120,6 @@ describe('initializeRedmineClient', () => {
       mockAxiosInstance.get.mockImplementation(() => new Promise(() => {}));
 
       const promise = projectClient.getConfig();
-      // Bound: 5 s memoizedPromise timeout — getConfig must resolve in 5.1 s
-      // even though showProject never settles.
       await vi.advanceTimersByTimeAsync(5_100);
       const cfg = await promise;
       expect(cfg.project_name).toBeUndefined();

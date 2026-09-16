@@ -84,7 +84,6 @@ mod tests {
 
     #[test]
     fn no_op_when_audit_dir_is_none() {
-        // Must not panic and must not create anything. Nothing to check, just no crash.
         write_pii_audit(None, &[detection("EMAIL", DetectionAction::Tokenized, 1)]);
     }
 
@@ -143,7 +142,6 @@ mod tests {
 
     #[test]
     fn write_failure_is_swallowed_not_panicking() {
-        // A path that cannot be created (parent is a file, not a dir).
         let dir = tempfile::tempdir().unwrap();
         let blocked = dir.path().join("not-a-dir");
         std::fs::write(&blocked, b"x").unwrap();

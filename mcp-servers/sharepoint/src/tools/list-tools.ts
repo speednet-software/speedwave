@@ -21,8 +21,6 @@ import { PagesClient } from '../graph/pages-client.js';
 /** A double-quote opening an OData comparison literal (e.g. `eq "Open"`) — the real syntax mistake, as opposed to a double quote legitimately nested inside a correct single-quoted literal. */
 const DOUBLE_QUOTED_LITERAL_RE = /\b(?:eq|ne|gt|ge|lt|le)\s+"/;
 
-// ── Types ─────────────────────────────────────────────────────────────────────────
-
 /** Minimal Graph list projection used by the tools. */
 export interface SharePointList {
   id: string;
@@ -56,8 +54,6 @@ export interface SharePointListItem {
   fields?: Record<string, unknown>;
   webUrl?: string;
 }
-
-// ── Tool schemas ──────────────────────────────────────────────────────────────────
 
 const listListsTool: Tool = {
   name: 'listLists',
@@ -199,7 +195,6 @@ const addListColumnTool: Tool = {
         enum: ['text', 'number', 'boolean', 'dateTime', 'choice', 'lookup'],
       },
       required: { type: 'boolean' },
-      // Type-specific config (one of these is consulted based on `type`)
       choices: { type: 'array', items: { type: 'string' } },
       lookupListId: {
         type: 'string',
@@ -400,8 +395,6 @@ const deletePageTool: Tool = {
     required: ['success'],
   },
 };
-
-// ── Handlers ──────────────────────────────────────────────────────────────────────
 
 function lists(client: SharePointClient): ListsClient {
   return new ListsClient(client);
@@ -690,8 +683,6 @@ async function handleListItems(
       },
     };
   } catch (e) {
-    // Only a genuine 400 with a double-quote opening a comparison literal is the OData mistake;
-    // a 401/403/429, or a `"` nested inside a correct single-quoted literal, must not match.
     if (
       e instanceof GraphApiError &&
       e.status === 400 &&
@@ -829,8 +820,6 @@ async function handleDeletePage(
   }
 }
 
-// ── Factory ───────────────────────────────────────────────────────────────────────
-
 /**
  * Build the list / item / column / deletion tool definitions.
  * @param client - Configured SharePoint client, or null when not configured.
@@ -936,7 +925,6 @@ export function createListTools(client: SharePointClient | null): ToolDefinition
   ];
 }
 
-// Schemas exported for the site-policy regression test (assert no site_id leak).
 export const LIST_TOOL_SCHEMAS = [
   listListsTool,
   getListTool,

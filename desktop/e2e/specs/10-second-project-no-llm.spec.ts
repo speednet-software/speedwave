@@ -51,7 +51,6 @@ describe('No-LLM Chat Gating (second project)', function () {
 
   it('navigates to settings from the block link', async function () {
     this.timeout(30_000);
-    // WebKit can throw a stale-element JS exception mid-navigation; re-fetch and retry.
     await browser.waitUntil(
       async () => {
         try {

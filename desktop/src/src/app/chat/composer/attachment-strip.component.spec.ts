@@ -64,7 +64,6 @@ describe('AttachmentStripComponent', () => {
     fixture.detectChanges();
     const overlay = fixture.nativeElement.querySelector('[role="status"]');
     expect(overlay).toBeTruthy();
-    // Uses the shared <app-spin-icon> (SSOT), not an ad-hoc border spinner.
     expect(overlay.querySelector('app-spin-icon')).toBeTruthy();
   });
 

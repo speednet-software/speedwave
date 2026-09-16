@@ -6,7 +6,6 @@
 import { bootWorker, ts } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './tools/index.js';
 
-// No service client (pure file processor) — bootWorker skips client init.
 bootWorker({
   serverName: 'mcp-office',
   version: '1.0.0',

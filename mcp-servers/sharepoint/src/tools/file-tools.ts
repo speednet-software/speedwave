@@ -16,8 +16,6 @@ import {
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient, GraphApiError } from '../client.js';
 
-// ── Parameter Normalization (accept both snake_case and camelCase) ──────────────
-
 /**
  * Normalize upload parameters to accept both snake_case and camelCase
  * @param params - Tool parameters
@@ -51,8 +49,6 @@ function normalizeDownloadParams(params: Record<string, unknown>): {
     localPath: (params.localPath ?? params.local_path) as string,
   };
 }
-
-// ── Tool Definitions ─────────────────────────────────────────────────────────────
 
 const listFileIdsTool: Tool = {
   name: 'listFileIds',
@@ -253,8 +249,6 @@ const uploadFileTool: Tool = {
   ],
 };
 
-// ── Tool Handlers ─────────────────────────────────────────────────────────────────
-
 /**
  * List file IDs in a SharePoint directory.
  * @param client - SharePoint client instance
@@ -298,7 +292,6 @@ export async function handleGetFileFull(
     const result = await client.getFileMetadata(params.file_id);
     return { success: true, data: result };
   } catch (error) {
-    // Only a genuine 404 means the id is wrong; 401/403/429 must not teach lookup.
     if (error instanceof GraphApiError && error.status === 404) {
       return teachingToolResult(
         {
@@ -395,8 +388,6 @@ export async function handleUploadFile(
     };
   }
 }
-
-// ── Tool Definitions Export ──────────────────────────────────────────────────────
 
 /**
  * Create file-related tool definitions

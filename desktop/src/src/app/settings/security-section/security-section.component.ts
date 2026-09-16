@@ -839,8 +839,6 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       const update = this.buildUpdate();
       await this.tauri.invoke('update_security_policy', { update });
       await this.refresh();
-      // refresh() swallows its own errors into error(), so gate success feedback
-      // on it being clear: never show "Saved" next to an error.
       if (this.error()) {
         this.saveError.set(this.error());
       } else {

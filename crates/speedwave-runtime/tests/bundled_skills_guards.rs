@@ -369,7 +369,6 @@ fn bundled_skills_carry_no_upstream_leftovers() {
                 violations.push(format!("{}:{}: {hit}", rel(&file), idx + 1));
             }
             for found in bare_slash.find_iter(line) {
-                // `\b` treats `-` as a boundary, so skip path-like hits such as `/triage-labels.md`.
                 if line.as_bytes().get(found.end()) == Some(&b'-') {
                     continue;
                 }

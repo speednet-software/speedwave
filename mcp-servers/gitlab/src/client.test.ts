@@ -5,18 +5,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import type { GitLabConfig, GitLabClient as GitLabClientType } from './client.js';
 
-// Create mock functions
 const mockLoadTokenFile = vi.fn();
 const mockReadFile = vi.fn();
 const mockGitlabConstructor = vi.fn();
 
-// Mock @gitbeaker/rest - use a class that delegates to mockGitlabConstructor
 vi.mock('@gitbeaker/rest', () => {
   return {
     Gitlab: class MockGitlab {
       constructor(...args: unknown[]) {
         mockGitlabConstructor(...args);
-        // Copy all properties from mockGitlabInstance returned by setup
         const instance =
           mockGitlabConstructor.mock.results[mockGitlabConstructor.mock.results.length - 1]?.value;
         if (instance) {
@@ -27,7 +24,6 @@ vi.mock('@gitbeaker/rest', () => {
   };
 });
 
-// Mock shared module
 vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@speedwave/mcp-shared')>();
   return {
@@ -37,17 +33,14 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   };
 });
 
-// Mock fs/promises
 vi.mock('fs/promises', () => ({
   default: {
     readFile: mockReadFile,
   },
 }));
 
-// Import helpers after mocks are set up (dynamic import avoids hoisting conflict)
 const { withSetupGuidance } = await import('@speedwave/mcp-shared');
 
-// Type for mock GitLab instance endpoints
 interface MockGitlabEndpoints {
   Users: { showCurrentUser: Mock };
   Projects: { all: Mock; show: Mock };
@@ -87,7 +80,6 @@ describe('GitLabClient', () => {
   beforeEach(async () => {
     vi.resetModules();
 
-    // Setup mock GitLab instance
     mockGitlabInstance = {
       Users: {
         showCurrentUser: vi.fn(),
@@ -173,7 +165,6 @@ describe('GitLabClient', () => {
       },
     };
 
-    // Mock Gitlab constructor
     mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
 
     config = {
@@ -181,7 +172,6 @@ describe('GitLabClient', () => {
       host: 'https://gitlab.example.com',
     };
 
-    // Import client after mocks are set up
     const module = await import('./client.js');
     GitLabClientClass = module.GitLabClient;
     client = new GitLabClientClass(config);
@@ -1798,8 +1788,6 @@ describe('GitLabClient', () => {
     });
   });
 
-  // ── MR Related Methods ─────────────────────────────────────────────────────────────────────
-
   describe('listMrCommits', () => {
     it('should list MR commits with default limit', async () => {
       const mockCommits = [
@@ -2019,8 +2007,6 @@ describe('GitLabClient', () => {
     });
   });
 
-  // ── Branches ───────────────────────────────────────────────────────────────────────────────
-
   describe('listBranches', () => {
     it('should list branches with default options', async () => {
       const mockBranches = [
@@ -2118,8 +2104,6 @@ describe('GitLabClient', () => {
       expect(result).toEqual(mockComparison);
     });
   });
-
-  // ── Commits ────────────────────────────────────────────────────────────────────────────────
 
   describe('listCommits', () => {
     it('should list commits with default options', async () => {
@@ -2230,7 +2214,7 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.Commits.all).toHaveBeenCalledWith(1, {
         refName: 'develop',
-        perPage: 100, // searchCommits always fetches 100 to filter locally
+        perPage: 100,
         maxPages: 1,
       });
     });
@@ -2253,8 +2237,6 @@ describe('GitLabClient', () => {
       expect(result).toHaveLength(5);
     });
   });
-
-  // ── Repository ─────────────────────────────────────────────────────────────────────────────
 
   describe('getTree', () => {
     it('should get tree with default options', async () => {
@@ -2440,8 +2422,6 @@ describe('GitLabClient', () => {
     });
   });
 
-  // ── Artifacts ──────────────────────────────────────────────────────────────────────────────
-
   describe('listArtifacts', () => {
     it('should list artifacts from jobs with artifacts', async () => {
       const mockJobs = [
@@ -2578,8 +2558,6 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Jobs.erase).toHaveBeenCalledWith(1, 123);
     });
   });
-
-  // ── Issues ─────────────────────────────────────────────────────────────────────────────────
 
   describe('listIssues', () => {
     it('should list issues with default options', async () => {
@@ -2939,8 +2917,6 @@ describe('GitLabClient', () => {
     });
   });
 
-  // ── Labels ─────────────────────────────────────────────────────────────────────────────────
-
   describe('listLabels', () => {
     it('should list labels with default options', async () => {
       const mockLabels = [
@@ -3048,7 +3024,6 @@ describe('initializeGitLabClient', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    // Import after mocks are cleared
     const module = await import('./client.js');
     initializeGitLabClient = module.initializeGitLabClient;
   });
@@ -3185,13 +3160,11 @@ describe('initializeGitLabClient', () => {
 
     const result = await initializeGitLabClient();
     expect(result).not.toBeNull();
-    // Wait for the background test to settle and update the tracker.
     await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
     expect(result!.statusTracker.getError()).toContain('Connection failed');
   });
 
   it('initializeGitLabClient resolves quickly when testConnection hangs', async () => {
-    // Hanging testConnection must not block init — background pattern.
     mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
 
@@ -3239,7 +3212,6 @@ describe('initializeGitLabClient', () => {
     const { makeStandardHealthCheck } = await import('@speedwave/mcp-shared');
     mockLoadTokenFile.mockResolvedValue('test-token');
     mockReadFile.mockRejectedValue(new Error('ENOENT'));
-    // testConnection hangs — tracker stays 'unknown' during warmup window.
     mockGitlabConstructor.mockImplementation(() => ({
       Users: {
         showCurrentUser: vi.fn().mockImplementation(() => new Promise(() => {})),
@@ -3251,7 +3223,6 @@ describe('initializeGitLabClient', () => {
     expect(client!.statusTracker.getStatus()).toBe('unknown');
 
     const hc = makeStandardHealthCheck(client!.statusTracker, 'GitLab');
-    // Within the warmup window (default 10 s) unknown is treated as healthy.
     await expect(hc()).resolves.toBeUndefined();
   });
 
@@ -3360,7 +3331,6 @@ describe('Response Mappers', () => {
           iid: 10,
           title: 'Test MR',
           state: 'opened',
-          // no author field
         },
       ];
       mockGitlabInstance.MergeRequests.all.mockResolvedValue(mockMrs);
@@ -3535,7 +3505,6 @@ describe('validateRequired — error paths', () => {
   });
 
   it('should throw with singular "parameter" for one missing field', async () => {
-    // showProject calls validateRequired({ project_id }) — pass undefined/null
     await expect(client.showProject('')).rejects.toThrow('Missing required parameter: project_id');
     await expect(client.showProject(null as unknown as string)).rejects.toThrow(
       'Missing required parameter: project_id'
@@ -3543,8 +3512,6 @@ describe('validateRequired — error paths', () => {
   });
 
   it('should throw with plural "parameters" for multiple missing fields', async () => {
-    // createMergeRequest requires project_id, source_branch, target_branch, title
-    // Pass valid project_id but empty source_branch and title to get multiple missing
     await expect(
       client.createMergeRequest(1, {
         source_branch: '',
@@ -4004,7 +3971,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         iid: 10,
         title: 'Sparse MR',
         state: 'opened',
-        // no sourceBranch or source_branch
         targetBranch: 'main',
         author: { id: 1, name: 'User', username: 'user' },
         webUrl: 'https://gitlab.com/mr/1',
@@ -4030,7 +3996,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         title: 'Sparse MR',
         state: 'opened',
         sourceBranch: 'feature',
-        // no targetBranch or target_branch
         author: { id: 1, name: 'User', username: 'user' },
         webUrl: 'https://gitlab.com/mr/1',
         createdAt: '2024-01-01T00:00:00Z',
@@ -4057,7 +4022,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         sourceBranch: 'feature',
         targetBranch: 'main',
         author: { id: 1, name: 'User', username: 'user' },
-        // no webUrl or web_url
         createdAt: '2024-01-01T00:00:00Z',
         updatedAt: '2024-01-01T00:00:00Z',
       };
@@ -4076,10 +4040,8 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const sparseMr = {
         id: 1,
-        // no iid — no warnings triggered
         title: 'Sparse MR',
         state: 'opened',
-        // no branches, no webUrl
         author: { id: 1, name: 'User', username: 'user' },
         createdAt: '2024-01-01T00:00:00Z',
         updatedAt: '2024-01-01T00:00:00Z',
@@ -4091,7 +4053,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
       expect(result.source_branch).toBe('');
       expect(result.target_branch).toBe('');
       expect(result.web_url).toBe('');
-      // No warnings when iid is absent
       expect(consoleSpy).not.toHaveBeenCalled();
       consoleSpy.mockRestore();
     });
@@ -4106,7 +4067,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         targetBranch: 'main',
         author: { id: 1, name: 'User', username: 'user' },
         webUrl: 'https://gitlab.com/mr/1',
-        // no createdAt, no created_at, no updatedAt, no updated_at
       };
       mockGitlabInstance.MergeRequests.show.mockResolvedValue(sparseMr);
 
@@ -4121,7 +4081,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
     it('should use empty string for short_id when both camelCase and snake_case are missing', async () => {
       const sparseCommit = {
         id: 'abc123',
-        // no shortId, no short_id
         title: 'Commit',
         message: 'Message',
         authorName: 'Author',
@@ -4141,7 +4100,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         shortId: 'abc',
         title: 'Commit',
         message: 'Message',
-        // no authorName, no author_name
         authorEmail: 'author@example.com',
         createdAt: '2024-01-01T00:00:00Z',
       };
@@ -4159,7 +4117,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         title: 'Commit',
         message: 'Message',
         authorName: 'Author',
-        // no authorEmail, no author_email
         createdAt: '2024-01-01T00:00:00Z',
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
@@ -4177,7 +4134,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         message: 'Message',
         authorName: 'Author',
         authorEmail: 'a@b.com',
-        // no createdAt, no created_at
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 
@@ -4194,7 +4150,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         status: 'success',
         ref: 'main',
         sha: 'abc123',
-        // no webUrl, no web_url
         createdAt: '2024-01-01T00:00:00Z',
         updatedAt: '2024-01-02T00:00:00Z',
       };
@@ -4212,7 +4167,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         ref: 'main',
         sha: 'abc123',
         webUrl: 'https://gitlab.com/p/1',
-        // no createdAt, no created_at
         updatedAt: '2024-01-02T00:00:00Z',
       };
       mockGitlabInstance.Pipelines.all.mockResolvedValue([sparsePipeline]);
@@ -4230,7 +4184,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         sha: 'abc123',
         webUrl: 'https://gitlab.com/p/1',
         createdAt: '2024-01-01T00:00:00Z',
-        // no updatedAt, no updated_at
       };
       mockGitlabInstance.Pipelines.all.mockResolvedValue([sparsePipeline]);
 
@@ -4245,7 +4198,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
       const mockProject = {
         id: 1,
         name: 'Test',
-        // no pathWithNamespace — use path_with_namespace
         path_with_namespace: 'group/test',
         webUrl: 'https://gitlab.com/group/test',
       };
@@ -4260,7 +4212,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
       const mockProject = {
         id: 1,
         name: 'Test',
-        // no pathWithNamespace, no path_with_namespace
         webUrl: 'https://gitlab.com/group/test',
       };
       mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
@@ -4275,7 +4226,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         id: 1,
         name: 'Test',
         pathWithNamespace: 'group/test',
-        // no webUrl — use web_url
         web_url: 'https://gitlab.com/group/test',
       };
       mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
@@ -4290,7 +4240,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         id: 1,
         name: 'Test',
         pathWithNamespace: 'group/test',
-        // no webUrl, no web_url
       };
       mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
 
@@ -4305,7 +4254,6 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
         name: 'Test',
         pathWithNamespace: 'group/test',
         webUrl: 'https://gitlab.com/group/test',
-        // no defaultBranch — use default_branch
         default_branch: 'develop',
       };
       mockGitlabInstance.Projects.show.mockResolvedValue(mockProject);
@@ -4373,7 +4321,6 @@ describe('initializeGitLabClient — additional branches', () => {
     delete process.env.GITLAB_URL;
 
     mockLoadTokenFile.mockResolvedValue('test-token');
-    // host_url returns empty string (trim results in empty)
     mockReadFile.mockResolvedValue('  \n  ');
 
     const mockGitlabInstance = {
@@ -4383,7 +4330,6 @@ describe('initializeGitLabClient — additional branches', () => {
 
     await initializeGitLabClient();
 
-    // Empty host_url content falls through to default gitlab.com
     expect(mockGitlabConstructor).toHaveBeenCalledWith({
       token: 'test-token',
       host: 'https://gitlab.com',
@@ -4394,7 +4340,6 @@ describe('initializeGitLabClient — additional branches', () => {
     process.env.GITLAB_URL = 'https://gitlab-env.example.com';
 
     mockLoadTokenFile.mockResolvedValue('test-token');
-    // Throw non-ENOENT error
     const permError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
     mockReadFile.mockRejectedValue(permError);
 
@@ -4419,7 +4364,6 @@ describe('initializeGitLabClient — additional branches', () => {
     delete process.env.GITLAB_URL;
 
     mockLoadTokenFile.mockResolvedValue('test-token');
-    // Simulate ENOENT with error object that has code property
     const enoentError = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
     mockReadFile.mockRejectedValue(enoentError);
 
@@ -4485,7 +4429,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
       const mr = {
         id: 1,
         iid: 10,
-        // no title
         state: 'opened',
         sourceBranch: 'feature',
         targetBranch: 'main',
@@ -4506,7 +4449,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 1,
         iid: 10,
         title: 'MR title',
-        // no state
         sourceBranch: 'feature',
         targetBranch: 'main',
         author: { id: 1, name: 'User', username: 'user' },
@@ -4525,16 +4467,13 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
   describe('testConnection — error with no message property', () => {
     it('should handle error objects without a message property (err.message || "")', async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
-      // Error object with no message — e.g. a plain status-only error
       const errorWithNoMessage = { response: { status: 500 } };
       mockGitlabInstance.Users.showCurrentUser.mockRejectedValue(errorWithNoMessage);
 
       const result = await client.testConnection();
 
       expect(result.success).toBe(false);
-      // 500 triggers server error message, not network message
       expect(result.error).toContain('GitLab server error');
-      // message is '' so no status-code-in-message match
       expect(result.errorType).toBe('unknown');
     });
   });
@@ -4544,7 +4483,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
       const project = {
         id: 1,
         name: 'Test',
-        // neither pathWithNamespace nor path_with_namespace
         webUrl: 'https://gitlab.com/p/1',
       };
       mockGitlabInstance.Projects.all.mockResolvedValue([project]);
@@ -4559,7 +4497,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 1,
         name: 'Test',
         pathWithNamespace: 'group/test',
-        // neither webUrl nor web_url
       };
       mockGitlabInstance.Projects.all.mockResolvedValue([project]);
 
@@ -4573,10 +4510,8 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
     it('should use empty strings for all camelCase+snake_case missing commit fields', async () => {
       const sparseCommit = {
         id: 'abc123',
-        // no shortId, no short_id
         title: 'Commit',
         message: 'Message',
-        // no authorName/author_name, authorEmail/author_email, createdAt/created_at
       };
       mockGitlabInstance.MergeRequests.allCommits.mockResolvedValue([sparseCommit]);
 
@@ -4596,7 +4531,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         status: 'success',
         ref: 'main',
         sha: 'abc123',
-        // no webUrl/web_url, createdAt/created_at, updatedAt/updated_at
       };
       mockGitlabInstance.MergeRequests.allPipelines.mockResolvedValue([sparsePipeline]);
 
@@ -4614,7 +4548,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 'abc123',
         title: 'Commit',
         message: 'Message',
-        // missing: short(Id|_id), author(Name|Email)/author_(name|email), created(At|_at)
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 
@@ -4633,7 +4566,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 'abc123',
         title: 'Commit',
         message: 'Message',
-        // missing: short(Id|_id), author(Name|Email)/author_(name|email), created(At|_at)
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 
@@ -4652,7 +4584,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 'abc123',
         title: 'fix: something',
         message: 'fix: something',
-        // missing: short(Id|_id), author(Name|Email)/author_(name|email), created(At|_at)
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 
@@ -4667,7 +4598,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
 
   describe('listIssues — || [] fallback when result has no .data property', () => {
     it('should return empty array when result is not an array and has no .data property', async () => {
-      // Returns an object that's not an array and has no .data field
       mockGitlabInstance.Issues.all.mockResolvedValue({ meta: { total: 0 } } as unknown as never);
 
       const result = await client.listIssues(1);
@@ -4693,7 +4623,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         status: 'running',
         ref: 'main',
         sha: 'abc123',
-        // no webUrl, no createdAt, no updatedAt
       };
       mockGitlabInstance.Pipelines.retry.mockResolvedValue(sparsePipeline);
 
@@ -4712,7 +4641,6 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         status: 'pending',
         ref: 'main',
         sha: 'abc123',
-        // no webUrl, no createdAt, no updatedAt
       };
       mockGitlabInstance.Pipelines.create.mockResolvedValue(sparsePipeline);
 

@@ -1,7 +1,5 @@
 #!/usr/bin/env bats
 
-# Guards scripts/setup-dev-windows.ps1: the install phase must never strand the config
-# phases, and the only files it writes stay off the committed cargo config.
 
 SETUP_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/setup-dev-windows.ps1"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
@@ -16,13 +14,10 @@ package_loop() {
 }
 
 @test "script starts with a UTF-8 BOM" {
-    # Windows PowerShell reads a BOM-less .ps1 in the system locale (cross-platform rules).
     [ "$(od -An -tx1 -N3 "$SETUP_SCRIPT" | tr -d ' \n')" = "efbbbf" ]
 }
 
 @test "the script writes only the msvc env, bashrc and the crate-local cargo config" {
-    # Spelling-independent: a re-introduced <repo>/.cargo/config.toml write would drop the
-    # SPEEDWAVE_DATA_DIR guard that keeps bare `cargo test` off the production data dir.
     local targets
     targets="$(grep -oE '(Set-Content|Add-Content|Out-File) -Path \$[A-Za-z_]+' "$SETUP_SCRIPT" |
         awk '{ print $NF }' | sort -u | tr '\n' ' ')"
@@ -37,7 +32,6 @@ package_loop() {
     local leaf len suffix maxpath
     leaf="$(grep -oE "SystemDrive \+ '[^']+'" "$SETUP_SCRIPT" | sed "s/.*'\(.*\)'/\1/")"
     [ -n "$leaf" ]
-    # $env:SystemDrive is "C:" — two chars on every Windows host.
     len=$(( 2 + ${#leaf} ))
     suffix="$(grep -oE '^SUFFIX_BUDGET=[0-9]+' "$BUDGET_SCRIPT" | cut -d= -f2)"
     maxpath="$(grep -oE '^MAX_PATH=[0-9]+' "$BUDGET_SCRIPT" | cut -d= -f2)"
@@ -55,14 +49,10 @@ package_loop() {
 }
 
 @test "the package loop never exits early" {
-    # An `exit` here is the original bug: one unavailable package skipped the MSVC env,
-    # the Vulkan SDK, long paths and the target-dir — everything `make dev` needs.
     ! package_loop | grep -vE '^[[:space:]]*#' | grep -qE '(^|[[:space:]]|\{)exit([[:space:]]|$)'
 }
 
 @test "a package still missing after a 3010 reboot code stays a reported failure" {
-    # Counted, not `! grep`: a leading `!` is exempt from set -e, so such an assertion is
-    # dead weight anywhere but the last line of a test.
     local hits
     hits="$(package_loop | grep -cE '3010.*continue' || true)"
     [ "$hits" -eq 0 ]
@@ -70,7 +60,6 @@ package_loop() {
 }
 
 @test "a 3010 reboot signal is captured before the success-path continue" {
-    # Recording it after the re-probe swallows the reboot for a package that already works.
     local code reboot have
     code="$(package_loop | grep -vE '^[[:space:]]*#')"
     reboot="$(printf '%s\n' "$code" | grep -n '3010' | head -1 | cut -d: -f1)"
@@ -80,29 +69,22 @@ package_loop() {
 }
 
 @test "an existing crate-local config's own target-dir is the one managed" {
-    # Reading only "is a target-dir set?" would create and ACL a directory nothing builds into.
     grep -qF '$shortTargetDir = $Matches[1]' "$SETUP_SCRIPT"
     grep -qF 'IsPathRooted($shortTargetDir)' "$SETUP_SCRIPT"
 }
 
 @test "the short target-dir is created here, and a foreign owner is refused" {
-    # A drive-root DACL lets any local account pre-create it and keep CREATOR OWNER over
-    # every desktop build artifact, including the exe sign-windows-binaries.ps1 signs.
     grep -qF 'GetOwner([Security.Principal.SecurityIdentifier])' "$SETUP_SCRIPT"
     grep -qF "@(\$mySid, 'S-1-5-32-544', 'S-1-5-18') -notcontains \$owner" "$SETUP_SCRIPT"
     grep -qF '$failedItems += @{ Name = $shortTargetWin' "$SETUP_SCRIPT"
 }
 
 @test "the short target-dir drops the inherited drive-root ACEs" {
-    # A bare /grant only adds an ACE: the drive root's inherited ACEs still let another
-    # local account plant files here and keep CREATOR OWNER control of them.
     grep -qF 'icacls $shortTargetWin /inheritance:r /grant:r' "$SETUP_SCRIPT"
     ! grep -qE 'icacls \$shortTargetWin /grant[^:]' "$SETUP_SCRIPT"
 }
 
 @test "every ACL principal is a well-known SID, never an account name" {
-    # Verified on a pl-PL host: 'BUILTIN\Administrators' does not resolve there, so icacls
-    # fails 1332 and leaves the inherited DACL fully intact (cross-platform rules).
     local hits
     hits="$(grep -vE '^[[:space:]]*#' "$SETUP_SCRIPT" | grep -cE 'BUILTIN.|NT AUTHORITY.' || true)"
     [ "$hits" -eq 0 ]
@@ -112,14 +94,11 @@ package_loop() {
 }
 
 @test "a target-dir with a foreign owner is refused, not re-ACLed" {
-    # Hardening a dir we already refuse to build into would only bless the planter's copy.
     grep -qF '$ownerTrusted = $false' "$SETUP_SCRIPT"
     grep -qF 'if ($ownerTrusted) {' "$SETUP_SCRIPT"
 }
 
 @test "a missing git cannot abort the long-paths step" {
-    # A bare `git` throws CommandNotFoundException under EAP=Stop, skipping every step
-    # below it -- including the "Incomplete" report the package loop feeds.
     local block
     block="$(awk '/^# No 2>&1 capture:/,/^\}$/' "$SETUP_SCRIPT")"
     printf '%s\n' "$block" | grep -qF 'git config --system core.longpaths true'

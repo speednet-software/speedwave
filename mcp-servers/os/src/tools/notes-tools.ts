@@ -13,8 +13,6 @@ import {
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-// ── Types ──────────────────────────────────────────────────────────────
-
 /** Input parameters for the listNoteFolders tool (no params required). */
 type ListNoteFoldersParams = Record<string, never>;
 
@@ -67,8 +65,6 @@ interface DeleteNoteParams {
   /** Note ID to delete. */
   id: string;
 }
-
-// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listNoteFoldersTool: Tool = {
   name: 'listNoteFolders',
@@ -380,8 +376,6 @@ const deleteNoteTool: Tool = {
   ],
 };
 
-// ── Handlers ──────────────────────────────────────────────────────────
-
 /**
  * Lists all note folders/notebooks available on this device.
  * @param _params - Unused tool input parameters.
@@ -492,8 +486,6 @@ export async function handleDeleteNote(params: DeleteNoteParams): Promise<ToolRe
   const result = await runCommand('notes', 'delete_note', p);
   return { success: true, data: result.parsed };
 }
-
-// ── Export ────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all notes operations. */
 export function createNoteTools(): ToolDefinition[] {

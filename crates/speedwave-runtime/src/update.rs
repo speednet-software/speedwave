@@ -8,8 +8,6 @@ use crate::consts;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
 /// Pre-update snapshot used to roll back a project on failure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateSnapshot {
@@ -55,8 +53,6 @@ pub use crate::validation::validate_project_name;
 pub fn is_torn_down(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ContainersTornDown>().is_some()
 }
-
-// ── Snapshot helpers ───────────────────────────────────────────────────────
 
 fn snapshot_dir(project: &str) -> anyhow::Result<PathBuf> {
     let dir = consts::data_dir().join("snapshots").join(project);
@@ -127,7 +123,6 @@ fn save_snapshot_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result
 
     let path = snapshot_path_in(data_dir, project);
     let json = serde_json::to_string_pretty(&snapshot)?;
-    // Durable atomic write (fsync data + parent dir, 0o600).
     crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
     Ok(())
 }
@@ -148,7 +143,6 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
     let compose_yml = match std::fs::read_to_string(&compose_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // First-time restart: no compose.yml yet, proceed without a snapshot.
             log::warn!(
                 "save_snapshot: no compose.yml at {} — rollback will be unavailable for this restart",
                 compose_path.display()
@@ -184,7 +178,6 @@ pub fn save_snapshot(project: &str) -> anyhow::Result<()> {
 
     let path = snapshot_path(project)?;
     let json = serde_json::to_string_pretty(&snapshot)?;
-    // Durable atomic write: fsync data + parent dir, owner-only (0o600).
     crate::fs_perms::write_restricted_file_atomic(&path, &json)?;
 
     Ok(())
@@ -245,8 +238,6 @@ fn maybe_prune_previous_bundle_inner(
     );
 }
 
-// ── Update / rollback ──────────────────────────────────────────────────────
-
 /// Compose mutation core. Caller MUST build images before calling — builds run outside the lock
 /// (90+ s would block concurrent sessions). See ADR-066.
 #[cfg(any(test, feature = "test-support"))]
@@ -275,8 +266,6 @@ fn apply_update_transaction_inner(
     runtime.transaction(project, |runtime| -> anyhow::Result<()> {
         save_snapshot(project)?;
         compose::save_compose(project, compose_yml)?;
-        // Past this point the project's containers may be partially or fully
-        // torn down; all failures carry ContainersTornDown so CLI rolls back.
         runtime
             .compose_down(project)
             .map_err(|e| e.context(ContainersTornDown))?;
@@ -316,8 +305,6 @@ fn apply_rollback_transaction_inner(
 ) -> anyhow::Result<()> {
     runtime.transaction(project, |runtime| -> anyhow::Result<()> {
         compose::save_compose(project, snapshot_yml)?;
-        // Best-effort VM-side validate: the bounded retry absorbs virtiofs lag (stale
-        // ENOENT/torn reads) before recreate; any other failure must not block recovery.
         if let Err(e) = crate::runtime::compose_validate_with_retry(runtime, project) {
             log::warn!(
                 "compose validate before rollback recreate failed for '{project}' — proceeding with recreate: {e}"
@@ -340,7 +327,6 @@ pub fn update_containers(
 ) -> anyhow::Result<ContainerUpdateResult> {
     validate_project_name(project)?;
 
-    // 1. Load config and resolve
     let user_config = config::load_user_config()?;
     let project_dir = user_config.require_project(project)?.dir.clone();
 
@@ -348,8 +334,6 @@ pub fn update_containers(
     let (resolved, integrations) =
         config::resolve_project_config(&project_path, &user_config, project);
 
-    // 2. Re-render compose.yml with current template (includes plugin image rebuild)
-    // Reconstruct host-bridge env from disk (ADR-074).
     let host_bridges = compose::host_bridges_from_disk();
     let compose_yml = compose::render_compose(
         project,
@@ -360,7 +344,6 @@ pub fn update_containers(
         &host_bridges,
     )?;
 
-    // 3a. OS prerequisite check
     let prereq_violations = crate::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();
@@ -371,10 +354,8 @@ pub fn update_containers(
         );
     }
 
-    // 3b. Fix host filesystem permissions before security gate
     crate::fs_security::ensure_data_dir_permissions(project)?;
 
-    // 3c. Mandatory security gate — BEFORE saving anything
     let manifests = crate::plugin::list_installed_plugins().unwrap_or_else(|e| {
         log::warn!("Failed to list installed plugins for security check: {e}");
         Vec::new()
@@ -397,15 +378,12 @@ pub fn update_containers(
     let new_manifest = bundle::load_current_bundle_manifest()?;
     let bundle_state = bundle::load_bundle_state();
 
-    // Build OUTSIDE the compose lock (ADR-066), missing-only per image (ADR-072).
     let images_rebuilt = build::build_missing_images_locked(
         runtime,
         &build::enabled_images(&integrations),
         &new_manifest,
     )
     .map_err(|e| {
-        // Full chain to the log first — the banner's "full output in Logs" pointer
-        // (stderr on the CLI path) must actually hold.
         log::error!("image rebuild during update failed: {e:#}");
         anyhow::anyhow!(
             "Image rebuild failed: {}. Containers are still running with the previous version.",
@@ -413,7 +391,6 @@ pub fn update_containers(
         )
     })?;
 
-    // Sync claude-resources after the build, before recreate; skip if another project runs.
     if other_projects_running(runtime, project) {
         log::warn!(
             "claude-resources sync skipped: another project is running; \
@@ -427,12 +404,10 @@ pub fn update_containers(
 
     apply_update_transaction(runtime, project, &compose_yml)?;
 
-    // 9. Wait for containers to stabilize before health check.
     std::thread::sleep(std::time::Duration::from_secs(
         consts::CONTAINER_STABILIZATION_DELAY_SECS,
     ));
 
-    // 10. Verify containers are running
     let containers = runtime.compose_ps(project)?;
     let running = containers
         .iter()
@@ -497,7 +472,6 @@ pub fn rollback_containers(
 
     let snapshot = load_snapshot(project)?;
 
-    // OS prerequisite check (uses a "Rollback aborted" prefix, not SYSTEM_CHECK_FAILED_PREFIX).
     let prereq_violations = crate::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         let msgs: Vec<String> = prereq_violations.iter().map(|v| v.to_string()).collect();
@@ -507,15 +481,10 @@ pub fn rollback_containers(
         );
     }
 
-    // Fix host filesystem permissions before security gate.
     crate::fs_security::ensure_data_dir_permissions(project)?;
 
-    // Security check on the snapshot compose.yml before applying.
-    // Use manifests from the snapshot (live state may differ post-uninstall).
     let user_config = config::load_user_config()?;
     let project_dir = user_config.require_project(project)?.dir.clone();
-    // Current resolved policy — a snapshot without the managed-settings mount must fail
-    // when today's policy locks telemetry, forcing the forward-fix to a fresh render.
     let (resolved, _integrations) = {
         let project_path = std::path::PathBuf::from(&project_dir);
         config::resolve_project_config(&project_path, &user_config, project)
@@ -529,8 +498,6 @@ pub fn rollback_containers(
         &expected_paths,
     );
 
-    // A snapshot from an older Speedwave can fail a newly added invariant;
-    // forward-fix from a clean fresh render instead of stranding the containers.
     let fresh = if snapshot_violations.is_empty() {
         None
     } else {
@@ -549,7 +516,6 @@ pub fn rollback_containers(
             apply_rollback_transaction(runtime, project, &snapshot.compose_yml)
         }
         RollbackComposeChoice::UseFreshRender => {
-            // The choice is UseFreshRender only when fresh rendered a clean compose.
             let yml = fresh.map(|(yml, _)| yml).unwrap_or(snapshot.compose_yml);
             log::warn!(
                 "rollback: snapshot compose predates a current invariant; \
@@ -596,8 +562,6 @@ fn render_fresh_compose_for_rollback(
     Some((compose_yml, manifests))
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -637,13 +601,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = "test-snapshot";
 
-        // Create a fake compose file that save_snapshot will read
         let compose_dir = dir.path().join("compose").join(project);
         std::fs::create_dir_all(&compose_dir).unwrap();
         let compose_content = "version: '3'\nservices:\n  claude:\n    image: test\n";
         std::fs::write(compose_dir.join("compose.yml"), compose_content).unwrap();
 
-        // Test snapshot serialization/deserialization roundtrip
         let snapshot = UpdateSnapshot {
             project: project.to_string(),
             compose_yml: compose_content.to_string(),
@@ -691,7 +653,6 @@ mod tests {
     fn save_snapshot_returns_ok_when_compose_missing() {
         let dir = tempfile::tempdir().unwrap();
         let project = "no-compose-yet";
-        // Intentionally no compose.yml written.
         let result = save_snapshot_in(dir.path(), project);
         assert!(
             result.is_ok(),
@@ -714,12 +675,10 @@ mod tests {
         let compose_path = compose::compose_output_path_in(dir.path(), project).unwrap();
         std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
         std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
-        // Strip all permissions from the file so read fails with PermissionDenied (not NotFound).
         std::fs::set_permissions(&compose_path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = save_snapshot_in(dir.path(), project);
 
-        // Restore perms before asserting so tempdir can clean up.
         let _ = std::fs::set_permissions(&compose_path, std::fs::Permissions::from_mode(0o644));
 
         assert!(
@@ -771,14 +730,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = "atomic-write-test";
 
-        // Set up the compose file that save_snapshot_in() will read
         let compose_path = compose::compose_output_path_in(dir.path(), project).unwrap();
         std::fs::create_dir_all(compose_path.parent().unwrap()).unwrap();
         std::fs::write(&compose_path, "version: '3'\nservices: {}\n").unwrap();
 
         save_snapshot_in(dir.path(), project).unwrap();
 
-        // Verify no .json.tmp residue remains
         let snap_path = snapshot_path_in(dir.path(), project);
         let tmp_path = snap_path.with_extension("json.tmp");
         assert!(
@@ -786,12 +743,10 @@ mod tests {
             ".json.tmp must not remain after atomic rename"
         );
 
-        // Verify content was written correctly
         let loaded = load_snapshot_in(dir.path(), project).unwrap();
         assert_eq!(loaded.project, project);
         assert_eq!(loaded.compose_yml, "version: '3'\nservices: {}\n");
 
-        // Verify file permissions (unix only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -804,18 +759,14 @@ mod tests {
         }
     }
 
-    // Behavioural tests for apply_update_transaction / apply_rollback_transaction live in tests/apply_transaction_behaviour.rs.
-
     #[test]
     fn test_rollback_with_empty_plugin_manifests_is_valid() {
-        // Old snapshots may have empty plugin_manifests; security check still passes with no plugin services.
         let snapshot = UpdateSnapshot {
             project: "test".to_string(),
             compose_yml: "version: '3'\nservices: {}\n".to_string(),
             plugin_manifests: vec![],
         };
         assert!(snapshot.plugin_manifests.is_empty());
-        // With no services in compose YAML, security check passes trivially
         let tmp = tempfile::tempdir().unwrap();
         let violations = compose::SecurityCheck::run_with_data_dir(
             &snapshot.compose_yml,
@@ -832,8 +783,6 @@ mod tests {
 
     #[test]
     fn test_rollback_stale_snapshot_without_mount_fails_when_policy_locks_telemetry() {
-        // A pre-ADR-076 snapshot has no managed-settings mount; SecurityCheck must flag it
-        // when today's policy locks telemetry, forcing a forward-fix to a fresh render.
         let stale_snapshot_yaml = "services:\n  claude:\n    volumes: []\n";
         let tmp = tempfile::tempdir().unwrap();
         let expected_paths = compose::SecurityExpectedPaths::from_raw("/test", "/test/tokens")
@@ -855,7 +804,6 @@ mod tests {
 
     #[test]
     fn test_update_checks_os_prereqs() {
-        // Structural test: check_os_prereqs() must run before SecurityCheck in update_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -879,7 +827,6 @@ mod tests {
 
     #[test]
     fn test_rollback_checks_os_prereqs() {
-        // Structural test: check_os_prereqs() must run before SecurityCheck in rollback_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -903,7 +850,6 @@ mod tests {
 
     #[test]
     fn test_update_calls_ensure_before_security_check() {
-        // Structural test: ensure_data_dir_permissions must run before SecurityCheck::run in update_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -927,7 +873,6 @@ mod tests {
 
     #[test]
     fn test_rollback_calls_ensure_before_security_check() {
-        // Structural test: ensure_data_dir_permissions must run before SecurityCheck::run in rollback_containers.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -958,7 +903,6 @@ mod tests {
         let data_dir = tmp.path();
         let original_mode = std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777;
 
-        // Setup: create compose dir with a compose file (save_snapshot_in reads it)
         let compose_dir = data_dir.join("compose").join("proj");
         std::fs::create_dir_all(&compose_dir).unwrap();
         std::fs::write(compose_dir.join("compose.yml"), "version: '3'").unwrap();
@@ -992,14 +936,11 @@ mod tests {
 
     #[test]
     fn test_save_snapshot_sets_parent_permissions() {
-        // Structural test: save_snapshot() (production, not _in) must delegate to secure_snapshot_dirs.
         let source = include_str!("update.rs");
 
-        // Find the production save_snapshot function (not save_snapshot_in)
         let fn_start = source
             .find("pub fn save_snapshot(")
             .expect("save_snapshot function must exist in update.rs");
-        // Limit scope to just this function (up to the next pub fn)
         let fn_body = &source[fn_start..];
         let fn_end = fn_body[1..]
             .find("\npub fn ")
@@ -1015,14 +956,12 @@ mod tests {
 
     #[test]
     fn test_snapshot_writers_use_durable_helper() {
-        // Both snapshot writers must use write_restricted_file_atomic, not bare fs::write+rename.
         let source = include_str!("update.rs");
         for func in ["fn save_snapshot(", "fn save_snapshot_in("] {
             let start = source
                 .find(func)
                 .unwrap_or_else(|| panic!("{func} must exist"));
             let body = &source[start..];
-            // Slice to the next column-0 fn (not attributes) so inner #[cfg(unix)] blocks stay in the body.
             let end = ["\npub fn ", "\nfn "]
                 .iter()
                 .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
@@ -1040,7 +979,6 @@ mod tests {
         }
     }
 
-    // SSOT guard: asserts CONTAINER_STABILIZATION_DELAY_SECS stays sane.
     #[expect(
         clippy::assertions_on_constants,
         reason = "deliberately asserting a compile-time SSOT constant stays in range"
@@ -1057,11 +995,8 @@ mod tests {
         );
     }
 
-    // Behavioural prune coverage: tests/apply_transaction_behaviour.rs.
-
     #[test]
     fn test_render_compose_called_with_runtime_in_update_containers() {
-        // Structural test: render_compose in update_containers must pass Some(runtime), not None.
         let source = include_str!("update.rs");
 
         let fn_start = source
@@ -1069,20 +1004,17 @@ mod tests {
             .expect("update_containers function must exist in update.rs");
         let fn_body = &source[fn_start..];
 
-        // Find the render_compose call site
         let render_pos = fn_body
             .find("render_compose(")
             .expect("render_compose call must exist in update_containers");
         let render_call = &fn_body[render_pos..render_pos + 300];
 
-        // Must NOT pass None as the last argument
         assert!(
             !render_call.contains("None)?"),
             "render_compose in update_containers must NOT pass None for runtime — \
              plugin images won't be rebuilt during CLI updates: {render_call}"
         );
 
-        // Must pass Some(runtime)
         assert!(
             render_call.contains("Some(runtime)"),
             "render_compose in update_containers must pass Some(runtime) so that \
@@ -1092,7 +1024,6 @@ mod tests {
 
     #[test]
     fn test_update_containers_reconstructs_host_bridges() {
-        // Structural guard (ADR-074): update must feed disk-reconstructed host bridges into render_compose.
         let source = include_str!("update.rs");
         let fn_start = source
             .find("fn update_containers(")
@@ -1112,7 +1043,6 @@ mod tests {
             !fn_body[..render_pos].contains(&empty_default),
             "update_containers must not pass an empty HostBridgesInfo to render_compose"
         );
-        // Also assert the call site actually receives &host_bridges as its argument.
         let call = &fn_body[render_pos..];
         let call_end = call
             .find(';')
@@ -1125,7 +1055,6 @@ mod tests {
 
     #[test]
     fn test_update_containers_plugin_rebuild_via_render_compose() {
-        // Cross-file structural test: render_compose's body must call ensure_plugin_images.
         let compose_source = include_str!("compose/mod.rs");
 
         let fn_start = compose_source
@@ -1142,7 +1071,6 @@ mod tests {
 
     #[test]
     fn test_no_buildkit_prune_in_routine_prune_paths() {
-        // Structural test (ADR-072): prune_buildkit_cache must not be called in the routine prune paths.
         let source = include_str!("build.rs");
 
         for fn_name in [
@@ -1169,9 +1097,7 @@ mod tests {
 
     #[test]
     fn update_containers_never_writes_bundle_state() {
-        // ADR-072 single-writer rule: only Desktop persists bundle state; the CLI only reads it.
         let source = include_str!("update.rs");
-        // Split literal so this assertion line isn't itself a match.
         let needle = format!("{}{}", "save_", "bundle_state");
         assert!(
             !source.contains(&needle),
@@ -1220,8 +1146,6 @@ mod tests {
 
     #[test]
     fn choose_rollback_forward_fixes_when_snapshot_fails_but_fresh_passes() {
-        // v0.13.3 Slack case: snapshot predates /workspace, so SecurityCheck flags it — but a fresh
-        // render is clean. Rollback must forward-fix, not abort.
         let snap = vec![slack_missing_workspace_violation()];
         let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &[])));
         assert_eq!(
@@ -1234,7 +1158,6 @@ mod tests {
 
     #[test]
     fn choose_rollback_aborts_when_both_snapshot_and_fresh_fail() {
-        // A genuine security problem the fresh render also exhibits must still abort.
         let snap = vec![slack_missing_workspace_violation()];
         let fresh = vec![slack_missing_workspace_violation()];
         let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &fresh)));
@@ -1247,8 +1170,6 @@ mod tests {
 
     #[test]
     fn choose_rollback_aborts_when_snapshot_fails_and_fresh_render_unavailable() {
-        // Fresh render could not be produced (e.g. render error) — no safe
-        // forward path, so abort rather than apply a failing snapshot.
         let snap = vec![slack_missing_workspace_violation()];
         let choice = choose_rollback_compose(&snap, None);
         assert_eq!(
@@ -1260,8 +1181,6 @@ mod tests {
 
     #[test]
     fn rollback_containers_forward_fixes_instead_of_bailing_on_snapshot_check() {
-        // A failing snapshot must route through choose_rollback_compose
-        // (forward-fix), not an unconditional bail after the security check.
         let source = include_str!("update.rs");
         let fn_start = source
             .find("pub fn rollback_containers(")
@@ -1286,7 +1205,6 @@ mod tests {
 
     #[test]
     fn compose_down_marker_appears_before_validate_in_transaction() {
-        // Structural guard: compose_down must carry ContainersTornDown before validate.
         let source = include_str!("update.rs");
         let fn_start = source
             .find("fn apply_update_transaction_inner(")

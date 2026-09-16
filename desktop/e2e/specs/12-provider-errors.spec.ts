@@ -1,4 +1,3 @@
-
 import { openSettings, requireLocalLlm } from '../helpers/llm';
 import { localLlmUnreachable } from '../helpers/preflight';
 

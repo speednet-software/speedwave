@@ -1,7 +1,5 @@
 #!/usr/bin/env bats
 
-# A `!`-prefixed pipeline is exempt from set -e (POSIX), so bats only honours such an
-# assertion when it is the last executable line of the test — anywhere else it is dead.
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 

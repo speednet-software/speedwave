@@ -1,6 +1,3 @@
-// Window management helpers — tray debounce, close/destroy guards,
-// show/hide with macOS activation policy.
-
 use super::MAIN_WINDOW_LABEL;
 use tauri::Manager;
 
@@ -66,13 +63,9 @@ pub(crate) fn hide_main_window(app: &tauri::AppHandle) {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- Tray click debounce --
 
     #[test]
     fn debounce_suppresses_click_within_threshold() {
@@ -86,47 +79,38 @@ mod tests {
 
     #[test]
     fn debounce_allows_click_at_exact_threshold() {
-        // Exactly 500ms elapsed goes through (strict less-than).
         assert!(!should_debounce(1000, 1500, 500));
     }
 
     #[test]
     fn debounce_suppresses_when_clock_goes_backward() {
-        // Backward clock (now < prev): saturating_sub is 0 < threshold → suppressed.
         assert!(should_debounce(5000, 3000, 500));
     }
 
     #[test]
     fn debounce_allows_first_click_ever() {
-        // prev=0 (initial AtomicU64): huge elapsed → not debounced.
         assert!(!should_debounce(0, 1_700_000_000_000, 500));
     }
 
     #[test]
     fn debounce_suppresses_zero_elapsed() {
-        // Same timestamp (simultaneous events).
         assert!(should_debounce(1000, 1000, 500));
     }
 
     #[test]
     fn debounce_allows_with_zero_threshold() {
-        // Zero threshold means "never debounce" (0 < 0 is false).
         assert!(!should_debounce(1000, 1000, 0));
     }
 
     #[test]
     fn debounce_handles_u64_max_prev() {
-        // prev=u64::MAX, small now: saturating_sub is 0 → suppressed.
         assert!(should_debounce(u64::MAX, 1000, 500));
     }
 
     #[test]
     fn debounce_handles_u64_max_now() {
-        // now is u64::MAX, prev is 0 → huge elapsed → allowed.
         assert!(!should_debounce(0, u64::MAX, 500));
     }
-
-    // -- CloseRequested branching --
 
     #[test]
     fn prevent_close_main_window_with_tray() {
@@ -153,8 +137,6 @@ mod tests {
         assert!(!should_prevent_close("", true));
     }
 
-    // -- Destroyed cleanup guard --
-
     #[test]
     fn cleanup_runs_for_main_window() {
         assert!(should_run_cleanup(MAIN_WINDOW_LABEL));
@@ -172,12 +154,9 @@ mod tests {
 
     #[test]
     fn cleanup_skips_for_similar_label() {
-        // "main2" or "main-dialog" should not trigger cleanup.
         assert!(!should_run_cleanup("main2"));
         assert!(!should_run_cleanup("main-dialog"));
     }
-
-    // -- Focused event gating --
 
     #[test]
     fn focus_event_emitted_for_main_window_gaining_focus() {

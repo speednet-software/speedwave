@@ -53,12 +53,10 @@ describe('path-utils', () => {
     });
 
     it('handles root level file with slash prefix', () => {
-      // Edge case: if input has leading slash
       expect(splitPath('/file.txt')).toEqual({ parentDir: '', name: 'file.txt' });
     });
 
     it('handles multiple trailing slashes', () => {
-      // splitPath preserves intermediate empty segments
       expect(splitPath('a/b///')).toEqual({ parentDir: 'a/b//', name: '' });
     });
   });
@@ -89,9 +87,7 @@ describe('path-utils', () => {
     });
 
     it('returns default message on complete parse failure', async () => {
-      // Create a response that will fail both json() and text()
       const response = new Response('not json');
-      // Consume the body to make subsequent reads fail
       await response.text();
       const result = await parseGraphErrorMessage(response, 'default msg');
       expect(result).toBe('default msg');

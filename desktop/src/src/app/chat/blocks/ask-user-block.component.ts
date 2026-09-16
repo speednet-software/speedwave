@@ -159,7 +159,6 @@ export class AskUserBlockComponent {
 
   /** Wires the per-input reset effect for each new `question()` block. */
   constructor() {
-    // Reset input state on new question(); effect because computed forbids signal writes.
     effect(() => {
       void this.question();
       this.selected.set(new Set());

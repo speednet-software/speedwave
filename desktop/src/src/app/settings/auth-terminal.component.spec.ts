@@ -183,7 +183,6 @@ describe('AuthTerminalComponent', () => {
     expect(component.copied).toBe(true);
     component.ngOnDestroy();
     vi.advanceTimersByTime(2000);
-    // copied remains true because the timer was cleared before it could reset
     expect(component.copied).toBe(true);
   });
 
@@ -201,7 +200,6 @@ describe('AuthTerminalComponent', () => {
     const btn = (fixture.nativeElement as HTMLElement).querySelector(
       '[data-testid="auth-copy-command"]'
     );
-    // Button is not rendered when command is empty (inside @if block)
     expect(btn).toBeNull();
   });
 
@@ -293,8 +291,6 @@ describe('AuthTerminalComponent', () => {
     expect(invokeSpy).not.toHaveBeenCalled();
   });
 
-  // ── Open terminal primary button ─────────────────────────────────────────
-
   it('renders the primary "Open terminal" button', async () => {
     fixture.detectChanges();
     await vi.advanceTimersByTimeAsync(0);
@@ -330,7 +326,6 @@ describe('AuthTerminalComponent', () => {
     fixture.detectChanges();
     await vi.advanceTimersByTimeAsync(0);
     component.openTerminal();
-    // Error is cleared synchronously before the Tauri call returns.
     expect(component.error).toBe('');
   });
 
@@ -347,7 +342,6 @@ describe('AuthTerminalComponent', () => {
 
     component.openTerminal();
     await vi.advanceTimersByTimeAsync(0);
-    // Allow the .finally() microtask to flush.
     await Promise.resolve();
     await Promise.resolve();
 

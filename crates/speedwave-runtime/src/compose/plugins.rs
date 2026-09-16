@@ -51,7 +51,6 @@ pub(crate) fn apply_plugins_from_verified(
 
         plugin::validate_manifest(manifest, plugin_dir)?;
 
-        // Check if plugin is enabled (by service_id for MCP plugins, by slug otherwise)
         let plugin_key = service_id.unwrap_or(slug);
         if !integrations.is_plugin_enabled(plugin_key) {
             continue;
@@ -62,7 +61,6 @@ pub(crate) fn apply_plugins_from_verified(
             &vp.tree_digest_hex()[..16.min(vp.tree_digest_hex().len())]
         ));
 
-        // MCP service generation (follows apply_llm_config pattern)
         if let Some(sid) = service_id {
             let service_value = plugin::generate_plugin_service(
                 manifest,
@@ -73,7 +71,6 @@ pub(crate) fn apply_plugins_from_verified(
                 tokens_dir,
                 project_dir,
             )?;
-            // Refuse to overwrite a built-in service (validate_manifest gates the obvious cases at install).
             let compose_name = plugin::derive_compose_name(sid);
             if let Some(services) = doc.get_mut("services").and_then(|v| v.as_mapping_mut()) {
                 let key = serde_yaml_ng::Value::String(compose_name.clone());
@@ -84,7 +81,6 @@ pub(crate) fn apply_plugins_from_verified(
                 }
                 services.insert(key, service_value);
             }
-            // Inject WORKER_*_URL into hub; all workers share PORT_WORKER (ADR-038).
             if let Some(declared) = manifest.port {
                 if declared != consts::PORT_WORKER {
                     log::warn!(
@@ -104,13 +100,10 @@ pub(crate) fn apply_plugins_from_verified(
             );
             inject_worker_env(&mut doc, &worker_env, &url);
 
-            // Inject host-bridge env vars when Desktop registered one for this slug (ADR-063).
             if manifest.host_bridge.is_some() {
                 if let Some(registration) = bridges.bridges.iter().find(|r| r.plugin_slug == *slug)
                 {
                     let compose_name = plugin::derive_compose_name(sid);
-                    // Under WSL2 mirrored networking the container reaches the bridge
-                    // through the guest relay port, not the loopback bind port (ADR-080).
                     let container_port = super::container_facing_port(registration.port);
                     let bridge_url =
                         format!("ws://{}:{}/", consts::HOST_GATEWAY_ALIAS, container_port);
@@ -131,7 +124,6 @@ pub(crate) fn apply_plugins_from_verified(
             }
         }
 
-        // Validate claude-resources is a real dir, not a symlink (ADR-051 security model).
         let plugin_resources = plugin::plugin_claude_resources_dir(plugin_dir);
         if plugin_resources.exists() {
             ensure_resources_dir_safe(plugin_dir, &plugin_resources)
@@ -145,7 +137,6 @@ pub(crate) fn apply_plugins_from_verified(
         }
     }
 
-    // slug in SPEEDWAVE_PLUGINS; digest in separate var for config-hash recreation (plugin contract).
     if !plugin_slugs.is_empty() {
         let slugs: Vec<&str> = plugin_slugs
             .iter()

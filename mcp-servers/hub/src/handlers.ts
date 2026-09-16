@@ -59,14 +59,12 @@ function isMcpContentArray(data: unknown): data is McpContentItem[] {
  * @param maxTimeout - Maximum allowed timeout (varies by operation type).
  */
 function validateTimeout(paramValue: unknown, configDefault: number, maxTimeout: number): number {
-  // Not provided → use config default (capped at max)
   if (paramValue === undefined || paramValue === null) {
     return Math.min(configDefault, maxTimeout);
   }
 
   const timeout = Number(paramValue);
 
-  // Validate it's a finite positive number
   if (!Number.isFinite(timeout)) {
     throw new Error(`timeout_ms must be a valid number (got: ${paramValue})`);
   }
@@ -75,7 +73,6 @@ function validateTimeout(paramValue: unknown, configDefault: number, maxTimeout:
     throw new Error(`timeout_ms must be positive (got: ${timeout})`);
   }
 
-  // Cap at maximum and floor to integer
   return Math.min(Math.floor(timeout), maxTimeout);
 }
 
@@ -156,13 +153,11 @@ export function createCodeExecutorHandlers(config: HandlerConfig) {
 
       const code = params.code;
 
-      // Get timeout configuration based on tools used in code (SSOT from tool-registry)
       const { timeoutMs: defaultTimeout, maxTimeoutMs } = getExecutionTimeout(
         code,
         config.timeoutMs
       );
 
-      // Validate and apply user-provided timeout (if any)
       const timeoutMs = validateTimeout(params.timeout_ms, defaultTimeout, maxTimeoutMs);
 
       const executeParams: ExecuteCodeParams = {

@@ -6,7 +6,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import { createMCPServer } from '@speedwave/mcp-shared';
 
-// ── fs mock ────────────────────────────────────────────────────────────────
 const readFileMock = vi.fn();
 vi.mock('node:fs', () => ({
   promises: {
@@ -14,7 +13,6 @@ vi.mock('node:fs', () => ({
   },
 }));
 
-// Imported after the mock is registered.
 import { normalizeSiteUrl, readCredentials } from './auth.js';
 
 /** Build an fs.readFile mock that resolves files from a map and ENOENTs the rest. */
@@ -204,7 +202,6 @@ describe('atlassian middleware wiring', () => {
           path: opts.path,
           method: opts.method || 'GET',
           headers: opts.headers || {},
-          // Fresh connection per request: no keep-alive socket outlives its test's server.
           agent: false,
         },
         (res) => {
@@ -234,8 +231,6 @@ describe('atlassian middleware wiring', () => {
 
   async function listen(mcp: ReturnType<typeof createMCPServer>): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      // Bind the address the client dials: host-less listen(0) is dual-stack [::], and macOS may
-      // hand it a port a foreign IPv4 127.0.0.1 listener holds, which then gets the connection.
       server = mcp.app.listen(0, LOOPBACK, () => {
         const addr = server!.address();
         if (!addr || typeof addr !== 'object' || addr.address !== LOOPBACK) {

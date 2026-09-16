@@ -3,8 +3,6 @@
 
 use speedwave_runtime::host_mcp_process::{HostMcpProcess, WorkerSpec};
 
-// ── Public relay operations (thin wrappers; the runtime lives in `imp`) ─────
-
 /// Ensures a guest-side relay for a host listener bound on `bind_port`, asynchronously
 /// (fire-and-forget thread — safe from the UI thread). Best-effort: failures are logged.
 pub fn ensure_relay_for_port(bind_port: u16) {
@@ -37,8 +35,6 @@ pub fn remove_relay_for_port_async(bind_port: u16) {
     #[cfg(all(not(target_os = "windows"), not(test)))]
     let _ = bind_port;
 }
-
-// ── RelayedWorker: the relay lifecycle rides the worker lifecycle ────────────
 
 /// Inner-worker surface the relay lifecycle rides on; `HostMcpProcess<S>` in
 /// production, a fake in tests.
@@ -167,8 +163,6 @@ impl Drop for RetiredRelay {
     }
 }
 
-// ── Test-only relay-op recorder ──────────────────────────────────────────────
-
 /// Records every relay op under `cfg(test)` so lifecycle tests (wrapper, HostBridge)
 /// can assert the exact ensure/remove sequence; keyed by port to stay parallel-safe.
 #[cfg(test)]
@@ -203,8 +197,6 @@ pub(crate) mod recorder {
     }
 }
 
-// ── Windows-only runtime ─────────────────────────────────────────────────────
-
 /// Thread orchestration + `wsl.exe` execution. Everything decision-shaped lives
 /// in [`logic`] so tests cover it on every platform.
 #[cfg(all(target_os = "windows", not(test)))]
@@ -228,14 +220,10 @@ mod imp {
     }
 
     pub(super) fn ensure_relay_for_port(bind_port: u16) {
-        // Coalesce to one in-flight ensure per port: watchdogs re-tick every ~30 s and a
-        // wedged wsl.exe must not stack unbounded threads behind the ops lock.
         let Some(inflight) = ENSURE_INFLIGHT.begin(bind_port) else {
             return;
         };
         let queued_generation = PORT_GENERATIONS.snapshot(bind_port);
-        // The guard clears the in-flight mark on every exit path: a failed spawn drops
-        // the un-run closure (and the captured guard), a panic unwinds through it.
         if let Err(e) = std::thread::Builder::new()
             .name(format!("mirror-relay-ensure-{bind_port}"))
             .spawn(move || {
@@ -252,12 +240,9 @@ mod imp {
             return;
         };
         sweep_orphan_relay_units_once();
-        // socat upstream = the bridge's bind address (127.0.0.1 under mirrored), from the
-        // addressing SSOT rather than hardcoded, so the two can never diverge (ADR-080).
         let upstream = match speedwave_runtime::compose::host_bind_address() {
             Ok(addr) => addr,
             Err(e) => {
-                // mirror_relay_port just resolved, so this is a poison/race edge — surface it.
                 log::warn!("host_bind_address unavailable while ensuring relay for bind {bind_port} ({e}); assuming 127.0.0.1");
                 "127.0.0.1".to_string()
             }
@@ -272,8 +257,6 @@ mod imp {
             &upstream,
         );
         let _ops = relay_ops_lock();
-        // A remove may have retired this port while this ensure was queued — creating
-        // the unit now would orphan a relay to a freed port (checked under the ops lock).
         let current_generation = PORT_GENERATIONS.snapshot(bind_port);
         if !logic::ensure_should_proceed(queued_generation, current_generation) {
             log::debug!("skipping relay ensure for retired bind {bind_port}");
@@ -305,8 +288,6 @@ mod imp {
     }
 
     pub(super) fn remove_relay_for_port(bind_port: u16) {
-        // Retire before anything else: a parked ensure must not resurrect this port
-        // even when the distro is stopped (the queued thread survives the early return).
         PORT_GENERATIONS.retire(bind_port);
         if !distro_is_running() {
             return;
@@ -389,8 +370,6 @@ mod imp {
         Ok(speedwave_runtime::runtime::decode_wsl_output(&out.stdout))
     }
 }
-
-// ── Pure decisions + scripts (cross-platform under test) ─────────────────────
 
 /// Decision state and script/classifier helpers shared by the Windows runtime
 /// (`imp`) and the cross-platform test suite.
@@ -634,8 +613,6 @@ mod tests {
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
-    // ── RelayedWorker lifecycle (the collapsed wiring guard) ────────────────
-
     struct FakeInner {
         port: u16,
         alive: bool,
@@ -686,7 +663,6 @@ mod tests {
     /// ensure on spawn, re-ensure on live probe, swap on respawn, remove on stop.
     #[test]
     fn relayed_worker_drives_the_full_relay_lifecycle() {
-        // Ports unique to this test — the recorder is global and tests run in parallel.
         let mut inner = FakeInner::new(1001);
         inner.next_respawn = Ok(1002);
         let stopped = inner.stopped.clone();
@@ -712,7 +688,6 @@ mod tests {
             "a dead probe must not re-ensure"
         );
 
-        // Respawn to a NEW port: the old relay is dropped (async), the new one ensured.
         assert_eq!(worker.respawn().unwrap(), 1002);
         assert_eq!(
             calls_for_port(1001),
@@ -720,7 +695,6 @@ mod tests {
         );
         assert_eq!(calls_for_port(1002), vec![RelayOp::Ensure]);
 
-        // Respawn reusing the SAME port: no teardown (it would race the live relay).
         worker.inner.next_respawn = Ok(1002);
         worker.respawn().unwrap();
         assert_eq!(
@@ -729,12 +703,10 @@ mod tests {
             "a port-reusing respawn must only re-ensure"
         );
 
-        // Failed respawn: no relay ops at all.
         worker.inner.next_respawn = Err("spawn failed");
         assert!(worker.respawn().is_err());
         assert_eq!(calls_for_port(1002).len(), 2);
 
-        // Stop: synchronous removal (an exit-path thread would not outlive the process).
         worker.stop().unwrap();
         assert!(stopped.get(), "stop must stop the inner worker");
         assert_eq!(
@@ -793,8 +765,6 @@ mod tests {
             "a port-changing replacement must not adopt the old relay"
         );
     }
-
-    // ── Coalescing, warn-once, negative cache, retire tombstone ─────────────
 
     #[test]
     fn inflight_set_coalesces_and_guard_clears_on_panic() {
@@ -893,10 +863,7 @@ mod tests {
         );
     }
 
-    // ── Scripts + classifier ────────────────────────────────────────────────
-
     fn sample_route() -> RelayRoute {
-        // 60123 ^ 0x4000 = 43739 (the deterministic relay port).
         RelayRoute {
             relay_port: 43739,
             bind_port: 60123,
@@ -911,7 +878,6 @@ mod tests {
             s.contains("socat TCP-LISTEN:43739,bind=10.200.0.1,fork,reuseaddr TCP:127.0.0.1:60123")
         );
         assert!(s.contains("systemd-run"));
-        // Unit keyed by the stable bind port; idempotent + self-healing.
         assert!(s.contains("--unit='spw-mirror-relay-60123'"));
         assert!(s.contains("is-active --quiet 'spw-mirror-relay-60123'"));
         assert!(s.contains("Restart=on-failure"));
@@ -919,8 +885,6 @@ mod tests {
 
     #[test]
     fn setup_script_verifies_socat_active_before_claiming_success() {
-        // systemd-run returns 0 at unit START; a socat that cannot bind (port collision)
-        // crash-loops — success must be claimed only after an is-active poll.
         let s = relay_setup_script(sample_route(), "10.200.0.1", "127.0.0.1");
         let created = s
             .find(RELAY_CREATED_MARKER)
@@ -958,8 +922,6 @@ mod tests {
 
     #[test]
     fn classify_relay_output_markers_match_setup_script() {
-        // The classifier and the script share the marker consts; this pins that the
-        // script actually emits them (a one-sided edit cannot silently misclassify).
         let s = relay_setup_script(sample_route(), "10.200.0.1", "127.0.0.1");
         assert!(s.contains(RELAY_CREATED_MARKER));
         assert!(s.contains(RELAY_FAILED_MARKER));
@@ -975,8 +937,6 @@ mod tests {
     #[test]
     fn sweep_script_stops_all_relay_units_and_only_relay_units() {
         let s = relay_sweep_script();
-        // The glob derives from RELAY_UNIT_PREFIX — same namespace the setup script
-        // creates units in, so a prefix rename can never strand the sweep.
         assert!(s.contains(&format!("'{RELAY_UNIT_PREFIX}*'")));
         assert!(s.contains("--all"), "must catch failed units");
         assert!(s.contains("systemctl stop"));

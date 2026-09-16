@@ -41,7 +41,6 @@ pub(crate) fn with_project_compose_lock_in<F, T>(
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
-    // Lock path is built from `project`; reject traversal at the boundary.
     crate::validation::validate_project_name(project)?;
 
     let inner_arc = in_process_lock_for(project);
@@ -119,7 +118,6 @@ mod tests {
         let mut e = entries.lock().unwrap().clone();
         e.sort_by_key(|(entered, _)| *entered);
         assert_eq!(e.len(), 2);
-        // The second thread must enter only after the first one exited.
         assert!(
             e[1].0 >= e[0].1,
             "expected serialization: second entered {:?} before first exited {:?}",
@@ -184,7 +182,6 @@ mod tests {
         let dir = tempdir();
         let root = dir.path().to_path_buf();
 
-        // Poison the in-process inner mutex by panicking inside it.
         let root_clone = root.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_project_compose_lock_in(&root_clone, "delta", || -> anyhow::Result<()> {
@@ -193,7 +190,6 @@ mod tests {
         }));
         assert!(result.is_err(), "panic must propagate");
 
-        // Subsequent acquire must still succeed (PoisonError recovery via `into_inner`).
         let value = with_project_compose_lock_in(&root, "delta", || Ok(42)).unwrap();
         assert_eq!(value, 42);
     }
@@ -206,7 +202,6 @@ mod tests {
             with_project_compose_lock_in(&root, "epsilon", || Ok(())).unwrap();
         }
         let map_len = IN_PROCESS_LOCKS.lock().unwrap().len();
-        // Parallel tests may add entries, so assert only our key is present.
         let map_contains = IN_PROCESS_LOCKS.lock().unwrap().contains_key("epsilon");
         assert!(map_contains, "epsilon entry should persist for reuse");
         assert!(map_len >= 1);
@@ -236,7 +231,6 @@ mod tests {
     fn panic_releases_file_lock_via_raii() {
         let dir = tempdir();
         let root = dir.path().to_path_buf();
-        // Panic in the critical section; FileLockGuard::drop must release the file lock.
         let root_clone = root.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_project_compose_lock_in(&root_clone, "panic_proj", || -> anyhow::Result<()> {
@@ -244,7 +238,6 @@ mod tests {
             })
         }));
         assert!(result.is_err(), "panic must propagate");
-        // Acquire again — would deadlock if file lock leaked.
         let value = with_project_compose_lock_in(&root, "panic_proj", || Ok(99)).unwrap();
         assert_eq!(value, 99);
     }
@@ -253,7 +246,6 @@ mod tests {
     fn invalid_project_name_rejected_at_boundary() {
         let dir = tempdir();
         let root = dir.path().to_path_buf();
-        // Path traversal attempt — must be rejected by validate_project_name.
         let err = with_project_compose_lock_in(&root, "../escape", || Ok(0)).unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("invalid")

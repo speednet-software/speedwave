@@ -70,7 +70,6 @@ pub fn outbound_headers_with(
 
     match auth {
         Auth::Bare(BareAuth::Passthrough) => {
-            // Copy auth and Anthropic headers verbatim — inject nothing.
             for name in &[
                 "authorization",
                 "x-api-key",
@@ -84,8 +83,6 @@ pub fn outbound_headers_with(
             }
         }
         Auth::Bare(BareAuth::None) => {
-            // Local server, no key: drop inbound auth, keep non-auth headers,
-            // inject nothing.
             for name in &["anthropic-version", "content-type"] {
                 if let Some(v) = inbound.get(*name) {
                     out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
@@ -93,14 +90,11 @@ pub fn outbound_headers_with(
             }
         }
         Auth::Swap { env, scheme } => {
-            // Drop inbound auth (client sends a dummy bearer on non-Anthropic legs).
-            // Keep non-auth Anthropic headers.
             for name in &["anthropic-version", "content-type"] {
                 if let Some(v) = inbound.get(*name) {
                     out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
                 }
             }
-            // Inject real provider key according to scheme.
             match (scheme, lookup(env)) {
                 (Scheme::Bearer, Some(key)) => {
                     let value = format!("Bearer {key}");
@@ -109,13 +103,9 @@ pub fn outbound_headers_with(
                     }
                 }
                 (Scheme::Bearer, None) => {
-                    // Key absent or env name tampered — forward with NO auth (the
-                    // provider answers 401). Surface it; env name only, never a value.
                     log::warn!("swap leg: no provider key for {env}; forwarding without auth");
                 }
-                (Scheme::None, _) => {
-                    // Local servers accept any/none — no auth header expected.
-                }
+                (Scheme::None, _) => {}
             }
         }
     }
@@ -215,8 +205,6 @@ fn resolve_request_status(
 /// Resolve the route, forward with swapped/verbatim headers, relay the SSE byte
 /// stream unbuffered while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
-    // Parse the body once: the model selects the backend route, the same
-    // parsed value is reused (now PII-scanned) to strip the route prefix before forwarding.
     let mut parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -228,7 +216,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         }
     };
 
-    // Fail-closed (ADR-073 F4): a broken PII engine must never let cleartext forward.
     let (policy, key) = match cfg.pii.as_ref() {
         PiiEngineState::Ready { policy, key } => (policy, key),
         PiiEngineState::Failed(reason) => {
@@ -253,7 +240,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     };
     audit::write_pii_audit(cfg.audit_dir.as_deref(), &detections);
 
-    // Re-serialize the scanned value: this, not the original raw bytes, is what forwards.
     let scanned_body = match serde_json::to_vec(&parsed) {
         Ok(b) => b,
         Err(e) => {
@@ -296,14 +282,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let out_headers = outbound_headers(&route.auth, &headers);
     let upstream_url = format!("{}/v1/messages", route.base_url);
-    // Strip the route prefix so the backend sees its own model name (the
-    // anthropic passthrough has no prefix and is untouched).
     let outbound_body = strip_model_prefix(&scanned_body, &parsed, &model);
-    // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
 
-    // Shared client (built once with no-redirect — SSRF, ADR-041); clone is cheap.
     let client = cfg.client.clone();
 
     let mut req = client.post(&upstream_url).body(outbound_body);
@@ -311,7 +293,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         req = req.header(name, value);
     }
 
-    // Clock starts before send() so latency includes connect + TTFT, not just body.
     let start = std::time::Instant::now();
     let upstream = match req.send().await {
         Ok(r) => r,
@@ -325,8 +306,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     };
 
     let status = upstream.status();
-    // Surface backend rejections at the proxy (model name only, never a key or
-    // body) — else a 401/403/5xx only shows up in the Claude Code logs.
     if status.as_u16() >= 400 {
         log::warn!(
             "upstream {} for model '{}' via prefix '{}'",
@@ -338,43 +317,29 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let response_headers = upstream.headers().clone();
     let upstream_is_sse = is_event_stream(&response_headers);
 
-    // Usage path resolved once at startup and stored in Config — no env read per request.
     let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
     let status_code = status.as_u16();
-    // Cheap Arc clone: the spawned task outlives this handler and needs its own handle to
-    // unmask keywords and detokenize PII spans before the response reaches the agent (§5.1).
     let pii_state = cfg.pii.clone();
 
-    // Channel-based relay: each upstream chunk is rewritten (keywords unmasked, PII spans
-    // detokenized) then forwarded as soon as the rolling buffer judges it safe.
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     tokio::spawn(async move {
         let PiiEngineState::Ready { policy, key } = pii_state.as_ref() else {
-            // Unreachable: `messages` already required `Ready` before ever calling upstream,
-            // and the engine state never changes after startup. Fail closed rather than
-            // forward a response nobody has rewritten.
             log::error!("PII engine unavailable for response rewrite; dropping stream");
             return;
         };
         let mut byte_stream = upstream.bytes_stream();
         let mut acc = UsageAcc::default();
-        // Buffer for incomplete SSE lines across chunks (usage sniffing only).
         let mut line_buf = String::new();
         let mut rewrite_buffer = crate::rewrite::ResponseRewriter::new(upstream_is_sse);
-        // Stream aborted mid-flight (upstream byte error, or a detokenization failure) →
-        // failure, even on a 2xx.
         let mut stream_errored = false;
-        // The client dropped the connection — stop pushing, and skip the final flush send.
         let mut client_disconnected = false;
 
         use futures_util::StreamExt;
         while let Some(chunk) = byte_stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    // Sniff SSE frames from the original chunk — unaffected by the rewrite
-                    // below, since usage numbers reflect what the upstream actually billed.
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         line_buf.push_str(text);
                         for line in drain_complete_lines(&mut line_buf) {
@@ -391,11 +356,8 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                                 }
                             }
                         }
-                        // Only sniffing is bounded; the rewrite buffer below is separate.
                         bound_sniff_buffer(&mut line_buf, MAX_SNIFF_BUF);
                     }
-                    // Unmask keywords then detokenize PII spans (§5.1/§7.2/§7.3) on decoded
-                    // event text — a span split across SSE delta events still matches.
                     let forward_bytes =
                         match rewrite_buffer.push_chunk(&bytes, policy.keywords(), key) {
                             Ok(b) => b,
@@ -410,7 +372,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                         && tx.send(Ok(Bytes::from(forward_bytes))).await.is_err()
                     {
                         client_disconnected = true;
-                        break; // Client disconnected.
+                        break;
                     }
                 }
                 Err(e) => {
@@ -463,13 +425,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         ) {
             append_usage(&usage_path, &line);
         }
-        // tx is dropped here; ReceiverStream terminates cleanly.
     });
 
     let stream = ReceiverStream::new(rx);
     let mut builder = Response::builder().status(status);
-    // Forward upstream headers (content-type, etc.), minus hop-by-hop ones —
-    // axum re-frames the body, so relaying them corrupts the client transfer.
     for (name, value) in &response_headers {
         if !is_hop_by_hop(name.as_str()) {
             builder = builder.header(name, value);
@@ -527,7 +486,6 @@ mod tests {
             upstream_host("http://host:8080/v1/messages?x=1"),
             "host:8080"
         );
-        // No scheme — return as-is up to the first slash.
         assert_eq!(upstream_host("barehost:9000/x"), "barehost:9000");
     }
 
@@ -544,7 +502,6 @@ mod tests {
         assert!(line.contains("prefix='openrouter'"), "{line}");
         assert!(line.contains("provider=open_router/openrouter"), "{line}");
         assert!(line.contains("api.openrouter.ai"), "{line}");
-        // Host only — never the full URL path.
         assert!(
             !line.contains("/api/v1"),
             "req log must not carry the URL path: {line}"
@@ -578,13 +535,11 @@ mod tests {
         let out = strip_model_prefix(body, &parsed, "local/unsloth/Qwen3.6");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["model"], "unsloth/Qwen3.6");
-        // Other fields survive the rewrite.
         assert_eq!(v["max_tokens"], 16);
     }
 
     #[test]
     fn strip_model_prefix_leaves_anthropic_untouched() {
-        // No prefix (anthropic passthrough) → body byte-identical.
         let body = br#"{"model":"claude-opus-4-8","max_tokens":16}"#;
         let parsed = serde_json::from_slice(body).unwrap();
         let out = strip_model_prefix(body, &parsed, "claude-opus-4-8");
@@ -593,7 +548,6 @@ mod tests {
 
     #[test]
     fn strip_model_prefix_only_drops_first_segment() {
-        // openrouter/anthropic/claude-3.5 → anthropic/claude-3.5 (one level).
         let body = br#"{"model":"openrouter/anthropic/claude-3.5"}"#;
         let parsed = serde_json::from_slice(body).unwrap();
         let out = strip_model_prefix(body, &parsed, "openrouter/anthropic/claude-3.5");
@@ -637,8 +591,6 @@ mod tests {
 
     #[test]
     fn swap_bearer_with_no_key_drops_dummy_and_injects_nothing() {
-        // Missing/tampered key: dummy auth dropped, no real key available → the
-        // request forwards with NO authorization header (provider answers 401).
         let mut h = HeaderMap::new();
         h.insert(
             "authorization",
@@ -717,7 +669,6 @@ mod tests {
     #[test]
     fn split_sse_frame_across_chunks_parses_once() {
         let full_line = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n";
-        // Split arbitrarily in the middle of the JSON payload.
         let split_at = full_line.find("\"output_to").unwrap();
         let chunk1 = &full_line[..split_at];
         let chunk2 = &full_line[split_at..];
@@ -725,7 +676,6 @@ mod tests {
         let mut buf = String::new();
         let mut acc = UsageAcc::default();
 
-        // First chunk — no complete line yet.
         buf.push_str(chunk1);
         for line in drain_complete_lines(&mut buf) {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -736,7 +686,6 @@ mod tests {
         }
         assert_eq!(acc.completion_tokens, 0, "must not sniff before full line");
 
-        // Second chunk — completes the line.
         buf.push_str(chunk2);
         for line in drain_complete_lines(&mut buf) {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -756,13 +705,11 @@ mod tests {
     fn sniff_buffer_is_bounded_against_newlineless_stream() {
         let max = 64;
         let mut buf = String::new();
-        // No newline: drain yields nothing, buffer would grow unbounded.
         buf.push_str(&"x".repeat(max + 10));
         assert!(drain_complete_lines(&mut buf).is_empty());
         bound_sniff_buffer(&mut buf, max);
         assert!(buf.is_empty(), "over-cap partial line must be dropped");
 
-        // A partial line UNDER the cap is preserved (real split frame).
         buf.push_str("data: {\"type\":\"mes");
         bound_sniff_buffer(&mut buf, max);
         assert_eq!(
@@ -778,7 +725,6 @@ mod tests {
         let mut acc = UsageAcc::default();
         buf.push_str(&"y".repeat(max + 10));
         bound_sniff_buffer(&mut buf, max);
-        // A complete frame after the reset still parses.
         buf.push_str("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n");
         for line in drain_complete_lines(&mut buf) {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -837,8 +783,6 @@ mod tests {
 
     #[test]
     fn bound_for_log_never_splits_a_utf8_char_boundary() {
-        // 100 three-byte chars = 300 bytes; 200 is not a multiple of 3, so the cap lands
-        // mid-character and the boundary-adjust loop must back off to the char before it.
         let s = "€".repeat(100);
         let out = bound_for_log(&s, 200);
         assert_eq!(out, format!("{}…", "€".repeat(66)));

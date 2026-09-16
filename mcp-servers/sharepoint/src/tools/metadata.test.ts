@@ -60,7 +60,6 @@ describe('SharePoint tool metadata', () => {
     const meta = listItems._meta as Record<string, unknown>;
     expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
     expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
-    // The legacy unprefixed identity keys must be absent (prefixed keys are the SSOT).
     expect(meta.userScoped).toBeUndefined();
     expect(meta.currentUserTool).toBeUndefined();
   });

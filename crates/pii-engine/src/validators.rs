@@ -35,7 +35,6 @@ pub(crate) fn validate_nip(value: &str) -> bool {
         .zip(weights.iter())
         .map(|(d, w)| d * w)
         .sum();
-    // A sum%11 of 10 has no single-digit representation, so it never matches (mirrors TS).
     sum % 11 == digits[9]
 }
 

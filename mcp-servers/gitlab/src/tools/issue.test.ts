@@ -340,8 +340,6 @@ describe('issue-tools', () => {
     });
 
     it('passes the real client not-found message through to the tool result end-to-end (not the generic 404 text)', async () => {
-      // Uses the real GitLabClient (not a hand-mocked one) so getIssue's own
-      // TeachingError survives withValidation's formatError call unmangled.
       const { GitLabClient: RealGitLabClient } = await import('../client.js');
       const realClient = new RealGitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
       (realClient as unknown as { gitlab: { Issues: { all: Mock } } }).gitlab.Issues.all = vi
@@ -1443,7 +1441,6 @@ describe('issue-tools', () => {
         await handler({ project_id: 'test', issue_iid: 1 });
       }
 
-      // Ensure no mock client methods were called
       expect(mockClient.listIssues).not.toHaveBeenCalled();
       expect(mockClient.getIssue).not.toHaveBeenCalled();
       expect(mockClient.createIssue).not.toHaveBeenCalled();

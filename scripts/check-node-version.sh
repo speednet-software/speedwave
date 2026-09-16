@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Fails unless the `node` on PATH is at least the pinned version (`.node-version` is the SSOT).
-# Usage: check-node-version.sh <required-version>
 set -euo pipefail
 
 required="${1:?usage: $0 <required-version>}"

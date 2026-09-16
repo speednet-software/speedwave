@@ -1,5 +1,3 @@
-// Git introspection for the chat status bar: `get_git_branch`.
-
 use std::path::Path;
 
 use speedwave_runtime::config;
@@ -18,7 +16,6 @@ pub(crate) fn get_git_branch(project: String) -> Result<Option<String>, String> 
 /// Runs `git rev-parse --abbrev-ref HEAD` in `dir` and returns the trimmed branch name. Any
 /// non-zero exit (not a git repo, git missing, etc.) maps to `None`, hiding the UI branch chip.
 fn read_branch(dir: &Path) -> Option<String> {
-    // system_command applies CREATE_NO_WINDOW on Windows so git does not flash a console.
     let output = speedwave_runtime::binary::system_command("git")
         .arg("-C")
         .arg(dir)
@@ -72,7 +69,6 @@ mod tests {
     fn read_branch_returns_none_for_unborn_head() {
         let tmp = tempfile::tempdir().unwrap();
         run(&["init", "-b", "main"], tmp.path());
-        // Unborn HEAD: rev-parse exits non-zero → None.
         assert_eq!(read_branch(tmp.path()), None);
     }
 

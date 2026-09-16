@@ -1,5 +1,3 @@
-// Health-check Tauri command: aggregates per-container and (on macOS) OS-bridge health.
-
 use crate::health::{self, HealthMonitor};
 use crate::types::check_project;
 use speedwave_runtime::config;

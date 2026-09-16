@@ -18,7 +18,6 @@ describe('TOOL_NAMES SSOT', () => {
 
   it('client teaching messages reference only tool names from the SSOT', () => {
     const clientSrc = readFileSync(fileURLToPath(new URL('./client.ts', import.meta.url)), 'utf-8');
-    // Every registered tool name that the client mentions must be routed through TOOL_NAMES, not a raw literal.
     const ssotValues = new Set<string>(Object.values(TOOL_NAMES));
     for (const name of REGISTERED) {
       if (ssotValues.has(name)) continue;

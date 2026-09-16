@@ -67,7 +67,6 @@ enum OutlookClient {
             folderClause = "inbox"
         }
 
-        // Counter loop avoids "Invalid index" error (-1719) past message count.
         let script = """
         tell application "Microsoft Outlook"
             set output to ""

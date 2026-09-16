@@ -52,7 +52,6 @@ describe('PagesClient URL builders', () => {
   });
 
   it('webpartItemPath omits section/column ids — Graph routes by webpart id', () => {
-    // Per-web-part PATCH/DELETE uses the `/webParts/{id}` form, not the empty-segments form.
     const r = fakeRequester();
     expect(new PagesClient(r).webpartItemPath('p1', 'wp1')).toBe(
       `/sites/${SITE_ID}/pages/p1/${PAGE_RESOURCE}/webParts/wp1`
@@ -288,7 +287,6 @@ describe('PagesClient request helpers', () => {
         },
       ],
     });
-    // Original input untouched (deep clone semantics).
     expect(input.horizontalSections[0].columns[0].webparts[0]).toHaveProperty(
       'customContentDropSupport'
     );
@@ -322,9 +320,7 @@ describe('PagesClient request helpers', () => {
 
   it('STANDARD_WEBPART_TYPES contains 13 entries — Graph supports 14 in the official table but Title Area is a sitePage property, not a standardWebPart', () => {
     expect(Object.keys(STANDARD_WEBPART_TYPES)).toHaveLength(13);
-    // Title Area must NOT be exposed via addWebPart — it lives on sitePage.titleArea.
     expect(Object.keys(STANDARD_WEBPART_TYPES)).not.toContain('titleArea');
-    // GUIDs are lowercase 8-4-4-4-12 hex.
     for (const guid of Object.values(STANDARD_WEBPART_TYPES)) {
       expect(guid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     }
@@ -348,11 +344,9 @@ describe('PagesClient request helpers', () => {
   });
 
   it('htmlToPlainText strips tags and decodes safe entities (preserves &lt; / &gt;)', () => {
-    // Stripping tags first leaves spaces at tag boundaries.
     expect(htmlToPlainText('<p>Hello&nbsp;<b>world</b> &amp; goodbye</p>')).toBe(
       'Hello world & goodbye'
     );
-    // Angle-bracket entities are preserved verbatim, never decoded back to `<` / `>`.
     expect(htmlToPlainText('&lt;tag&gt;')).toBe('&lt;tag&gt;');
     expect(htmlToPlainText('&amp;lt;script&amp;gt;')).toBe('&lt;script&gt;');
     expect(htmlToPlainText('&quot;quoted&quot; &#39;single&#39;')).toBe('"quoted" \'single\'');
@@ -378,7 +372,6 @@ describe('PagesClient request helpers', () => {
   });
 
   it('deletePage DELETEs at /sites/{site-id}/pages/{page-id} (no cast)', async () => {
-    // deletePage uses the base /pages collection; the sitePage cast is GET/PATCH only.
     const r = fakeRequester();
     await new PagesClient(r).deletePage('p1');
     expect(r.graphRequest).toHaveBeenCalledWith('DELETE', `/sites/${SITE_ID}/pages/p1`);
@@ -399,7 +392,6 @@ describe('PagesClient never accepts a site_id from callers (ADR-060)', () => {
     await pages.listPages();
     await pages.getPage('p1');
     await pages.publishPage('p1');
-    // Every URL builder calls back through GraphRequester, never a caller-supplied site id.
     expect(calls).toBeGreaterThanOrEqual(3);
   });
 });
@@ -411,7 +403,7 @@ describe('Table-of-contents helpers', () => {
     const headings = extractHeadings(html);
     expect(headings).toEqual([
       { level: 1, anchor: 'intro', text: 'Intro' },
-      { level: 2, anchor: 'setup', text: 'Setup' }, // explicit id preserved
+      { level: 2, anchor: 'setup', text: 'Setup' },
       { level: 3, anchor: 'step-1', text: 'Step 1' },
       { level: 2, anchor: 'conclusion', text: 'Conclusion' },
     ]);
@@ -459,7 +451,6 @@ describe('Table-of-contents helpers', () => {
   });
 
   it('injectHeadingAnchors leaves empty headings (no visible text) untouched', () => {
-    // Empty headings survive verbatim; no id is invented for non-content blocks.
     const input = '<h1>Real</h1><h2>   </h2><h2><img alt=""/></h2>';
     const out = injectHeadingAnchors(input, [{ level: 1, anchor: 'real', text: 'Real' }]);
     expect(out).toContain('<h2>   </h2>');
@@ -468,7 +459,6 @@ describe('Table-of-contents helpers', () => {
   });
 
   it('injectHeadingAnchors leaves headings past the supplied anchor list untouched', () => {
-    // 3 real headings but only 1 anchor supplied; trailing headings stay unchanged.
     const input = '<h1>One</h1><h2>Two</h2><h2>Three</h2>';
     const out = injectHeadingAnchors(input, [{ level: 1, anchor: 'one', text: 'One' }]);
     expect(out).toBe('<h1 id="one">One</h1><h2>Two</h2><h2>Three</h2>');
@@ -476,7 +466,6 @@ describe('Table-of-contents helpers', () => {
 
   it('slugifyHeading produces kebab-case ASCII', () => {
     expect(slugifyHeading('Hello World')).toBe('hello-world');
-    // NFKD decomposes accented letters; bare `Ł`/`ł` fall through as separators.
     expect(slugifyHeading('Café — naprawdę')).toBe('cafe-naprawde');
     expect(slugifyHeading('   --- ')).toBe('');
   });
@@ -503,7 +492,6 @@ describe('Table-of-contents helpers', () => {
   });
 
   it('renderTableOfContents bridges level skips with empty intermediate <li>', () => {
-    // h1 → h3 (skips h2). Result must remain well-formed: <ul><li><ul><li><ul><li>…
     const html = renderTableOfContents([
       { level: 1, anchor: 'a', text: 'A' },
       { level: 3, anchor: 'a-c', text: 'A.x.c' },

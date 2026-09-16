@@ -69,8 +69,6 @@ export function requireFields(
   return { valid: true };
 }
 
-// ── Input Validation — max length, control chars, types (SEC-012) ────────
-
 /** Maximum allowed lengths per field category. */
 export const MAX_LENGTHS = { id: 512, short: 1_000, body: 100_000 } as const;
 
@@ -477,7 +475,6 @@ export function isValidISO8601(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   if (!ISO8601_RE.test(value)) return false;
 
-  // Validate month/day ranges to prevent silent rollover (e.g., Feb 30 → Mar 2)
   const year = parseInt(value.slice(0, 4), 10);
   const month = parseInt(value.slice(5, 7), 10);
   const day = parseInt(value.slice(8, 10), 10);

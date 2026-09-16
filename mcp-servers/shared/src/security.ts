@@ -68,7 +68,6 @@ export async function loadToken(tokenPath: string): Promise<string> {
     const token = await fs.readFile(tokenPath, 'utf-8');
     return token.trim();
   } catch (error) {
-    // Differentiate error types for better debugging
     const code = (error as NodeJS.ErrnoException).code;
 
     if (code === 'ENOENT') {
@@ -78,7 +77,6 @@ export async function loadToken(tokenPath: string): Promise<string> {
     } else if (code === 'EISDIR') {
       throw new Error(`Token path is a directory, not a file: ${tokenPath}`, { cause: error });
     } else {
-      // Other errors (EIO, EMFILE, etc.)
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to read token file: ${tokenPath} (${message})`, { cause: error });
     }
@@ -90,7 +88,6 @@ export async function loadToken(tokenPath: string): Promise<string> {
  * Never includes secret-carrying names (`MCP_*_AUTH_TOKEN`, API keys).
  */
 export const BASE_SAFE_ENV_KEYS: readonly string[] = [
-  // Process / shell environment
   'PATH',
   'HOME',
   'USER',
@@ -102,7 +99,6 @@ export const BASE_SAFE_ENV_KEYS: readonly string[] = [
   'TMPDIR',
   'TMP',
   'TEMP',
-  // macOS: required by Swift runtime / Xcode toolchain
   'DEVELOPER_DIR',
   'SDKROOT',
   '__CF_USER_TEXT_ENCODING',
@@ -113,19 +109,16 @@ export const BASE_SAFE_ENV_KEYS: readonly string[] = [
  * @param body - request body to validate
  */
 export function validateJSONRPCMessage(body: unknown): boolean {
-  // Must have jsonrpc field
   if (!body || typeof body !== 'object') {
     return false;
   }
 
   const message = body as Record<string, unknown>;
 
-  // Must be JSON-RPC 2.0
   if (message.jsonrpc !== '2.0') {
     return false;
   }
 
-  // Must have either method (request/notification) or result/error (response)
   const hasMethod = typeof message.method === 'string' && message.method.length <= 200;
   const hasResult = 'result' in message || 'error' in message;
 
@@ -137,13 +130,10 @@ export function validateJSONRPCMessage(body: unknown): boolean {
     return false;
   }
 
-  // If it's a request (has method), must have id
   if (hasMethod && !('id' in message)) {
-    // It's a notification - valid
     return true;
   }
 
-  // If it has id, must be string or number
   if ('id' in message) {
     const idType = typeof message.id;
     if (idType !== 'string' && idType !== 'number') {
@@ -170,7 +160,6 @@ export function validateParams(
  * @param sessionId - session ID to validate
  */
 export function validateSessionId(sessionId: string): boolean {
-  // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   return uuidRegex.test(sessionId);
 }
@@ -180,15 +169,12 @@ export function validateSessionId(sessionId: string): boolean {
  * @param toolName - tool name to validate
  */
 export function validateToolName(toolName: string): boolean {
-  // Only allow: letters, numbers, underscore, hyphen
   const toolNameRegex = /^[a-zA-Z0-9_-]+$/;
   return toolNameRegex.test(toolName) && toolName.length > 0 && toolName.length < 100;
 }
 
 const CONTAINER_HOSTNAME_RE = /^mcp-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
-// SSOT mirror — synchronized with crates/speedwave-runtime/src/consts.rs::HOST_GATEWAY_ALIAS
-// via Rust regression test `host_gateway_alias_matches_mcp_shared_ts`.
 export const HOST_GATEWAY_ALIAS = 'host.docker.internal';
 
 /**
@@ -210,7 +196,6 @@ export function validateWorkerUrl(url: string): boolean {
   const port = Number(parsed.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
 
-  // URL constructor lowercases hostname; check raw string to reject uppercase input.
   const hostnameStart = url.indexOf('://') + 3;
   const hostnameEnd = url.indexOf(':', hostnameStart);
   const rawHostname = url.substring(hostnameStart, hostnameEnd);
@@ -224,7 +209,6 @@ export function validateWorkerUrl(url: string): boolean {
   if (parsed.pathname !== '/') return false;
   if (parsed.search !== '') return false;
   if (parsed.hash !== '') return false;
-  // Credentials are already rejected by the raw-hostname check above.
   /* c8 ignore next */
   if (parsed.username !== '' || parsed.password !== '') return false;
 

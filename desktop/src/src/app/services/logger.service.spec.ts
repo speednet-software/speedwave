@@ -25,23 +25,20 @@ describe('LoggerService', () => {
   it('forwards the message to the Rust log pipeline as an error-level entry', async () => {
     service.error('boom');
 
-    // Yield so the wrapper's `.catch(() => {})` chain can settle.
     await Promise.resolve();
     await Promise.resolve();
 
     expect(invokeSpy).toHaveBeenCalledTimes(1);
     const [cmd, args] = invokeSpy.mock.calls[0];
     expect(cmd).toBe('plugin:log|log');
-    expect(args).toMatchObject({ message: 'boom', level: 5 }); // 5 = LogLevel.Error
+    expect(args).toMatchObject({ message: 'boom', level: 5 });
   });
 
   it('swallows logging-pipeline failures so the UI never crashes', async () => {
     invokeSpy.mockRejectedValue(new Error('rust pipeline down'));
 
-    // Should NOT throw, even though the underlying invoke rejects.
     expect(() => service.error('unreachable')).not.toThrow();
 
-    // Allow the swallowed rejection to settle on the microtask queue.
     await Promise.resolve();
     await Promise.resolve();
 
@@ -57,9 +54,6 @@ describe('LoggerService', () => {
     expect(invokeSpy).toHaveBeenCalledTimes(1);
     expect(invokeSpy.mock.calls[0][1]).toMatchObject({ message: '' });
   });
-
-  // -- info / warn / debug levels --
-  // LogLevel: Trace=1, Debug=2, Info=3, Warn=4, Error=5.
 
   it('forwards info-level messages with level=3', async () => {
     service.info('hello');
@@ -99,7 +93,6 @@ describe('LoggerService', () => {
     expect(() => service.debug('x')).not.toThrow();
     await Promise.resolve();
     await Promise.resolve();
-    // 3 calls, all failed at the invoke layer, none propagated to the caller.
     expect(invokeSpy).toHaveBeenCalledTimes(3);
   });
 });

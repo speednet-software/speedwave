@@ -52,7 +52,6 @@ describe('github auth enforcement', () => {
             path: options.path,
             method: options.method || 'GET',
             headers: options.headers || {},
-            // Fresh connection per request: no keep-alive socket outlives its test's server.
             agent: false,
           },
           (res) => {
@@ -82,8 +81,6 @@ describe('github auth enforcement', () => {
 
     async function listen(server: ReturnType<typeof createMCPServer>): Promise<void> {
       await new Promise<void>((resolve, reject) => {
-        // Bind the address the client dials: host-less listen(0) is dual-stack [::], and macOS may
-        // hand it a port a foreign IPv4 127.0.0.1 listener holds, which then gets the connection.
         httpServer = server.app.listen(0, LOOPBACK, () => {
           const addr = httpServer!.address();
           if (!addr || typeof addr !== 'object' || addr.address !== LOOPBACK) {

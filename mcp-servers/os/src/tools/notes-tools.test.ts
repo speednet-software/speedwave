@@ -14,7 +14,6 @@ import {
   createNoteTools,
 } from './notes-tools.js';
 
-// Mock the platform runner
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));

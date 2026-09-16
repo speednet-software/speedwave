@@ -1,4 +1,3 @@
-
 const DEFAULT_RESTART_TIMEOUT_MS = 180_000;
 
 async function triggerRestart(): Promise<void> {
@@ -8,15 +7,17 @@ async function triggerRestart(): Promise<void> {
         window as unknown as {
           __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<unknown> };
         }
-      ).__TAURI_INTERNALS__.invoke('e2e_restart_app')
+      ).__TAURI_INTERNALS__
+        .invoke('e2e_restart_app')
         .then(() => done(true))
         .catch(() => done(false));
     });
-  } catch {
-  }
+  } catch {}
 }
 
-export async function restartAppAndReconnect(timeoutMs = DEFAULT_RESTART_TIMEOUT_MS): Promise<void> {
+export async function restartAppAndReconnect(
+  timeoutMs = DEFAULT_RESTART_TIMEOUT_MS
+): Promise<void> {
   const restartRequestedAt = Date.now();
   await triggerRestart();
   await new Promise((resolve) => setTimeout(resolve, 3_000));

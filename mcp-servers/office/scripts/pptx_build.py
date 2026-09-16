@@ -38,7 +38,6 @@ def _add_chart(slide, chart_spec: dict) -> None:
     x, y, cx, cy = Inches(1), Inches(1.5), Inches(8), Inches(5)
 
     if kind in ("xy", "bubble"):
-        # For xy/bubble we treat `categories` as the X values.
         cats = [float(c) for c in chart_spec["categories"]]
         cd = XyChartData() if kind == "xy" else BubbleChartData()
         for ser in chart_spec["series"]:
@@ -71,7 +70,6 @@ def _add_slide(prs, slide_spec: dict) -> None:
     if slide_spec.get("title") and slide.shapes.title is not None:
         slide.shapes.title.text = str(slide_spec["title"])
     if has_body:
-        # Layout 1 has a body placeholder at index 1.
         body = slide.placeholders[1].text_frame
         bullets = list(slide_spec["bullets"])
         body.text = str(bullets[0]) if bullets else ""
@@ -118,7 +116,6 @@ def _edit(src: str, output: str, ops: list) -> None:
             slides = prs.slides
             if idx < 0 or idx >= len(slides):
                 fail(f"delete_slide index out of range: {idx}")
-            # python-pptx has no public slide-delete; manipulate the XML id list.
             xml_slides = prs.slides._sldIdLst
             slide_ids = list(xml_slides)
             xml_slides.remove(slide_ids[idx])

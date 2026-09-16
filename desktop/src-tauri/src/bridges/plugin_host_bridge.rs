@@ -17,8 +17,6 @@ use super::host_bridge::{
 
 const DEFAULT_PENDING_SLOT_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
-// SSOT lives in `speedwave_runtime::plugin`; re-exported so existing call
-// sites keep resolving `plugin_host_bridge::BRIDGE_TOKEN_FILENAME`.
 pub use speedwave_runtime::plugin::BRIDGE_TOKEN_FILENAME;
 
 /// Lock-file payload written under `~/.speedwave/<slug>-bridge/<port>.lock`.

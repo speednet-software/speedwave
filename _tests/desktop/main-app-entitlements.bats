@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Guard the MAIN app's signing entitlements: bundle.macOS.entitlements must point
-# at an existing plist carrying the mic entitlement (in-process consent, ADR-056).
 
 CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.macos.conf.json"
 

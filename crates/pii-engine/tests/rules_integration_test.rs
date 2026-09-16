@@ -4,11 +4,9 @@
 fn rules_yaml_is_valid_and_loadable() {
     let yaml_content = include_str!("../../../mcp-servers/policies/rules.yaml");
 
-    // Basic validation: YAML must parse and have the expected structure
     assert!(yaml_content.contains("version: 3"), "version must be 3");
     assert!(yaml_content.contains("rules:"), "must have rules section");
 
-    // Count expected rules
     let email_count = yaml_content.matches("id: EMAIL").count();
     let phone_count = yaml_content.matches("id: PHONE_PL").count();
     let pesel_count = yaml_content.matches("id: PESEL").count();
@@ -25,7 +23,6 @@ fn rules_yaml_is_valid_and_loadable() {
     assert_eq!(card_count, 1, "CARD rule must appear exactly once");
     assert_eq!(api_key_count, 1, "API_KEY rule must appear exactly once");
 
-    // Verify validators are referenced correctly
     assert!(
         yaml_content.contains("validator: pesel"),
         "PESEL must have validator"

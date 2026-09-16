@@ -16,11 +16,9 @@ type DiffSegment = { type: 'line'; line: DiffLine } | { type: 'omitted'; count: 
  * @param newStr - Replacement text content (lines separated by "\n" or "\r\n").
  */
 export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
-  // Normalize CRLF -> LF so Windows files don't diff line-by-line vs Unix.
   const oldNormalized = oldStr.replace(/\r\n/g, '\n');
   const newNormalized = newStr.replace(/\r\n/g, '\n');
   return diffLines(oldNormalized, newNormalized).flatMap((part) => {
-    // Split the run into lines, dropping the empty tail from a trailing "\n".
     const lines = part.value.split('\n');
     if (part.value.endsWith('\n')) {
       lines.pop();
@@ -99,9 +97,7 @@ export class DiffViewComponent {
    * Resets the expand-toggle whenever the diff input strings change.
    */
   constructor() {
-    // Reset expand-toggle on input change so a recycled instance has no stale state.
     effect(() => {
-      // Touch both inputs so the effect re-runs on either change.
       this.oldString();
       this.newString();
       this.expanded.set(false);
@@ -124,8 +120,6 @@ export class DiffViewComponent {
     if (!this.isTruncated()) {
       return lines.map((line) => ({ type: 'line', line }));
     }
-    // For odd truncateLines, give the extra line to head so the visible total
-    // matches the advertised count (e.g. 21 → head 11 + tail 10 = 21).
     const truncate = this.truncateLines();
     const headCount = Math.ceil(truncate / 2);
     const tailCount = Math.floor(truncate / 2);

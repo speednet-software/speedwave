@@ -18,7 +18,6 @@ import { createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
 import path from 'path';
 
-// Mock dependencies
 vi.mock('fs/promises');
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
@@ -39,7 +38,6 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
       expiresIn: 3600,
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     }),
-    // Mocked to assert SharePoint delegates; default impl wired in beforeEach.
     authedRequest: vi.fn(),
     ts: () => '[00:00:00]',
   };
@@ -53,7 +51,6 @@ const mockLoadToken = vi.mocked(loadToken);
 const mockOauthRefresh = vi.mocked(refreshAccessToken);
 const mockAuthedRequest = vi.mocked(authedRequest);
 
-// Test configuration
 const mockConfig: SharePointConfig = {
   siteId: 'test-site-id',
   accessToken: 'test-access-token',
@@ -77,26 +74,20 @@ describe('SharePointClient', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    // Reset all mocks
     vi.clearAllMocks();
 
-    // Mock global fetch
     fetchMock = vi.fn();
     global.fetch = fetchMock as typeof fetch;
 
-    // ADR-060: refreshAccessToken re-reads access_token from /tokens.
     mockLoadToken.mockResolvedValue('refreshed-access-token');
     mockOauthRefresh.mockResolvedValue({
       expiresIn: 3600,
       grantedScopes: ['https://graph.microsoft.com/Sites.Manage.All'],
     });
-    // Default: delegate to `send` once; refresh tests override per case.
     mockAuthedRequest.mockImplementation((opts) => opts.send(opts.state.accessToken));
 
-    // Create fresh client instance
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
 
-    // Mock console methods to reduce noise
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -106,8 +97,6 @@ describe('SharePointClient', () => {
     vi.restoreAllMocks();
   });
 
-  // ── Constructor & Configuration ────────────────────────────────────────────────────────────────
-
   describe('constructor', () => {
     it('should initialize with valid config', () => {
       expect(client).toBeInstanceOf(SharePointClient);
@@ -115,7 +104,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  // Tests OAuth diagnostics path used by Desktop integrations card.
   describe('token save error getters', () => {
     it('getLastTokenSaveError starts null and survives clear', () => {
       expect(client.getLastTokenSaveError()).toBeNull();
@@ -138,7 +126,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  // 401 → host-side oauth worker refresh → retry (ADR-060).
   describe('auth delegation (host-side oauth worker, ADR-060)', () => {
     it('delegates the Graph call to authedRequest with the sharepoint service + proactive window', async () => {
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
@@ -163,7 +150,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  // Public Graph wrapper used by tools/page-tools.ts + tools/list-tools.ts.
   describe('graphRequest', () => {
     it('expands /sites/{site-id} path and adds v1.0 prefix', async () => {
       fetchMock.mockResolvedValueOnce({
@@ -261,7 +247,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  // Static helper used by every tool's wrapErr().
   describe('formatError', () => {
     it('rewrites 401 / Unauthorized with setup guidance', () => {
       expect(SharePointClient.formatError(new Error('401 Unauthorized'))).toMatch(
@@ -311,8 +296,6 @@ describe('SharePointClient', () => {
     });
 
     it('classifies a GraphApiError by its status, not by numeric substrings in the URL-bearing message', () => {
-      // A list-item id of "429"/"423" embedded in the Graph URL must not be mistaken for the
-      // HTTP status when the real status is a genuine, unrelated failure.
       const notFoundOnItem429 = new GraphApiError(
         'Graph API GET https://graph.microsoft.com/v1.0/sites/S1/lists/L1/items/429 failed: 404 Not Found',
         404
@@ -338,7 +321,6 @@ describe('SharePointClient', () => {
 
   describe('callGraphAPI', () => {
     it('retries the resolve and unwedges when a failed tracker retry succeeds', async () => {
-      // Simulate a prior warmup failure on a path-form siteId.
       client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Retry:';
       client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
       fetchMock
@@ -353,21 +335,16 @@ describe('SharePointClient', () => {
       await expect(client.listFiles()).resolves.not.toThrow();
 
       expect(client.statusTracker.getStatus()).toBe('ok');
-      // The retried list call must target the refreshed composite siteId, not the
-      // stale path-form id embedded in the URL the caller built before the resolve.
       const listUrl = fetchMock.mock.calls[1][0] as string;
       expect(listUrl).toContain(
         'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
       );
       expect(listUrl).not.toContain(':/sites/Retry:');
-      // A later call must go straight through without re-resolving.
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
       await expect(client.listFiles()).resolves.not.toThrow();
     });
 
     it('rewrites only the /sites/{siteId} path segment, not a coincidental substring match elsewhere in the URL', async () => {
-      // A stale siteId whose bare-word form ("Docs") could also legitimately appear as an
-      // unrelated URL segment (e.g. a folder path) — the fix must not touch that occurrence.
       const staleSiteId = 'Docs:/sites/Docs:';
       client.getConfig().siteId = staleSiteId;
       client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
@@ -383,12 +360,9 @@ describe('SharePointClient', () => {
       await client.graphRequest('GET', `/sites/{site-id}/lists/L1/items?$filter=Docs:/sites/Docs:`);
 
       const listUrl = fetchMock.mock.calls[1][0] as string;
-      // The /sites/{siteId} path segment must carry the freshly resolved composite id.
       expect(listUrl).toContain(
         '/sites/contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222/'
       );
-      // The unrelated occurrence of the stale string later in the URL (the $filter value) must
-      // be left untouched — a naive whole-URL substring replace would have rewritten it too.
       expect(listUrl).toContain('$filter=Docs:/sites/Docs:');
     });
 
@@ -415,7 +389,6 @@ describe('SharePointClient', () => {
         );
         const callsAfterFirst = fetchMock.mock.calls.length;
 
-        // A second call inside the cooldown fails fast without re-running the resolve.
         await expect(client.listFiles()).rejects.toThrow(
           /SharePoint site connection is not established/
         );
@@ -436,7 +409,6 @@ describe('SharePointClient', () => {
           /SharePoint site connection is not established/
         );
 
-        // Past the cooldown the worker attempts the resolve again rather than staying wedged.
         await vi.advanceTimersByTimeAsync(30_000);
         fetchMock.mockReset();
         fetchMock
@@ -479,8 +451,6 @@ describe('SharePointClient', () => {
         await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
         const resolveCallsAfterFirst = mockAuthedRequest.mock.calls.length;
 
-        // A second call inside the cooldown must fail fast without a fresh network resolve,
-        // exactly like every other wedged-resolve failure mode.
         await expect(client.listFiles()).rejects.toThrow(
           /SharePoint site connection is not established/
         );
@@ -525,7 +495,6 @@ describe('SharePointClient', () => {
     });
 
     it('flows a 401-retry result back through authedRequest (the helper owns the retry)', async () => {
-      // Helper's 401 → retry: send called twice (401, then 200).
       fetchMock
         .mockResolvedValueOnce({ status: 401, ok: false })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
@@ -546,7 +515,6 @@ describe('SharePointClient', () => {
     });
 
     it('state is a live view — a helper token write propagates to later requests', async () => {
-      // Shim setter must mutate config.accessToken, not a copy.
       fetchMock.mockResolvedValue({ ok: true, json: async () => ({ value: [] }) });
       mockAuthedRequest.mockImplementationOnce(async (opts) => {
         opts.state.accessToken = 'rotated-token';
@@ -554,7 +522,7 @@ describe('SharePointClient', () => {
       });
 
       await client.listFiles();
-      await client.listFiles(); // default mock: sends state.accessToken
+      await client.listFiles();
 
       expect(fetchMock).toHaveBeenLastCalledWith(
         expect.any(String),
@@ -595,14 +563,12 @@ describe('SharePointClient', () => {
       );
 
       await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
-      // SharePoint never reached its own fetch — the helper rejected first.
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('should merge custom headers with authorization', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test content'));
 
-      // File upload succeeds
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -658,7 +624,7 @@ describe('SharePointClient', () => {
     it('rejects responses missing id or sharepointIds (defensive parse)', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ name: 'hero.jpg' /* no id, no sharepointIds */ }),
+        json: async () => ({ name: 'hero.jpg' }),
       });
       await expect(
         client.getDriveItemForSharePointPath('Shared Documents/hero.jpg')
@@ -682,8 +648,6 @@ describe('SharePointClient', () => {
       expect(result).toEqual(payload);
     });
   });
-
-  // ── Path Handling ──────────────────────────────────────────────────────────────────────────────
 
   describe('encodeGraphPath', () => {
     it('should encode path segments for Graph API', async () => {
@@ -746,7 +710,6 @@ describe('SharePointClient', () => {
       );
     });
 
-    // URL-encoded traversal tests (security fix #1)
     it('should reject URL-encoded path traversal (%2e%2e)', async () => {
       await expect(client.listFiles({ path: '%2e%2e/etc/passwd' })).rejects.toThrow(
         'Invalid path (security check failed)'
@@ -778,7 +741,6 @@ describe('SharePointClient', () => {
     });
 
     it('should reject invalid URL encoding', async () => {
-      // Invalid percent encoding should be rejected
       await expect(client.listFiles({ path: '%GG/file.txt' })).rejects.toThrow(
         'Invalid path (security check failed)'
       );
@@ -805,8 +767,6 @@ describe('SharePointClient', () => {
 
   describe('API timeout (security fix #2)', () => {
     it('should timeout on slow Graph API response', async () => {
-      // Mock slow response that takes longer than API_TIMEOUT_MS (30000ms)
-      // We'll simulate abort by making fetch reject with AbortError
       fetchMock.mockImplementationOnce(() => {
         return new Promise((_, reject) => {
           const error = new Error('The operation was aborted');
@@ -821,9 +781,7 @@ describe('SharePointClient', () => {
     it('should trigger the API timeout callback when using fake timers', async () => {
       vi.useFakeTimers();
 
-      // Make fetch hang forever so the timer fires and aborts the signal
       fetchMock.mockImplementationOnce((_url: string, opts: RequestInit) => {
-        // Return a promise that only rejects when the signal is aborted
         return new Promise<Response>((_, reject) => {
           opts.signal?.addEventListener('abort', () => {
             const err = new Error('The operation was aborted');
@@ -835,15 +793,12 @@ describe('SharePointClient', () => {
 
       const listPromise = client.listFiles();
 
-      // Advance past the API timeout (TIMEOUTS.API_CALL_MS)
       vi.runAllTimers();
 
       await expect(listPromise).rejects.toThrow(/timeout/i);
       vi.useRealTimers();
     });
   });
-
-  // ── Tool Implementations ───────────────────────────────────────────────────────────────────────
 
   describe('listFiles', () => {
     it('should list files in base directory', async () => {
@@ -900,7 +855,6 @@ describe('SharePointClient', () => {
       const result = await client.listFiles({ path: 'Reports' });
 
       expect(result.files[0].path).toBe('Reports/report.pdf');
-      // listFiles({ path: 'Reports' }) hits /drive/root:/Reports:/children.
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining(`drive/root:/Reports:/children`),
         expect.any(Object)
@@ -983,7 +937,6 @@ describe('SharePointClient', () => {
     });
 
     it('should follow @odata.nextLink for paginated responses', async () => {
-      // First page returns 2 items and a nextLink
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -995,7 +948,6 @@ describe('SharePointClient', () => {
         }),
       });
 
-      // Second page returns 1 more item with no nextLink
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -1011,7 +963,6 @@ describe('SharePointClient', () => {
       expect(result.files[2].name).toBe('doc3.txt');
       expect(result.exists).toBe(true);
 
-      // Second fetch should use the nextLink URL
       expect(fetchMock).toHaveBeenNthCalledWith(
         2,
         'https://graph.microsoft.com/v1.0/nextpage?$skiptoken=abc',
@@ -1172,14 +1123,12 @@ describe('SharePointClient', () => {
     });
 
     it('should upload file successfully', async () => {
-      // Check parent folder 'remote' exists
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
         json: async () => ({ id: 'folder-remote' }),
       });
 
-      // Upload file
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1212,7 +1161,6 @@ describe('SharePointClient', () => {
     });
 
     it('should include expectedEtag in If-Match header', async () => {
-      // Upload file with etag
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1234,7 +1182,6 @@ describe('SharePointClient', () => {
     });
 
     it('should include If-None-Match header for createOnly', async () => {
-      // Upload file with createOnly
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1256,7 +1203,6 @@ describe('SharePointClient', () => {
     });
 
     it('should skip conditional headers in overwrite mode', async () => {
-      // Upload file
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1268,23 +1214,19 @@ describe('SharePointClient', () => {
         expectedEtag: '"ignored"',
       });
 
-      // The upload call (last one) should NOT have If-Match header
       const uploadCall = fetchMock.mock.calls[fetchMock.mock.calls.length - 1];
       expect(uploadCall[1]?.headers).not.toHaveProperty('If-Match');
     });
 
     it('should ensure parent folders exist', async () => {
-      // Check 'newfolder' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create 'newfolder'
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 201,
         json: async () => ({ id: 'folder-1' }),
       });
 
-      // File upload
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1293,13 +1235,11 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('newfolder/file.txt', '/workspace/file.txt');
 
-      // Should check parent folder exists
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining('/newfolder'),
         expect.not.objectContaining({ method: 'POST' })
       );
 
-      // Should create parent folder
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining('/children'),
         expect.objectContaining({ method: 'POST' })
@@ -1307,7 +1247,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw error on upload failure', async () => {
-      // Upload fails
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 409,
@@ -1320,7 +1259,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw generic error when error message missing', async () => {
-      // Upload fails without error message
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -1347,7 +1285,6 @@ describe('SharePointClient', () => {
     });
 
     it('throws when metadata response is not ok', async () => {
-      // Metadata fetch fails
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 404,
@@ -1377,7 +1314,6 @@ describe('SharePointClient', () => {
         json: async () => ({
           id: 'file-1',
           name: 'file.txt',
-          // No @microsoft.graph.downloadUrl
         }),
       });
 
@@ -1387,7 +1323,6 @@ describe('SharePointClient', () => {
     });
 
     it('throws when download fetch fails', async () => {
-      // Metadata succeeds with download URL
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -1397,10 +1332,8 @@ describe('SharePointClient', () => {
         }),
       });
 
-      // mkdir succeeds
       mockFs.mkdir.mockResolvedValue(undefined);
 
-      // Actual file download fails
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 403,
@@ -1413,7 +1346,6 @@ describe('SharePointClient', () => {
     });
 
     it('throws when download response has no body', async () => {
-      // Metadata succeeds with download URL
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -1423,10 +1355,8 @@ describe('SharePointClient', () => {
         }),
       });
 
-      // mkdir succeeds
       mockFs.mkdir.mockResolvedValue(undefined);
 
-      // Actual file download has ok but no body
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1439,7 +1369,6 @@ describe('SharePointClient', () => {
     });
 
     it('streams file to disk successfully (happy path)', async () => {
-      // Metadata succeeds with download URL
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -1451,7 +1380,6 @@ describe('SharePointClient', () => {
 
       mockFs.mkdir.mockResolvedValue(undefined);
 
-      // Create a minimal ReadableStream body
       const encoder = new TextEncoder();
       const bodyStream = new ReadableStream({
         start(controller) {
@@ -1466,7 +1394,6 @@ describe('SharePointClient', () => {
         body: bodyStream,
       });
 
-      // Mock createWriteStream and pipeline
       const fakeWriteStream = { path: '/workspace/report.pdf' };
       mockCreateWriteStream.mockReturnValue(
         fakeWriteStream as unknown as ReturnType<typeof createWriteStream>
@@ -1487,7 +1414,6 @@ describe('SharePointClient', () => {
     it('should create nested parent folders', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // First level folder 'level1' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1495,7 +1421,6 @@ describe('SharePointClient', () => {
         json: async () => ({ id: 'folder-1' }),
       });
 
-      // Second level folder 'level2' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1503,7 +1428,6 @@ describe('SharePointClient', () => {
         json: async () => ({ id: 'folder-2' }),
       });
 
-      // File upload
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1512,7 +1436,6 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('level1/level2/file.txt', '/workspace/file.txt');
 
-      // Should create both new parent folders (level1 and level2)
       const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
       expect(postCalls.length).toBe(2);
     });
@@ -1520,14 +1443,12 @@ describe('SharePointClient', () => {
     it('should skip folder creation if folder exists', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // Parent folder 'existing' exists
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
         json: async () => ({ id: 'existing-folder' }),
       });
 
-      // File upload
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1536,7 +1457,6 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('existing/file.txt', '/workspace/file.txt');
 
-      // Should not create any folder (all exist)
       const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
       expect(postCalls.length).toBe(0);
     });
@@ -1544,7 +1464,6 @@ describe('SharePointClient', () => {
     it('should handle file in root directory', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // File upload
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1553,24 +1472,20 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('file.txt', '/workspace/file.txt');
 
-      // File in root has no parent segments; only the upload PUT happens.
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('should create folder at root level', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // Check 'rootfolder' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create folder 'rootfolder'
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 201,
         json: async () => ({ id: 'root-folder' }),
       });
 
-      // File upload
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1579,7 +1494,6 @@ describe('SharePointClient', () => {
 
       await client.uploadFile('rootfolder/file.txt', '/workspace/file.txt');
 
-      // Should create folder
       const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
       expect(postCalls.length).toBe(1);
       expect(postCalls[0][1]?.body).toContain('rootfolder');
@@ -1592,17 +1506,13 @@ describe('SharePointClient', () => {
     });
 
     it('should return early from ensureParentFolders when path has no parent (single segment)', async () => {
-      // Single-segment path has no parent — returns without API calls.
       await client.ensureParentFolders('file.txt');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('should create folder at root drive level when first segment does not exist', async () => {
-      // First-segment 404 hits buildFolderChildrenUrl("") → root/children URL.
-      // 'Documents' doesn't exist (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create 'Documents' at root level (parentDir is "")
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 201,
@@ -1613,17 +1523,14 @@ describe('SharePointClient', () => {
 
       const createCall = fetchMock.mock.calls.find((call) => call[1]?.method === 'POST');
       expect(createCall).toBeDefined();
-      // The POST URL should be the root/children URL (no path segment in URL)
       expect(createCall![0]).toContain('/drive/root/children');
     });
 
     it('should handle folder creation failure in ensureParentFolders with text body', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // 'newdir' doesn't exist (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create 'newdir' fails with non-409 status and returns text body
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 507,
@@ -1639,10 +1546,8 @@ describe('SharePointClient', () => {
     it('should handle folder creation failure in ensureParentFolders when text() also throws', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // 'baddir' doesn't exist (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create 'baddir' fails with non-409 and text() also throws
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 507,
@@ -1664,35 +1569,28 @@ describe('SharePointClient', () => {
     it('should handle 409 Conflict in ensureParentFolders (race condition - folder exists)', async () => {
       mockFs.readFile.mockResolvedValue(Buffer.from('test'));
 
-      // 'racedir' doesn't exist in first check (404)
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create 'racedir' returns 409 Conflict (already created by another process)
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 409,
         json: async () => ({ error: { message: 'nameAlreadyExists' } }),
       });
 
-      // File upload succeeds
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
         json: async () => ({ eTag: '"xyz"', size: 4 }),
       });
 
-      // Should not throw - 409 is treated as success (idempotent)
       await expect(
         client.uploadFile('racedir/file.txt', '/workspace/file.txt')
       ).resolves.toBeDefined();
     });
   });
 
-  // ── Empty Folder Support ───────────────────────────────────────────────────────────────────────
-
   describe('createRemoteFolder', () => {
     it('should create a new folder successfully', async () => {
-      // Create folder succeeds
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 201,
@@ -1701,7 +1599,6 @@ describe('SharePointClient', () => {
 
       await client.createRemoteFolder('newfolder');
 
-      // Verify POST call to create folder
       const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
       expect(postCalls.length).toBe(1);
       expect(postCalls[0][1]?.body).toContain('newfolder');
@@ -1709,17 +1606,14 @@ describe('SharePointClient', () => {
     });
 
     it('should create nested folder with parent folders', async () => {
-      // Check parent 'level1' doesn't exist
       fetchMock.mockResolvedValueOnce({ status: 404, ok: false });
 
-      // Create parent 'level1'
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 201,
         json: async () => ({ id: 'level1-folder' }),
       });
 
-      // Create 'level2' folder
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 201,
@@ -1728,25 +1622,21 @@ describe('SharePointClient', () => {
 
       await client.createRemoteFolder('level1/level2');
 
-      // Should create both parent and folder
       const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
       expect(postCalls.length).toBe(2);
     });
 
     it('should handle 409 Conflict (folder already exists) as idempotent', async () => {
-      // Create folder returns 409 Conflict (already exists)
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 409,
         json: async () => ({ error: { message: 'Item already exists' } }),
       });
 
-      // Should not throw error - idempotent operation
       await expect(client.createRemoteFolder('existing')).resolves.toBeUndefined();
     });
 
     it('should throw error on 403 Forbidden (permission denied)', async () => {
-      // Create folder returns 403 Forbidden
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 403,
@@ -1757,7 +1647,6 @@ describe('SharePointClient', () => {
     });
 
     it('should throw error on 500 Internal Server Error', async () => {
-      // Create folder returns 500 Internal Server Error
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -1784,14 +1673,12 @@ describe('SharePointClient', () => {
     });
 
     it('should handle invalid folder path (empty string)', async () => {
-      // Empty string is caught by path validator before we check folder name
       await expect(client.createRemoteFolder('')).rejects.toThrow(
         'Invalid path (security check failed)'
       );
     });
 
     it('should throw when folder path has trailing slash (empty folder name)', async () => {
-      // "folder/" passes validation but splitPath gives empty folderName.
       fetchMock.mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -1804,7 +1691,6 @@ describe('SharePointClient', () => {
     });
 
     it('should fall back to text body when JSON parse of error response fails', async () => {
-      // Create folder fails; JSON parse throws but text parse succeeds
       const errorResponse = {
         ok: false,
         status: 503,
@@ -1822,7 +1708,6 @@ describe('SharePointClient', () => {
     });
 
     it('should use fallback status message when both JSON and text parse fail', async () => {
-      // Both JSON and text parsing fail on the error response
       const errorResponse = {
         ok: false,
         status: 503,
@@ -1846,7 +1731,6 @@ describe('SharePointClient', () => {
     });
 
     it('should fall back to text body when JSON parse fails (non-Error textParseError)', async () => {
-      // JSON parse fails; text parse throws a non-Error value
       const errorResponse = {
         ok: false,
         status: 503,
@@ -1870,7 +1754,6 @@ describe('SharePointClient', () => {
     });
 
     it('emits a debug log entry with the parseError context when DEBUG is set', async () => {
-      // debugLog has a two-arg overload used when JSON parsing fails.
       const prev = process.env.DEBUG;
       process.env.DEBUG = '1';
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1897,8 +1780,6 @@ describe('SharePointClient', () => {
     });
   });
 
-  // ── Factory & Initialization ───────────────────────────────────────────────────────────────────
-
   describe('initializeSharePointClient', () => {
     const originalEnv = process.env.TOKENS_DIR;
 
@@ -1915,7 +1796,6 @@ describe('SharePointClient', () => {
     });
 
     it('should initialize client with valid tokens', async () => {
-      // vi.clearAllMocks does not drain the Once queue, only call history.
       mockLoadToken.mockReset();
       mockLoadToken.mockImplementation(async (path: string) => {
         if (path.includes('access_token')) return 'test-access-token';
@@ -1979,7 +1859,6 @@ describe('SharePointClient', () => {
       expect(console.warn).toHaveBeenCalled();
     });
 
-    // ADR-060: refresh_token/client_id/tenant_id live in host-only oauth.json.
     it('should return null when any worker-mounted required token is missing', async () => {
       const required = ['access_token', 'site_id'];
 
@@ -1996,7 +1875,6 @@ describe('SharePointClient', () => {
     });
 
     it('should NOT require legacy fields removed by ADR-060', async () => {
-      // refresh_token / client_id / tenant_id being absent must not block startup
       mockLoadToken.mockImplementation(async (path: string) => {
         if (
           path.includes('refresh_token') ||
@@ -2080,7 +1958,6 @@ describe('SharePointClient', () => {
 
       const result = await initializeSharePointClient();
       expect(result).not.toBeNull();
-      // Background warmup eventually mutates siteId to composite form.
       await vi.waitFor(() =>
         expect(result!.getConfig().siteId).toBe(
           'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
@@ -2109,7 +1986,6 @@ describe('SharePointClient', () => {
 
       const result = await initializeSharePointClient();
       expect(result).not.toBeNull();
-      // Background resolve eventually fails — tracker captures the reason.
       await vi.waitFor(() => expect(result!.statusTracker.getStatus()).toBe('failed'));
       expect(result!.statusTracker.getError()).toContain('404');
     });
@@ -2216,7 +2092,6 @@ describe('SharePointClient', () => {
     });
 
     it('rejects non-ASCII (IDN homograph)', () => {
-      // Cyrillic 'е' (U+0435) in place of ASCII 'e' in "speednet"
       const err = validateGraphSiteId('speednеtpl.sharepoint.com:/sites/X:');
       expect(err).toContain('ASCII');
     });
@@ -2303,7 +2178,6 @@ describe('SharePointClient', () => {
     });
 
     it('delegates the cold-start lookup to authedRequest and returns its refreshed result', async () => {
-      // Cold-start: /tokens/access_token stale; helper owns 401 → refresh → retry.
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })
@@ -2335,11 +2209,9 @@ describe('SharePointClient', () => {
     });
 
     it('logs and continues when authedRequest rejects during init (refresh failure)', async () => {
-      // Helper rejection during cold-start: log warning and fall through.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const fetchMock = vi
         .fn()
-        // Fall-through bare lookup after the helper rejected: stale 401.
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' });
       global.fetch = fetchMock as unknown as typeof fetch;
       mockAuthedRequest.mockRejectedValueOnce('non-error string failure');
@@ -2348,9 +2220,7 @@ describe('SharePointClient', () => {
         refreshOn401: true,
       });
 
-      // Fell through to the standard 401 → not_found branch.
       expect(result).toMatchObject({ ok: false, reason: 'not_found' });
-      // The non-Error value made it into the warning message verbatim.
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('non-error string failure'));
       warnSpy.mockRestore();
     });
@@ -2368,7 +2238,6 @@ describe('SharePointClient', () => {
     });
 
     it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {
-      // Cold-start Graph hang would block initializeSharePointClient indefinitely.
       const fetchMock = vi.fn().mockResolvedValueOnce({
         ok: true,
         json: async () => ({ id: 'contoso.sharepoint.com,site-guid,web-guid' }),
@@ -2397,7 +2266,6 @@ describe('SharePointClient', () => {
     });
 
     it('guards both the initial and the post-401-refresh retry fetch with an AbortSignal', async () => {
-      // Cold-start send wires per-request AbortController; pre-fix only initial had signal.
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'Unauthorized' })

@@ -87,7 +87,6 @@ describe('PluginsComponent', () => {
   let projectState: ProjectStateService;
 
   beforeEach(async () => {
-    // Reset openMock to clear stale mock values from previous specs (isolate: false).
     openMock.mockReset();
 
     mockTauri = new MockTauriService();
@@ -100,7 +99,7 @@ describe('PluginsComponent', () => {
 
     projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject.set('test-project');
-    projectState.status.set('ready'); // toggles/saves happen on a ready project
+    projectState.status.set('ready');
 
     fixture = TestBed.createComponent(PluginsComponent);
     component = fixture.componentInstance;
@@ -182,7 +181,6 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       const event = { target: { checked: true } } as unknown as Event;
-      // plugins[1] is my-commands with service_id: null
       await component.handleTogglePlugin({ plugin: component.plugins[1], event });
       expect(invokeSpy).toHaveBeenCalledWith('set_plugin_enabled', {
         project: 'test-project',
@@ -223,7 +221,6 @@ describe('PluginsComponent', () => {
 
     it('auto-enables plugin after save when configured and not enabled', async () => {
       await component.ngOnInit();
-      // Mock: after save, get_plugins returns plugin as configured but not enabled
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_projects')
           return {
@@ -449,7 +446,6 @@ describe('PluginsComponent', () => {
         return undefined;
       };
       await component.installPlugin();
-      // Resource-only plugins never get a `building` step.
       const steps = component.installSteps();
       expect(steps.map((s) => s.id)).toEqual(['verifying', 'extracting']);
     });
@@ -471,7 +467,6 @@ describe('PluginsComponent', () => {
       };
 
       const promise = component.installPlugin();
-      // Let peek + listener registration run.
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
@@ -494,7 +489,6 @@ describe('PluginsComponent', () => {
     it('marks the active step as error and sets installError on phase=failed', async () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/bad.zip');
-      // Hold install_plugin pending so phase events arrive while the listener is registered.
       const pendingInstall = createDeferred<string>();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
@@ -554,7 +548,6 @@ describe('PluginsComponent', () => {
       };
 
       const promise = component.installPlugin();
-      // Flush microtasks for open() + peek_plugin_manifest + listen()
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
       fixture.detectChanges();
@@ -618,14 +611,12 @@ describe('PluginsComponent', () => {
       await projectState.init();
       await component.ngOnInit();
 
-      // Verify the unsub function exists before destroy
       expect(
         (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
       ).not.toBeNull();
 
       component.ngOnDestroy();
 
-      // Verify unsub was called and nulled
       expect(
         (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
       ).toBeNull();
@@ -674,7 +665,6 @@ describe('PluginsComponent', () => {
       expect(title).not.toBeNull();
       expect(title.textContent).toContain('Installed plugins');
       expect(title.classList.contains('view-title')).toBe(true);
-      // Project pill is the shared <app-project-pill> component.
       const pill = fixture.nativeElement.querySelector('app-project-pill');
       expect(pill).not.toBeNull();
     });
@@ -731,7 +721,6 @@ describe('PluginsComponent', () => {
       const target = component.plugins[0];
       const before = target.enabled;
       await component.onRowToggle(target, new MouseEvent('click'));
-      // Hold a direct reference: the project-ready listener may replace the plugins array.
       expect(target.enabled).toBe(!before);
       expect(navSpy).not.toHaveBeenCalled();
     });
@@ -787,7 +776,6 @@ describe('PluginsComponent', () => {
       expect(pill).not.toBeNull();
       expect(pill.classList.contains('red')).toBe(true);
       expect(pill.getAttribute('title')).toBe('Ed25519 verification failed');
-      // The "verified" pill must not be present.
       expect(fixture.nativeElement.querySelector('[data-testid="plugins-row-signed"]')).toBeNull();
 
       const toggle = fixture.nativeElement.querySelector(

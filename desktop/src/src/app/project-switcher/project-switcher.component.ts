@@ -234,7 +234,6 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
 
   /** Registers reactive cleanup of transient pending/error state. */
   constructor() {
-    // Reset transient pending/error state when the dropdown closes or the row disappears.
     effect(() => {
       if (!this.ui.projectSwitcherOpen()) {
         this.pendingDeleteName.set(null);
@@ -260,11 +259,8 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.projects.set(result.projects);
       this.activeProject.set(result.active_project);
-    } catch {
-      // Not running inside Tauri or command not registered yet.
-    }
+    } catch {}
 
-    // Refresh list on settled (not just ready — failed add still registers project).
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       try {
         const result = await this.tauri.invoke<ProjectList>('list_projects');
@@ -347,7 +343,6 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
       return;
     }
     this.pendingDeleteName.set(null);
-    // The backend may first boot a stopped engine, so the row shows an in-flight state.
     this.removingName.set(name);
     try {
       await this.projectState.removeProject(name);

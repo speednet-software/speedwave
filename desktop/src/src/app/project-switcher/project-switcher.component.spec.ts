@@ -44,7 +44,6 @@ describe('ProjectSwitcherComponent', () => {
     component = fixture.componentInstance;
     projectState = TestBed.inject(ProjectStateService);
     ui = TestBed.inject(UiStateService);
-    // Reset shared UI state between tests so each starts closed.
     ui.closeProjectSwitcher();
   });
 
@@ -147,9 +146,6 @@ describe('ProjectSwitcherComponent', () => {
   });
 
   describe('add-project modal lifecycle', () => {
-    // Create/error-handling logic lives in CreateProjectModalComponent (own spec); here we only
-    // assert the switcher opens, closes, and reacts to the `created` event correctly.
-
     it('openAddForm() makes the modal visible and closes the dropdown', () => {
       ui.toggleProjectSwitcher();
       expect(ui.projectSwitcherOpen()).toBe(true);
@@ -333,7 +329,6 @@ describe('ProjectSwitcherComponent', () => {
     });
 
     it('confirmRemove() marks the row as removing and blocks a second removal until it settles', async () => {
-      // The backend may first boot a stopped engine, so the wait can be long.
       const pendingRemove = createDeferred();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -367,8 +362,6 @@ describe('ProjectSwitcherComponent', () => {
       ) as HTMLButtonElement | null;
       expect(itemButton?.disabled).toBe(true);
 
-      // Other rows lose their remove and switch affordances and ignore removal requests
-      // meanwhile: the backend holds the project transition lock for the whole removal.
       expect(
         fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-gamma"]')
       ).toBeNull();

@@ -1,4 +1,3 @@
-
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -248,9 +247,11 @@ export async function waitForUsd(
   return resolved;
 }
 
-export async function waitForDashboardUsd(
-  opts: { timeout: number; interval: number; timeoutMsg: string }
-): Promise<number> {
+export async function waitForDashboardUsd(opts: {
+  timeout: number;
+  interval: number;
+  timeoutMsg: string;
+}): Promise<number> {
   const deadline = Date.now() + opts.timeout;
   let value: number | null = null;
   for (;;) {
@@ -269,16 +270,13 @@ export async function waitForFooterToReconcile(
   opts: { timeout: number; interval: number; timeoutMsg: string }
 ): Promise<number> {
   let resolved: number | null = null;
-  await browser.waitUntil(
-    async () => {
-      const value = await readUsd('[data-testid="session-stats"]');
-      if (value === null) return false;
-      if (Math.abs(value - target) > tol) return false;
-      resolved = value;
-      return true;
-    },
-    opts
-  );
+  await browser.waitUntil(async () => {
+    const value = await readUsd('[data-testid="session-stats"]');
+    if (value === null) return false;
+    if (Math.abs(value - target) > tol) return false;
+    resolved = value;
+    return true;
+  }, opts);
   if (resolved === null) throw new Error(opts.timeoutMsg);
   return resolved;
 }

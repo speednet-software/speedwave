@@ -151,8 +151,6 @@ export async function refreshSlackToken(req: RefreshRequest): Promise<RefreshRes
   }
   const json = body.json;
 
-  // Slack signals failure via `ok:false` on HTTP 200; check it before (and in
-  // addition to) the HTTP status so both conventions are covered.
   if (json.ok !== true) {
     const errCode = typeof json.error === 'string' ? json.error : `http_${response.status}`;
     const code = REAUTH_ERROR_CODES.has(errCode) ? 'invalid_grant' : 'http';
@@ -165,8 +163,6 @@ export async function refreshSlackToken(req: RefreshRequest): Promise<RefreshRes
   }
   const fields = extracted.fields;
 
-  // A missing/invalid expires_in means token rotation is off — broken state
-  // for this integration (Speedwave's Slack app always enables rotation).
   if (typeof fields.expiresIn !== 'number' || fields.expiresIn <= 0) {
     return {
       ok: false,

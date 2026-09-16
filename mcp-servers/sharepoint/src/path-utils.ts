@@ -44,7 +44,6 @@ export async function parseGraphErrorMessage(
       const data = JSON.parse(text) as { error?: { message?: string } };
       return data.error?.message || defaultMessage;
     } catch {
-      // JSON parsing failed, return raw text
       return text;
     }
   } catch {

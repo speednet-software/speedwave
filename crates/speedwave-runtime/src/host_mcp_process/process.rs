@@ -132,7 +132,6 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         let lock_path = state_dir.join(spec.lock_file_name());
         let log_path = state_dir.join(log_filename);
 
-        // Stale-PID cleanup: read lock.json (single on-disk format).
         if let Some(existing) = lock::read(&lock_path, spec.service()) {
             kill_stale_node(existing.pid, spec.log_tag());
             let _ = std::fs::remove_file(&lock_path);
@@ -153,7 +152,6 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
         let mut cmd = crate::binary::command("node");
         cmd.arg(script_path);
         apply_child_env(&mut cmd, &CurrentProcessEnv);
-        // SSOT bind host — must match host_gateway_ip for container extra_hosts.
         cmd.env("MCP_LISTEN_HOST", crate::compose::host_bind_address()?);
         spec.apply_env(&mut cmd, &ctx);
         cmd.stdin(Stdio::null())
@@ -162,7 +160,6 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 
         let mut child = cmd.spawn()?;
 
-        // Attach child to Windows Job Object (no-op on non-Windows).
         let job = super::job_object::attach_to_kill_on_close_job(&child);
 
         let (port, drain_handles) = match drain_and_read_port(&mut child, &log_path, spec.log_tag())
@@ -300,7 +297,6 @@ pub fn kill_stale_node(pid: u32, service_tag: &str) {
         log::debug!("{service_tag}: stale PID {pid} is not a node process — skipping kill");
         return;
     }
-    // Live node at spawn means a second supervisor is racing us (exit-137 bug, ADR-060).
     log::warn!(
         "{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid}) at spawn — possible second supervisor racing this one"
     );
@@ -426,7 +422,6 @@ mod tests {
 
     #[test]
     fn fake_spec_records_hook_order() {
-        // Spawn-sequence contract: pre_spawn → apply_env → spawn → write_atomic.
         let spec = FakeSpec::new(LockService::Oauth, "fake");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock.json");
@@ -447,13 +442,11 @@ mod tests {
 
     #[test]
     fn kill_stale_node_skips_pid_1() {
-        // PID 1 is init/launchd; is_node_process returns false → no kill.
         kill_stale_node(1, "test");
     }
 
     #[test]
     fn kill_stale_node_warn_uses_shared_marker() {
-        // Source-string guard: WARN line must carry KILL_STALE_LOG_MARKER (grep hint in resources::OOM_MESSAGE).
         let source = include_str!("process.rs");
         assert!(
             source.contains("{service_tag}: {KILL_STALE_LOG_MARKER} (PID {pid})"),
@@ -485,7 +478,6 @@ mod tests {
             .get_envs()
             .filter_map(|(k, v)| v.map(|val| (k.to_owned(), val.to_owned())))
             .collect();
-        // Base policy:
         assert_eq!(
             envs.get(std::ffi::OsStr::new("PATH"))
                 .map(|v| v.to_string_lossy().to_string())
@@ -493,7 +485,6 @@ mod tests {
             Some("/usr/bin"),
             "base apply_child_env must set PATH from EnvSource"
         );
-        // Spec layer on top:
         assert_eq!(
             envs.get(std::ffi::OsStr::new("FAKE_TOKEN"))
                 .map(|v| v.to_string_lossy().to_string())

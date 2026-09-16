@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# The one required CI status check: exits 0 only when every job in NEEDS_JSON (the workflow's
-# `toJSON(needs)` object) reports result "success". Guard: _tests/ci/ci-gate.bats.
 
 set -euo pipefail
 

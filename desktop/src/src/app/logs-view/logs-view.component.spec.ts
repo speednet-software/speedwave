@@ -54,8 +54,6 @@ describe('LogsViewComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  // -- Happy path --
-
   it('renders a line per parsed log entry', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
@@ -71,7 +69,6 @@ describe('LogsViewComponent', () => {
     const times = Array.from(
       fixture.nativeElement.querySelectorAll('[data-testid="logs-time"]')
     ) as HTMLElement[];
-    // formatTime() prefixes bracketed `HH:MM:SS` with today's date; raw value kept in `title`.
     expect(times[0].textContent?.trim()).toMatch(/^\d{4}-\d{2}-\d{2} 14:34:02$/);
     expect(times[0].getAttribute('title')).toBe('14:34:02.814');
 
@@ -98,7 +95,6 @@ describe('LogsViewComponent', () => {
   });
 
   it("prefixes today's date when the log line only carries HH:MM:SS", async () => {
-    // `[HH:MM:SS]`-only lines are dated with the host's current day.
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? 'mcp_hub | [11:32:56] INFO  hello' : undefined;
     vi.spyOn(component as unknown as { todayIso(): string }, 'todayIso').mockReturnValue(
@@ -114,7 +110,6 @@ describe('LogsViewComponent', () => {
   });
 
   it('renders an ISO timestamp in the host local timezone, raw value in title', async () => {
-    // Column shows local time; UTC `Z` and `+02:00` for the same instant render identically.
     const raw = '2026-04-28T11:32:56.123456Z';
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? `mcp_hub | ${raw} INFO  hello` : undefined;
@@ -122,7 +117,6 @@ describe('LogsViewComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    // `formatTime` must agree with a plain `new Date(...)`.
     const d = new Date(raw);
     const p2 = (n: number) => String(n).padStart(2, '0');
     const expected =
@@ -135,9 +129,8 @@ describe('LogsViewComponent', () => {
   });
 
   it('renders a `+02:00`-offset ISO stamp identically to the same instant in UTC', async () => {
-    // The whole point of `formatTime`: source offset is irrelevant to the column.
     const utc = '2026-04-28T11:32:56.000Z';
-    const plus2 = '2026-04-28T13:32:56.000+02:00'; // same instant
+    const plus2 = '2026-04-28T13:32:56.000+02:00';
     const render = async (raw: string): Promise<string> => {
       mockTauri.invokeHandler = async (cmd: string) =>
         cmd === 'get_all_logs' ? `mcp_hub | ${raw} INFO x` : undefined;
@@ -150,8 +143,6 @@ describe('LogsViewComponent', () => {
     };
     expect(await render(utc)).toBe(await render(plus2));
   });
-
-  // -- ARIA --
 
   it('marks the scroll region as role="log" with aria-live="polite"', async () => {
     await component.ngOnInit();
@@ -185,8 +176,6 @@ describe('LogsViewComponent', () => {
         ?.getAttribute('aria-pressed')
     ).toBe('true');
   });
-
-  // -- Edge cases --
 
   it('renders an empty-hint when no log lines are returned', async () => {
     mockTauri.invokeHandler = async () => '';
@@ -227,8 +216,6 @@ describe('LogsViewComponent', () => {
     expect(message.className).toContain('break-words');
   });
 
-  // -- Error path --
-
   it('renders an error block when get_all_logs rejects', async () => {
     mockTauri.invokeHandler = async () => {
       throw new Error('compose logs unavailable');
@@ -245,7 +232,6 @@ describe('LogsViewComponent', () => {
 
   it('shows "No active project" error when activeProject is null and the lifecycle has settled', async () => {
     projectState.activeProject.set(null);
-    // Mark the lifecycle as settled (any non-loading status) so the banner can surface.
     projectState.status.set('error');
 
     await component.ngOnInit();
@@ -268,7 +254,6 @@ describe('LogsViewComponent', () => {
   });
 
   it('refetches logs once the project lifecycle settles after mount', async () => {
-    // Boot race: component mounts before `activeProject` loads; picks it up on `onProjectSettled`.
     projectState.activeProject.set(null);
     projectState.status.set('loading');
     await component.ngOnInit();
@@ -277,11 +262,9 @@ describe('LogsViewComponent', () => {
 
     projectState.activeProject.set('test');
     projectState.status.set('ready');
-    // Emulate a settled event by calling all registered onProjectSettled callbacks.
     (projectState as unknown as { settledListeners: Array<() => void> }).settledListeners.forEach(
       (cb) => cb()
     );
-    // The settled callback fires `void this.refresh()`; let the microtask resolve.
     await new Promise<void>((r) => setTimeout(r, 0));
     await fixture.whenStable();
     fixture.detectChanges();
@@ -289,8 +272,6 @@ describe('LogsViewComponent', () => {
     expect(component.lines().length).toBeGreaterThan(0);
     expect(component.error()).toBe('');
   });
-
-  // -- State transitions (filters combine) --
 
   it('filtering by level=error leaves only the error row visible', async () => {
     await component.ngOnInit();
@@ -333,8 +314,6 @@ describe('LogsViewComponent', () => {
     expect(rows[0].textContent).toContain('POST /projects/x');
   });
 
-  // -- Source select --
-
   it('renders a source <select> with one option per distinct source plus "all"', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
@@ -344,7 +323,6 @@ describe('LogsViewComponent', () => {
     ) as HTMLSelectElement;
     expect(select).not.toBeNull();
     const values = Array.from(select.options).map((o) => o.value);
-    // 4 distinct sources in MOCK_LOGS: mcp_hub, mcp_redmine, mcp_sharepoint, mcp_slack — sorted alphabetically.
     expect(values).toEqual(['all', 'mcp_hub', 'mcp_redmine', 'mcp_sharepoint', 'mcp_slack']);
   });
 
@@ -357,7 +335,6 @@ describe('LogsViewComponent', () => {
     ) as HTMLSelectElement;
     const labels = Array.from(select.options).map((o) => o.textContent?.trim());
     expect(labels[0]).toBe('all sources (5)');
-    // mcp_hub appears twice in MOCK_LOGS (info + debug) so its counter must read 2.
     expect(labels.find((l) => l?.startsWith('mcp_hub'))).toBe('mcp_hub (2)');
     expect(labels.find((l) => l?.startsWith('mcp_redmine'))).toBe('mcp_redmine (1)');
   });
@@ -384,8 +361,6 @@ describe('LogsViewComponent', () => {
     component['setSource']('mcp_redmine');
     expect(component.filters().source).toBe('mcp_redmine');
 
-    // Next refresh returns logs without the `redmine` source — the stale
-    // selection must be reconciled instead of stranding the user on an empty list.
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? 'mcp_hub | [12:00:00] INFO  still here' : undefined;
     await component['refresh']();
@@ -464,8 +439,6 @@ describe('parseLogLine', () => {
   });
 
   it('uses the drain ISO timestamp; strips STDOUT: and the redundant inline ts() from an mcp-os line', () => {
-    // Line shape: `<drain-ISO> STDOUT: [<ts()-ISO>] msg` — the column gets the
-    // drain stamp, `STDOUT:` and the duplicate `[<ts()-ISO>]` are removed.
     const line = parseLogLine(
       'mcp-os | 2026-05-12T14:34:02.814+02:00 STDOUT: [2026-05-12T14:34:02.810+02:00] mcp-os started'
     );
@@ -490,7 +463,6 @@ describe('parseLogLine', () => {
   });
 
   it('parses a bare bracketed ISO timestamp via the extended BRACKETED_TIME_RE', () => {
-    // A worker `ts()` line with no drain/compose prefix — now local offset.
     const line = parseLogLine('mcp_hub | [2026-05-12T14:34:02.814+02:00] 🚀 Starting');
     expect(line.time).toBe('2026-05-12T14:34:02.814+02:00');
     expect(line.message).toBe('🚀 Starting');
@@ -503,8 +475,6 @@ describe('parseLogLine', () => {
   });
 
   it('compose-container line: nerdctl stamp → column, the worker `ts()` stamp dropped from the message', () => {
-    // `<container> | <nerdctl-RFC3339-UTC> [<ts()-ISO-local>] msg` — the column gets nerdctl's
-    // stamp (localised at render); the inline `[<ts()>]` is the same instant, so it's removed.
     const line = parseLogLine(
       'mcp_hub | 2026-05-12T13:00:39.816Z [2026-05-12T15:00:39.816+02:00] 🔗 Initializing HTTP bridges'
     );
@@ -515,7 +485,6 @@ describe('parseLogLine', () => {
   });
 
   it('rewrites the desktop ISO+bracketed-level line (colon offset) to a WARN chip', () => {
-    // tauri-plugin-log → `prefix_lines("desktop", …)` → `desktop | <ISO> WARN [target] msg`.
     const line = parseLogLine(
       'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail'
     );
@@ -527,12 +496,9 @@ describe('parseLogLine', () => {
 });
 
 describe('sortLogLinesByTime', () => {
-  // Build a parsed line from a backend wire line via the real parser.
   const ln = (raw: string) => parseLogLine(raw);
 
   it('interleaves per-source blocks into one chronological stream', () => {
-    // Backend order: a `claude` block then a `mcp-hub` block, each internally
-    // ordered but overlapping in time. After the sort they're interleaved.
     const sorted = sortLogLinesByTime([
       ln('claude | 2026-05-12T14:53:49.000+02:00 SESSION: started'),
       ln('claude | 2026-05-12T14:53:57.000+02:00 SYSTEM: init'),
@@ -542,35 +508,35 @@ describe('sortLogLinesByTime', () => {
       ln('mcp_hub | 2026-05-12T14:54:13.000+02:00 INFO  Executing tool'),
     ]);
     expect(sorted.map((l) => l.time)).toEqual([
-      '2026-05-12T14:53:48.000+02:00', // hub
-      '2026-05-12T14:53:49.000+02:00', // claude
-      '2026-05-12T14:53:49.500+02:00', // hub
-      '2026-05-12T14:53:57.000+02:00', // claude
-      '2026-05-12T14:54:13.000+02:00', // hub
-      '2026-05-12T14:54:32.000+02:00', // claude
+      '2026-05-12T14:53:48.000+02:00',
+      '2026-05-12T14:53:49.000+02:00',
+      '2026-05-12T14:53:49.500+02:00',
+      '2026-05-12T14:53:57.000+02:00',
+      '2026-05-12T14:54:13.000+02:00',
+      '2026-05-12T14:54:32.000+02:00',
     ]);
   });
 
   it('orders correctly across mixed offsets (UTC `Z` vs `+02:00`) by instant', () => {
     const sorted = sortLogLinesByTime([
-      ln('claude | 2026-05-12T14:00:05.000+02:00 SESSION: started'), // 12:00:05Z
-      ln('mcp_hub | 2026-05-12T12:00:03.000Z hub line'), // 12:00:03Z
-      ln('claude | 2026-05-12T14:00:01.000+02:00 SESSION: prep'), // 12:00:01Z
+      ln('claude | 2026-05-12T14:00:05.000+02:00 SESSION: started'),
+      ln('mcp_hub | 2026-05-12T12:00:03.000Z hub line'),
+      ln('claude | 2026-05-12T14:00:01.000+02:00 SESSION: prep'),
     ]);
     expect(sorted.map((l) => l.time)).toEqual([
-      '2026-05-12T14:00:01.000+02:00', // 12:00:01Z
-      '2026-05-12T12:00:03.000Z', // 12:00:03Z
-      '2026-05-12T14:00:05.000+02:00', // 12:00:05Z
+      '2026-05-12T14:00:01.000+02:00',
+      '2026-05-12T12:00:03.000Z',
+      '2026-05-12T14:00:05.000+02:00',
     ]);
   });
 
   it('keeps a timestamp-less line attached to the preceding line (continuation)', () => {
     const banner = parseLogLine('mcp_hub | ════════════');
-    expect(banner.time).toBe(''); // no timestamp
+    expect(banner.time).toBe('');
     const sorted = sortLogLinesByTime([
       ln('claude | 2026-05-12T14:00:10.000+02:00 b: later'),
       ln('mcp_hub | 2026-05-12T14:00:01.000+02:00 a: first'),
-      banner, // inherits a:first's instant → stays right after it
+      banner,
       ln('mcp_hub | 2026-05-12T14:00:02.000+02:00 a: second'),
     ]);
     expect(sorted.map((l) => l.message)).toEqual([
@@ -606,8 +572,6 @@ describe('sortLogLinesByTime', () => {
   });
 
   it('purely plain-text input preserves stable input order', () => {
-    // Edge case: every line has NaN key (no timestamp anywhere). Stable sort
-    // must keep input order — banner/header lines stay at the top.
     const onlyPlain = sortLogLinesByTime([
       parseLogLine('plugin | starting'),
       parseLogLine('plugin | ready'),
@@ -636,8 +600,6 @@ describe('LogsViewComponent — status bar layout', () => {
       port: 4001,
       ws_url: 'ws://127.0.0.1:4001',
       detected_ides: [{ ide_name: 'cursor', port: 49820, ws_url: null }],
-      // Connected = an IDE has been actively selected via `select_ide`. The
-      // status bar reads this field as SSOT — `running` alone is not enough.
       selected_ide: { ide_name: 'cursor', port: 49820, ws_url: null },
     },
     overall_healthy: false,
@@ -684,7 +646,6 @@ describe('LogsViewComponent — status bar layout', () => {
     fixture.detectChanges();
     const bar = fixture.nativeElement.querySelector('[data-testid="logs-status-bar"]');
     expect(bar).not.toBeNull();
-    // role="status" so screen readers announce the latest snapshot in place.
     expect(bar?.getAttribute('role')).toBe('status');
 
     expect(fixture.nativeElement.querySelector('[data-testid="health-overall"]')).not.toBeNull();
@@ -695,7 +656,6 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('shows a neutral checking placeholder until the first health snapshot lands', async () => {
-    // No snapshot yet: get_health yields nothing, so the strip must not claim "degraded".
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_all_logs') return '';
       return undefined;
@@ -721,8 +681,6 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('reports disconnected and surfaces a connect link when bridge is running but no IDE is selected (SSOT regression guard)', async () => {
-    // `running: true` means the bridge daemon is scanning, not that an IDE is selected — the status
-    // bar must read `selected_ide` as SSOT for "connected" and offer a deep-link to connect.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health')
@@ -738,8 +696,6 @@ describe('LogsViewComponent — status bar layout', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.bridgeConnected()).toBe(false);
-    // Detail line still carries a count, but the "none selected" label is
-    // gone — the routerLink takes its place so the action is one click away.
     expect(component.bridgeDetail()).toBe('1 detected');
     expect(component.bridgeShowConnectLink()).toBe(true);
 
@@ -748,8 +704,6 @@ describe('LogsViewComponent — status bar layout', () => {
     ) as HTMLAnchorElement;
     expect(link).not.toBeNull();
     expect(link.textContent?.trim()).toContain('connect');
-    // Anchor target must point to the IDE Bridge section in /integrations
-    // so anchorScrolling can drop the user right at the connect table.
     expect(link.getAttribute('href')).toBe('/integrations#ide-bridge');
   });
 
@@ -778,8 +732,6 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('hides the connect link when an IDE is already selected', async () => {
-    // MOCK_HEALTH starts with selected_ide set — the link must not appear
-    // because the user has nothing left to connect.
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.bridgeConnected()).toBe(true);
@@ -791,7 +743,6 @@ describe('LogsViewComponent — status bar layout', () => {
     await component.ngOnInit();
     fixture.detectChanges();
 
-    // Default: details collapsed so logs claim maximum vertical space.
     expect(fixture.nativeElement.querySelector('[data-testid="logs-status-details"]')).toBeNull();
 
     const overallBtn = fixture.nativeElement.querySelector(
@@ -803,7 +754,6 @@ describe('LogsViewComponent — status bar layout', () => {
     const details = fixture.nativeElement.querySelector('[data-testid="logs-status-details"]');
     expect(details).not.toBeNull();
 
-    // One row per container, identified by backend-supplied service name.
     expect(
       fixture.nativeElement.querySelector('[data-testid="health-container-mcp_hub"]')
     ).not.toBeNull();
@@ -811,13 +761,11 @@ describe('LogsViewComponent — status bar layout', () => {
       fixture.nativeElement.querySelector('[data-testid="health-container-mcp_sharepoint"]')
     ).not.toBeNull();
 
-    // One row for the cursor IDE detected in the snapshot.
     const ideRows = fixture.nativeElement.querySelectorAll('[data-testid="health-ide-row"]');
     expect(ideRows).toHaveLength(1);
     expect(ideRows[0].textContent).toContain('cursor');
     expect(ideRows[0].textContent).toContain('49820');
 
-    // Re-clicking collapses the panel.
     overallBtn.click();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="logs-status-details"]')).toBeNull();
@@ -841,8 +789,6 @@ describe('LogsViewComponent — status bar layout', () => {
     fixture.detectChanges();
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
-    // Dialog must stay closed before the user clicks export so it can never
-    // appear from a stale signal in another flow.
     expect(
       fixture.nativeElement.querySelector('[data-testid="export-diagnostics-overlay"]')
     ).toBeNull();
@@ -862,8 +808,6 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(component.diagnosticsPath()).toBe('/tmp/speedwave-diag.zip');
     expect(component.exportDialogOpen()).toBe(true);
 
-    // CDK Dialog renders the modal into a portal on document.body, not
-    // inside the host fixture, so query the global document.
     expect(document.querySelector('[data-testid="export-diagnostics-overlay"]')).not.toBeNull();
     const note = document.querySelector('[data-testid="modal-note"]');
     expect(note?.textContent).toContain('/tmp/speedwave-diag.zip');
@@ -1005,7 +949,6 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('schedules a scroll-to-bottom write after each successful fetch', async () => {
-    // `scrollToBottom` is invoked after `lines.set(...)`.
     const scrollSpy = vi.spyOn(
       component as unknown as { scrollToBottom(): void },
       'scrollToBottom'
@@ -1017,8 +960,6 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(scrollSpy).toHaveBeenCalled();
     scrollSpy.mockRestore();
   });
-
-  // -- Unified logs view (get_all_logs) --
 
   it('invokes get_all_logs (not get_compose_logs) on refresh', async () => {
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -1035,19 +976,15 @@ describe('LogsViewComponent — status bar layout', () => {
     const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
     try {
       await component.ngOnInit();
-      // A poll is armed at the health cadence (the same `setInterval(_, 5000)`
-      // line; the health service also arms one — assert ours is among them).
       const armed = setIntervalSpy.mock.calls.filter(
         (c) => c[1] === HEALTH_REFRESH_INTERVAL_MS
       ).length;
       expect(armed).toBeGreaterThanOrEqual(1);
 
-      // It fires `get_all_logs` again on each tick.
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await vi.advanceTimersByTimeAsync(HEALTH_REFRESH_INTERVAL_MS);
       expect(invokeSpy.mock.calls.some((c) => c[0] === 'get_all_logs')).toBe(true);
 
-      // Destroy clears it.
       component.ngOnDestroy();
       expect(clearIntervalSpy).toHaveBeenCalled();
       expect(component['logsTimer']).toBeNull();
@@ -1058,9 +995,8 @@ describe('LogsViewComponent — status bar layout', () => {
 
   it('a silent refresh does not toggle the loading spinner; a normal one does', async () => {
     await component.ngOnInit();
-    expect(component.loading()).toBe(false); // settled after the initial fetch
+    expect(component.loading()).toBe(false);
 
-    // Hold the fetch so we can observe `loading` mid-flight.
     let fetchGate = createDeferred();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
@@ -1068,14 +1004,12 @@ describe('LogsViewComponent — status bar layout', () => {
       return '';
     };
 
-    // Silent: `loading` stays false throughout.
     const silent = component['refresh'](true);
     expect(component.loading()).toBe(false);
     fetchGate.resolve();
     await silent;
     expect(component.loading()).toBe(false);
 
-    // Non-silent (the explicit refresh button): `loading` flips to true then back.
     fetchGate = createDeferred();
     const loud = component['refresh']();
     expect(component.loading()).toBe(true);
@@ -1097,10 +1031,9 @@ describe('LogsViewComponent — status bar layout', () => {
 
     const first = component['refresh'](true);
     const before = calls();
-    expect(before).toBe(1); // first silent refresh fired its invoke
-    // A second silent tick while `first` is still in flight must be dropped.
+    expect(before).toBe(1);
     await component['refresh'](true);
-    expect(calls()).toBe(before); // no extra invoke
+    expect(calls()).toBe(before);
     fetchGate.resolve();
     await first;
   });
@@ -1109,22 +1042,16 @@ describe('LogsViewComponent — status bar layout', () => {
     await component.ngOnInit();
     mockTauri.invokeHandler = async (cmd: string) =>
       cmd === 'get_all_logs' ? 'mcp_hub | hello' : undefined;
-    // First silent poll populates lastRaw + lines.
     await component['refresh'](true);
     const setSpy = vi.spyOn(component.lines, 'set');
-    // Second silent poll with identical raw response must skip `lines.set`.
     await component['refresh'](true);
     expect(setSpy).not.toHaveBeenCalled();
   });
 
   it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
-    // `get_all_logs` returns lines pre-prefixed with `<source> | …`; `parseLogLine` extracts the
-    // token and `sources()` exposes distinct values — pins that all token types reach the dropdown.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [
-        // compose-container line: nerdctl `--timestamps` (UTC) + the worker's
-        // own `ts()` (local offset) inside the message.
         'mcp_hub | 2026-05-12T12:00:00.123456Z [2026-05-12T14:00:00.123+02:00] INFO container line',
         'desktop | 2026-05-12T14:34:02.814+02:00 INFO [target] desktop line',
         'mcp-os | 2026-05-12T14:34:03.000+02:00 STDOUT: [2026-05-12T14:34:03.000+02:00] mcp-os line',
@@ -1134,16 +1061,14 @@ describe('LogsViewComponent — status bar layout', () => {
     await component.ngOnInit();
 
     const sources = component.sources();
-    // Order is: 'all' first, then sorted distinct sources.
     expect(sources).toContain('desktop');
     expect(sources).toContain('mcp-os');
     expect(sources).toContain('claude');
-    expect(sources).toContain('mcp_hub'); // compose container, prefix-stripped
+    expect(sources).toContain('mcp_hub');
     expect(sources[0]).toBe('all');
   });
 
   it('renders desktop bracketed level as INFO/WARN level chip after Rust reformatting', async () => {
-    // Mock simulates Rust `prefix_lines("desktop", …)`: `[WARN]` rewritten to `WARN ` (trailing space required by `LEVEL_RE = /^LEVEL\s+/`).
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return 'desktop | 2026-05-12T14:34:02.814+02:00 WARN [speedwave_desktop::x] auto-disabled mail';

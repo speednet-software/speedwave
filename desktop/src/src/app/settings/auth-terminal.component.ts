@@ -119,7 +119,6 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       })
       .catch((err: unknown) => {
-        // Non-fatal: the Windows PowerShell hint just won't show.
         this.log.warn(`auth-terminal: get_platform failed: ${String(err)}`);
       });
     this.startPolling();
@@ -186,7 +185,6 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
           this.done.emit(true);
         }
       } catch (err: unknown) {
-        // Expected while the container is still starting; log anything else.
         const msg = typeof err === 'string' ? err : String(err);
         if (!/container|not running|starting/i.test(msg)) {
           this.log.debug(`auth-terminal: get_auth_status poll error: ${msg}`);

@@ -187,7 +187,6 @@ describe('ToolBlockComponent', () => {
     it('renders bash terminal output when expanded', () => {
       setTool(makeTool({ tool_name: 'Bash', input_json: '{"command":"ls -la"}' }));
       fixture.detectChanges();
-      // done starts collapsed; expand the body first.
       component.toggleCollapsed();
       fixture.detectChanges();
 
@@ -416,7 +415,6 @@ describe('ToolBlockComponent', () => {
     it('wires role=region and aria-labelledby/aria-controls/aria-expanded', () => {
       setTool(makeTool({ status: 'running' }));
       fixture.detectChanges();
-      // Expand first so the [role="region"] body renders.
       component.toggleCollapsed();
       fixture.detectChanges();
 
@@ -508,7 +506,6 @@ describe('ToolBlockComponent', () => {
 
       component.toggleCollapsed();
 
-      // toggleCollapsed must not mutate the bound tool.
       expect(tool).toEqual(snapshot);
     });
 
@@ -563,7 +560,6 @@ describe('ToolBlockComponent', () => {
 
     it('re-setting an unparseable done block with fresh objects never logs', () => {
       const spy = vi.spyOn(TestBed.inject(ToolNormalizerService), 'normalize');
-      // Every chat-state mutation rebuilds the block objects; the log must not scale with it.
       const tool = makeTool({
         status: 'done',
         tool_name: 'SendMessage',
@@ -597,7 +593,6 @@ describe('ToolBlockComponent', () => {
       setTool(makeTool({ tool_name: 'Glob', input_json: '{"pattern":"**/*.ts"}' }));
       expect(component.headerSummary()).toBe('**/*.ts');
 
-      // Use a neutral search term to avoid triggering the marker-comment guardrail spec.
       setTool(makeTool({ tool_name: 'Grep', input_json: '{"pattern":"foo"}' }));
       expect(component.headerSummary()).toBe('foo');
     });

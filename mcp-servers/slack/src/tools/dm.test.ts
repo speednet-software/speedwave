@@ -7,7 +7,6 @@ import { RefreshLock } from '@speedwave/mcp-shared';
 import { handleListDirectMessages, handleOpenDirectMessage, createDmTools } from './dm-tools.js';
 import type { SlackClients } from '../client.js';
 
-// Mock the client module
 vi.mock('../client.js', async () => {
   const actual = await vi.importActual('../client.js');
   return {
@@ -21,7 +20,6 @@ vi.mock('../client.js', async () => {
   };
 });
 
-// Mock the user-directory boundary — its machinery has its own test file.
 vi.mock('../user-directory.js', () => ({
   peekUserDirectory: vi.fn(),
   displayNameOf: vi.fn(
@@ -150,7 +148,6 @@ describe('dm-tools', () => {
       const tools = createDmTools(presentClients());
       expect(tools.map((t) => t.tool.name)).toEqual(['listDirectMessages', 'openDirectMessage']);
       expect(tools[0].tool.annotations?.readOnlyHint).toBe(true);
-      // Opening a conversation mutates state on Slack's side.
       expect(tools[1].tool.annotations?.readOnlyHint).not.toBe(true);
     });
 
@@ -179,8 +176,6 @@ describe('dm-tools', () => {
     });
 
     it('forwards the users array to openDm verbatim (cap enforced in client)', async () => {
-      // minItems/maxItems is a model hint only; the runtime cap lives in openDm (client.ts),
-      // so the handler forwards as-is and surfaces a cap violation as OPEN_FAILED.
       const tools = createDmTools(presentClients());
       vi.mocked(client.openDm).mockRejectedValue(
         new Error('A Slack DM holds at most 8 people; got 9.')

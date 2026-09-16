@@ -118,12 +118,10 @@ describe('TranscriptionSectionComponent', () => {
       fixture.detectChanges();
 
       expect(component.modelRows().map((r) => r.entry.key)).toEqual(['small', 'large-v3-turbo']);
-      // The live row is still the one the original test ids point at.
       expect(
         fixture.nativeElement.querySelector('[data-testid="model-state"]').textContent
       ).toContain('Not downloaded');
       expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).not.toBeNull();
-      // The offline model is already on disk, so its row offers removal, not download.
       const finalizeState = fixture.nativeElement.querySelector(
         '[data-testid="model-state-finalize"]'
       );
@@ -296,8 +294,6 @@ describe('TranscriptionSectionComponent', () => {
   });
 
   it('a fresh instance reflects a download already in flight in the service', async () => {
-    // Regression: navigating away and back must not re-offer the download
-    // button while the backend is still writing the model.
     downloadingModelKey.set('large-v3');
     downloadProgress.set({ model_key: 'large-v3', downloaded_bytes: 50, total_bytes: 100 });
     await component.ngOnInit();
@@ -348,8 +344,6 @@ describe('TranscriptionSectionComponent', () => {
       return undefined;
     });
     await component.ngOnInit();
-    // Both start before either finishes — proves they ran in parallel, not
-    // one-after-another. (Index-based: framework CD may re-run the hook.)
     expect(order.indexOf('get_platform:start')).toBeGreaterThan(-1);
     expect(order.indexOf('get_platform:start')).toBeLessThan(order.indexOf('recommendedModel:end'));
     expect(order.indexOf('recommendedModel:start')).toBeLessThan(

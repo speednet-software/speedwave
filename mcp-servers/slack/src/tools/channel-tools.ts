@@ -21,8 +21,6 @@ import {
   formatSlackError,
 } from '../client.js';
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
 interface SendChannelParams {
   channel: string;
   message: string;
@@ -44,8 +42,6 @@ interface GetThreadMessagesParams {
   limit?: number;
   cursor?: string;
 }
-
-// ── Tool Definitions ──────────────────────────────────────────────────────
 
 const sendChannelTool: Tool = {
   name: 'sendChannel',
@@ -369,8 +365,6 @@ const listChannelIdsTool: Tool = {
   ],
 };
 
-// ── Tool Handlers ─────────────────────────────────────────────────────────
-
 /**
  * Handler for `sendChannel` — sends a message to a channel or DM as the signed-in user.
  * @param clients - The Slack client container.
@@ -448,8 +442,6 @@ export async function handleListChannelIds(
     return { success: false, error: { code: 'LIST_FAILED', message: formatSlackError(error) } };
   }
 }
-
-// ── Tool Definitions Export ───────────────────────────────────────────────
 
 /**
  * Required-param options for {@link withValidation}, driven by the tool's own declared `inputSchema.required` so the guard can never drift from the schema.

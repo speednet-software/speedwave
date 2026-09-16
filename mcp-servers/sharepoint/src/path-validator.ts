@@ -31,20 +31,17 @@ export class PathValidator {
       return false;
     }
 
-    // Recursively decode URL-encoded characters to catch double/triple encoding
-    // e.g., %252e%252e → %2e%2e → ..
     const pathsToCheck = [pathStr];
     let current = pathStr;
-    const maxIterations = 5; // Prevent infinite loops
+    const maxIterations = 5;
 
     for (let i = 0; i < maxIterations; i++) {
       try {
         const decoded = decodeURIComponent(current);
-        if (decoded === current) break; // No more decoding possible
+        if (decoded === current) break;
         pathsToCheck.push(decoded);
         current = decoded;
       } catch {
-        // Invalid URL encoding - reject
         console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
           attemptedPath: pathStr,
           attackType: 'invalid_url_encoding',
@@ -54,7 +51,6 @@ export class PathValidator {
       }
     }
 
-    // Check all decoded versions for path traversal
     for (const p of pathsToCheck) {
       if (p.includes('../') || p.includes('..\\')) {
         console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
@@ -65,8 +61,6 @@ export class PathValidator {
         });
         return false;
       }
-      // Check for .. at path boundaries (not inside filenames like foo..bar.txt)
-      // Pattern matches: ^.. | /.. | \.. | ../ | ..\ | ..$ (end of string)
       if (/(^|[/\\])\.\.([/\\]|$)/.test(p)) {
         console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
           attemptedPath: pathStr,
@@ -114,12 +108,10 @@ export class PathValidator {
       return false;
     }
 
-    // Resolve to absolute path and normalize
     const resolved = path.resolve(localPath);
 
     const allowedPrefix = '/workspace';
 
-    // Must start with allowed prefix (exact match or as directory prefix)
     const isAllowed = resolved === allowedPrefix || resolved.startsWith(allowedPrefix + '/');
     if (!isAllowed) {
       console.warn(`${ts()} 🔒 Security: Local path validation blocked potential attack:`, {
@@ -131,10 +123,8 @@ export class PathValidator {
       return false;
     }
 
-    // Check denylist: protect sensitive directories/files within /workspace
     for (const denied of DENYLIST) {
       if (denied === '/workspace/.env') {
-        // Exact match only: blocks /workspace/.env but allows /workspace/.envrc
         if (resolved === denied) {
           console.warn(`${ts()} 🔒 Security: Local path validation blocked denied path:`, {
             attemptedPath: localPath,
@@ -145,7 +135,6 @@ export class PathValidator {
           return false;
         }
       } else {
-        // Prefix match: blocks the directory and everything inside it
         if (resolved === denied || resolved.startsWith(denied + '/')) {
           console.warn(`${ts()} 🔒 Security: Local path validation blocked denied path:`, {
             attemptedPath: localPath,

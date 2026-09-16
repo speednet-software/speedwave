@@ -1,5 +1,4 @@
 #!/usr/bin/env bats
-# Drift guards for the meeting-transcription bundle wiring (ADR-056).
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 MACOS_CONF="$REPO_ROOT/desktop/src-tauri/tauri.macos.conf.json"
@@ -48,7 +47,6 @@ PY
 }
 
 @test "THIRD-PARTY-LICENSES ships as a bundle resource on both platforms" {
-    # Windows redistributes vulkan-1.dll (ADR-085) — its Apache-2.0 notice must ship there too.
     for conf in "$MACOS_CONF" "$REPO_ROOT/desktop/src-tauri/tauri.windows.conf.json"; do
         run python3 -c "
 import json
@@ -62,7 +60,6 @@ assert 'THIRD-PARTY-LICENSES/' in res, f'THIRD-PARTY-LICENSES/ not in resources:
 
 @test "Makefile has a bundle-static-licenses target wired into build-tauri" {
     grep -qE '^bundle-static-licenses:' "$MAKEFILE"
-    # build-tauri must invoke bundle-static-licenses.
     grep -qF 'bundle-static-licenses' "$MAKEFILE"
 }
 

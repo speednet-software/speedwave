@@ -122,8 +122,6 @@ async function resolveCaller(
       result: errorResult('unauthorized: caller is not a configured consumer'),
     };
   }
-  // Bearer-map already validated by middleware; re-load here only to verify
-  // the caller still exists (consumer could have been forget()'d concurrently).
   const map = await loadBearerMap(deps.stateDir);
   if (!Object.values(map).includes(caller)) {
     return {
@@ -148,7 +146,6 @@ async function handleRefresh(
 async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCallResult> {
   const now = deps.now ?? Date.now;
   const rateLimitMs = (deps.rateLimitSeconds ?? DEFAULT_RATE_LIMIT_SECONDS) * 1000;
-  // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
   const ts = new Date().toISOString();
 
   let state: OAuthState | null;
@@ -196,7 +193,6 @@ async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCall
     scopes: state.scopes,
     refreshToken: state.refreshToken,
   };
-  // Provider validation if present, else the static requiredFields check.
   const validationError = provider.validateRequest
     ? provider.validateRequest(refreshReq)
     : missingStaticField(provider.requiredFields, state.providerData);
@@ -211,7 +207,6 @@ async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCall
     return errorResult(`${validationError.code}: ${validationError.message}`);
   }
 
-  // Rate limit: skip IdP call if token still valid and refresh is recent.
   const expiresAtMs = Date.parse(state.expiresAt);
   const lastRefreshMs = Date.parse(state.lastRefreshAt);
   const skewMs = 60_000;
@@ -249,7 +244,6 @@ async function refreshLocked(deps: ToolDeps, service: string): Promise<ToolsCall
   }
 
   const nowMs = now();
-  // Clamp the IdP-supplied lifetime so `new Date(...)` stays in range.
   const expiresInMs = Math.min(result.value.expiresIn, MAX_EXPIRES_IN_SECONDS) * 1000;
   const newState: OAuthState = {
     ...state,
@@ -286,7 +280,6 @@ async function handleForget(
 }
 
 async function forgetLocked(deps: ToolDeps, service: string): Promise<ToolsCallResult> {
-  // Deliberate UTC (bare Z): JSON audit-record field, not a human log prefix.
   const ts = new Date().toISOString();
 
   const statePath = join(deps.stateDir, `${service}.json`);

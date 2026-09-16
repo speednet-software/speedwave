@@ -1,7 +1,5 @@
 /** Hub-specific types (executor, skills); PII types live in \@speedwave/policy-engine; base types from \@speedwave/mcp-shared */
 
-// ── Code Executor Types ───────────────────────────────────────────────────────────────────────
-
 /**
  * Tool execution error
  */
@@ -78,8 +76,6 @@ export interface IToolContext {
   /** Logger instance */
   logger: ILogger;
 }
-
-// ── Tool Discovery Types (Progressive Disclosure) ─────────────────────────────────────────────
 
 /**
  * Tool input example (Tool Use Examples pattern).

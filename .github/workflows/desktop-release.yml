@@ -1,31 +1,3 @@
-# Desktop Release — builds Tauri desktop app + CLI binaries for all platforms
-#
-# Based on the official Tauri v2 GitHub Actions guide:
-#   https://v2.tauri.app/distribute/pipelines/github/
-#
-# tauri-action handles release creation, artifact upload, and updater JSON
-# generation automatically — no custom release management needed.
-#
-# Triggers:
-#   - workflow_call (from release-please.yml — provides version, tag_name)
-#   - workflow_dispatch (manual, with version input)
-#
-# Required secrets:
-#   TAURI_SIGNING_PRIVATE_KEY          — Ed25519 private key for Tauri updater signatures
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — passphrase for the signing key (can be empty string)
-#
-# Optional secrets (macOS code signing + notarization):
-#   APPLE_CERTIFICATE                  — base64-encoded .p12 Developer ID Application certificate
-#   APPLE_CERTIFICATE_PASSWORD         — passphrase for the .p12 certificate
-#   APPLE_SIGNING_IDENTITY             — e.g. "Developer ID Application: Your Name (TEAMID)"
-#   APPLE_ID                           — Apple ID email for notarization
-#   APPLE_PASSWORD                     — app-specific password for notarization
-#   APPLE_TEAM_ID                      — Apple Developer Team ID
-#
-# Optional variables on the `release` environment (Windows code signing via Azure Artifact
-# Signing, ADR-086: OIDC login, no stored secret; all empty = unsigned Windows build):
-#   AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
-#   AZURE_ARTIFACT_SIGNING_ENDPOINT / AZURE_ARTIFACT_SIGNING_ACCOUNT / AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE
 
 name: Desktop Release
 
@@ -51,7 +23,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Resolve version from trigger source ────────────────────────────────
   resolve:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -121,11 +92,8 @@ jobs:
 
           echo "Resolved: version=$VERSION tag=$TAG release_id=$RELEASE_ID tag_exists=$TAG_EXISTS"
 
-  # ── Desktop app (Tauri) — official tauri-action pattern ──────────────────
   publish-tauri:
     needs: resolve
-    # `release` holds the Windows-signing variables and is the OIDC subject the Entra federated
-    # credential trusts (ADR-086); the macOS legs ignore it.
     environment: release
     permissions:
       contents: write
@@ -146,13 +114,11 @@ jobs:
     timeout-minutes: 75
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
 
-      # The runner's checkout base + the ggml-vulkan CMake scratch crosses MAX_PATH (C1083);
-      # same escape as test.yml's desktop-windows-check.
       - name: Use a short cargo target dir (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
@@ -161,11 +127,9 @@ jobs:
           # Cache key folds in the runner image: a VS bump invalidates CMakeCache generators.
           echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
 
-      # rust-cache (setup-toolchain) caches workspace-relative target dirs only — D:\st
-      # needs its own cache entry; shares the key with desktop-build.yml's Windows leg.
       - name: Cache the short cargo target dir (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: D:\st
           key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
@@ -181,8 +145,6 @@ jobs:
         run: npm ci
         working-directory: desktop/src
 
-      # Set APPLE_* in GITHUB_ENV only when the secret is real (tauri-action
-      # imports on any non-null APPLE_CERTIFICATE).
       - name: Configure macOS code signing
         if: matrix.platform == 'macos-latest'
         env:
@@ -212,8 +174,6 @@ jobs:
             echo "::notice::macOS code signing skipped (no APPLE_CERTIFICATE secret)"
           fi
 
-      # Import the .p12 into a throwaway build keychain so codesign can resolve
-      # APPLE_SIGNING_IDENTITY. See: https://v2.tauri.app/distribute/sign/macos/
       - name: Import Apple signing certificate to keychain
         if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         shell: bash
@@ -266,8 +226,6 @@ jobs:
           fi
           echo "::notice::Apple signing identity imported and verified in build keychain"
 
-      # Tauri signs inside tauri-action (beforeBundleCommand + signCommand both call
-      # scripts/sign-windows-binaries.ps1), so the Azure login must land before it.
       - name: Configure Windows code signing
         if: matrix.platform == 'windows-latest'
         uses: ./.github/actions/azure-signing-login
@@ -285,9 +243,7 @@ jobs:
           platform: ${{ matrix.platform }}
           args: ${{ matrix.args }}
 
-      # releaseId set: upload to existing release (tag* ignored); empty: create
-      # by tag.
-      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f  # v1.0.0
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -303,8 +259,6 @@ jobs:
           args: ${{ matrix.args }}
           releaseAssetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
 
-  # ── CLI binary cross-compilation ─────────────────────────────────────────
-  # Runs after publish-tauri so the GitHub release already exists
   cli:
     needs: [resolve, publish-tauri]
     environment: release
@@ -327,13 +281,13 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           targets: ${{ matrix.target }}
 
@@ -344,7 +298,7 @@ jobs:
         run: rustup target add "$TARGET"
 
       - name: Rust cache
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: cli-${{ matrix.target }}
 
@@ -365,7 +319,6 @@ jobs:
           account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
           certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
 
-      # Same host (Windows PowerShell 5.1) and script as the Tauri hooks; no-op without the env.
       - name: Sign CLI binary (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -403,7 +356,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" --repo "$REPO" --clobber
 
-  # ── Publish release: draft → live after all builds succeed ──────────────
   publish-release:
     needs: [resolve, publish-tauri, cli]
     runs-on: ubuntu-latest
@@ -411,7 +363,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Verify release assets (pre-publish)
         env:

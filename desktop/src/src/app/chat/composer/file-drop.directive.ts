@@ -34,7 +34,6 @@ export class FileDropDirective {
   onDragOver(event: DragEvent): void {
     if (this.disabled()) return;
     if (!hasFiles(event)) return;
-    // Mandatory for `drop` to fire.
     event.preventDefault();
     if (event.dataTransfer) {
       event.dataTransfer.dropEffect = 'copy';

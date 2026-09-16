@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Guards scripts/stage-vulkan-runtime.sh and scripts/check-vulkan-path-budget.sh (ADR-085):
-# the pin scrape, the hash gate, and the MAX_PATH budget math run on every Windows build.
 
 STAGE_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/stage-vulkan-runtime.sh"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
@@ -18,8 +16,6 @@ hash_of() {
     (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1
 }
 
-# Copies the stage script into an isolated scripts/ dir next to a fabricated pin file and a
-# repo-shaped destination, so the pass/fail paths run without a real SDK install.
 stage_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri" "$WORK/sdk/runtime/x64"
     cp "$STAGE_SCRIPT" "$WORK/repo/scripts/stage-vulkan-runtime.sh"
@@ -107,7 +103,6 @@ stage_rig() {
 }
 
 @test "check-vulkan-path-budget rejects a target dir past the MAX_PATH budget" {
-    # 259 - 250 = 9 usable chars; 80 chars is safely over the budget.
     local deep
     deep="/$(printf 'x%.0s' {1..80})"
     CARGO_TARGET_DIR="$deep" run bash "$BUDGET_SCRIPT"
@@ -117,7 +112,6 @@ stage_rig() {
 }
 
 @test "check-vulkan-path-budget resolves a relative CARGO_TARGET_DIR against the crate dir" {
-    # The literal "t" is 1 char; only the crate-dir-resolved path can exceed the budget.
     local deep
     deep="$WORK/$(printf 'x%.0s' {1..80})"
     mkdir -p "$deep/repo/scripts" "$deep/repo/desktop/src-tauri"
@@ -131,8 +125,6 @@ stage_rig() {
 }
 
 @test "cargo-target-dir resolves a relative crate dir without doubling it" {
-    # Makefile's E2E_BINARY passes a repo-relative crate dir: the no-cargo fallback used to
-    # re-prefix it into <crate>/<crate>/target and print a path nothing ever builds into.
     local sealed expected
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri"
     cp "$RESOLVER_SCRIPT" "$WORK/repo/scripts/cargo-target-dir.sh"
@@ -154,7 +146,6 @@ stage_rig() {
     [ "$status" -ne 0 ]
 }
 
-# Fabricates a minimal crate so `cargo metadata` (the config-layer resolver) works in isolation.
 budget_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri/.cargo" "$WORK/repo/desktop/src-tauri/src"
     cp "$BUDGET_SCRIPT" "$WORK/repo/scripts/check-vulkan-path-budget.sh"
@@ -165,8 +156,6 @@ budget_rig() {
 }
 
 @test "check-vulkan-path-budget reads the crate-local .cargo/config.toml target-dir escape" {
-    # The escape hatch documented in cross-platform.md: a short crate-local target-dir
-    # must pass even when the default crate path would fail.
     budget_rig
     printf '[build]\ntarget-dir = "/t"\n' > "$WORK/repo/desktop/src-tauri/.cargo/config.toml"
 
@@ -174,8 +163,6 @@ budget_rig() {
 
     [ "$status" -eq 0 ]
     if command -v cygpath >/dev/null 2>&1; then
-        # cargo already returns a Windows-absolute path there; asserting its exact shape
-        # would re-encode cygpath's MSYS-root mapping. The budget verdict is the contract.
         [[ "$output" == *"path budget OK"* ]]
     else
         [[ "$output" == *"/t:"* ]]

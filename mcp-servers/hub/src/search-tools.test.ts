@@ -50,7 +50,6 @@ describe('searchTools', () => {
     });
 
     it('matches by description', async () => {
-      // Mock descriptions contain "Slack channel", so search for that
       const result = await searchTools({
         query: 'Slack channel',
         detailLevel: 'with_descriptions',
@@ -76,7 +75,6 @@ describe('searchTools', () => {
         detailLevel: 'names_only',
       });
 
-      // Should return all tools from all services (including os with 26 tools)
       expect(result.matches.length).toBeGreaterThan(75);
       expect(result.total).toBe(result.matches.length);
     });
@@ -170,12 +168,10 @@ describe('searchTools', () => {
       expect(result.matches.length).toBeGreaterThan(0);
       const match = result.matches[0];
 
-      // Should have basic fields
       expect(match.tool).toBeDefined();
       expect(match.service).toBeDefined();
       expect(typeof match.deferLoading).toBe('boolean');
 
-      // Should NOT have detailed fields
       expect(match.description).toBeUndefined();
       expect(match.inputSchema).toBeUndefined();
       expect(match.outputSchema).toBeUndefined();
@@ -192,11 +188,9 @@ describe('searchTools', () => {
       expect(result.matches.length).toBeGreaterThan(0);
       const match = result.matches[0];
 
-      // Should have description
       expect(match.description).toBeDefined();
       expect(typeof match.description).toBe('string');
 
-      // Should NOT have schema fields
       expect(match.inputSchema).toBeUndefined();
       expect(match.outputSchema).toBeUndefined();
     });
@@ -224,7 +218,6 @@ describe('searchTools', () => {
         detailLevel: 'names_only',
       });
 
-      // Should have both deferred and non-deferred tools
       const hasDeferred = result.matches.some((m) => m.deferLoading === true);
       const hasNonDeferred = result.matches.some((m) => m.deferLoading === false);
 
@@ -239,7 +232,6 @@ describe('searchTools', () => {
         includeDeferred: false,
       });
 
-      // Should only have non-deferred tools
       expect(result.matches.every((m) => m.deferLoading === false)).toBe(true);
       expect(result.matches.length).toBeGreaterThan(0);
     });
@@ -353,17 +345,14 @@ describe('searchTools edge cases', () => {
   });
 
   it('skips a service that has an empty tool list', async () => {
-    // Add an enabled service with zero tools — searchTools should skip it.
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, unknown>>;
     mutableRegistry['emptysvc'] = {};
-    // Must also add to SERVICE_NAMES so the service appears in servicesToSearch
     _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os', 'emptysvc']);
     process.env.ENABLED_SERVICES = 'slack,emptysvc';
     resetServiceCaches();
 
     const result = await searchTools({ query: '*', detailLevel: 'names_only' });
 
-    // Only slack tools should appear, not emptysvc (emptysvc has no tools → continue branch hit)
     expect(result.matches.every((m) => m.service !== 'emptysvc')).toBe(true);
     expect(result.matches.some((m) => m.service === 'slack')).toBe(true);
 
@@ -372,7 +361,6 @@ describe('searchTools edge cases', () => {
   });
 
   it('matches a tool by keyword when name and description do not match', async () => {
-    // Insert a tool whose name/description don't contain 'xkeyword', but keywords does.
     const mutableRegistry = TOOL_REGISTRY as Record<
       string,
       Record<
@@ -404,14 +392,12 @@ describe('searchTools edge cases', () => {
       service: 'slack',
     });
 
-    // Should match via keywords even though 'xkeyword' is not in name or description
     expect(result.matches.some((m) => m.tool === 'slack/keywordTool')).toBe(true);
 
     delete mutableRegistry['slack']['keywordTool'];
   });
 
   it('uses true as deferLoading fallback when tool has deferLoading undefined', async () => {
-    // Insert a tool with deferLoading === undefined so the `?? true` branch is hit.
     const mutableRegistry = TOOL_REGISTRY as Record<
       string,
       Record<
@@ -434,7 +420,6 @@ describe('searchTools edge cases', () => {
       inputSchema: { type: 'object', properties: {} },
       example: '',
       service: 'slack',
-      // deferLoading intentionally omitted
     };
 
     const result = await searchTools({
@@ -444,7 +429,6 @@ describe('searchTools edge cases', () => {
     });
 
     expect(result.matches.length).toBe(1);
-    // The `?? true` branch returns true when deferLoading is undefined
     expect(result.matches[0].deferLoading).toBe(true);
 
     delete mutableRegistry['slack']['undeferredTool'];
@@ -563,15 +547,14 @@ describe('tool counts per service (regression)', () => {
 
   it('sharepoint has expected number of tools', () => {
     const tools = getServiceTools('sharepoint');
-    expect(tools.length).toBe(5); // listFileIds, getFileFull, downloadFile, uploadFile, getCurrentUser
+    expect(tools.length).toBe(5);
   });
 
   it('os has expected number of tools', () => {
     const tools = getServiceTools('os');
-    expect(tools.length).toBe(26); // 6 reminders + 6 calendar + 7 mail + 7 notes
+    expect(tools.length).toBe(26);
   });
 
-  // Note: gitlab and redmine counts may vary - these tests verify minimum counts
   it('gitlab has at least 40 tools', () => {
     const tools = getServiceTools('gitlab');
     expect(tools.length).toBeGreaterThanOrEqual(40);
@@ -590,7 +573,6 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
     populateRegistryWithMockTools();
-    // Ambient DISABLED_OS_SERVICES (set inside Speedwave containers) would filter the mock os tools
     delete process.env.DISABLED_OS_SERVICES;
     resetServiceCaches();
   });
@@ -621,7 +603,6 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
     const services = new Set(result.matches.map((m) => m.service));
     expect(services.has('os')).toBe(true);
 
-    // No reminder or mail tools should appear
     for (const match of result.matches) {
       if (match.service === 'os') {
         expect(match.tool.toLowerCase()).not.toMatch(/reminder/);
@@ -650,10 +631,8 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
     const result = await searchTools({ query: '*', detailLevel: 'names_only', service: 'os' });
     const toolNames = result.matches.map((m) => m.tool.toLowerCase());
 
-    // No reminder tools should appear
     expect(toolNames.some((t) => t.includes('reminder'))).toBe(false);
 
-    // Calendar, mail, notes tools should still appear
     expect(toolNames.some((t) => t.includes('calendar') || t.includes('event'))).toBe(true);
     expect(toolNames.some((t) => t.includes('mail') || t.includes('email'))).toBe(true);
     expect(toolNames.some((t) => t.includes('note'))).toBe(true);
@@ -694,7 +673,6 @@ describe('searchTools tokenized multi-word query', () => {
   });
 
   it('matches a natural-language phrase whose tokens are split across description', async () => {
-    // "Send a message to a Slack channel" — every token of the query appears.
     const result = await searchTools({
       query: 'send message slack channel',
       detailLevel: 'names_only',
@@ -705,8 +683,6 @@ describe('searchTools tokenized multi-word query', () => {
   });
 
   it('tolerates one non-matching token for queries of 4+ tokens', async () => {
-    // "zzznomatch logged hours redmine" — "zzznomatch" appears nowhere, but the
-    // other 3 (of 4) content tokens do, and 4-token queries allow one miss.
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
     mutableRegistry['redmine']['listTimeEntries'] = {
       ...mutableRegistry['redmine']['listTimeEntries'],
@@ -723,7 +699,6 @@ describe('searchTools tokenized multi-word query', () => {
   });
 
   it('requires every token to match for queries under 4 tokens', async () => {
-    // "slack nonexistentword" — one of two tokens matches nothing, so no result.
     const result = await searchTools({
       query: 'slack nonexistentword',
       detailLevel: 'names_only',
@@ -830,7 +805,6 @@ describe('searchTools tokenized multi-word query', () => {
     });
 
     const names = result.matches.map((m) => m.tool);
-    // Name-prefix match ranks ahead of the (unboosted) userScoped description match
     expect(names.indexOf('redmine/issueSomething2')).toBeLessThan(
       names.indexOf('redmine/getCurrentUser')
     );
@@ -900,8 +874,6 @@ describe('searchTools tokenized multi-word query', () => {
   });
 
   it('sorts a non-boosted tool after a boosted tool regardless of comparator call order', async () => {
-    // Both tools match 'zzzsharedterm' at the same tier, so only selfBoost decides order;
-    // 'aaa...' sorts first alphabetically, forcing comparator to see non-boosted as `a`.
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
     mutableRegistry['redmine']['aaaPlainTool'] = buildMockToolMetadata('redmine', 'aaaPlainTool', {
       description: 'Handles zzzsharedterm but is not userScoped',
@@ -1346,8 +1318,6 @@ describe('searchTools sandboxGlobal', () => {
   it('hides tools of a service the sandbox refuses to expose', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
-    // `class` camelCases to a reserved word, so execute_code cannot expose it — advertising
-    // its tools would hand the model a tool it can never call.
     mutableRegistry['class'] = {
       searchItems: buildMockToolMetadata('class', 'searchItems', { deferLoading: false }),
     };

@@ -63,13 +63,10 @@ export interface SitePage {
   canvasLayout?: CanvasLayout;
 }
 
-// ── Tool schemas ──────────────────────────────────────────────────────────────────
-
 const listPagesTool: Tool = {
   name: 'listPages',
   description:
     'List all pages in the configured SharePoint site. Provides the pageId used by getPage/updatePage/publishPage/deletePage/addWebPart/updateWebPart/removeWebPart/addImageWebPart/generateTableOfContents.',
-  // No site_id — the worker uses its stored site (ADR-060 site policy).
   inputSchema: { type: 'object', properties: {} },
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: false },
@@ -196,7 +193,6 @@ const addWebPartTool: Tool = {
     type: 'object',
     properties: {
       pageId: { type: 'string', description: 'Graph page id, from listPages.' },
-      // Capped to bound index values from an untrusted caller.
       sectionIndex: { type: 'number', minimum: 0, maximum: 20 },
       columnIndex: { type: 'number', minimum: 0, maximum: 10 },
       innerHtml: {
@@ -205,7 +201,6 @@ const addWebPartTool: Tool = {
       },
       webPartType: {
         type: 'string',
-        // Derived from the SSOT `STANDARD_WEBPART_TYPES`.
         enum: Object.keys(STANDARD_WEBPART_TYPES),
         description:
           'Standard web part type. Mutually exclusive with `innerHtml` (which targets text web parts).',
@@ -394,8 +389,6 @@ const generateTableOfContentsTool: Tool = {
   },
 };
 
-// ── Handlers ──────────────────────────────────────────────────────────────────────
-
 function pages(client: SharePointClient): PagesClient {
   return new PagesClient(client);
 }
@@ -570,7 +563,6 @@ async function handleAddWebPart(
 ): Promise<ToolResult> {
   const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
-  // Defense in depth — cap here since `withValidation` skips JSON Schema validation.
   const MAX_SECTION = 20;
   const MAX_COLUMN = 10;
   if (
@@ -654,7 +646,6 @@ async function handleAddWebPart(
         },
       };
     }
-    // Graph ids become URL path segments — validate against injection.
     const sectErr = validateGraphId(section.id, 'section.id');
     if (sectErr) return sectErr;
     const colErr = validateGraphId(column.id, 'column.id');
@@ -822,7 +813,6 @@ async function handleGenerateTableOfContents(
     const colErr = validateGraphId(column.id, 'column.id');
     if (colErr) return colErr;
 
-    // Extract headings from text web parts and inject anchor ids where missing.
     const allHeadings = [] as ReturnType<typeof extractHeadings>;
     let anchorsInjected = 0;
     for (const s of sections) {
@@ -993,8 +983,6 @@ async function handleAddImageWebPart(
   }
 }
 
-// ── Factory ───────────────────────────────────────────────────────────────────────
-
 /**
  * Build the page tool definitions.
  * @param client - Configured SharePoint client, or null when not configured.
@@ -1093,7 +1081,6 @@ export function createPageTools(client: SharePointClient | null): ToolDefinition
   ];
 }
 
-// Export tool schemas for the regression test that asserts no site_id leak.
 export const PAGE_TOOL_SCHEMAS = [
   listPagesTool,
   getPageTool,

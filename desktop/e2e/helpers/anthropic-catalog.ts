@@ -1,4 +1,3 @@
-
 export interface AnthropicCatalogEntry {
   id: string;
   family: string;
@@ -17,7 +16,8 @@ export async function anthropicCatalog(): Promise<AnthropicCatalogEntry[]> {
       window as unknown as {
         __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<AnthropicCatalogEntry[]> };
       }
-    ).__TAURI_INTERNALS__.invoke('list_anthropic_models')
+    ).__TAURI_INTERNALS__
+      .invoke('list_anthropic_models')
       .then((rows) => done(rows))
       .catch(() => done([]));
   });

@@ -26,11 +26,9 @@ vi.mock('node:fs/promises', async (orig) => {
   };
 });
 
-// Build a tiny real .xlsx in memory so the SheetJS path is exercised end-to-end.
 import * as XLSX from 'xlsx';
 function makeWorkbookBuffer(): Buffer {
   const wb = XLSX.utils.book_new();
-  // Ragged rows, commas, pipes, escaping.
   const ws = XLSX.utils.aoa_to_sheet([
     ['Name', 'Score', 'Note'],
     ['Ada', 10, 'hello, world'],
@@ -68,9 +66,7 @@ describe('readDocumentToMarkdown — spreadsheets (SheetJS)', () => {
     expect(r.engine).toBe('sheetjs');
     expect(r.content).toContain('## Sheet1');
     expect(r.content).toContain('| Name | Score | Note |');
-    // A cell containing a comma stays in one column (not split): `| Ada | 10 | hello, world |`.
     expect(r.content).toContain('| Ada | 10 | hello, world |');
-    // The pipe in "Bo|b" is escaped, and the short row is padded to the table width.
     expect(r.content).toMatch(/\| Bo\\\|b \| {2}\| {2}\|/);
     expect(r.content).toContain('## Empty');
     expect(r.content).toContain('_(empty)_');
@@ -96,7 +92,6 @@ describe('readDocumentToMarkdown — spreadsheets (SheetJS)', () => {
   it('escapes a backslash before a pipe (literal `\\|` round-trips as `\\\\\\|`)', async () => {
     fileBytes['/workspace/bs.csv'] = Buffer.from('"a\\|b"\n');
     const r = await readDocumentToMarkdown('bs.csv');
-    // `\|` in the cell → `\\` (escaped backslash) then `\|` (escaped pipe) → `\\\|`.
     expect(r.content).toContain('| a\\\\\\|b |');
   });
 
@@ -132,7 +127,7 @@ describe('readDocumentToMarkdown — markitdown chain', () => {
         timedOut: false,
         stdoutTruncated: false,
         stderrTruncated: false,
-      }) // markitdown empty
+      })
       .mockResolvedValueOnce({
         stdout: 'pdf text',
         stderr: '',
@@ -140,7 +135,7 @@ describe('readDocumentToMarkdown — markitdown chain', () => {
         timedOut: false,
         stdoutTruncated: false,
         stderrTruncated: false,
-      }); // pdftotext
+      });
     const r = await readDocumentToMarkdown('a.pdf');
     expect(r.engine).toBe('pdftotext');
     expect(r.content).toBe('pdf text');
@@ -163,7 +158,7 @@ describe('readDocumentToMarkdown — markitdown chain', () => {
         timedOut: false,
         stdoutTruncated: false,
         stderrTruncated: false,
-      }) // markitdown
+      })
       .mockResolvedValueOnce({
         stdout: 'pandoc md',
         stderr: '',
@@ -171,7 +166,7 @@ describe('readDocumentToMarkdown — markitdown chain', () => {
         timedOut: false,
         stdoutTruncated: false,
         stderrTruncated: false,
-      }); // pandoc
+      });
     const r = await readDocumentToMarkdown('a.rtf');
     expect(r.engine).toBe('pandoc');
     expect(r.content).toBe('pandoc md');

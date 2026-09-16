@@ -5,7 +5,6 @@ import XCTest
 
 final class CalendarTests: XCTestCase {
 
-    // MARK: - Calendar Type String
 
     func testCalendarTypeStrings() {
         XCTAssertEqual(calendarTypeString(.local), "local")
@@ -15,11 +14,9 @@ final class CalendarTests: XCTestCase {
         XCTAssertEqual(calendarTypeString(.birthday), "birthday")
     }
 
-    // MARK: - JSON Argument Parsing
 
     func testCreateEventRequiredFields() {
         let params: [String: Any] = ["summary": "Meeting"]
-        // Missing start and end should be caught
         XCTAssertNil(params["start"])
         XCTAssertNil(params["end"])
     }
@@ -48,7 +45,7 @@ final class CalendarTests: XCTestCase {
         ]
         XCTAssertNotNil(params["id"])
         XCTAssertNotNil(params["summary"])
-        XCTAssertNil(params["start"])  // Optional, not required for update
+        XCTAssertNil(params["start"])  
     }
 
     func testDeleteEventRequiresId() {
@@ -62,38 +59,32 @@ final class CalendarTests: XCTestCase {
         XCTAssertEqual(limit, 20)
     }
 
-    // MARK: - Permission Access
 
     func testRequestCalendarAccessReturnsTuple() {
-        // Compile-time check: requestCalendarAccess returns (granted: Bool, error: Error?)
         let store = EKEventStore()
         let result: (granted: Bool, error: Error?) = requestCalendarAccess(store: store, timeout: 0.001)
         XCTAssertNotNil(result)
     }
 
-    // MARK: - EventStoreGate — file-scope struct reachable via @testable import
 
     func testCalendarEventStoreGateConformsToPermissionGate() {
-        // Compile-time + smoke: EventStoreGate produces RawAuthorizationStatus.
         let store = EKEventStore()
         let gate: PermissionGate = EventStoreGate(store: store)
         let _: RawAuthorizationStatus = gate.authorizationStatus()
     }
 
     func testCalendarEventStoreGateProducesRawStatus() {
-        // At runtime, the gate's raw status is one of the documented cases.
         let store = EKEventStore()
         let gate = EventStoreGate(store: store)
         let raw = gate.authorizationStatus()
         switch raw {
         case .granted, .denied, .restricted, .notDetermined, .writeOnly, .unknown:
-            break  // expected EventKit-producible cases
+            break  
         case .targetNotRunning:
             XCTFail("EventKit gate must never produce .targetNotRunning — that is AE-only")
         }
     }
 
-    // MARK: - eventToDict Output Keys
 
     func testEventToDictOutputContainsCalendarIdAndCalendarName() {
         let store = EKEventStore()

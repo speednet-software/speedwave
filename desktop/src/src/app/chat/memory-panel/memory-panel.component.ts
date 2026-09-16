@@ -123,14 +123,12 @@ export class MemoryPanelComponent {
       if (this.open()) this.openOverlay();
       else this.closeOverlay();
     });
-    // Dispose the overlay if the host is torn down while open.
     inject(DestroyRef).onDestroy(() => this.closeOverlay());
   }
 
   private openOverlay(): void {
     if (this.overlayRef !== null) return;
     const overlayRef = this.overlay.create({
-      // Anchor past the 56px nav-rail so the drawer doesn't cover it.
       positionStrategy: this.overlay.position().global().left('56px').top('0'),
       height: '100%',
       hasBackdrop: true,

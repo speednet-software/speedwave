@@ -7,13 +7,13 @@ public func exitWithError(_ message: String) -> Never {
 }
 
 public enum PermissionStatus: String {
-    case granted          // .fullAccess (macOS 14+) or .authorized (macOS 13)
-    case denied           // .denied — user explicitly denied; tccutil reset required
-    case restricted       // .restricted — parental controls / MDM
-    case notDetermined    // .notDetermined — first-run; consent prompt should appear next launch
-    case writeOnly        // .writeOnly — partial access (Calendars only, macOS 14+)
-    case silentReject     // status remained .notDetermined after request, OR @unknown raw value
-    case targetNotRunning // AE-only: target app (Mail/Notes) not running, not a TCC issue
+    case granted          
+    case denied           
+    case restricted       
+    case notDetermined    
+    case writeOnly        
+    case silentReject     
+    case targetNotRunning 
 }
 
 /// Internal status produced by gates (EventKit gates map EKAuthorizationStatus, AppleEvents gates map OSStatus).
@@ -23,9 +23,9 @@ public enum RawAuthorizationStatus: Equatable {
     case denied
     case restricted
     case notDetermined
-    case writeOnly                            // EventKit-only (Calendar)
-    case targetNotRunning(bundleId: String)   // AppleEvents-only: procNotFound (-600)
-    case unknown                              // @unknown EK / unmapped OSStatus
+    case writeOnly                            
+    case targetNotRunning(bundleId: String)   
+    case unknown                              
 }
 
 public enum PermissionEntity: String {
@@ -91,10 +91,10 @@ public func mapAuthorizationStatus(_ raw: EKAuthorizationStatus) -> PermissionSt
     case .notDetermined: return .notDetermined
     case .restricted: return .restricted
     case .denied: return .denied
-    case .authorized: return .granted              // macOS 13 legacy
-    case .fullAccess: return .granted              // macOS 14+
-    case .writeOnly: return .writeOnly             // macOS 14+, Calendar only
-    @unknown default: return .silentReject         // explicit @unknown default
+    case .authorized: return .granted              
+    case .fullAccess: return .granted              
+    case .writeOnly: return .writeOnly             
+    @unknown default: return .silentReject         
     }
 }
 
@@ -136,19 +136,16 @@ public func composeErrorMessage(
     case .granted:
         return ""
     case .denied:
-        // macOS 14+ has no + button to re-add Speedwave; tccutil reset is the only recovery path.
         return "\(entityName) access was previously denied. Open Terminal and run:\n\(resetCmd)\nThen click the toggle again."
     case .restricted:
         return "\(entityName) access restricted by your administrator or parental controls."
     case .notDetermined:
-        // Unreachable from performCheckPermission; kept for exhaustive switch coverage.
         return "\(entityName) permission was not requested. Quit Speedwave and reopen, then click the toggle again."
     case .writeOnly:
         return "Speedwave has write-only \(entityName) access. Open \(settingsPath) and grant Full Access for read support."
     case .silentReject:
         return "\(entityName) permission was silently rejected by macOS. This usually means a signing or entitlement problem — please reinstall Speedwave from a fresh download."
     case .targetNotRunning:
-        // AE-only path (mail/notes). Not a TCC issue — do NOT mention tccutil here.
         return "\(entityName).app is not running. Open \(entityName).app and try again — this is not a permission problem."
     }
 }
@@ -173,13 +170,11 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
     let initial = mapRawToPermissionStatus(initialRaw)
     logTrace("performCheckPermission initial entity=\(entity.rawValue) status=\(initial.rawValue)")
 
-    // Short-circuit terminal states; `.targetNotRunning` falls through so requestAccess can auto-launch the target.
     if initial != .notDetermined && initial != .targetNotRunning {
         logTrace("performCheckPermission terminal-state short-circuit entity=\(entity.rawValue) final=\(initial.rawValue)")
         return finalizeResult(status: initial, entity: entity, gate: gate)
     }
 
-    // Status is .notDetermined or .targetNotRunning — fire the request and wait.
     logTrace("performCheckPermission firing requestAccess entity=\(entity.rawValue)")
     let semaphore = DispatchSemaphore(value: 0)
     var requestGranted = false
@@ -200,18 +195,15 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
     }
     logTrace("performCheckPermission requestAccess returned entity=\(entity.rawValue) granted=\(requestGranted) error=\(requestError?.localizedDescription ?? "nil")")
 
-    // Re-query status to disambiguate user-denied from silent-reject; post-status is source of truth.
     let postStatus = mapRawToPermissionStatus(gate.authorizationStatus())
     logTrace("performCheckPermission post-status entity=\(entity.rawValue) status=\(postStatus.rawValue)")
     let final: PermissionStatus
     if requestGranted && postStatus == .granted {
         final = .granted
     } else if postStatus == .notDetermined {
-        // Prompt never fired. Almost always usage-description / entitlement / signing.
         final = .silentReject
         logTrace("performCheckPermission SILENT REJECT entity=\(entity.rawValue) — post-status remained notDetermined; check Info.plist usage description and code signature")
     } else {
-        // Post-status trumps requestGranted (request can return granted=true while TCC.db settled to a different state).
         final = postStatus
     }
     logTrace("performCheckPermission done entity=\(entity.rawValue) final=\(final.rawValue)")
@@ -229,7 +221,6 @@ private func finalizeResult(
     if status == .granted {
         logTrace("finalizeResult entity=\(entity.rawValue) status=granted — running verifyDataAccess()")
         if let dataAccessError = gate.verifyDataAccess() {
-            // Granted by TCC but data access fails — surface as silentReject with gate-specific error.
             logTrace("finalizeResult entity=\(entity.rawValue) verifyDataAccess FAILED — downgrading granted→silentReject error=\(dataAccessError)")
             return formatPermissionResult(
                 granted: false,

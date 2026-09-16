@@ -1,5 +1,4 @@
 #!/usr/bin/env bats
-# Static checks on desktop/src-tauri/entitlements/reminders.plist per ADR-037.
 
 PLIST="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements/reminders.plist"
 

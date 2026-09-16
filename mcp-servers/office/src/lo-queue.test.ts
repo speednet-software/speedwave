@@ -15,7 +15,6 @@ describe('libreOfficeQueue', () => {
           resolve(n);
         }, delay);
       });
-    // First task is slow, second fast — without serialization the order would be [2,1].
     const p1 = libreOfficeQueue.run(mk(1, 30));
     const p2 = libreOfficeQueue.run(mk(2, 1));
     await expect(p1).resolves.toBe(1);

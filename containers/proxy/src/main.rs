@@ -68,7 +68,6 @@ fn build_router(cfg: Arc<Config>) -> Router {
 
 #[tokio::main]
 async fn main() {
-    // Default to `info` so swap-leg warnings surface; `RUST_LOG` overrides.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let config_path =
         std::env::var("SPW_CONFIG_PATH").unwrap_or_else(|_| "/config/proxy.json".to_string());
@@ -317,7 +316,6 @@ mod tests {
             let framed = format!("{size:x}\r\n{chunk}\r\n", size = chunk.len());
             socket.write_all(framed.as_bytes()).await.unwrap();
             socket.flush().await.unwrap();
-            // No terminating `0\r\n\r\n` — drop mid-body so the client sees an aborted stream.
             drop(socket);
         });
         addr
@@ -365,7 +363,6 @@ mod tests {
         let usage_path = usage_dir.path().join("usage.jsonl");
 
         let addr = spawn_mock_sse_backend().await;
-        // Give the listener a moment to be ready.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let cfg = Arc::new(config_pointing_at(&addr, usage_path.clone()));
@@ -384,7 +381,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), 200);
-        // Drain the body to let the relay complete.
         let _ = resp.into_body().collect().await.unwrap();
 
         let lines = wait_for_usage_lines(&usage_path).await;
@@ -490,8 +486,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), 200);
-        // The relay's Err(e) branch sends a terminal Err into the client-facing stream —
-        // collecting it may itself surface that error; either outcome is fine here.
         let _ = resp.into_body().collect().await;
 
         let lines = wait_for_usage_lines(&usage_path).await;
@@ -665,7 +659,6 @@ mod tests {
         let (addr, captured) = spawn_capturing_backend().await;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
-        // Bare "claude-opus-4-8" has no "/" prefix, so router.rs::resolve maps it to "anthropic".
         cfg.routes.push(Route {
             prefix: "anthropic".to_string(),
             base_url: format!("http://{addr}"),
@@ -810,7 +803,6 @@ mod tests {
         let policy = speedwave_pii_engine::compile_policy_v3(policy_json).unwrap();
         let key = speedwave_pii_engine::EngineKey::from_bytes([9u8; 32]);
 
-        // Exactly what the outbound scan left in the request the model actually saw.
         let mut body = serde_json::json!({"system": "Contact bob@example.com at Coca-Cola"});
         crate::pii::scan_request(&policy, &key, &mut body).unwrap();
         let upstream_echo = body["system"].as_str().unwrap().to_string();

@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Static validation of critical updater config fields in tauri.conf.json.
-# Set TAURI_CONF_OVERRIDE to use a different config file.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 REAL_CONF="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
@@ -11,7 +9,6 @@ conf_file() {
   echo "${TAURI_CONF_OVERRIDE:-$REAL_CONF}"
 }
 
-# ── Test 1: bundle.createUpdaterArtifacts ───────────────────────────────────
 
 @test "bundle.createUpdaterArtifacts equals v1Compatible (real file)" {
   run python3 - "$(conf_file)" <<'PY'
@@ -38,7 +35,6 @@ PY
   [[ "$output" =~ "createUpdaterArtifacts" ]]
 }
 
-# ── Test 2: plugins.updater.endpoints non-empty and starts with https:// ───
 
 @test "plugins.updater.endpoints non-empty and first starts with https:// (real file)" {
   run python3 - "$(conf_file)" <<'PY'
@@ -69,7 +65,6 @@ PY
   [[ "$output" =~ "endpoints" ]]
 }
 
-# ── Test 3: pubkey non-empty, base64-decodable, begins with minisign header ─
 
 @test "plugins.updater.pubkey is valid minisign public key (real file)" {
   run python3 - "$(conf_file)" <<'PY'
@@ -110,7 +105,6 @@ PY
   [[ "$output" =~ "minisign" ]]
 }
 
-# ── Test 4: endpoints[0] equals STABLE_ENDPOINT from updater.rs ─────────────
 
 @test "endpoints[0] equals STABLE_ENDPOINT from updater.rs (real file)" {
   run python3 - "$(conf_file)" "$UPDATER_RS" <<'PY'
@@ -159,7 +153,6 @@ PY
   [[ "$output" =~ "STABLE_ENDPOINT" ]]
 }
 
-# ── Test 5: bundle.targets contains all required targets ────────────────────
 
 @test "bundle.targets contains nsis msi app dmg (real file)" {
   run python3 - "$(conf_file)" <<'PY'

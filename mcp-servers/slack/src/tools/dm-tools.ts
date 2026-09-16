@@ -124,7 +124,6 @@ export async function handleListDirectMessages(
 ): Promise<ToolResult> {
   try {
     const { dms } = await listDms(clients);
-    // Best-effort 1:1 naming from the directory — raw ID when unavailable.
     const directory = await peekUserDirectory(clients);
     const named = dms.map((dm) => {
       if (dm.type !== 'im' || !dm.user) {

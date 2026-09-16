@@ -15,8 +15,6 @@ jobs:
     steps:
       - name: Validate conventional commit title
         env:
-          # Pass title via env (never interpolated into run: body); mirrors
-          # merge-strategy-check.yml.
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           TITLE="$PR_TITLE"

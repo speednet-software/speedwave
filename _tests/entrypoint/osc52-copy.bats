@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Tests for containers/osc52-copy.sh — host-side, no container required.
-# Channels: ~/.clipboard-bridge file (always) + OSC 52 on /dev/tty (TTY-only, skipped under bats).
 
 OSC52="$BATS_TEST_DIRNAME/../../containers/osc52-copy.sh"
 CONTAINERFILE="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
@@ -14,7 +12,6 @@ teardown() {
     rm -rf "$TMP_HOME"
 }
 
-# ── Bridge file channel (verified everywhere) ───────────────────────────────
 
 @test "writes stdin to ~/.clipboard-bridge" {
     run bash -c "printf 'hello' | HOME='$TMP_HOME' bash '$OSC52'"
@@ -63,7 +60,6 @@ teardown() {
 @test "atomic write — temp file is removed on success" {
     run bash -c "printf 'hello' | HOME='$TMP_HOME' bash '$OSC52'"
     [ "$status" -eq 0 ]
-    # No leftover .tmp.* files
     local leftovers
     leftovers=$(ls "$TMP_HOME"/.clipboard-bridge.tmp.* 2>/dev/null | wc -l | tr -d ' ')
     [ "$leftovers" -eq 0 ]
@@ -75,7 +71,6 @@ teardown() {
     [ "$(cat "$BRIDGE")" = "second" ]
 }
 
-# ── Claude Code ≥2.1.161 write argv shapes (each must hit the write path) ───
 
 @test "wl-copy --primary writes stdin to the bridge" {
     run bash -c "printf 'primary-sel' | HOME='$TMP_HOME' bash '$OSC52' --primary"
@@ -107,7 +102,6 @@ teardown() {
     [ "$(cat "$BRIDGE")" = "xsel-clip" ]
 }
 
-# ── powershell.exe interop (Claude Code platform "wsl" on Windows hosts) ────
 
 @test "powershell.exe Set-Clipboard command writes stdin to the bridge" {
     local ps='[Console]::InputEncoding = [Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())'
@@ -126,15 +120,12 @@ teardown() {
 }
 
 @test "powershell.exe ContainsImage probe exits 1 (no false-positive image)" {
-    # The WSL image-check chain falls back to powershell after xclip; a 0 exit
-    # with no payload would make Claude treat an empty clipboard as an image.
     run bash -c "HOME='$TMP_HOME' bash '$OSC52' -NoProfile -Command 'ContainsImage check' </dev/null"
     [ "$status" -eq 1 ]
     [ -z "$output" ]
 }
 
 @test "command mentioning BOTH Set-Clipboard and Get-Clipboard takes the write path" {
-    # Set-Clipboard arm precedes Get-Clipboard, so a token naming both resolves to write.
     local ps='Set-Clipboard -Value ([Console]::In.ReadToEnd()); Get-Clipboard'
     run bash -c "printf 'both' | HOME='$TMP_HOME' bash '$OSC52' -NoProfile -Command \"\$0\"" "$ps"
     [ "$status" -eq 0 ]
@@ -142,8 +133,6 @@ teardown() {
 }
 
 @test "invoking via the powershell.exe symlink name routes Set-Clipboard to write" {
-    # Claude Code reaches the shim by name (powershell.exe), not osc52-copy.sh.
-    # Symlink mirrors the image-time `ln -s` in Containerfile.claude.
     local bindir="$TMP_HOME/bin"
     mkdir -p "$bindir"
     ln -s "$OSC52" "$bindir/powershell.exe"
@@ -153,7 +142,6 @@ teardown() {
     [ "$(cat "$BRIDGE")" = "via-symlink" ]
 }
 
-# ── Containerfile integration ───────────────────────────────────────────────
 
 @test "Containerfile.claude COPYs osc52-copy.sh to /usr/local/bin" {
     grep -q 'COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh' "$CONTAINERFILE"
@@ -169,8 +157,6 @@ teardown() {
 }
 
 @test "osc52-copy.sh is installed AFTER the heavy claude COPY layer" {
-    # Cache invariant: editing osc52-copy.sh must not invalidate the ~210MB
-    # claude binary layer. Verify Dockerfile line order.
     local osc_line claude_line
     osc_line=$(grep -n 'osc52-copy.sh' "$CONTAINERFILE" | head -1 | cut -d: -f1)
     claude_line=$(grep -n 'cp "\$CLAUDE_BIN" /usr/local/bin/claude' "$CONTAINERFILE" | head -1 | cut -d: -f1)
@@ -179,20 +165,15 @@ teardown() {
     [ "$osc_line" -gt "$claude_line" ]
 }
 
-# ── SSOT cross-check with the host watcher ──────────────────────────────────
 
 @test "bridge filename matches BRIDGE_FILENAME in clipboard_bridge.rs" {
-    # SSOT: shell wrapper and Rust watcher must use the same ~/.clipboard-bridge name.
     local rs="$BATS_TEST_DIRNAME/../../desktop/src-tauri/src/clipboard_bridge.rs"
     grep -q 'BRIDGE_FILENAME: &str = ".clipboard-bridge"' "$rs"
     grep -q '\.clipboard-bridge' "$OSC52"
 }
 
-# ── Error reporting ─────────────────────────────────────────────────────────
 
 @test "reports a stderr error when the bridge file cannot be written" {
-    # HOME at a non-directory → cannot create ~/.clipboard-bridge.
-    # Wrapper must still exit 0 and print a diagnostic to stderr.
     local notadir="$TMP_HOME/regular-file"
     printf 'x' > "$notadir"
     run bash -c "printf 'hello' | HOME='$notadir' bash '$OSC52'"
@@ -200,7 +181,6 @@ teardown() {
     [[ "$output" == *"failed to write clipboard bridge file"* ]]
 }
 
-# ── Read path (host → container paste, ADR-065) ─────────────────────────────
 
 @test "read -o without clip file → exit 1, empty stdout, stderr message" {
     run bash -c "SPEEDWAVE_CLIP_FILE='$TMP_HOME/clip.png' bash '$OSC52' -o"
@@ -248,8 +228,6 @@ teardown() {
 }
 
 @test "cat uses -- delimiter so dash-prefixed CLIP_FILE is not parsed as option" {
-    # Adversarial CLIP_FILE override: filename starts with `-`. Without
-    # `cat -- "$file"` this would be interpreted as an unknown cat option.
     local f="$TMP_HOME/-rfile"
     printf 'OK' > "$f"
     run bash -c "SPEEDWAVE_CLIP_FILE='$f' bash '$OSC52' -t image/png -o"
@@ -257,7 +235,6 @@ teardown() {
     [ "$output" = "OK" ]
 }
 
-# ── Security ────────────────────────────────────────────────────────────────
 
 @test "script has no curl, wget, secrets, or anthropic touchpoints" {
     ! grep -qE '\bcurl\b|\bwget\b|/tokens|\.credentials\.json|api\.anthropic' "$OSC52"

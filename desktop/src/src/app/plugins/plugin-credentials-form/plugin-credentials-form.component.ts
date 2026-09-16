@@ -168,7 +168,6 @@ import { OAuthFlowStatus } from '../../models/integration';
     }
   `,
   styles: [
-    // Mask multi-line secrets via -webkit-text-security (Chromium/WebKit webviews).
     `
       .cred-secret-mask {
         -webkit-text-security: disc;
@@ -205,7 +204,6 @@ export class PluginCredentialsFormComponent {
    */
   readonly inFlight = input<boolean>(false);
 
-  // -- OAuth (authorization_code) flow, when the manifest declares oauth --
   /** Brand shown in the OAuth button (plugin display name). */
   readonly providerLabel = input<string>('provider');
   /** Whether an authorized OAuth state already exists (reconnect copy). */
@@ -350,11 +348,9 @@ export class PluginCredentialsFormComponent {
    * @param event the `input` event whose target holds the new value
    */
   onFieldInput(key: string, event: Event): void {
-    // Guard the cast against a non-field event target.
     const target = event.target;
     if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return;
     this.values[key] = target.value;
-    // Clear a stale validation error on edit; re-evaluated on next submit.
     delete this.validationErrors[key];
   }
 
@@ -383,7 +379,6 @@ export class PluginCredentialsFormComponent {
     try {
       re = new RegExp(`^(?:${validation.pattern})$`);
     } catch (err) {
-      // Pattern compiles in Rust (RE2) but not JS; backend still enforces on save.
       this.log.warn(
         `auth_field "${field.key}" pattern not compilable in JS; skipping client check: ${String(err)}`
       );
@@ -412,7 +407,6 @@ export class PluginCredentialsFormComponent {
     }
     if (Object.keys(credentials).length === 0) return;
 
-    // Validate each filled field against its regex, collecting all errors.
     const errors: Record<string, string> = {};
     const fields = this.authFields();
     for (const [key, value] of Object.entries(credentials)) {

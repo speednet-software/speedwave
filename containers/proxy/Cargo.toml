@@ -3,8 +3,6 @@ name = "proxy"
 version = "0.1.0"
 edition = "2021"
 
-# Not a workspace member — built inside the container image (see ADR-073).
-# The empty [workspace] table below opts this crate out of the root workspace.
 [workspace]
 
 [[bin]]
@@ -34,10 +32,7 @@ futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 log = "0.4"
 rand = "0.8"
-# default-features off drops the regex/color deps — keeps the scratch binary small.
 env_logger = { version = "0.11", default-features = false }
-# Native link (ADR-073 F4): the same crate the hub scans through over wasm, so proxy and hub
-# tokenize identically for the same policy+key — one engine is the determinism guarantee.
 speedwave-pii-engine = { path = "../../crates/pii-engine" }
 
 [dev-dependencies]

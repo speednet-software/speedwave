@@ -86,8 +86,6 @@ describe('SystemHealthService', () => {
       await service.ensurePolling();
       const first = service.health();
 
-      // A subsequent identical fetch must keep the SAME object reference so
-      // OnPush descendants do not re-render between real changes.
       await service.refresh();
       expect(service.health()).toBe(first);
     });
@@ -198,7 +196,6 @@ describe('SystemHealthService', () => {
       service.ngOnDestroy();
 
       const spy = vi.spyOn(mockTauri, 'invoke');
-      // Re-running ensurePolling after destroy must be allowed (started reset).
       expect(service['started']).toBe(false);
       expect(spy).not.toHaveBeenCalled();
     });
