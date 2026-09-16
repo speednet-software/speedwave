@@ -8,7 +8,7 @@
 
 ### Inference on the host, sealing in the proxy
 
-The Desktop app hosts the model in-process (`desktop/src-tauri/src/pii_ner_service.rs`) and exposes `POST /v1/detect` over plain HTTP on `host_bind_address()` (ADR-067). The proxy, before forwarding `/v1/messages`, sends every string leaf it is about to scan (`system`, then each `messages[].content`, the order of `pii::collect_scan_leaves`) in one request and receives one span list per leaf: UTF-8 byte offsets, label, confidence. It then seals those spans with the existing engine (`pii-engine::scan_json_with_external`) under the same category-scoped tokens as rule hits. The key never leaves the container; the host sees request text, which it already saw as the user typed it.
+The Desktop app hosts the model in-process (`desktop/src-tauri/src/pii_ner_service.rs`) and exposes `POST /v1/detect` over plain HTTP on `host_bind_address()` (ADR-067). The proxy, before forwarding `/v1/messages`, sends the string leaves of each `messages[].content` (the order of `pii::collect_scan_leaves`) in one request and receives one span list per leaf: UTF-8 byte offsets, label, confidence. It then seals those spans with the existing engine (`pii-engine::scan_json_with_external`) under the same category-scoped tokens as rule hits. The key never leaves the container; the host sees request text, which it already saw as the user typed it.
 
 HTTP rather than a `HostBridge`: the bridge skeleton is WebSocket-only and the exchange is one request, one reply. The service reuses the audited pieces of the skeleton instead of reimplementing them: `bind_with_retry` (EADDRNOTAVAIL re-detect), `load_or_create_persistent_token` (0600 UUID token), `constant_time_eq`, the Windows firewall `Once`, and the mirrored-relay lifecycle (ensure after bind, remove on stop, periodic re-ensure, ADR-080).
 
@@ -31,8 +31,15 @@ The URL goes through `compose::container_facing_port`, so under WSL2 mirrored mo
 
 ### What the detector is asked to look at
 
-Two filters sit in front of the round trip; both keep one slot per leaf, so the per-leaf answer still lands on the right string.
+The detector sees the conversation, never the client's scaffolding. `messages[].content` is what a user typed, what a tool returned and what the assistant said: content, and the thing this feature exists to protect. `system` is written by the client (Claude Code, the Agent SDK) and is protocol — it must reach the provider byte for byte.
 
+This boundary was learned the hard way. The first version treated both alike, and the detector reads "Claude" in "You are a Claude agent, built on Anthropic's Claude Agent SDK" as a `GIVEN_NAME` at 0.95 (0.74-1.00 across the preamble and in ordinary sentences). Every request therefore went upstream with a sealed preamble, and Anthropic rejected the OAuth leg with `rate_limit_error` and an empty message — which reads as an account limit and cost two days of looking in the wrong place. Measured on 2026-09-16, one session and one account: `GIVEN_NAME` in `ner.labels` gave 429 on every attempt, removing it gave 200 on every attempt, with `system` block 0 logged as sealed and unsealed respectively. The rule engine still scans `system`; its patterns match values (an e-mail, a PESEL), not words, so they leave the scaffolding intact.
+
+The cost is accepted knowingly: identity that a user keeps in `CLAUDE.md` or in memory is injected into `system`, and the detector no longer sees it. Whether a never-seal term list (`Claude`, `Anthropic`, model names) should bring part of that back is a separate question, recorded for its own issue rather than settled here — it is needed for message text too, where sealing the assistant's own name confuses the agent.
+
+Three filters sit in front of the round trip; all keep one slot per leaf, so the per-leaf answer still lands on the right string.
+
+- Every `system` leaf is blanked, whole, per the boundary above.
 - Leaves that are not prose are blanked: `type`, `id`, `tool_use_id`, `media_type`, `data`, `signature`, `url`, `file_id` (`pii::NON_PROSE_LEAF_KEYS`). The rule engine still scans them. Without this an attached image sends megabytes of base64 through the model — thousands of windows, or the 4 MiB cap, which would drop the whole request to rules only.
 - Spans already detected for a text are cached in the proxy for the process lifetime, keyed by the text's length and two per-process randomly seeded hashes, so the cache holds offsets and never request text. Two generations bound it (2048 entries each, a hit promotes the entry back into the young one). A continued conversation therefore pays for its new leaves only, and a client that retries the same body — Claude Code backs off and retries through upstream 429s, dozens of times — pays once.
 - One detector call at a time per proxy (`NerClient::gate`): the host serializes inference anyway, and the caller that waits usually finds its leaves already cached by the call ahead of it. The cache is re-read after the gate for exactly that reason.
@@ -49,7 +56,7 @@ The hub (`mcp-hub`, Node, wasm engine) keeps rules only for now; tool results fl
 
 ## Consequences
 
-- Every `/v1/messages` gains one host round trip before forwarding, carrying the leaves that are new to this proxy. The CPU budget for a long conversation (about 100 KB of text, several hundred windows) is measured with `make bench-pii-ner` before anyone sets `required: true`; that full price is paid on a session's first turn, after which the cache leaves only the new message.
+- Every `/v1/messages` gains one host round trip before forwarding, carrying the `messages[].content` leaves that are new to this proxy. The CPU budget for a long conversation (about 100 KB of text, several hundred windows) is measured with `make bench-pii-ner` before anyone sets `required: true`; that full price is paid on a session's first turn, after which the cache leaves only the new message.
 - The cache is per proxy process: restarting the project's containers re-detects the conversation from scratch.
 - Request text now leaves the proxy container to a second process on the same machine. It is the user's own machine and the same text the Desktop UI displayed; the gate above pins the destination to the host gateway.
 - The CLI (`speedwave`) never starts the service: exactly one supervisor, the Desktop app, as for mcp-os and oauth. A CLI-only session renders `proxy.json` without `ner` and keeps rule-based protection.

@@ -837,7 +837,10 @@ mod tests {
                     .uri("/v1/messages")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"model":"local/x","system":"Jan Kowalski","messages":[{"role":"user","content":"mieszka w Gdańsku"}]}"#,
+                        // `system` carries the same name as the conversation on purpose: the
+                        // detector must never be offered the client's scaffolding, only the
+                        // two message leaves.
+                        r#"{"model":"local/x","system":"Jan Kowalski","messages":[{"role":"user","content":"Jan Kowalski"},{"role":"user","content":"mieszka w Gdańsku"}]}"#,
                     ))
                     .unwrap(),
             )
@@ -876,11 +879,25 @@ mod tests {
         );
 
         let body = String::from_utf8(forwarded).unwrap();
-        assert!(body.contains("Jan [SURNAME:TOKEN_"), "{body}");
-        assert!(body.contains("mieszka w [CITY:TOKEN_"), "{body}");
+        let forwarded: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(
-            !body.contains("Kowalski") && !body.contains("Gda"),
+            forwarded["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Jan [SURNAME:TOKEN_"),
             "{body}"
+        );
+        assert!(
+            forwarded["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("mieszka w [CITY:TOKEN_"),
+            "{body}"
+        );
+        assert_eq!(
+            forwarded["system"], "Jan Kowalski",
+            "the client's scaffolding goes upstream verbatim (SPEED-521): sealing it made \
+             Anthropic reject the OAuth leg"
         );
         let rows = audit_rows(audit_dir.path());
         assert!(rows.iter().all(|r| r["source"] == "ner"), "{rows:?}");

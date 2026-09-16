@@ -138,24 +138,31 @@ const NON_PROSE_LEAF_KEYS: &[&str] = &[
 
 /// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then each
 /// `messages[].content`. The detector receives exactly this list and answers per leaf; leaves it
-/// must not spend windows on are blanked, which keeps the indices aligned and costs no detection.
+/// must not see are blanked, which keeps the indices aligned and costs no detection.
+///
+/// `system` is blanked whole. It is the client's own scaffolding, not anything a user typed, and
+/// rewriting it breaks the client: the detector reads "Claude" in "You are a Claude agent, built
+/// on Anthropic's Claude Agent SDK" as a GIVEN_NAME at 0.95, so every request went upstream with
+/// a sealed preamble and Anthropic answered `rate_limit_error` on the OAuth leg (SPEED-521,
+/// measured 2026-09-16: same session, same account, 429 on every attempt with the label on and
+/// 200 on every attempt with it off). The rule engine still scans `system`; its patterns match
+/// values, not words, so they leave the scaffolding intact.
 pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
     let mut leaves = Vec::new();
-    let push = |subtree: &serde_json::Value, leaves: &mut Vec<String>| {
-        leaves.extend(collect_string_leaves_with_keys(subtree).into_iter().map(
-            |leaf| match leaf.key {
-                Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
-                _ => leaf.text.to_string(),
-            },
-        ));
-    };
     if let Some(system) = body.get("system") {
-        push(system, &mut leaves);
+        leaves.extend(collect_string_leaves(system).iter().map(|_| String::new()));
     }
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
         for message in messages {
             if let Some(content) = message.get("content") {
-                push(content, &mut leaves);
+                leaves.extend(
+                    collect_string_leaves_with_keys(content)
+                        .into_iter()
+                        .map(|leaf| match leaf.key {
+                            Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
+                            _ => leaf.text.to_string(),
+                        }),
+                );
             }
         }
     }
@@ -1154,10 +1161,7 @@ mod tests {
             "metadata": {"user_id": "ignored"}
         });
         let leaves = collect_scan_leaves(&body);
-        assert_eq!(
-            leaves,
-            ["sys", "", "first", "second", "", "third", "", "", ""]
-        );
+        assert_eq!(leaves, ["", "", "first", "second", "", "third", "", "", ""]);
         assert_eq!(
             leaves.len(),
             collect_string_leaves(&body["system"]).len()
@@ -1170,6 +1174,26 @@ mod tests {
             "blanking must not change how many leaves the scan indexes"
         );
         assert!(collect_scan_leaves(&json!({"model": "x"})).is_empty());
+    }
+
+    #[test]
+    fn the_client_scaffolding_is_never_offered_to_the_detector() {
+        // The detector reads "Claude" as a GIVEN_NAME at 0.95, so sealing `system` shipped a
+        // rewritten preamble and Anthropic answered rate_limit_error on the OAuth leg.
+        let body = json!({
+            "system": [
+                {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
+                {"type": "text", "text": "Jan Kowalski, mikolaj@example.com"}
+            ],
+            "messages": [{"role": "user", "content": "Jan Kowalski"}]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "", "", "Jan Kowalski"]);
+        assert_eq!(
+            leaves.len(),
+            collect_string_leaves(&body["system"]).len() + 1,
+            "system keeps one slot per leaf so the per-leaf answers stay aligned"
+        );
     }
 
     #[test]
@@ -1200,13 +1224,10 @@ mod tests {
             ]
         });
         let leaves = collect_scan_leaves(&body);
-        assert_eq!(
-            leaves,
-            ["Jan Kowalski", "nothing here", "mieszka w Gdańsku", ""]
-        );
+        assert_eq!(leaves, ["", "nothing here", "mieszka w Gdańsku", ""]);
         let external = vec![
-            vec![external(4, 12, "SURNAME")],
             vec![],
+            vec![external(0, 7, "SURNAME")],
             vec![external(10, 18, "CITY")],
             vec![],
         ];
@@ -1217,11 +1238,14 @@ mod tests {
             .external
             .iter()
             .all(|d| d.action == DetectionAction::Tokenized && d.count == 1));
-        assert!(body["system"]
+        assert_eq!(
+            body["system"], "Jan Kowalski",
+            "the client's scaffolding is forwarded verbatim"
+        );
+        assert!(body["messages"][0]["content"]
             .as_str()
             .unwrap()
-            .starts_with("Jan [SURNAME:TOKEN_"));
-        assert_eq!(body["messages"][0]["content"], "nothing here");
+            .starts_with("[SURNAME:TOKEN_"));
         let city = body["messages"][1]["content"][0]["text"].as_str().unwrap();
         assert!(city.starts_with("mieszka w [CITY:TOKEN_"), "{city}");
     }
