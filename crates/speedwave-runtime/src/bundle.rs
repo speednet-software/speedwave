@@ -704,7 +704,7 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
 
 /// Host build-output dir names that are never image content — skipped from digests here, skipped at
 /// copy time by bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
-pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
+pub const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
     dir: &Path,
@@ -943,6 +943,59 @@ mod tests {
         assert_digest_error_names(&err, &locked);
     }
 
+    fn script_block_body<'a>(script: &'a str, header: &str) -> Vec<&'a str> {
+        script
+            .lines()
+            .skip_while(|l| l.trim_end() != header)
+            .skip(1)
+            .take_while(|l| l.trim_end() != "}")
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect()
+    }
+
+    fn copy_sources(script: &str, call: &str) -> Vec<String> {
+        let mut sources: Vec<String> = script
+            .lines()
+            .filter_map(|l| l.strip_prefix(call))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|src| {
+                let src = src.trim_matches('"');
+                let src = src.strip_prefix("$REPO_ROOT/").unwrap_or(src);
+                match src.strip_prefix('$') {
+                    Some(knob) => {
+                        let knob = knob.to_lowercase().replace('_', "");
+                        knob.strip_suffix("dir").unwrap_or(&knob).to_string()
+                    }
+                    None => src.replace('\\', "/"),
+                }
+            })
+            .collect();
+        sources.sort();
+        sources
+    }
+
+    #[test]
+    fn script_block_body_skips_comments_and_stops_at_closing_brace() {
+        let script = "copy_tree() {\n  # find -prune\n  tar\n}\nfind . -name target -prune\n";
+        assert_eq!(script_block_body(script, "copy_tree() {"), ["  tar"]);
+        assert!(script_block_body(script, "missing() {").is_empty());
+    }
+
+    #[test]
+    fn copy_sources_normalizes_both_script_dialects() {
+        let sh = "copy_tree \"$CONTAINERS_DIR\" \"$DEST/c\"\ncopy_tree \"$REPO_ROOT/crates/pii-engine\" \"$DEST/p\"\n  copy_tree nested\n";
+        let ps1 =
+            "Copy-Tree $containersDir \"$dest\\c\"\nCopy-Tree crates\\pii-engine \"$dest\\p\"\n";
+        assert_eq!(
+            copy_sources(sh, "copy_tree "),
+            ["containers", "crates/pii-engine"]
+        );
+        assert_eq!(
+            copy_sources(ps1, "Copy-Tree "),
+            ["containers", "crates/pii-engine"]
+        );
+    }
+
     #[test]
     fn host_build_output_dirs_align_with_bundle_scripts_and_dockerignore() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -977,10 +1030,10 @@ mod tests {
             );
         }
 
-        let ps1_lines: Vec<&str> = ps1.lines().filter(|l| l.contains(" -in ")).collect();
+        let ps1_lines: Vec<&str> = ps1.lines().filter(|l| l.contains(" -cin ")).collect();
         assert!(
             !ps1_lines.is_empty(),
-            "-in exclusion line should exist in .ps1"
+            "case-sensitive -cin exclusion line should exist in .ps1"
         );
         for line in ps1_lines {
             let mut names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
@@ -990,6 +1043,29 @@ mod tests {
                 "bundle-build-context.ps1 exclusion must match HOST_BUILD_OUTPUT_DIRS: {line}"
             );
         }
+        let sh_body = script_block_body(&sh, "copy_tree() {");
+        assert!(
+            sh_body.iter().any(|l| l.contains("-prune"))
+                && !sh_body.iter().any(|l| l
+                    .split_whitespace()
+                    .any(|t| t == "rm" || t == "-exec" || t == "-delete")),
+            "copy_tree() in bundle-build-context.sh must skip build outputs, never remove them: {sh_body:?}"
+        );
+        let ps1_body = script_block_body(&ps1, "function Copy-Tree {");
+        assert!(
+            ps1_body.iter().any(|l| l.contains(" -cin "))
+                && !ps1_body
+                    .iter()
+                    .any(|l| l.contains("Remove-Item") || l.contains("-Recurse")),
+            "Copy-Tree in bundle-build-context.ps1 must skip build outputs, never copy recursively or remove: {ps1_body:?}"
+        );
+        let sh_sources = copy_sources(&sh, "copy_tree ");
+        let ps1_sources = copy_sources(&ps1, "Copy-Tree ");
+        assert!(
+            !sh_sources.is_empty() && sh_sources == ps1_sources,
+            "both bundle scripts must stage the same trees through their excluding copy: \
+             sh {sh_sources:?}, ps1 {ps1_sources:?}"
+        );
         for name in HOST_BUILD_OUTPUT_DIRS {
             assert!(
                 dockerignore
