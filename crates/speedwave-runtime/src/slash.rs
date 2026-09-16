@@ -195,13 +195,17 @@ fn lead_discovery(
         drop(guard);
         outcome
     } else {
-        let mut res = slot.result.lock().unwrap_or_else(|p| p.into_inner());
-        while res.is_none() {
-            res = slot.ready.wait(res).unwrap_or_else(|p| p.into_inner());
-        }
-        res.clone()
-            .unwrap_or_else(|| Err("discovery leader failed".to_string()))
+        follow_slot(&slot)
     }
+}
+
+fn follow_slot(slot: &InFlightSlot) -> Result<RawDiscovery, String> {
+    let mut res = slot.result.lock().unwrap_or_else(|p| p.into_inner());
+    while res.is_none() {
+        res = slot.ready.wait(res).unwrap_or_else(|p| p.into_inner());
+    }
+    res.clone()
+        .unwrap_or_else(|| Err("discovery leader failed".to_string()))
 }
 
 /// Invalidates the cached discovery for one project. Call on plugin
@@ -1663,9 +1667,13 @@ mod tests {
         started_rx
             .recv()
             .expect("leader must signal it has started");
-        let follower_project = project.clone();
-        let follower =
-            std::thread::spawn(move || lead_discovery(&follower_project, || unreachable!()));
+        let slot = in_flight_map()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&project)
+            .expect("leader must have registered before signaling started")
+            .clone();
+        let follower = std::thread::spawn(move || follow_slot(&slot));
         drop(release_tx);
         assert!(leader.join().is_err(), "leader must have panicked");
         let res = follower.join().unwrap();
