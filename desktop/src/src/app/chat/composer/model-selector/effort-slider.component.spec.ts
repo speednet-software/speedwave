@@ -246,4 +246,21 @@ describe('EffortSliderComponent', () => {
     setInputs(NO_XHIGH_STOPS, 'xhigh');
     expect(slider().getAttribute('aria-valuenow')).toBe('0');
   });
+
+  it('ignores a non-primary button press: a following move over the track leaves the level unchanged and emits nothing', () => {
+    setInputs(FULL_STOPS, 'low');
+    const emitted: string[] = [];
+    fixture.componentInstance.levelSelected.subscribe((l) => emitted.push(l));
+    mockTrackRect();
+
+    const handle = slider();
+    handle.dispatchEvent(new PointerEvent('pointerdown', { clientX: 0, button: 2, pointerId: 1 }));
+    handle.dispatchEvent(new PointerEvent('pointermove', { clientX: 100, pointerId: 1 }));
+    fixture.detectChanges();
+    expect(handle.getAttribute('aria-valuetext')).toBe('Low');
+
+    handle.dispatchEvent(new PointerEvent('pointerup', { clientX: 100, pointerId: 1 }));
+    fixture.detectChanges();
+    expect(emitted).toEqual([]);
+  });
 });
