@@ -22,8 +22,6 @@ use tokio_tungstenite::WebSocketStream;
 use speedwave_runtime::consts;
 use speedwave_runtime::fs_perms as runtime_fs_perms;
 
-// ── Public types — auth / origin / subprotocol ─────────────────────────────
-
 /// How clients authenticate the WebSocket upgrade request.
 #[derive(Clone, Debug)]
 pub enum AuthScheme {
@@ -57,8 +55,6 @@ pub struct SubprotocolPolicy {
     pub accepted: &'static [&'static str],
 }
 
-// ── Pairing config ──────────────────────────────────────────────────────────
-
 /// Pairing-mode config. See ADR-063.
 #[derive(Clone, Debug)]
 pub struct PairingConfig {
@@ -80,8 +76,6 @@ pub enum RoleCollisionPolicy {
     /// Drop the older pending stream, accept the new one.
     EvictOlder,
 }
-
-// ── Config builder ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub enum ConnectionMode {
@@ -205,7 +199,6 @@ impl HostBridgeConfigBuilder {
             .lock_body
             .ok_or_else(|| anyhow::anyhow!("lock_body not set"))?;
 
-        // Mode/auth consistency
         match &mode {
             ConnectionMode::Endpoint => {
                 if self.auth.is_none() {
@@ -224,7 +217,6 @@ impl HostBridgeConfigBuilder {
             }
         }
 
-        // Origin policy / auth consistency
         if matches!(&origin_policy, OriginPolicy::AcceptIfAuthIsQueryParam) {
             let has_query_param = match &mode {
                 ConnectionMode::Endpoint => {
@@ -257,8 +249,6 @@ impl HostBridgeConfigBuilder {
     }
 }
 
-// ── Endpoint mode — handler ─────────────────────────────────────────────────
-
 pub type ConnectionHandler = Arc<
     dyn Fn(WebSocketStream<tokio::net::TcpStream>, ConnectionContext) -> BoxFuture<'static, ()>
         + Send
@@ -277,8 +267,6 @@ pub struct ConnectionContext {
     pub _matched_auth: AuthMatch,
     pub _shutdown: broadcast::Receiver<()>,
 }
-
-// ── Pairing mode — events ───────────────────────────────────────────────────
 
 pub type PairingEventCallback = Arc<dyn Fn(PairingEvent) + Send + Sync + 'static>;
 
@@ -307,8 +295,6 @@ pub enum PairingEvent {
         _peer_addr: SocketAddr,
     },
 }
-
-// ── Internal auth state ─────────────────────────────────────────────────────
 
 pub(crate) struct AuthState {
     token: String,
@@ -376,13 +362,9 @@ pub(crate) fn extract_query_param(query: &str, name: &str) -> Option<String> {
     None
 }
 
-// ── Bridge ───────────────────────────────────────────────────────────────────
-
 pub struct HostBridge {
     config: HostBridgeConfig,
     auth_state: Arc<Mutex<AuthState>>,
-    // Shared with the watchdog, which relocates a container-facing lock when the
-    // addressing mode flips mid-session (e.g. late mirrored detection) — ADR-080.
     lock_file_path: Arc<Mutex<PathBuf>>,
     tcp_port: u16,
     tcp_listener: Option<std::net::TcpListener>,
@@ -412,14 +394,10 @@ impl HostBridge {
     ) -> anyhow::Result<Self> {
         let listener = bind_with_retry(&config.name, opts.preferred_port)?;
         let port = listener.local_addr()?.port();
-        // The relay is ensured in start_inner, not here: a bridge dropped before start()
-        // (like the not-yet-written lock file below) must leave nothing to clean up.
         let token = load_or_create_persistent_token(opts.persistent_token_path.as_deref())?;
 
         let data_dir = consts::data_dir();
         let lock_dir = data_dir.join(format!("{}-bridge", &config.name));
-        // The lock filename carries the port its READER dials: container-read locks get
-        // the container-facing (relay) port under mirrored mode; host-read keep raw. ADR-080.
         let lock_file_path = lock_dir.join(lock_file_name(port, config.container_facing_lock));
 
         Ok(Self {
@@ -439,8 +417,6 @@ impl HostBridge {
     }
 
     pub fn lock_file_path(&self) -> PathBuf {
-        // A poisoned mutex must not collapse to `PathBuf::default()` ("") — stop() would
-        // then `remove_file("")` and the watchdog would write to "". Recover the value.
         self.lock_file_path
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -498,8 +474,6 @@ impl HostBridge {
             self.config.stale_probe_timeout,
             self.config.container_facing_lock,
         );
-        // Reach this loopback listener from containers under WSL2 mirrored mode via a
-        // guest-side relay (ADR-080; no-op off Windows/mirrored). Paired with stop().
         crate::mirror_relay::ensure_relay_for_port(self.tcp_port);
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -578,8 +552,6 @@ impl HostBridge {
                     }
                 };
                 rt.block_on(async move {
-                    // A WSL distro restart wipes the relay while this process survives —
-                    // re-ensure every ~6 ticks (async fire-and-forget, idempotent). ADR-080.
                     let relay_reensure_every = watchdog_interval * 6;
                     let mut last_relay_ensure = std::time::Instant::now();
                     loop {
@@ -637,7 +609,6 @@ impl HostBridge {
         if let Some(h) = self.watchdog_thread.take() {
             let _ = h.join();
         }
-        // Symmetric with the relay ensured at bind (ADR-080); no-op off Windows.
         crate::mirror_relay::remove_relay_for_port(self.tcp_port);
         match std::fs::remove_file(self.lock_file_path()) {
             Ok(()) => {}
@@ -688,8 +659,6 @@ fn relocate_lock_on_addressing_change(
     body_cb: &LockBodyBuilder,
     token: &str,
 ) {
-    // Resolve the addressing ONCE: a transient detection Err must not flap a live relay-port
-    // lock back to raw, and a re-resolve could see the cache flip mid-call (untranslating it).
     let Ok(addressing) = speedwave_runtime::compose::host_addressing() else {
         return;
     };
@@ -712,8 +681,6 @@ fn relocate_lock_on_addressing_change(
         );
         return;
     }
-    // New lock in place; retire the stale one. On removal failure keep the old tracked
-    // path so the next tick retries — advancing it would strand a second live lock.
     match std::fs::remove_file(&current) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -838,8 +805,6 @@ enum StartHandler {
     Pairing(Option<PairingEventCallback>),
 }
 
-// ── Endpoint accept loop ─────────────────────────────────────────────────────
-
 async fn run_endpoint_loop(
     listener: TcpListener,
     auth: Arc<Mutex<AuthState>>,
@@ -879,7 +844,6 @@ async fn run_endpoint_loop(
                 let outcome_cb = outcome.clone();
 
                 let ws_config = make_ws_config(config.max_frame_bytes);
-                // Err variant size dictated by tokio_tungstenite; threshold raised in clippy.toml.
                 let upgrade_result = tokio_tungstenite::accept_hdr_async_with_config(
                     stream,
                     move |req: &Request<()>, mut resp: Response<()>| {
@@ -957,8 +921,6 @@ struct HandshakeOutcome {
     query: Option<String>,
 }
 
-// ── Pairing accept loop ──────────────────────────────────────────────────────
-
 #[derive(Default)]
 struct PairingState {
     pending: HashMap<&'static str, PendingSlot>,
@@ -1022,12 +984,9 @@ async fn run_pairing_loop(
                 let outcome_cb = outcome.clone();
 
                 let ws_config = make_ws_config(config.max_frame_bytes);
-                // ErrorResponse layout fixed by tokio_tungstenite — see
-                // clippy.toml `result-large-err-threshold`.
                 let upgrade_result = tokio_tungstenite::accept_hdr_async_with_config(
                     stream,
                     move |req: &Request<()>, mut resp: Response<()>| {
-                        // 1. Auth — find the role whose scheme matches.
                         let Ok(auth_guard) = auth_for_cb.lock() else {
                             return Err(http_response(500, "auth state poisoned"));
                         };
@@ -1051,7 +1010,6 @@ async fn run_pairing_loop(
                             target: "host_bridge",
                             "pairing[{bridge_name_for_cb}] accept {peer_addr} as role '{role}'"
                         );
-                        // 2. Origin
                         if !check_origin(req, &origin_policy, &matched_auth) {
                             log::warn!(
                                 target: "host_bridge",
@@ -1059,7 +1017,6 @@ async fn run_pairing_loop(
                             );
                             return Err(http_response(403, "Forbidden origin"));
                         }
-                        // 3. Subprotocol
                         let selected = select_subprotocol(req, &subprotocol);
                         if let Some(sp) = selected {
                             resp.headers_mut().insert(
@@ -1067,7 +1024,6 @@ async fn run_pairing_loop(
                                 HeaderValue::from_static(sp),
                             );
                         }
-                        // 4. Collision check
                         let Ok(mut st) = state_for_cb.lock() else {
                             return Err(http_response(500, "pairing state poisoned"));
                         };
@@ -1109,7 +1065,6 @@ async fn run_pairing_loop(
                         let Ok(mut outcome_guard) = outcome_cb.lock() else {
                             return Err(http_response(500, "outcome state poisoned"));
                         };
-                        // matched_auth used only for origin check above
                         let _ = matched_auth;
                         *outcome_guard = Some(PairingHandshakeOutcome { role });
                         Ok(resp)
@@ -1239,14 +1194,11 @@ fn spawn_pending_slot_watcher(
     })
 }
 
-// ── Relay (Pairing mode) ─────────────────────────────────────────────────────
-
 async fn run_relay(
     streams: Vec<WebSocketStream<tokio::net::TcpStream>>,
     mut shutdown_rx: broadcast::Receiver<()>,
     max_frame_bytes: Option<usize>,
 ) -> String {
-    // Two streams only — generalize later if needed.
     let mut iter = streams.into_iter();
     let a = match iter.next() {
         Some(s) => s,
@@ -1312,13 +1264,10 @@ where
             _ => 0,
         };
         if len > max {
-            // Best-effort close 1009 on the receiver side; the bridge tears
-            // the pair down after we return OverSize.
             let _ = sink.close().await;
             return ForwardOutcome::OverSize;
         }
     }
-    // Forward Close frames too — they signal disconnect.
     let is_close = matches!(&msg, Message::Close(_));
     if let Err(e) = sink.send(msg).await {
         return ForwardOutcome::Error(e.to_string());
@@ -1328,8 +1277,6 @@ where
     }
     ForwardOutcome::Continue
 }
-
-// ── Handshake helpers (shared) ───────────────────────────────────────────────
 
 fn validate_request_auth_single(
     req: &Request<()>,
@@ -1376,7 +1323,6 @@ fn select_subprotocol(req: &Request<()>, policy: &SubprotocolPolicy) -> Option<&
 }
 
 fn http_response(code: u16, body: &str) -> ErrorResponse {
-    // Synthesize a 500 if the builder fails; the callback signature must stay infallible.
     Response::builder()
         .status(code)
         .body(Some(body.to_string()))
@@ -1391,8 +1337,6 @@ fn make_ws_config(max_frame_bytes: Option<usize>) -> WebSocketConfig {
     }
     cfg
 }
-
-// ── Lock file I/O ────────────────────────────────────────────────────────────
 
 pub(crate) fn write_lock_file_atomic(
     final_path: &Path,
@@ -1411,7 +1355,6 @@ pub(crate) fn write_lock_file_atomic(
         .write_all(serde_json::to_string_pretty(body)?.as_bytes())?;
     tmp.as_file_mut().flush()?;
 
-    // Atomic rename on Unix; on Windows tempfile uses ReplaceFile / MoveFileEx.
     tmp.persist(final_path)
         .map_err(|e| anyhow::anyhow!("persisting lock file: {e}"))?;
     Ok(())
@@ -1429,7 +1372,6 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration, container_facin
         Ok(e) => e,
         Err(_) => return,
     };
-    // Probe on the bind address; skip on failure to avoid deleting locks for live bridges.
     let bind: std::net::IpAddr = match speedwave_runtime::compose::host_bind_address() {
         Ok(addr) => match addr.parse() {
             Ok(ip) => ip,
@@ -1461,8 +1403,6 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration, container_facin
                 continue;
             }
         };
-        // The filename carries the READER-facing port — under mirrored that relay port has
-        // no host listener; probe the bind port it maps to or every live lock gets culled.
         let probe_port = if container_facing {
             speedwave_runtime::compose::host_bind_port_for_container_facing(name_port)
         } else {
@@ -1480,8 +1420,6 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration, container_facin
         }
     }
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
@@ -1529,8 +1467,6 @@ mod tests {
             .unwrap()
     }
 
-    // --- AuthState / constant_time_eq ---
-
     #[test]
     fn auth_state_valid_token() {
         let auth = AuthState::new("abc".to_string());
@@ -1552,8 +1488,6 @@ mod tests {
         assert!(constant_time_eq("", ""));
     }
 
-    // --- validate_bridge_name ---
-
     #[test]
     fn validate_bridge_name_ok() {
         assert!(validate_bridge_name("ide"));
@@ -1574,8 +1508,6 @@ mod tests {
         assert!(!validate_bridge_name(&"a".repeat(34)));
     }
 
-    // --- extract_query_param ---
-
     #[test]
     fn extract_query_param_basic() {
         assert_eq!(
@@ -1592,14 +1524,11 @@ mod tests {
 
     #[test]
     fn extract_query_param_no_plus_as_space() {
-        // RFC 3986 query: '+' is literal.
         assert_eq!(
             extract_query_param("token=a+b", "token"),
             Some("a+b".to_string())
         );
     }
-
-    // --- Config builder ---
 
     #[test]
     fn config_builder_endpoint_valid() {
@@ -1643,8 +1572,6 @@ mod tests {
 
     #[test]
     fn config_builder_origin_acceptifqueryparam_requires_queryparam_in_config() {
-        // Endpoint Header-only auth — Origin policy AcceptIfAuthIsQueryParam is
-        // nonsense (no QueryParam will ever match), so we reject.
         let err = HostBridgeConfig::builder("ide")
             .endpoint(AuthScheme::Header("h"))
             .origin_policy(OriginPolicy::AcceptIfAuthIsQueryParam)
@@ -1652,8 +1579,6 @@ mod tests {
             .build();
         assert!(err.is_err());
     }
-
-    // --- HostBridge::new ---
 
     #[test]
     fn new_assigns_port_and_token() {
@@ -1669,7 +1594,6 @@ mod tests {
         let cfg = endpoint_config("ide");
         let bridge = HostBridge::new(cfg).unwrap();
         let port = bridge.port();
-        // Re-binding the same port must fail because the listener is held.
         let second = std::net::TcpListener::bind(format!("127.0.0.1:{port}"));
         assert!(second.is_err(), "TOCTOU guard: listener must still be held");
         drop(bridge);
@@ -1687,8 +1611,6 @@ mod tests {
         );
         assert!(dbg.contains("REDACTED"));
     }
-
-    // --- HostBridge::new_with_options ---
 
     /// Reserve a free port. Caller drops the guard listener immediately
     /// before binding the bridge to minimize the TOCTOU window.
@@ -1798,8 +1720,6 @@ mod tests {
         assert_ne!(a.auth_token(), b.auth_token());
     }
 
-    // --- Origin policy ---
-
     fn req_with_origin(
         origin: Option<&str>,
         query: Option<&str>,
@@ -1852,7 +1772,6 @@ mod tests {
 
     #[test]
     fn origin_accept_if_query_param_blocks_browser_with_header_auth() {
-        // Header auth + Origin = forged combo (workers never set Origin).
         let req = req_with_origin(
             Some("https://example.com"),
             None,
@@ -1868,8 +1787,6 @@ mod tests {
             &matched
         ));
     }
-
-    // --- stale lock cleanup ---
 
     #[test]
     fn stale_lock_cleanup_removes_files_for_dead_ports() {
@@ -1904,8 +1821,6 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn stale_lock_cleanup_reverse_translates_container_facing_port() {
-        // Under mirrored mode the container-facing lock name carries the RELAY port (no host
-        // listener); cleanup must reverse-translate to the bind port or it culls live locks.
         let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
         let dir = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1921,7 +1836,6 @@ mod tests {
             "live container-facing lock must survive the reverse-translated probe"
         );
 
-        // Listener gone → the reverse-translated bind port is dead → lock is culled.
         drop(listener);
         cleanup_stale_lock_files(dir.path(), Duration::from_millis(200), true);
         assert!(
@@ -1929,8 +1843,6 @@ mod tests {
             "dead container-facing lock must be removed once the bind port stops listening"
         );
     }
-
-    // --- write_lock_file_atomic ---
 
     #[test]
     fn write_lock_file_atomic_writes_json() {
@@ -1969,8 +1881,6 @@ mod tests {
         }
     }
 
-    // --- start / stop lifecycle ---
-
     #[test]
     fn start_endpoint_in_pairing_config_bails() {
         let cfg = pairing_config("example-plugin");
@@ -1992,15 +1902,10 @@ mod tests {
     fn stop_is_idempotent_when_files_missing() {
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
-        // Never started — stop must succeed (no lock file to remove).
         bridge.stop().unwrap();
         bridge.stop().unwrap();
     }
 
-    // -------- Integration helpers --------
-
-    // Uses process-global `data_dir()`; do not mutate SPEEDWAVE_DATA_DIR
-    // here — the OnceLock is shared across the test binary.
     fn start_endpoint_for_test(
         cfg: HostBridgeConfig,
         handler: ConnectionHandler,
@@ -2054,14 +1959,11 @@ mod tests {
             .unwrap()
     }
 
-    // -------- Endpoint integration tests --------
-
     #[test]
     fn endpoint_header_auth_valid_token_accepted() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|mut ws, _ctx| {
             Box::pin(async move {
-                // Echo first message and close.
                 if let Some(Ok(msg)) = ws.next().await {
                     let _ = ws.send(msg).await;
                 }
@@ -2122,19 +2024,18 @@ mod tests {
     fn endpoint_context_exposes_path_query_matched_auth() {
         let cfg = endpoint_config("ide");
         type Snapshot = (
-            String,         // bridge_name
-            SocketAddr,     // peer_addr
-            String,         // path
-            Option<String>, // query
-            Option<String>, // selected_subprotocol
-            AuthMatch,      // matched_auth
+            String,
+            SocketAddr,
+            String,
+            Option<String>,
+            Option<String>,
+            AuthMatch,
         );
         let observed: Arc<Mutex<Option<Snapshot>>> = Arc::new(Mutex::new(None));
         let observed_clone = observed.clone();
         let handler: ConnectionHandler = Arc::new(move |mut ws, mut ctx| {
             let observed = observed_clone.clone();
             Box::pin(async move {
-                // `shutdown` is a broadcast receiver — resubscribe instead of cloning.
                 let _shutdown_alive = ctx._shutdown.try_recv().is_err();
                 *observed.lock().unwrap() = Some((
                     ctx.bridge_name.clone(),
@@ -2157,7 +2058,6 @@ mod tests {
                 make_client_request(port, Some("foo=bar"), Some(("x-test-auth", &token)), None);
             let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
             ws.close(None).await.ok();
-            // Give the handler a moment to record the context.
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
 
@@ -2219,7 +2119,6 @@ mod tests {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|mut ws, mut ctx| {
             Box::pin(async move {
-                // Wait for shutdown signal, then close.
                 let _ = ctx._shutdown.recv().await;
                 let _ = ws.close(None).await;
             })
@@ -2232,9 +2131,7 @@ mod tests {
         rt.block_on(async move {
             let req = make_client_request(port, None, Some(("x-test-auth", &token)), None);
             let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
-            // Stop the bridge — the handler should observe shutdown and close.
             bridge.stop().unwrap();
-            // Read until close.
             let res = tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(msg) = ws.next().await {
                     if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
@@ -2246,8 +2143,6 @@ mod tests {
             assert!(res.is_ok(), "client must observe close within 2s");
         });
     }
-
-    // -------- Pairing integration tests --------
 
     #[test]
     fn pairing_two_different_roles_get_paired_and_relay() {
@@ -2264,11 +2159,9 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            // Worker uses header auth.
             let worker_req =
                 make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (mut worker, _) = tokio_tungstenite::connect_async(worker_req).await.unwrap();
-            // Plugin uses query param.
             let plugin_req = make_client_request(
                 port,
                 Some(&format!("token={token}")),
@@ -2277,7 +2170,6 @@ mod tests {
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
-            // Worker → Plugin
             worker
                 .send(Message::Text("from-worker".into()))
                 .await
@@ -2285,7 +2177,6 @@ mod tests {
             let got = plugin.next().await.unwrap().unwrap();
             assert_eq!(got.into_text().unwrap(), "from-worker");
 
-            // Plugin → Worker
             plugin
                 .send(Message::Text("from-plugin".into()))
                 .await
@@ -2293,7 +2184,6 @@ mod tests {
             let got = worker.next().await.unwrap().unwrap();
             assert_eq!(got.into_text().unwrap(), "from-plugin");
 
-            // Cleanly close
             worker.close(None).await.ok();
             plugin.close(None).await.ok();
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2360,7 +2250,6 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            // Fill the pair: worker + plugin.
             let worker_req =
                 make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let (_worker, _) = tokio_tungstenite::connect_async(worker_req).await.unwrap();
@@ -2371,15 +2260,12 @@ mod tests {
                 Some("https://example.com"),
             );
             let (_plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
-            // Wait for pairing to set `active`.
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // Third connection: must be rejected with HTTP 409.
             let third_req =
                 make_client_request(port, None, Some(("x-test-worker-auth", &token)), None);
             let res = tokio_tungstenite::connect_async(third_req).await;
             assert!(res.is_err(), "third connection must be rejected");
-            // It must be an HTTP 409 (pre-handshake) — not a WS close frame.
             let err_str = format!("{:?}", res.err().unwrap());
             assert!(
                 err_str.contains("409"),
@@ -2423,9 +2309,7 @@ mod tests {
             );
             let (mut plugin, _) = tokio_tungstenite::connect_async(plugin_req).await.unwrap();
 
-            // Plugin disconnects.
             plugin.close(None).await.ok();
-            // Worker should observe the relay closing within a short window.
             let res = tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(msg) = worker.next().await {
                     if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
@@ -2440,7 +2324,6 @@ mod tests {
 
     #[test]
     fn lock_body_builder_called_with_correct_context() {
-        // Use a builder that captures the args via shared state.
         let captured: Arc<Mutex<Option<(u16, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
         let cfg = HostBridgeConfig::builder("ide")
@@ -2463,8 +2346,6 @@ mod tests {
         bridge.stop().unwrap();
     }
 
-    // ─── Plan-required tests: lifecycle + state ───────────────────────────────
-
     #[test]
     fn start_twice_returns_error() {
         let cfg = endpoint_config("ide");
@@ -2483,10 +2364,7 @@ mod tests {
     fn drop_calls_stop() {
         let cfg = endpoint_config("ide");
         let bridge = HostBridge::new(cfg).unwrap();
-        // Lock file is written in start_endpoint, not new — but Drop still
-        // calls stop() which is idempotent on a never-started bridge.
         drop(bridge);
-        // Test passes if no panic; idempotent stop verified separately.
     }
 
     #[test]
@@ -2504,7 +2382,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_rolls_back_on_lock_file_write_failure() {
-        // Parent is a regular file, so the tempfile create fails and start_endpoint rolls back.
         let tmp = tempfile::tempdir().unwrap();
         let file_path = tmp.path().join("not-a-dir");
         std::fs::write(&file_path, b"sentinel").unwrap();
@@ -2513,15 +2390,12 @@ mod tests {
             res.is_err(),
             "write_lock_file_atomic must fail when parent is a file"
         );
-        // Sanity: the would-be lock file was not created.
         assert!(!file_path.join("inner.lock").exists());
-        // Sanity: the sentinel file untouched.
         assert_eq!(std::fs::read(&file_path).unwrap(), b"sentinel");
     }
 
     #[test]
     fn start_writes_lock_file_atomic_via_named_temp_file() {
-        // Asserts the lock file appears; content + mode are checked in dedicated tests.
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
@@ -2535,8 +2409,6 @@ mod tests {
         );
         bridge.stop().unwrap();
     }
-
-    // ─── Plan-required tests: endpoint mode ──────────────────────────────────
 
     #[test]
     fn endpoint_two_clients_concurrent() {
@@ -2576,7 +2448,6 @@ mod tests {
 
     #[test]
     fn endpoint_max_frame_close_1009() {
-        // 1 KiB cap forces an oversize close on a 2 KiB message.
         let cfg = HostBridgeConfig::builder("ide")
             .endpoint(AuthScheme::Header("x-test-auth"))
             .origin_policy(OriginPolicy::RejectIfPresent)
@@ -2599,10 +2470,7 @@ mod tests {
         rt.block_on(async move {
             let req = make_client_request(port, None, Some(("x-test-auth", &token)), None);
             let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
-            // 2 KiB > 1 KiB cap → server tears down with close 1009.
             let payload = "x".repeat(2048);
-            // send may succeed or fail depending on flush timing; we just
-            // want to see the server-initiated close on the read side.
             let _ = ws.send(Message::Text(payload.into())).await;
             let saw_close = tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(msg) = ws.next().await {
@@ -2631,8 +2499,6 @@ mod tests {
             "stop() must join accept thread within 1s, took {elapsed:?}"
         );
     }
-
-    // ─── Plan-required tests: pairing role matching ──────────────────────────
 
     #[test]
     fn pairing_role_match_header_worker() {
@@ -2699,8 +2565,6 @@ mod tests {
             "plugin role must match via query param, got events {evts:?}"
         );
     }
-
-    // ─── Plan-required tests: pairing relay correctness ──────────────────────
 
     #[test]
     fn pairing_relay_text_frames() {
@@ -2821,7 +2685,6 @@ mod tests {
                 _ => "other",
             })
             .collect();
-        // Order: at least two slot before paired before closed.
         let paired_idx = kinds.iter().position(|k| *k == "paired");
         let closed_idx = kinds.iter().position(|k| *k == "closed");
         assert!(paired_idx.is_some(), "expected Paired in {kinds:?}");
@@ -2829,11 +2692,8 @@ mod tests {
         assert!(paired_idx.unwrap() < closed_idx.unwrap());
     }
 
-    // ─── Plan-required tests: collision policies + race fix ──────────────────
-
     #[test]
     fn pairing_rejects_same_role_with_409() {
-        // Use Reject policy for this test.
         let roles = HashMap::from([
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
@@ -2864,7 +2724,6 @@ mod tests {
 
         let rt = tokio_rt();
         rt.block_on(async move {
-            // First worker — accepted as pending.
             let (_first, _) = tokio_tungstenite::connect_async(make_client_request(
                 port,
                 None,
@@ -2874,7 +2733,6 @@ mod tests {
             .await
             .unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
-            // Second worker — must be rejected with HTTP 409.
             let res = tokio_tungstenite::connect_async(make_client_request(
                 port,
                 None,
@@ -2989,7 +2847,6 @@ mod tests {
             .await;
             assert!(res.is_err());
             let err = format!("{:?}", res.err().unwrap());
-            // Pre-handshake error carries HTTP 409, not a tungstenite Close frame.
             assert!(err.contains("409"), "must be HTTP 409, got: {err}");
             assert!(
                 !err.contains("1008"),
@@ -3000,15 +2857,12 @@ mod tests {
 
     #[test]
     fn pairing_pair_id_generation_prevents_stale_active_clear() {
-        // A relay task that finishes after a *new* pair was activated must
-        // NOT clear `active`. We exercise this by walking the state manually.
         let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
         let port = bridge.port();
         let token = bridge.auth_token();
         let rt = tokio_rt();
         rt.block_on(async move {
-            // First pair: connect both sides, then close — `active` returns to None.
             let (mut w1, _) = tokio_tungstenite::connect_async(make_client_request(
                 port,
                 None,
@@ -3030,8 +2884,6 @@ mod tests {
             p1.close(None).await.ok();
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            // Second pair: NEW pair_id. The relay task from the first pair
-            // (which has already exited) MUST NOT clear the active record.
             let (_w2, _) = tokio_tungstenite::connect_async(make_client_request(
                 port,
                 None,
@@ -3050,7 +2902,6 @@ mod tests {
             .unwrap();
             tokio::time::sleep(Duration::from_millis(150)).await;
 
-            // Now a third connection must see PairBusy (active still set).
             let res = tokio_tungstenite::connect_async(make_client_request(
                 port,
                 None,
@@ -3072,7 +2923,6 @@ mod tests {
 
     #[test]
     fn pairing_max_frame_violation_closes_pair_1009() {
-        // 256 B frame cap; sending 1 KiB tears down the pair.
         let roles = HashMap::from([
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
@@ -3110,11 +2960,8 @@ mod tests {
             .await
             .unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
-            // 1 KiB > 256 B cap. The send may succeed at the client side
-            // (tungstenite framing); the server detects oversize and tears down.
             let payload = "x".repeat(1024);
             let _ = worker.send(Message::Text(payload.into())).await;
-            // Both sides must observe close within the window.
             let plugin_closed = tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(msg) = plugin.next().await {
                     if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
@@ -3129,11 +2976,8 @@ mod tests {
         });
     }
 
-    // ─── Plan-required tests: pending slot timeout + watchdog ───────────────
-
     #[test]
     fn pending_slot_timeout_clears_slot() {
-        // 1s timeout + 250ms check interval (timeout/4).
         let roles = HashMap::from([
             ("worker", AuthScheme::Header("x-test-worker-auth")),
             ("plugin", AuthScheme::QueryParam("token")),
@@ -3158,7 +3002,6 @@ mod tests {
         let token = bridge.auth_token();
         let rt = tokio_rt();
         rt.block_on(async move {
-            // Only one side connects; the other never arrives.
             let (_solo, _) = tokio_tungstenite::connect_async(make_client_request(
                 port,
                 None,
@@ -3167,7 +3010,6 @@ mod tests {
             ))
             .await
             .unwrap();
-            // check_interval = max(timeout/4, 1s) = 1s; wait through 2 ticks to age the slot out.
             tokio::time::sleep(Duration::from_millis(2500)).await;
         });
         let evts = events.lock().unwrap().clone();
@@ -3187,13 +3029,9 @@ mod tests {
         use crate::mirror_relay::recorder::{calls_for_port, RelayOp};
 
         let mut cfg = endpoint_config("relay-lifecycle");
-        // Watchdog re-ensures every `watchdog_interval * 6`; shrink it so the test
-        // observes at least one re-ensure quickly.
         cfg.watchdog_interval = Duration::from_millis(50);
         let mut bridge = HostBridge::new(cfg).unwrap();
         let port = bridge.port();
-        // The recorder is process-global: skip residue another test's bridge left on a
-        // reused ephemeral port (impossible after this point — the port is bound by us).
         let baseline = calls_for_port(port).len();
         let ops = move || calls_for_port(port).split_off(baseline);
 
@@ -3225,7 +3063,6 @@ mod tests {
 
     #[test]
     fn container_facing_lock_flag_defaults_off_and_plumbs_through() {
-        // Default: host-facing bridges keep the raw bind port in the lock filename.
         let default = HostBridgeConfig::builder("figma-x")
             .endpoint(AuthScheme::Header("x-test"))
             .origin_policy(OriginPolicy::RejectIfPresent)
@@ -3237,7 +3074,6 @@ mod tests {
             "default must be host-facing (raw port)"
         );
 
-        // Opt-in (IDE bridge): lock filename uses the container-facing (relay) port.
         let ide = HostBridgeConfig::builder("ide")
             .endpoint(AuthScheme::Header("x-test"))
             .origin_policy(OriginPolicy::RejectIfPresent)
@@ -3267,7 +3103,6 @@ mod tests {
             "container-facing lock must carry the relay port Claude Code dials"
         );
 
-        // Host-facing bridges keep the raw bind port even under mirrored mode.
         let host_facing = HostBridge::new(endpoint_config("figma-x")).unwrap();
         assert_eq!(
             host_facing
@@ -3282,8 +3117,6 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn watchdog_relocates_container_facing_lock_after_addressing_flip() {
-        // Bind while addressing resolves Direct (e.g. WSL detection failed at startup):
-        // the lock carries the raw port.
         let _direct = speedwave_runtime::compose::pin_direct_addressing(
             speedwave_runtime::consts::LIMA_VZ_HOST_IP,
         );
@@ -3296,8 +3129,6 @@ mod tests {
         let old_path = bridge.lock_file_path();
         assert!(old_path.exists(), "raw-port lock written at start");
 
-        // Detection later resolves mirrored: the watchdog must move the lock to the
-        // relay-port filename, or Claude Code dials a dead port all session (ADR-080).
         let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
         let relay = speedwave_runtime::compose::mirror_relay_port(bridge.port())
             .expect("mirrored pin must yield a relay port");
@@ -3326,8 +3157,6 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn relocate_skips_while_addressing_unresolvable() {
-        // The load-bearing early return: a transient detection Err must NOT flap a live
-        // relay-port lock back to the raw port (the WSL-restart case this exists for).
         struct FailingComputer;
         impl speedwave_runtime::compose::HostAddressingComputer for FailingComputer {
             fn compute(&self) -> anyhow::Result<speedwave_runtime::compose::HostAddressing> {
@@ -3360,7 +3189,6 @@ mod tests {
     fn relocate_moves_raw_lock_to_relay_name_on_mirrored_flip() {
         let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
         let dir = tempfile::tempdir().unwrap();
-        // Simulate a lock written earlier under Direct (raw bind-port filename).
         let raw = dir.path().join("60123.lock");
         std::fs::write(&raw, "{}").unwrap();
         let lock_path = Arc::new(Mutex::new(raw.clone()));
@@ -3386,23 +3214,18 @@ mod tests {
         let path = dir.path().join("12345.lock");
         let body = serde_json::json!({"sentinel": true, "port": 12345});
 
-        // Initial write (mirrors `start()`).
         write_lock_file_atomic(&path, &body).unwrap();
         assert!(path.exists());
 
-        // Simulate the lock file being deleted (e.g. by a container restart).
         std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
 
-        // Watchdog loop calls write_lock_file_atomic on every tick where
-        // path.exists() is false. Exercising the same call path here:
         write_lock_file_atomic(&path, &body).unwrap();
         assert!(
             path.exists(),
             "watchdog recovery path must recreate lock file"
         );
 
-        // Verify perms still 0o600 on Unix (atomic-write preserves mode).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

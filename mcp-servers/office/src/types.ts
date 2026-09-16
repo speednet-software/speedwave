@@ -29,8 +29,6 @@ export interface ReadResult {
   engine: string;
 }
 
-// ── Chart DSL (renderChart) ──────────────────────────────────────────────────
-
 /** Supported standalone-chart kinds for {@link ChartSpec}. */
 export type ChartType = 'bar' | 'line' | 'pie' | 'scatter' | 'area';
 
@@ -67,8 +65,6 @@ export interface ChartSpec {
   };
 }
 
-// ── Word DSL (createDocx / editDocx) ─────────────────────────────────────────
-
 /** A single content element in a `.docx` spec. */
 export type DocxElement =
   | { type: 'heading'; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
@@ -88,8 +84,6 @@ export type DocxOp =
   | { op: 'append'; element: DocxElement }
   | { op: 'replace_text'; find: string; replace: string }
   | { op: 'delete_paragraph'; index: number };
-
-// ── Excel DSL (createXlsx / editXlsx) ────────────────────────────────────────
 
 /** Supported native-chart kinds inside an `.xlsx`. */
 export type XlsxChartType = 'bar' | 'line' | 'pie' | 'scatter';
@@ -132,8 +126,6 @@ export type XlsxOp =
   | { op: 'set_formula'; sheet: string; cell: string; formula: string }
   | { op: 'add_sheet'; name: string }
   | { op: 'add_chart'; sheet: string; chart: XlsxChart };
-
-// ── PowerPoint DSL (createPptx / editPptx) ───────────────────────────────────
 
 /** Supported native-chart kinds inside a `.pptx`. */
 export type PptxChartType = 'column' | 'line' | 'pie' | 'xy' | 'bubble';

@@ -8,8 +8,6 @@ import { errorResult } from './server.js';
 import { notConfiguredMessage } from './errors.js';
 import { missingParamResult } from './teaching-errors.js';
 
-// ── Family A — param-shape guard + ToolResult formatting (slack / sharepoint / os) ──
-
 /** Standardized result returned by Family-A tool handlers. */
 export interface ToolResult {
   /** Whether the tool execution succeeded. */
@@ -104,8 +102,6 @@ export function withResultValidation<T>(
     }
   };
 }
-
-// ── Family B — null-client gate + error mapping (github / gitlab / atlassian) ──
 
 /** Options for {@link withClientValidation}. */
 export interface ClientValidationOptions {

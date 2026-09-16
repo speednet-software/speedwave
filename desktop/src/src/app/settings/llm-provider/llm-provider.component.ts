@@ -660,9 +660,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const id = await this.tauri.invoke<string>('get_openrouter_default_model');
       this.openrouterDefaultModel.set(id);
       this.cdr.markForCheck();
-    } catch {
-      // Not in Tauri (browser dev mode) — the success line simply omits the id.
-    }
+    } catch {}
   }
 
   /** Tears down the external-login watcher (poll + focus listener). */
@@ -877,9 +875,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         if (freshDefault) {
           this.defaultBaseUrlsByProvider[provider] = freshDefault;
         }
-      } catch {
-        // Not in Tauri or unknown provider — cache stays empty for this provider.
-      }
+      } catch {}
     }
     const defaultBaseUrl = this.defaultBaseUrlsByProvider[provider] ?? '';
     this.defaultBaseUrl.set(defaultBaseUrl);
@@ -966,9 +962,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       this.apiKeyConfigured.set(status.api_key_configured);
       this.oauthAuthenticated.set(status.oauth_authenticated);
       this.projectState.applyAuthStatus(status);
-    } catch {
-      // Auth status check failed — container may not be running.
-    }
+    } catch {}
     this.cdr.markForCheck();
   }
 

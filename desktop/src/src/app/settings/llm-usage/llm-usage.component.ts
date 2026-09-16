@@ -461,7 +461,6 @@ export class LlmUsageComponent implements OnDestroy {
    * @param bucket - the usage bucket to compute throughput for
    */
   tokensPerSec(bucket: UsageBucket): number | null {
-    // Falsy guard also covers payloads from a binary without this field.
     if (!bucket.decode_latency_ms_sum) return null;
     return bucket.throughput_completion_tokens / (bucket.decode_latency_ms_sum / 1000);
   }

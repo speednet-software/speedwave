@@ -104,7 +104,6 @@ export class UpdateNotificationComponent implements OnDestroy {
         this.cdr.markForCheck();
       });
 
-      // Proactive check: backend returns tagged outcome, only 'update_available' surfaces.
       const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
       if (outcome.kind === 'update_available') {
         const { kind: _kind, ...info } = outcome;
@@ -113,9 +112,7 @@ export class UpdateNotificationComponent implements OnDestroy {
         this.checkContainers();
         this.cdr.markForCheck();
       }
-    } catch {
-      // Not running inside Tauri
-    }
+    } catch {}
   }
 
   private async checkContainers(): Promise<void> {

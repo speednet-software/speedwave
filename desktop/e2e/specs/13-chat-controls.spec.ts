@@ -31,11 +31,8 @@ describe('Chat Controls', function () {
   it('starts a fresh conversation', async function () {
     this.timeout(180_000);
     await startNewConversation();
-    // A brand-new session accepts a message and streams a reply.
     await sendMessageAndWait('Say hello in one word.');
-    const messages = await $$(
-      '[data-testid="chat-message"][data-role="assistant"]'
-    ).getElements();
+    const messages = await $$('[data-testid="chat-message"][data-role="assistant"]').getElements();
     expect(messages.length).toBeGreaterThan(0);
   });
 
@@ -45,15 +42,12 @@ describe('Chat Controls', function () {
     await waitForTurnStart();
 
     await (await $('[data-testid="chat-stop"]')).click();
-    // After stop, the turn ends: send button returns, stop button gone.
     await waitForTurnComplete(30_000);
     expect(await $('[data-testid="chat-stop"]').isExisting()).toBe(false);
   });
 
   it('stops a streaming turn with the Escape key', async function () {
     this.timeout(120_000);
-    // Esc goes through the document-level handler in chat.component, a
-    // separate code path from the chat-stop button click.
     await sendMessageNoWait(LONG_STREAM_PROMPT);
     await waitForTurnStart();
 
@@ -67,13 +61,10 @@ describe('Chat Controls', function () {
     await sendMessageNoWait(LONG_STREAM_PROMPT);
     await waitForTurnStart();
 
-    // While streaming, the send button is replaced by Stop — Enter is the only
-    // submit path, and ADR-045 routes it to the queue instead of a new turn.
     await queueMessageViaEnter('This one should be queued.');
     await $('[data-testid="composer-queued"]').waitForExist({ timeout: 10_000 });
     expect(await $('[data-testid="composer-queued-text"]').isExisting()).toBe(true);
 
-    // Cancel the queued message, then let the active turn finish.
     await (await $('[data-testid="composer-queued-cancel"]')).click();
     await $('[data-testid="composer-queued"]').waitForExist({ timeout: 10_000, reverse: true });
     await waitForTurnComplete();
@@ -81,8 +72,6 @@ describe('Chat Controls', function () {
 
   it('dispatches the queued message as the next turn (ADR-045)', async function () {
     this.timeout(300_000);
-    // Fresh conversation on purpose: a FIRST-turn queue needs the SystemInit
-    // session-id seed (it used to be dropped until the first Result).
     await startNewConversation();
     await sendMessageNoWait(LONG_STREAM_PROMPT);
     await waitForTurnStart();
@@ -90,8 +79,6 @@ describe('Chat Controls', function () {
     await queueMessageViaEnter('Reply with exactly the single word ACK.');
     await $('[data-testid="composer-queued"]').waitForExist({ timeout: 10_000 });
 
-    // Turn 1 ends → backend drains the slot to stdin with no user action:
-    // the chip disappears and the queued text becomes the next user message.
     await $('[data-testid="composer-queued"]').waitForExist({
       timeout: 240_000,
       reverse: true,
@@ -115,8 +102,6 @@ describe('Chat Controls', function () {
     await input.waitForExist({ timeout: 15_000 });
     await input.setValue('/');
 
-    // Discovery is container-backed (list_slash_commands); core skills are
-    // always linked, so at least one item must appear.
     await $('[data-testid="slash-menu"]').waitForExist({ timeout: 15_000 });
     await browser.waitUntil(
       async () => (await $$('[data-testid="slash-menu-item"]').getElements()).length > 0,
@@ -127,15 +112,11 @@ describe('Chat Controls', function () {
     await items[0].click();
     await $('[data-testid="slash-menu"]').waitForExist({ timeout: 10_000, reverse: true });
 
-    // Selection replaces the token with "/<name> " (trailing space, caret after).
     const value = await input.getValue();
     expect(value).toMatch(/^\/\S+ $/);
 
-    // Clear the composer so later tests start from an empty input.
     await browser.execute(() => {
-      const ta = document.querySelector(
-        '[data-testid="chat-input"]'
-      ) as HTMLTextAreaElement | null;
+      const ta = document.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement | null;
       if (!ta) return;
       ta.value = '';
       ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -147,8 +128,6 @@ describe('Chat Controls', function () {
     const input = await $('[data-testid="chat-input"]');
     await input.waitForExist({ timeout: 15_000 });
 
-    // WebDriver cannot drive the OS clipboard — dispatch a synthetic paste
-    // event carrying a real PNG File, which reaches the same handler.
     await browser.execute(() => {
       const ta = document.querySelector('[data-testid="chat-input"]');
       if (!ta) return;
@@ -168,8 +147,6 @@ describe('Chat Controls', function () {
       timeoutMsg: 'attachment strip never appeared after the synthetic paste',
     });
 
-    // The preview thumbnail is a blob: URL — a broken image here is the CSP
-    // img-src regression this test exists to catch.
     await browser.waitUntil(
       async () =>
         await browser.execute(() => {

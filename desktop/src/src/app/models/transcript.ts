@@ -1,6 +1,3 @@
-// Mirror of speedwave_runtime::transcription's serde types. Rust derives
-// `#[serde(rename_all = "snake_case")]` everywhere — field names match.
-
 /** PL/EN (forced; never auto-detected). */
 export type Language = 'pl' | 'en';
 

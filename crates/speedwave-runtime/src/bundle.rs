@@ -70,7 +70,6 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // `oauth` worker (ADR-060): host process like `mcp-os`, not in `build::IMAGES`.
     BundledAssetSpec {
         path: "oauth/oauth/dist/index.js",
         kind: BundledAssetKind::File,
@@ -159,8 +158,6 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "cli/speedwave.exe",
         kind: BundledAssetKind::File,
     },
-    // The Vulkan loader must sit next to the exe: the whisper Vulkan backend is a load-time
-    // import and ggml touches it on every whisper init (ADR-085). Same path staged + installed.
     BundledAssetSpec {
         path: "vulkan-1.dll",
         kind: BundledAssetKind::File,
@@ -277,7 +274,6 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
         let manifest: BundleManifest = serde_json::from_str(&data)?;
-        // Pre-ADR-072 manifest (no per-image hashes) — regenerate from the tree.
         if !manifest.image_hashes.is_empty() {
             return Ok(manifest);
         }
@@ -288,17 +284,16 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
-    .map_err(|e| {
-        // An older Desktop's tree lacks new image inputs — name the real remedy.
-        match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+    .map_err(
+        |e| match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
             Some(v) => anyhow::anyhow!(
                 "installed Desktop resources are v{v} but this binary is v{}: {e}. \
                  Update Speedwave Desktop, then run `speedwave update`.",
                 env!("CARGO_PKG_VERSION")
             ),
             None => e,
-        }
-    })
+        },
+    )
 }
 
 /// App version stamped in the on-disk manifest; `None` when absent/unreadable.
@@ -319,7 +314,6 @@ pub fn generate_bundle_manifest(
     claude_version: &str,
     build_root: &Path,
 ) -> anyhow::Result<BundleManifest> {
-    // Each distinct input is hashed once (mcp-servers/shared feeds every worker).
     let mut component_cache: std::collections::HashMap<&str, String> =
         std::collections::HashMap::new();
     let mut image_hashes = std::collections::BTreeMap::new();
@@ -719,7 +713,6 @@ fn collect_directory_entries(
     if !dir.exists() {
         anyhow::bail!("Missing path for bundle digest: {}", dir.display());
     }
-    // Reject symlinks: the copier dereferences them, changing content without changing the hash.
     if dir.is_symlink() {
         anyhow::bail!(
             "symlink not allowed in image hash inputs: {}",
@@ -745,7 +738,6 @@ fn collect_directory_entries(
         {
             continue;
         }
-        // Reject symlinks: the copier dereferences them, changing content without changing the hash.
         if child.is_symlink() {
             anyhow::bail!(
                 "symlink not allowed in image hash inputs: {}",
@@ -777,7 +769,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
-            // fsync each file — staging→target rename must not outlive the data (torn-write).
             let file = std::fs::File::open(&dst_path)
                 .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
             crate::fs_perms::fsync_file_durable(&file)
@@ -824,8 +815,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Missing path for bundle digest"), "{err}");
-        // Separator-insensitive: the message mixes native joins with the
-        // POSIX-relative input on Windows.
         let norm = err.replace('\\', "/");
         let direct = tmp.path().join("crates/pii-engine");
         let vendored = tmp.path().join("containers/crates/pii-engine");
@@ -880,7 +869,6 @@ mod tests {
         let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
             .expect("containers/.dockerignore should exist");
 
-        // .sh prune: `\( -name target -o -name dist -o -name node_modules \) -prune`
         let sh_line = sh
             .lines()
             .find(|l| l.contains("-prune"))
@@ -893,7 +881,6 @@ mod tests {
             .collect();
         sh_names.sort_unstable();
 
-        // .ps1 prune: `if ($dir.Name -in 'target', 'dist', 'node_modules') {`
         let ps1_line = ps1
             .lines()
             .find(|l| l.contains(" -in "))
@@ -943,7 +930,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn collect_directory_entries_skips_node_modules_with_bin_symlink() {
-        // node_modules/.bin/<tool> symlinks must be skipped, not bailed on.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
         std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
@@ -965,7 +951,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn collect_directory_entries_skips_nested_node_modules() {
-        // The skip applies at every recursion depth, not just the top level.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
         let nested = dir.join("packages/pkg/node_modules/.bin");
@@ -983,8 +968,6 @@ mod tests {
 
     #[test]
     fn collect_directory_entries_skips_target_and_dist_directories() {
-        // target/ is .dockerignore'd, dist/ is rebuilt in-image (never a context
-        // COPY source) — both are host build outputs racing parallel test lanes.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("proxy");
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1007,7 +990,6 @@ mod tests {
 
     #[test]
     fn collect_directory_entries_keeps_files_named_target_or_dist() {
-        // The skip is directory-gated: plain FILES with these names are content.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("svc");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1022,8 +1004,6 @@ mod tests {
 
     #[test]
     fn target_and_dist_changes_do_not_alter_manifest_hash() {
-        // Parallel `cargo test` (containers/proxy/target) and tsc rebuilds
-        // (mcp-servers/*/dist) must not perturb or race the image hashes.
         let tmp = tempfile::tempdir().unwrap();
         write_build_tree(tmp.path());
         let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
@@ -1043,7 +1023,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn node_modules_changes_do_not_alter_manifest_hash() {
-        // node_modules is not image content; adding it must not change any image hash (ADR-072).
         let tmp = tempfile::tempdir().unwrap();
         write_build_tree(tmp.path());
         let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
@@ -1088,7 +1067,6 @@ mod tests {
         for img in build::IMAGES {
             for input in img.hash_inputs {
                 let path = root.join(input);
-                // Inputs with an extension are files; the rest are directories.
                 if Path::new(input).extension().is_some() {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).unwrap();
@@ -1143,14 +1121,12 @@ mod tests {
         )
         .unwrap();
 
-        // Real directory copy (matches production bundle-build-context.sh behavior)
         let mcp_shared_dest = root.join("mcp-os/os/node_modules/@speedwave/mcp-shared");
         std::fs::create_dir_all(mcp_shared_dest.join("dist")).unwrap();
         std::fs::write(mcp_shared_dest.join("dist/index.js"), "export {};").unwrap();
         std::fs::write(mcp_shared_dest.join("package.json"), "{}").unwrap();
         std::fs::write(mcp_shared_dest.join("package-lock.json"), "{}").unwrap();
 
-        // oauth worker — staged the same way as mcp-os (ADR-060).
         std::fs::create_dir_all(root.join("oauth/oauth/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/node_modules/pkg")).unwrap();
@@ -1390,7 +1366,6 @@ mod tests {
     fn legacy_state_file_parses_preserving_existing_fields() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("bundle-state.json");
-        // Pre-ADR-072 shape: no applied_image_hashes field.
         std::fs::write(
             &path,
             r#"{
@@ -1415,7 +1390,6 @@ mod tests {
 
     #[test]
     fn new_state_file_readable_by_legacy_shape() {
-        // Old releases deserialize the new file (serde ignores unknown fields).
         #[derive(Deserialize)]
         struct LegacyBundleState {
             applied_bundle_id: Option<String>,
@@ -1444,7 +1418,6 @@ mod tests {
     fn legacy_manifest_json_is_regenerated() {
         let temp = tempfile::tempdir().unwrap();
         write_build_tree(temp.path());
-        // Pre-ADR-072 manifest: no image_hashes field.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{
@@ -1469,7 +1442,6 @@ mod tests {
     #[test]
     fn stale_resources_regeneration_error_names_desktop_update() {
         let temp = tempfile::tempdir().unwrap();
-        // Legacy manifest + no build tree: digesting the new catalogue fails.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{"app_version": "0.1.0", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
@@ -1742,7 +1714,6 @@ mod tests {
             "WINDOWS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
              the const literal and the SSOT drifted"
         );
-        // The Tauri Windows resource map must carry the same bundle path.
         let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
         assert!(
             tauri_cfg.contains(&expected),
@@ -1752,8 +1723,6 @@ mod tests {
 
     #[test]
     fn windows_vulkan_loader_path_is_aligned_across_bundle_config_and_scripts() {
-        // The literal `vulkan-1.dll` recurs in the asset list, the Tauri resource map, and the
-        // stage/verify/install scripts — no SSOT const carries it, so pin the copies together.
         let expected = "vulkan-1.dll";
         let assets = required_bundled_assets("windows").expect("windows assets");
         assert!(
@@ -1803,7 +1772,6 @@ mod tests {
             "MACOS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
              the const literal and the SSOT drifted"
         );
-        // The Tauri macOS resource map must carry the same bundle path.
         let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.macos.conf.json");
         assert!(
             tauri_cfg.contains(&expected),

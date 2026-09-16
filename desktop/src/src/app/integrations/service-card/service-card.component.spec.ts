@@ -363,7 +363,6 @@ describe('ServiceCardComponent', () => {
       );
       expect(card.classList.contains('ring-1')).toBe(true);
       expect(card.classList.contains('rounded')).toBe(true);
-      // Must not stack a 1px border on a rounded ring-1 wrapper
       expect(card.classList.contains('border')).toBe(false);
     });
 
@@ -378,7 +377,6 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const body = fixture.nativeElement.querySelector('[data-testid="card-body"]');
-      // The spec bans a border-b inside the rounded ring wrapper
       expect(body.classList.contains('border-t')).toBe(false);
       expect(body.classList.contains('border-b')).toBe(false);
     });
@@ -421,8 +419,6 @@ describe('ServiceCardComponent', () => {
     });
   });
 
-  // -- OAuth-related tests --
-
   describe('OAuth fields', () => {
     it('does not render inputs for oauth_flow fields', () => {
       fixture.componentRef.setInput('svc', makeSharepointSvc());
@@ -448,7 +444,7 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const inputs = fixture.nativeElement.querySelectorAll('[data-testid="auth-field-input"]');
-      expect(inputs.length).toBe(3); // client_id, tenant_id, site_id
+      expect(inputs.length).toBe(3);
       for (const input of inputs) {
         expect(input.required).toBe(true);
       }
@@ -466,7 +462,6 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
-      // No typed inputs at all — bundled client_id, no prerequisites.
       expect(el.querySelectorAll('[data-testid="auth-field-input"]').length).toBe(0);
       expect(el.querySelector('[data-testid="oauth-section"]')).not.toBeNull();
       expect(el.textContent).toContain('Sign in with Slack');
@@ -533,7 +528,6 @@ describe('ServiceCardComponent', () => {
       const hint = fixture.nativeElement.querySelector('[data-testid="auth-field-hint"]');
       expect(hint).not.toBeNull();
       expect(hint.textContent).toContain('both colons');
-      // aria-describedby wires the input to the hint for screen readers
       const input: HTMLInputElement = fixture.nativeElement.querySelector('#sharepoint-site_id');
       expect(input.getAttribute('aria-describedby')).toBe('sharepoint-site_id-hint');
     });
@@ -565,7 +559,6 @@ describe('ServiceCardComponent', () => {
         tenant_id: 'my-tenant',
         site_id: 'my-site',
       });
-      // Should NOT include oauth_flow fields
       expect(payload.credentials['access_token']).toBeUndefined();
       expect(payload.credentials['refresh_token']).toBeUndefined();
     });
@@ -675,7 +668,6 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
-      // Query labels by their `for` attribute — immune to field reordering
       expect(el.querySelector('label[for="redmine-api_key"]').textContent).not.toContain(
         '(optional)'
       );
@@ -692,7 +684,6 @@ describe('ServiceCardComponent', () => {
       fixture.componentRef.setInput('expanded', true);
       fixture.detectChanges();
       const el = fixture.nativeElement;
-      // Query inputs by their ID — immune to field reordering
       expect(el.querySelector('#redmine-api_key').required).toBe(true);
       expect(el.querySelector('#redmine-host_url').required).toBe(true);
       expect(el.querySelector('#redmine-project_id').required).toBe(false);

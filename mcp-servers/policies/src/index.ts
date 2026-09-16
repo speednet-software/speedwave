@@ -4,6 +4,5 @@
  * @module speedwave/policy-engine
  */
 
-// WASM engine wrapper
 export { loadEngine } from './engine.js';
 export type { Detection, TokenizeResult, PiiEngine } from './engine.js';

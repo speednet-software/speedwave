@@ -15,8 +15,6 @@ on:
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
-      # Bundled into build-context/ (proxy image + compose template) — a
-      # containers-only change still affects the desktop bundle.
       - "containers/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
@@ -34,8 +32,6 @@ on:
       - "mcp-servers/package-lock.json"
       - "mcp-servers/shared/**"
       - "mcp-servers/os/**"
-      # Bundled into build-context/ (proxy image + compose template) — a
-      # containers-only change still affects the desktop bundle.
       - "containers/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
@@ -72,10 +68,8 @@ jobs:
     timeout-minutes: 75
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      # The runner's checkout base + the ggml-vulkan CMake scratch crosses MAX_PATH (C1083);
-      # same escape as test.yml's desktop-windows-check.
       - name: Use a short cargo target dir (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
@@ -84,11 +78,9 @@ jobs:
           # Cache key folds in the runner image: a VS bump invalidates CMakeCache generators.
           echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
 
-      # rust-cache (setup-toolchain) caches workspace-relative target dirs only — D:\st
-      # needs its own cache entry, same pattern as test.yml's desktop-windows-check.
       - name: Cache the short cargo target dir (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: D:\st
           key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}

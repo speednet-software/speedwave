@@ -37,8 +37,6 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
     component = fixture.componentInstance;
   });
 
-  // Auto-check state is self-rewritten by the component per update-section.component.spec.ts
-
   describe('installUpdate()', () => {
     it('calls install_update_and_reconcile with expectedVersion', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);

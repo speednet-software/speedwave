@@ -321,6 +321,3 @@ export interface GitHubUser {
   /** Full URL to the user's profile in the GitHub web interface. */
   html_url: string;
 }
-
-// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT). Import directly
-// from the shared package; this worker no longer defines its own variant.

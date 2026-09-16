@@ -1,14 +1,10 @@
 #!/usr/bin/env bats
-# SSOT-alignment test: each native macOS CLI binary carries an embedded
-# `__TEXT,__info_plist` section with the right id, usage description, version. macOS-only.
 
 setup() {
     if [ "$(uname)" != "Darwin" ]; then
         skip "macOS-only: requires segedit/lipo and macOS-native CLI binaries"
     fi
     REPO_ROOT="$BATS_TEST_DIRNAME/../.."
-    # Sub-identifier mapping — must match SharedCLI/Utilities.swift::subBundleIdentifier
-    # (and, for audio-capture, native/macos/audio-capture/Resources/Info.plist).
     declare -gA EXPECTED_BUNDLE_ID=(
         [calendar]="pl.speedwave.desktop.calendar"
         [reminders]="pl.speedwave.desktop.reminders"
@@ -26,8 +22,6 @@ setup() {
     SERVICES=(calendar reminders mail notes audio-capture)
 }
 
-# Returns the path to the binary for a service, picking universal first then arch-specific.
-# Returns empty string if no built binary exists yet (test should skip).
 resolve_binary() {
     local svc="$1"
     local pkg_dir="$REPO_ROOT/native/macos/$svc"
@@ -41,18 +35,14 @@ resolve_binary() {
             return 0
         fi
     done
-    # Fallback: any universal-apple-macosx slice or first arch-specific
     find "$pkg_dir/.build" -type f -name "$svc-cli" \
         \( -path "*universal*" -o -path "*release*" -o -path "*Release*" \) \
         ! -path "*.dSYM*" ! -path "*Intermediates*" 2>/dev/null | head -n 1
 }
 
-# Extract embedded plist as plutil-parseable file. Handles fat (universal) binaries
-# by thinning to arm64 first (segedit only works on single-arch Mach-O).
 extract_embedded_plist() {
     local bin="$1"
     local out="$2"
-    # If fat, thin to arm64 first
     if file "$bin" | grep -q "Mach-O universal"; then
         local thin="${out}.arm64"
         lipo -thin arm64 "$bin" -output "$thin" 2>/dev/null || return 1
@@ -81,8 +71,6 @@ extract_embedded_plist() {
     for svc in "${SERVICES[@]}"; do
         bin="$(resolve_binary "$svc")"
         [ -n "$bin" ] || skip "$svc-cli not built"
-        # otool -s prints "Contents of (__TEXT,__info_plist) section" + hex dump if present.
-        # Empty section is ABSENT — must have at least one hex line beyond the header.
         local lines
         lines=$(otool -s __TEXT __info_plist "$bin" 2>/dev/null | wc -l | tr -d ' ')
         if [ "$lines" -lt 3 ]; then
@@ -134,8 +122,6 @@ extract_embedded_plist() {
 }
 
 @test "embedded CFBundleShortVersionString matches tauri.conf.json version" {
-    # build-native-macos.sh stamps tauri.conf.json's version into each
-    # CLI's Resources/Info.plist before swift build.
     local tauri_version svc bin tmp actual
     if command -v jq >/dev/null 2>&1; then
         tauri_version="$(jq -r '.version' "$REPO_ROOT/desktop/src-tauri/tauri.conf.json")"
@@ -160,8 +146,6 @@ extract_embedded_plist() {
 }
 
 @test "each CLI Info.plist has correct UsageDescription key" {
-    # Source Info.plist files (read directly, not from binary) must
-    # carry the right TCC usage description for each service.
     local svc plist key val
     for svc in "${SERVICES[@]}"; do
         plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
@@ -194,8 +178,6 @@ extract_embedded_plist() {
 }
 
 @test "Package.swift files declare Info.plist linker flags for every CLI" {
-    # Every CLI's Package.swift must carry the -sectcreate __TEXT
-    # __info_plist flags pointing at Resources/Info.plist.
     local svc pkg pattern
     for svc in "${SERVICES[@]}"; do
         pkg="$REPO_ROOT/native/macos/$svc/Package.swift"

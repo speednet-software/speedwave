@@ -56,7 +56,6 @@ describe('page-tools metadata', () => {
     ]);
   });
 
-  // Regression: no page tool accepts site_id (security invariant per ADR-060).
   it('NO page tool accepts site_id from the model', () => {
     for (const tool of PAGE_TOOL_SCHEMAS) {
       const schema = tool.inputSchema as {
@@ -101,7 +100,6 @@ describe('page-tools metadata', () => {
         'data',
       ])
     );
-    // innerHtml / webPartType are mutually exclusive — both opt-in, handler enforces exactly-one.
     expect(schema.required).not.toContain('innerHtml');
     expect(schema.required).not.toContain('webPartType');
     expect(schema.required).toEqual(['pageId', 'sectionIndex', 'columnIndex']);
@@ -152,7 +150,6 @@ describe('page-tools handlers — happy paths', () => {
     };
     expect(out.pages).toHaveLength(2);
     expect(out.pages[0].id).toBe('p1');
-    // Verify the URL has the site id derived from the worker, not from the caller.
     expect(graph).toHaveBeenCalledWith(
       'GET',
       expect.stringContaining(`/sites/${MOCK_SITE_ID}/pages/microsoft.graph.sitePage`)
@@ -413,7 +410,6 @@ describe('page-tools handlers — happy paths', () => {
     expect(result.isError).toBe(true);
     const parsed = parseContent(result) as { code: string };
     expect(parsed.code).toBe('SECTION_OUT_OF_RANGE');
-    // Did the GET, did not POST.
     expect(graph.mock.calls).toHaveLength(1);
   });
 
@@ -449,7 +445,6 @@ describe('page-tools handlers — happy paths', () => {
     expect(result.isError).toBe(true);
     const parsed = parseContent(result) as { code: string };
     expect(parsed.code).toBe('INVALID_INDEX');
-    // Never reached Graph
     expect(graph).not.toHaveBeenCalled();
   });
 
@@ -511,7 +506,6 @@ describe('page-tools handlers — happy paths', () => {
     expect(url).toBe(`/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage/webParts/wp-1`);
   });
 
-  // A swapped sourceTool would point the model at the wrong follow-up tool.
   it.each([
     [
       'updateWebPart',
@@ -562,14 +556,12 @@ describe('page-tools handlers — happy paths', () => {
     const getDriveItem = vi.fn().mockResolvedValue(driveItem);
     const localGraph = vi
       .fn()
-      // 1) getPage
       .mockResolvedValueOnce({
         id: 'p1',
         canvasLayout: {
           horizontalSections: [{ id: 'sec-1', columns: [{ id: 'col-1', webparts: [] }] }],
         },
       })
-      // 2) addStandardWebPart
       .mockResolvedValueOnce({ id: 'wp-image' });
     const c = createMockClient(localGraph as unknown as Parameters<typeof createMockClient>[0], {
       getDriveItemForSharePointPath: getDriveItem,
@@ -589,7 +581,6 @@ describe('page-tools handlers — happy paths', () => {
     expect(getDriveItem).toHaveBeenCalledWith('Shared Documents/hero.jpg');
 
     const [, , body] = localGraph.mock.calls[1];
-    // Body embeds driveItem ids for SharePoint UI reconciliation.
     const properties = (
       body as { webPartProperties?: unknown; data?: { properties: Record<string, unknown> } }
     ).data?.properties;
@@ -645,7 +636,6 @@ describe('page-tools handlers — happy paths', () => {
   });
 
   it('addImageWebPart returns COLUMN_OUT_OF_RANGE when the column index does not exist', async () => {
-    // Column-index bounds prevent wasted Graph round-trips.
     const driveItem = {
       id: 'item-1',
       webUrl: 'https://example/hero.jpg',
@@ -666,7 +656,7 @@ describe('page-tools handlers — happy paths', () => {
     const result = await tool.handler({
       pageId: 'p1',
       sectionIndex: 0,
-      columnIndex: 5, // out of range — section has 1 column
+      columnIndex: 5,
       sharepointPath: 'X/y.jpg',
     });
     expect(result.isError).toBe(true);
@@ -676,7 +666,6 @@ describe('page-tools handlers — happy paths', () => {
   });
 
   it('addImageWebPart rejects out-of-range section/column indexes before any Graph call', async () => {
-    // Handler validates index bounds before driveItem lookup.
     const getDriveItem = vi.fn();
     const c = createMockClient(undefined, { getDriveItemForSharePointPath: getDriveItem });
     const tools = createPageTools(c);
@@ -704,7 +693,7 @@ describe('page-tools handlers — happy paths', () => {
       image: { width: 1, height: 1 },
       sharepointIds: { siteId: 's', webId: 'w', listId: 'l', listItemUniqueId: 'u' },
     };
-    const localGraph = vi.fn().mockResolvedValueOnce(undefined); // getPage returns undefined
+    const localGraph = vi.fn().mockResolvedValueOnce(undefined);
     const c = createMockClient(localGraph as unknown as Parameters<typeof createMockClient>[0], {
       getDriveItemForSharePointPath: vi.fn().mockResolvedValue(driveItem),
     });
@@ -721,7 +710,6 @@ describe('page-tools handlers — happy paths', () => {
   });
 
   it('addImageWebPart wraps unexpected driveItem-lookup errors as ADD_IMAGE_WEBPART_FAILED', async () => {
-    // Unexpected driveItem-lookup throws surface with a stable error code.
     const getDriveItem = vi.fn().mockRejectedValue(new Error('Graph 503 Service Unavailable'));
     const c = createMockClient(undefined, {
       getDriveItemForSharePointPath: getDriveItem,
@@ -803,7 +791,6 @@ describe('page-tools handlers — error paths', () => {
     expect(parsed.code).toBe('LIST_PAGES_FAILED');
   });
 
-  // Table-driven Graph-500 error tests covering every wrapErr code.
   it.each([
     ['getPage', { pageId: 'p1' }, 'GET_PAGE_FAILED'],
     ['createPage', { title: 'Hi', name: 'hi.aspx' }, 'CREATE_PAGE_FAILED'],
@@ -838,7 +825,6 @@ describe('page-tools handlers — error paths', () => {
   });
 
   it('addWebPart returns NOT_FOUND when getPage resolves to undefined', async () => {
-    // The defensive `if (!page)` branch — Graph returned 204 / null layout.
     const graph = vi.fn().mockResolvedValueOnce(undefined);
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
     const tools = createPageTools(client);
@@ -881,7 +867,6 @@ describe('page-tools handlers — error paths', () => {
     expect((parseContent(result) as { code: string }).code).toBe('INVALID_INPUT');
   });
 
-  // Per-tool pageId / webPartId validateGraphId rejections.
   it.each([
     [
       'addWebPart',
@@ -902,7 +887,6 @@ describe('page-tools handlers — error paths', () => {
   });
 
   it('addWebPart rejects malformed section.id from Graph response (defense-in-depth)', async () => {
-    // Defense-in-depth: validate Graph ids before URL stitching.
     const graph = vi.fn().mockResolvedValueOnce({
       id: 'p1',
       canvasLayout: {
@@ -1008,7 +992,6 @@ describe('page-tools handlers — error paths', () => {
   it('generateTableOfContents injects id attributes on source headings and posts a ToC web part', async () => {
     const graph = vi
       .fn()
-      // GET page
       .mockResolvedValueOnce({
         id: 'p1',
         canvasLayout: {
@@ -1029,7 +1012,6 @@ describe('page-tools handlers — error paths', () => {
           ],
         },
       })
-      // PATCH wp1 (inject ids), PATCH wp2 (inject id), POST ToC
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ id: 'wp-toc' });
@@ -1047,9 +1029,8 @@ describe('page-tools handlers — error paths', () => {
 
     expect(out.webPartId).toBe('wp-toc');
     expect(out.headingCount).toBe(3);
-    expect(out.anchorsInjected).toBe(2); // both source web parts got PATCHed
+    expect(out.anchorsInjected).toBe(2);
 
-    // PATCH wp1 rewrites both h1 and h2 with id="…"
     const [m1, u1, b1] = graph.mock.calls[1];
     expect(m1).toBe('PATCH');
     expect(u1).toContain('/webParts/wp1');
@@ -1057,7 +1038,6 @@ describe('page-tools handlers — error paths', () => {
       .webPartProperties.data.content.formattedValue;
     expect(wp1Html).toBe('<h1 id="intro">Intro</h1><h2 id="setup">Setup</h2>');
 
-    // PATCH wp2 rewrites the single h2.
     const [m2, u2, b2] = graph.mock.calls[2];
     expect(m2).toBe('PATCH');
     expect(u2).toContain('/webParts/wp2');
@@ -1065,7 +1045,6 @@ describe('page-tools handlers — error paths', () => {
       .webPartProperties.data.content.formattedValue;
     expect(wp2Html).toBe('<h2 id="outcome">Outcome</h2>');
 
-    // POST ToC carries the rendered nested list.
     const [m3, , b3] = graph.mock.calls[3];
     expect(m3).toBe('POST');
     const tocHtml = (b3 as { webPartProperties: { data: { content: { formattedValue: string } } } })
@@ -1104,7 +1083,6 @@ describe('page-tools handlers — error paths', () => {
     ) as { headingCount: number; anchorsInjected: number };
     expect(out.headingCount).toBe(1);
     expect(out.anchorsInjected).toBe(0);
-    // GET + POST only — no PATCH.
     expect(graph.mock.calls).toHaveLength(2);
   });
 

@@ -109,9 +109,7 @@ describe('LlmUsageComponent', () => {
     );
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="llm-usage-card-requests"]')?.textContent).toContain('3');
-    // cache hit = 25010/50019 ≈ 50%
     expect(el.querySelector('[data-testid="llm-usage-card-cache"]')?.textContent).toContain('50%');
-    // 12 completion tokens over 1.2s of latency = 10 tok/s
     expect(el.querySelector('[data-testid="llm-usage-card-speed"]')?.textContent).toContain(
       '10.0 tok/s'
     );
@@ -120,9 +118,7 @@ describe('LlmUsageComponent', () => {
     );
     const rows = el.querySelectorAll('[data-testid="llm-usage-table"] tbody tr');
     expect(rows.length).toBe(3);
-    // Newest day first.
     expect(rows[0].textContent).toContain('2026-06-13');
-    // Unpriced (null cost, e.g. subscription) renders a dash, not $0.
     expect(rows[0].textContent).toContain('—');
   });
 
@@ -138,9 +134,7 @@ describe('LlmUsageComponent', () => {
       })
     );
     const el: HTMLElement = fixture.nativeElement;
-    // A genuine zero (free local) is priced — shows $0, never a dash.
     expect(el.querySelector('[data-testid="llm-usage-card-cost"]')?.textContent).toContain('$0');
-    // The cost column (last cell) shows $0, not a dash.
     const rows = el.querySelectorAll('[data-testid="llm-usage-table"] tbody tr');
     const costCell = rows[0].querySelector('td:last-child');
     expect(costCell?.textContent).toContain('$0');
@@ -148,8 +142,6 @@ describe('LlmUsageComponent', () => {
   });
 
   it('tags each table row with its provider-prefixed model and exposes the per-row cost cell', async () => {
-    // Usage JSONL stores the model as `<provider_kind>/<model>` — assert both the
-    // full data-model and a suffix match (how the E2E helper targets a row).
     const { fixture } = await setup(
       summary({
         totals: bucket({ requests: 2, cost_usd: 0.01 }),
@@ -167,11 +159,9 @@ describe('LlmUsageComponent', () => {
     );
     expect(localRow).not.toBeNull();
     expect(localRow?.getAttribute('data-model')).toBe('local/unsloth/Qwen3.6-35B-A3B');
-    // The unpriced local model shows "—" in its own per-row cost cell.
     expect(localRow?.querySelector('[data-testid="llm-usage-row-cost"]')?.textContent).toContain(
       '—'
     );
-    // The priced OpenRouter row shows a $ figure, not a dash.
     const orRow = el.querySelector(
       '[data-testid="llm-usage-row"][data-model="openrouter/openai/gpt-4o"]'
     );
@@ -258,22 +248,18 @@ describe('LlmUsageComponent metrics', () => {
 
   it('clamps cache hit rate to 100% when cache_read exceeds reported prompt tokens', async () => {
     const c = await makeComponent();
-    // Anthropic streamed records: prompt_tokens excludes cached.
     expect(c.cacheHitRate(bucket({ prompt_tokens: 100, cache_read: 20_000 }))).toBeLessThanOrEqual(
       1
     );
-    // Normal OpenAI-style inclusive counts: 50% stays 50%.
     expect(c.cacheHitRate(bucket({ prompt_tokens: 100, cache_read: 50 }))).toBeCloseTo(0.5);
     expect(c.cacheHitRate(bucket({ prompt_tokens: 0, cache_read: 0 }))).toBe(0);
   });
 
   it('computes tok/s from decode time (latency minus ttft)', async () => {
     const c = await makeComponent();
-    // 12 tokens over 1.2 s of decode time = 10 tok/s.
     expect(
       c.tokensPerSec(bucket({ throughput_completion_tokens: 12, decode_latency_ms_sum: 1200 }))
     ).toBeCloseTo(10);
-    // No decode time → null (not a divide-by-zero or inflated rate).
     expect(
       c.tokensPerSec(bucket({ completion_tokens: 9999, decode_latency_ms_sum: 0 }))
     ).toBeNull();
@@ -333,7 +319,6 @@ describe('dailySeries', () => {
     expect(bars.map((b) => b.day)).toEqual(['2026-06-11', '2026-06-12']);
     expect(bars[1].promptTokens).toBe(80);
     expect(bars[1].completionTokens).toBe(20);
-    // Tallest bar (100 tokens) fills 100%: 80% prompt + 20% completion.
     expect(bars[1].promptPct).toBe(80);
     expect(bars[1].completionPct).toBe(20);
     expect(bars[0].promptPct).toBe(50);
@@ -391,7 +376,6 @@ describe('providerShares', () => {
 
 describe('heatmapRows', () => {
   it('folds days onto a Monday-first weekday grid and scales intensity', () => {
-    // 2026-06-12 is a Friday (weekday index 4), 2026-06-08 a Monday (0).
     const hours = Array(24).fill(0) as number[];
     const { rows, max } = heatmapRows(
       summary({
@@ -427,7 +411,6 @@ describe('heatmapRows', () => {
     const { rows, max } = heatmapRows(summary({ hours: { 'not-a-date': [1, 2, 3] } }));
     expect(max).toBe(0);
     expect(rows.flat().every((c) => c.requests === 0)).toBe(true);
-    // Older payloads without an `hours` field at all.
     const legacy = heatmapRows({ ...summary(), hours: undefined as never });
     expect(legacy.max).toBe(0);
   });
@@ -533,12 +516,11 @@ describe('LlmUsageComponent deferred re-poll', () => {
   it('re-polls an unpriced (deferred) aggregate until the cost is enriched', async () => {
     const invoke = vi
       .fn()
-      .mockResolvedValueOnce(deferredSummary()) // initial mount fetch: unpriced
-      .mockResolvedValue(pricedSummary(0.0003)); // re-poll fetch: priced
+      .mockResolvedValueOnce(deferredSummary())
+      .mockResolvedValue(pricedSummary(0.0003));
     const fixture = await mount(invoke);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBeNull();
 
-    // First backoff tick (2s) fires the re-poll, which returns the priced value.
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.0003);
     expect(invoke).toHaveBeenCalledTimes(2);
@@ -567,7 +549,6 @@ describe('LlmUsageComponent deferred re-poll', () => {
     const fixture = await mount(invoke);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(invoke).toHaveBeenCalledTimes(1);
-    // Unpriced stays null → the dash, never coerced to $0 (invariant 6).
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBeNull();
     fixture.destroy();
   });
@@ -575,10 +556,8 @@ describe('LlmUsageComponent deferred re-poll', () => {
   it('stops re-polling after the last backoff step (bounded, never a poll loop)', async () => {
     const invoke = vi.fn().mockResolvedValue(deferredSummary());
     const fixture = await mount(invoke);
-    // All five backoff steps: 2+4+8+15+30 s = 59 s → 1 mount fetch + 5 re-polls.
     await vi.advanceTimersByTimeAsync(59_000);
     expect(invoke).toHaveBeenCalledTimes(6);
-    // Exhausted: no sixth re-poll no matter how long we wait.
     await vi.advanceTimersByTimeAsync(600_000);
     expect(invoke).toHaveBeenCalledTimes(6);
     fixture.destroy();
@@ -594,14 +573,12 @@ describe('LlmUsageComponent deferred re-poll', () => {
     });
     const fixture = await mount(invoke);
 
-    // Re-poll for 'proj' fires and is left in flight (unresolved promise).
     await vi.advanceTimersByTimeAsync(2_000);
     fixture.componentRef.setInput('project', 'other');
     fixture.detectChanges();
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.42);
 
-    // The stale 'proj' response must neither apply nor re-schedule.
     stale.resolve(pricedSummary(0.99));
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.42);

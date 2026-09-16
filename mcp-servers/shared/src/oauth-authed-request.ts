@@ -85,8 +85,6 @@ async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
   const outcome = await refreshAccessToken({ service: ctx.service });
   const dir = ctx.tokensDir ?? process.env.TOKENS_DIR ?? '/tokens';
   let fresh = await loadToken(join(dir, 'access_token'));
-  // A real refresh rewrites the file; a rate-limited noop does not. Poll
-  // briefly for host-write → guest-read mount lag (ADR-066).
   if (!outcome.rateLimited) {
     for (let i = 0; i < STALE_READ_POLL_ATTEMPTS && fresh === before; i += 1) {
       await new Promise((r) => setTimeout(r, STALE_READ_POLL_DELAY_MS));
@@ -117,7 +115,6 @@ export async function authedRequest(opts: AuthedRequestOptions): Promise<Respons
     );
   }
 
-  // Proactive refresh failure falls through to the reactive path.
   if (
     typeof opts.proactiveWithinSeconds === 'number' &&
     accessTokenExpiresWithin(opts.state.accessToken, opts.proactiveWithinSeconds)
@@ -146,7 +143,7 @@ export async function authedRequest(opts: AuthedRequestOptions): Promise<Respons
 async function refreshOnce(ctx: AuthedRefreshContext): Promise<void> {
   const before = ctx.lock.generation;
   await ctx.lock.run(async () => {
-    if (ctx.lock.generation !== before) return; // another caller already refreshed
+    if (ctx.lock.generation !== before) return;
     await refreshInto(ctx);
     ctx.lock.generation += 1;
   });

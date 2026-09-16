@@ -1,5 +1,3 @@
-// Slack OAuth2 authorization_code flow (loopback redirect + PKCE, ADR-071).
-
 use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
 use crate::oauth_loopback::{build_authorize_url, wait_for_callback, CallbackFailure};
 use crate::types::check_project;
@@ -85,7 +83,6 @@ pub async fn start_slack_oauth(
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
 
-    // Fixed port registered on the Slack app; bind both 127.0.0.1 and ::1.
     let port = consts::SLACK_OAUTH_REDIRECT_PORT;
     // SSOT-allow: browser-side OAuth redirect listener, not a container-reach bind (see ADR-071; same rationale as plugin_oauth_cmd).
     let v4 = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
@@ -115,7 +112,6 @@ pub async fn start_slack_oauth(
         &scopes,
         &state,
         &pkce.challenge,
-        // user_scope, never scope (bot scopes).
         "user_scope",
     )
     .inspect_err(|_| FLOW_STATE.clear_if_current(&request_id))?;
@@ -208,8 +204,6 @@ pub async fn start_slack_oauth(
 pub fn cancel_slack_oauth() {
     FLOW_STATE.cancel();
 }
-
-// ── Helpers ──────────────────────────────────────────────
 
 /// Translate the raw callback failure into actionable wording for the
 /// consent-screen dead ends (deny, pending admin approval).
@@ -335,7 +329,6 @@ async fn exchange_slack_code(
     let access_token = user.access_token.filter(|t| !t.is_empty()).ok_or_else(|| {
         "Slack returned no user access token — check the app's user_scope configuration".to_string()
     })?;
-    // Rotation is mandatory; refresh_token/expires_in are required.
     let refresh_token = user
         .refresh_token
         .filter(|t| !t.is_empty())
@@ -395,7 +388,6 @@ fn persist_slack_tokens_in(
         "clientId".to_string(),
         consts::SLACK_OAUTH_CLIENT_ID.to_string(),
     );
-    // Workspace identity for the UI ("Connected to <team> as <user>").
     if let Some(team_id) = &token.team_id {
         provider_data.insert("teamId".to_string(), team_id.clone());
     }
@@ -533,7 +525,6 @@ mod tests {
         assert!(form.contains("code=code1"));
         assert!(form.contains("code_verifier=ver"));
         assert!(form.contains(&format!("client_id={}", consts::SLACK_OAUTH_CLIENT_ID)));
-        // PKCE public client: no secret, anywhere.
         assert!(!form.contains("client_secret"));
         assert!(!req.to_ascii_lowercase().contains("authorization:"));
     }
@@ -585,7 +576,6 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_requires_rotation_fields() {
-        // No refresh_token → must fail loudly (rotation off = misconfigured app).
         let (url, handle) = stub_token_endpoint(
             200,
             r#"{"ok": true, "authed_user": {"access_token": "xoxp-x", "token_type": "user"}}"#,
@@ -598,7 +588,6 @@ mod tests {
         assert!(err.contains("rotation"), "got: {err}");
         let _ = handle.await;
 
-        // refresh_token present but no expires_in → same class of failure.
         let (url2, handle2) = stub_token_endpoint(
             200,
             r#"{"ok": true, "authed_user": {"access_token": "xoxp-x", "refresh_token": "r", "token_type": "user"}}"#,
@@ -638,7 +627,6 @@ mod tests {
     fn friendly_callback_error_translates_access_denied() {
         let msg = friendly_callback_error("authorization denied: access_denied");
         assert!(msg.contains("workspace admin"), "got: {msg}");
-        // Other errors pass through verbatim.
         assert_eq!(
             friendly_callback_error("OAuth flow timed out"),
             "OAuth flow timed out"
@@ -735,13 +723,11 @@ mod tests {
             users_info_url_from("https://slack.com/api/oauth.v2.access"),
             "https://slack.com/api/users.info"
         );
-        // Degenerate input without a slash → returned unchanged (no panic).
         assert_eq!(users_info_url_from("noslash"), "noslash");
     }
 
     #[tokio::test]
     async fn fetch_display_name_returns_none_on_unreachable_endpoint() {
-        // Nothing is listening — best-effort lookup must yield None, not error.
         let name =
             fetch_slack_display_name("http://127.0.0.1:1/api/users.info", "xoxe.xoxp-at", "U123")
                 .await;
@@ -767,8 +753,6 @@ mod tests {
         assert!(state["providerData"].get("authedUserId").is_none());
     }
 
-    // State-before-token ordering: the refresh token must already be on disk when the mounted
-    // access token appears (ADR-071; source-order pin like plugin_oauth_cmd's auto-enable test).
     #[test]
     fn persist_writes_oauth_state_before_access_token() {
         let src = include_str!("slack_oauth_cmd.rs");

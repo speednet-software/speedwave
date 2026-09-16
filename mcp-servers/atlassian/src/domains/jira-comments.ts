@@ -33,7 +33,6 @@ export interface JiraCommentsClient {
  * @returns A Jira comments client.
  */
 export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsClient {
-  // Enforce the Jira project allowlist for an issue ref (see assertJiraIssueKeyAllowed).
   const enforce = (issueIdOrKey: string): void =>
     assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
 

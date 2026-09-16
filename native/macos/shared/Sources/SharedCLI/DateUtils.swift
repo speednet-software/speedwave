@@ -20,7 +20,6 @@ private let utcFormatter: ISO8601DateFormatter = {
     return formatter
 }()
 
-// `xxxxx` keeps `+00:00` where ISO8601DateFormatter would collapse a zero offset to `Z`.
 private let offsetFormatter: DateFormatter = {
     let formatter = DateFormatter()
     formatter.calendar = Calendar(identifier: .gregorian)

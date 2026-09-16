@@ -52,7 +52,6 @@ describe('withValidation', () => {
   });
 
   it('invokes the handler with the client and params and returns its result on success', async () => {
-    // `new GitHubClient` makes no network calls until a method is invoked, so it is safe to construct.
     const client = new GitHubClient({ token: 'x' });
     let seenClient: GitHubClient | undefined;
     let seenParams: { name: string } | undefined;
@@ -82,7 +81,6 @@ describe('withValidation', () => {
       content: [{ type: 'text', text: 'Error: boom from handler' }],
       isError: true,
     });
-    // A plain Error (no numeric `status`) is a programming bug — it must be logged.
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining('Unexpected (non-Octokit) error'),
       expect.any(Error)
@@ -100,7 +98,6 @@ describe('withValidation', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('Authentication failed');
-    // An Octokit-style error (numeric `status`) is expected — don't log it as a bug.
     expect(errSpy).not.toHaveBeenCalled();
   });
 
@@ -110,7 +107,6 @@ describe('withValidation', () => {
     const wrapped = withValidation<{ owner: string; repo: string; path: string }>(
       client,
       async (c, params) => {
-        // getFileContents translates an Octokit 404 into a plain Error marked `expected`.
         await c.getFileContents(params.owner, params.repo, params.path);
         return jsonResult({ ok: true });
       }
@@ -125,7 +121,6 @@ describe('withValidation', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("File not found: 'missing.txt'");
-    // A translated 404 is an expected, already-teaching error — never logged as a bug.
     expect(errSpy).not.toHaveBeenCalled();
   });
 
@@ -139,7 +134,6 @@ describe('withValidation', () => {
     const result = await wrapped(undefined);
 
     expect(result.isError).toBe(true);
-    // Same text shape as a translated 404, but a plain Error (not a TeachingError), so still a bug.
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining('Unexpected (non-Octokit) error'),
       expect.any(Error)

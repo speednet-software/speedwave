@@ -40,7 +40,6 @@ describe('MemoryPanelComponent', () => {
   });
 
   afterEach(() => {
-    // Tear down the overlay so each test starts with a clean container.
     host.open = false;
     fixture.detectChanges();
     fixture.destroy();
@@ -60,8 +59,6 @@ describe('MemoryPanelComponent', () => {
     });
 
     it('detaches the overlay when open transitions back to false', () => {
-      // Drives the child input directly (bypasses OnPush on the host's plain fields) to verify the
-      // CDK overlay attaches/detaches in lockstep with `open`; destroys the shared host fixture first.
       fixture.destroy();
       const childFixture = TestBed.createComponent(MemoryPanelComponent);
       childFixture.componentRef.setInput('open', true);
@@ -224,7 +221,6 @@ describe('MemoryPanelComponent', () => {
     });
 
     it('strips pointer-style links in the unstructured fallback (no canonical headers)', () => {
-      // No `## ...` headers — entries land in the fallback branch.
       host.open = true;
       host.markdown = [
         '- [foo entry](foo.md) — first description',

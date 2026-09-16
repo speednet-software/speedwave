@@ -99,7 +99,6 @@ mod tests {
     #[tokio::test]
     async fn queue_then_peek_returns_message() {
         let svc = QueuedMessageService::new();
-        // Direct service call — emulates what the Tauri command body does.
         let prior = svc.queue(
             "s1",
             QueuedMessage {

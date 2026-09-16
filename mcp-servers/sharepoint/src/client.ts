@@ -26,8 +26,6 @@ import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import { splitPath } from './path-utils.js';
 
-// ── Types ───────────────────────────────────────────────────────────────────────────────────────
-
 /**
  * SharePoint worker runtime config. Post-ADR-060 the worker holds only the mount-resident state
  * (`accessToken` + `siteId`); refresh is delegated to the host-side `oauth` worker.
@@ -107,8 +105,6 @@ export class GraphApiError extends Error {
 /** Minimum spacing between siteId resolve retries while the worker is wedged. */
 const RESOLVE_RETRY_COOLDOWN_MS = TIMEOUTS.API_CALL_MS;
 
-// ── Client Class ────────────────────────────────────────────────────────────────────────────────
-
 /**
  * Conditional debug logging — only when the DEBUG env var is set.
  * @param message - Debug message.
@@ -156,7 +152,6 @@ export class SharePointClient {
    */
   private async _resolveSiteIdOnce(): Promise<void> {
     if (!this.config.siteId.includes(':')) {
-      // Already composite — mark ok without touching the network.
       this.statusTracker.setOk();
       return;
     }
@@ -171,8 +166,6 @@ export class SharePointClient {
         this.statusTracker.setFailed(err);
         throw err;
       }
-      // Re-read access_token in case resolveCompositeSiteId triggered a
-      // refresh-on-401 — disk may now hold a newer token than memory.
       const fresh = await loadToken(path.join(this.tokensDir, 'access_token'));
       if (fresh) {
         this.config.accessToken = fresh;
@@ -191,10 +184,7 @@ export class SharePointClient {
 
   /** Fire-and-forget background siteId resolution; mutates config.siteId once Graph responds. */
   warmupSiteId(): void {
-    void this._resolveSiteIdMemo().catch(() => {
-      // Failure already logged + tracker updated in _resolveSiteIdOnce.
-      // Memo clears its cache on rejection so a subsequent call retries.
-    });
+    void this._resolveSiteIdMemo().catch(() => {});
   }
 
   /** Get the last token save error, if refresh succeeded but disk save failed. */
@@ -244,9 +234,7 @@ export class SharePointClient {
       try {
         const errBody = (await response.json()) as { error?: { message?: string } };
         if (errBody.error?.message) detail = `${detail}: ${errBody.error.message}`;
-      } catch {
-        // body not JSON — keep status line
-      }
+      } catch {}
       throw new GraphApiError(`Graph API ${method} ${url} failed: ${detail}`, response.status);
     }
     if (response.status === 204) return undefined;
@@ -261,8 +249,6 @@ export class SharePointClient {
     return this.config.siteId;
   }
 
-  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
-
   /**
    * Sanitize a Graph API error into a consistent, user-friendly message. Numeric status codes
    * are read from `GraphApiError.status`, not matched as message substrings (the message embeds the request URL, which can itself contain a colliding numeric id).
@@ -271,7 +257,6 @@ export class SharePointClient {
   static formatError(error: unknown): string {
     const e = error as { message?: string };
     const message = e.message || '';
-    // Substring fallback only for non-GraphApiError inputs (network/timeout/etc).
     const status = error instanceof GraphApiError ? error.status : undefined;
     const numeric = (code: string): boolean => status === undefined && message.includes(code);
 
@@ -321,7 +306,6 @@ export class SharePointClient {
     if (this.statusTracker.getStatus() === 'failed') {
       url = await this._retryWedgedResolve(url);
     }
-    // Live view onto config.accessToken so the helper's writes are shared.
     const config = this.config;
     const state: AuthedTokenState = {
       get accessToken() {
@@ -382,8 +366,6 @@ export class SharePointClient {
     if (this.config.siteId === staleSiteId) {
       return url;
     }
-    // Every Graph URL this worker builds addresses the site via a `/sites/{siteId}` path
-    // segment — rewrite only that segment, not any substring match anywhere in the URL.
     const sitesSegment = `/sites/${staleSiteId}`;
     return url.includes(sitesSegment)
       ? url.replace(sitesSegment, `/sites/${this.config.siteId}`)
@@ -420,8 +402,6 @@ export class SharePointClient {
     return `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root/children`;
   }
 
-  // ── Tool Implementations ───────────────────────────────────────────────────────────────────────
-
   /**
    * List files in a directory, paginating via `@odata.nextLink`. Returns `exists: false` with an
    * empty array on 404 (folder doesn't exist yet) so push operations can create it safely.
@@ -437,13 +417,10 @@ export class SharePointClient {
       throw new Error('Invalid path (security check failed)');
     }
 
-    // Empty path → list the site's drive root; `site_id` already scopes the worker to a single
-    // site, so no additional `base_path` sandbox is applied.
     const initialUrl = relativePath
       ? `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(relativePath)}:/children`
       : `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root/children`;
 
-    // Collect all items across paginated responses
     const allItems: Array<{
       id?: string;
       name: string;
@@ -456,13 +433,10 @@ export class SharePointClient {
 
     let nextUrl: string | undefined = initialUrl;
 
-    // Follow pagination links until all items are retrieved
     while (nextUrl) {
       const response = await this.callGraphAPI(nextUrl);
 
       if (!response.ok) {
-        // 404 means folder doesn't exist yet - return empty list with exists: false
-        // This allows push operations to create new folders while listFileIds can detect non-existence
         if (response.status === 404) {
           return { files: [], exists: false };
         }
@@ -486,7 +460,6 @@ export class SharePointClient {
       const items = data.value || [];
       allItems.push(...items);
 
-      // Get next page URL if available
       nextUrl = data['@odata.nextLink'];
     }
 
@@ -518,9 +491,7 @@ export class SharePointClient {
       try {
         const errorData = (await response.json()) as { error?: { message?: string } };
         if (errorData.error?.message) detail = errorData.error.message;
-      } catch {
-        // body not JSON — keep the generic fallback message
-      }
+      } catch {}
       throw new GraphApiError(detail, response.status);
     }
 
@@ -566,12 +537,10 @@ export class SharePointClient {
     localPath: string,
     options?: { expectedEtag?: string; createOnly?: boolean; overwrite?: boolean }
   ): Promise<{ etag?: string; size?: number }> {
-    // Security: validate sharepoint path for defense-in-depth
     if (!this.pathValidator.validatePath(sharepointPath)) {
       throw new Error('Invalid sharepoint_path (security check failed)');
     }
 
-    // Security: validate local path to prevent exfiltration of sensitive files
     if (!this.pathValidator.validateLocalPath(localPath)) {
       throw new Error('Invalid local_path: must be under /workspace');
     }
@@ -585,14 +554,11 @@ export class SharePointClient {
       'Content-Type': 'application/octet-stream',
     };
 
-    // CAS headers
     const expectedEtag = options?.expectedEtag;
     const createOnly = options?.createOnly;
     const overwrite = options?.overwrite;
 
-    if (overwrite) {
-      // Overwrite mode: no conditional headers, always replace
-    } else if (expectedEtag) {
+    if (!overwrite && expectedEtag) {
       headers['If-Match'] = expectedEtag;
     }
 
@@ -611,7 +577,6 @@ export class SharePointClient {
       throw new Error(errorData.error?.message || 'Upload failed');
     }
 
-    // Parse response to get new etag and size
     const data = (await response.json()) as { eTag?: string; size?: number };
     return { etag: data.eTag, size: data.size };
   }
@@ -656,7 +621,6 @@ export class SharePointClient {
       throw new Error('Invalid sharepoint_path (security check failed)');
     }
 
-    // `site_id` already scopes us to a single site; no `base_path` prefix is applied.
     const metadataUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(sharepointPath)}`;
     const metadataResponse = await this.callGraphAPI(metadataUrl);
 
@@ -674,11 +638,9 @@ export class SharePointClient {
       );
     }
 
-    // Ensure parent directory exists
     const parentDir = path.dirname(localPath);
     await fs.mkdir(parentDir, { recursive: true });
 
-    // Download file using streaming
     const downloadResponse = await fetch(downloadUrl);
 
     if (!downloadResponse.ok) {
@@ -689,7 +651,6 @@ export class SharePointClient {
       throw new Error('No response body for download');
     }
 
-    // Stream to file
     const fileStream = createWriteStream(localPath);
     const readable = Readable.fromWeb(downloadResponse.body as import('stream/web').ReadableStream);
     await pipeline(readable, fileStream);
@@ -700,15 +661,12 @@ export class SharePointClient {
    * @param remotePath - SharePoint folder path relative to the site's drive root.
    */
   async createRemoteFolder(remotePath: string): Promise<void> {
-    // Security: validate remote path to prevent path traversal attacks
     if (!this.pathValidator.validatePath(remotePath)) {
       throw new Error('Invalid path (security check failed)');
     }
 
-    // 1. Ensure parent folders exist if needed
     await this.ensureParentFolders(remotePath);
 
-    // 2. Create the folder itself
     const { parentDir, name: folderName } = splitPath(remotePath);
 
     if (!folderName) {
@@ -727,7 +685,6 @@ export class SharePointClient {
       }),
     });
 
-    // 3. Handle 409 Conflict (folder already exists - idempotent operation)
     if (!response.ok && response.status !== 409) {
       let errorMessage = `Failed to create folder: ${response.status}`;
       try {
@@ -741,7 +698,6 @@ export class SharePointClient {
           const text = await response.text();
           if (text) errorMessage = `${response.status} - ${text.slice(0, 200)}`;
         } catch (textParseError) {
-          // Text parsing failed - log the error for debugging
           console.error(`${ts()} Failed to parse error response as text:`, {
             error:
               textParseError instanceof Error ? textParseError.message : String(textParseError),
@@ -758,13 +714,12 @@ export class SharePointClient {
    * @param fullPath - Full path including filename.
    */
   async ensureParentFolders(fullPath: string): Promise<void> {
-    // Defense-in-depth: callers should validate, but we verify here too.
     if (!this.pathValidator.validatePath(fullPath)) {
       throw new Error('Invalid path in ensureParentFolders (security check failed)');
     }
 
     const parts = fullPath.split('/');
-    parts.pop(); // Remove filename
+    parts.pop();
     const parent = parts.join('/');
 
     if (!parent) return;
@@ -776,7 +731,6 @@ export class SharePointClient {
       const checkResp = await this.callGraphAPI(checkUrl);
 
       if (checkResp.status === 404) {
-        // Create folder
         const { parentDir, name } = splitPath(accum);
         const postUrl = this.buildFolderChildrenUrl(parentDir);
 
@@ -790,7 +744,6 @@ export class SharePointClient {
           }),
         });
 
-        // Validate response - 409 Conflict means folder already exists (race condition), which is OK
         if (!createResp.ok && createResp.status !== 409) {
           let errorBody: string;
           try {
@@ -808,8 +761,6 @@ export class SharePointClient {
     }
   }
 }
-
-// ── Factory & Initialization ───────────────────────────────────────────────────────────────────
 
 /** Outcome of `resolveCompositeSiteId` — successful id or a typed error. */
 export type ResolveResult =
@@ -834,8 +785,6 @@ export async function resolveCompositeSiteId(
   if (validationError) {
     return { ok: false, reason: 'validation', detail: validationError };
   }
-  // Composite ids never contain `:` (they use `,` as separator). If a value
-  // both has a comma AND a colon it's malformed — refuse to interpolate it.
   if (siteId.includes(',') && siteId.includes(':')) {
     return {
       ok: false,
@@ -848,8 +797,6 @@ export async function resolveCompositeSiteId(
   }
   const refreshOn401 = opts.refreshOn401 !== false;
   const tokensDir = opts.tokensDir ?? defaultTokensDir();
-  // A cold-start hang here blocks initializeSharePointClient and the hub's discovery retry
-  // budget; apply the same per-request timeout the steady-state path uses.
   const siteLookupWithTimeout = async (bearer: string): Promise<Response> => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.API_CALL_MS);
@@ -863,8 +810,6 @@ export async function resolveCompositeSiteId(
     }
   };
   try {
-    // Cold-start (no client yet): use the shared helper with a throwaway state;
-    // a refresh failure falls through to the not_found / transient branch below.
     let response: Response;
     if (refreshOn401) {
       const state: AuthedTokenState = { accessToken };
@@ -877,7 +822,6 @@ export async function resolveCompositeSiteId(
           tokensDir,
         });
       } catch (err) {
-        // Scope mismatch can't self-heal; propagate so the re-consent UI fires.
         if (err instanceof OAuthScopeMismatchError) throw err;
         console.warn(
           `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
@@ -909,7 +853,6 @@ export async function resolveCompositeSiteId(
     }
     return { ok: true, compositeId: id };
   } catch (e) {
-    // Scope mismatch can't self-heal; propagate so the re-consent UI fires.
     if (e instanceof OAuthScopeMismatchError) throw e;
     if (e instanceof Error && e.name === 'AbortError') {
       return {
@@ -953,7 +896,6 @@ export function validateGraphSiteId(siteId: string): string | null {
   if (siteId.includes('..')) {
     return `SharePoint site_id must not contain "..". ${guidance}`;
   }
-  // Block non-ASCII (IDN homographs, RTL overrides) — Graph site ids are ASCII.
   // eslint-disable-next-line no-control-regex
   if (/[^\x00-\x7f]/.test(siteId)) {
     return `SharePoint site_id must be ASCII only (got ${quoted}). ${guidance}`;
@@ -969,12 +911,9 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
   try {
     const tokensDir = defaultTokensDir();
 
-    // Load tokens from the worker-mounted dir (ADR-060); `client_id`/`tenant_id`/`refresh_token`
-    // are NOT mounted here — they live host-side in `~/.speedwave/oauth/<project>/sharepoint.json`.
     const accessToken = await loadToken(path.join(tokensDir, 'access_token'));
     const siteId = await loadToken(path.join(tokensDir, 'site_id'));
 
-    // Validate tokens are not empty (0-byte placeholder files)
     const missingTokens: string[] = [];
     if (!accessToken) missingTokens.push('access_token');
     if (!siteId) missingTokens.push('site_id');
@@ -983,8 +922,6 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
       console.warn(
         `${ts()} ${withSetupGuidance(`SharePoint tokens are empty or incomplete. Missing: ${missingTokens.join(', ')}.`)}`
       );
-      // Graceful degradation: log warning, return null, let server start
-      // DO NOT throw here - see JSDoc above for rationale
       return null;
     }
 
@@ -996,20 +933,15 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
 
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
-    // Store the raw siteId; warmupSiteId() resolves path-form to composite in the background
-    // and mutates config.siteId in place. Most Graph endpoints accept both forms meanwhile.
     const config: SharePointConfig = { siteId, accessToken };
 
     const client = new SharePointClient(config, tokensDir);
-    // Fire-and-forget: server starts immediately; tools degrade gracefully if Graph is slow.
     client.warmupSiteId();
     return client;
   } catch (error) {
     console.warn(
       `${ts()} Failed to initialize SharePoint client: ${error instanceof Error ? error.message : String(error)}`
     );
-    // Graceful degradation: log warning, return null, let server start
-    // DO NOT throw here - see JSDoc above for rationale
     return null;
   }
 }

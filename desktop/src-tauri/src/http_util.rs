@@ -1,8 +1,5 @@
-// Shared HTTP utilities for Tauri commands that make outbound requests from
-// the Desktop host process.
-
 /// Maximum response body size (5 MiB) to prevent OOM from rogue servers.
-pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MiB
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// Default request timeout (ADR-041). A stalled upstream must not hang the
 /// command; discovery probes override this per-request with their own value.
@@ -73,21 +70,17 @@ pub(crate) fn rewrite_container_alias_to_loopback(host: &str) -> Option<&'static
     }
 }
 
-// Tests
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_max_response_body_bytes_is_5_mib() {
-        // Changing this value requires updating Redmine + LLM discovery tests.
         assert_eq!(MAX_RESPONSE_BODY_BYTES, 5 * 1024 * 1024);
     }
 
     #[test]
     fn test_hardened_client_has_default_timeout() {
-        // ADR-041 baseline: a stalled upstream must not hang a command forever.
         assert!(DEFAULT_REQUEST_TIMEOUT > std::time::Duration::ZERO);
         assert!(build_hardened_client(None).is_ok());
     }
@@ -99,8 +92,6 @@ mod tests {
             Some("127.0.0.1")
         );
     }
-
-    // Deprecated aliases must not re-enter the rewrite path.
 
     #[test]
     fn test_rewrite_alias_deprecated_lima_returns_none() {

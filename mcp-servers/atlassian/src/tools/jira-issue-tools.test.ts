@@ -11,7 +11,6 @@ import { META_KEYS } from '@speedwave/mcp-shared';
 import { createJiraIssueTools } from './jira-issue-tools.js';
 import type { AtlassianClient } from '../client.js';
 
-// Mock the domain factory: `createJiraIssuesClient` returns our scripted stub.
 const issuesStub = {
   search: vi.fn(),
   get: vi.fn(),

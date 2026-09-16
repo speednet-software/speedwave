@@ -10,21 +10,10 @@ Var SpeedwaveDataDirOverride
     DetailPrint "Speedwave: could not create sweep.ps1 in $PLUGINSDIR — skipping."
     Goto sw_SWEEP_write_done_${SW_SWEEP_ID}
   sw_SWEEP_write_ok_${SW_SWEEP_ID}:
-  FileWrite $0 `# SSOT: process sweep for Speedwave Windows upgrades.$\r$\n`
-  FileWrite $0 `# Consumed by: NSIS PREINSTALL hook, WiX CustomAction, setup_wizard::link_cli.$\r$\n`
-  FileWrite $0 `# Env: SPW_INSTDIR (Tauri app dir) + SPW_DATA_DIR (speedwave data dir).$\r$\n`
-  FileWrite $0 `# Args: -Mode full|runtime$\r$\n`
-  FileWrite $0 `#   full    (default; install-time): kill Speedwave.exe + nodejs\*.exe + the instance CLI.$\r$\n`
-  FileWrite $0 `#   runtime (Tauri Desktop pre-link): kill only bin\<instance>.exe — Tauri must NOT$\r$\n`
-  FileWrite $0 `#           target its own workers or itself or the sweep deadlocks on its own locks.$\r$\n`
-  FileWrite $0 `# Exits: 0 ok, 2 missing env, 3 enum failed, 4 lock timeout.$\r$\n`
-  FileWrite $0 `# See ADR-048 for design constraints (string concat, OrdinalIgnoreCase, CIM).$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `param($\r$\n`
   FileWrite $0 `  [ValidateSet('full', 'runtime')]$\r$\n`
   FileWrite $0 `  [string]$$Mode = 'full',$\r$\n`
-  FileWrite $0 `  # Params override env; the WiX CA passes paths as args (never interpolated$\r$\n`
-  FileWrite $0 `  # into a -Command literal) while NSIS/Tauri callers still use env vars.$\r$\n`
   FileWrite $0 `  [string]$$InstDir,$\r$\n`
   FileWrite $0 `  [string]$$DataDir$\r$\n`
   FileWrite $0 `)$\r$\n`
@@ -39,11 +28,9 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `$$instDir = $$instDir.TrimEnd('\')$\r$\n`
   FileWrite $0 `$$dataDir = $$dataDir.TrimEnd('\')$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `# String concat per ADR-048.$\r$\n`
   FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
   FileWrite $0 `$$desktopExe = $$instDir + '\Speedwave.exe'$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `# Installed CLI filename carries the instance; mirrors consts::installed_cli_filename.$\r$\n`
   FileWrite $0 `$$instance = (Split-Path $$dataDir -Leaf) -replace '^\.+', ''$\r$\n`
   FileWrite $0 `if ($$instance -eq 'speedwave') {$\r$\n`
   FileWrite $0 `  $$cliName = 'speedwave.exe'$\r$\n`
@@ -52,8 +39,6 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `}$\r$\n`
   FileWrite $0 `$$cliExe = $$dataDir + '\bin\' + $$cliName$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `# Runtime mode: scope to the CLI binary only (Tauri Desktop is itself running$\r$\n`
-  FileWrite $0 `# the sweep — killing its own workers / self deadlocks the lock-poll).$\r$\n`
   FileWrite $0 `$$includeWorkers = ($$Mode -eq 'full')$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `try {$\r$\n`
@@ -74,7 +59,6 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  exit 3$\r$\n`
   FileWrite $0 `}$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `# Poll write access. Returns when all targets unlock, or 20 s timeout.$\r$\n`
   FileWrite $0 `if ($$includeWorkers) {$\r$\n`
   FileWrite $0 `  $$targets = @($$desktopExe, $$nodePrefix + 'node.exe', $$cliExe)$\r$\n`
   FileWrite $0 `} else {$\r$\n`

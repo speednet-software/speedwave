@@ -79,16 +79,13 @@ export class OauthCompletionWatcher implements OnDestroy {
     this.tauri
       .listen('window_focused', () => void this.checkNow())
       .then((unlisten) => {
-        // Registration can settle after teardown — release it immediately then.
         if (this.destroyed) {
           unlisten();
           return;
         }
         this.unlistenFocus = unlisten;
       })
-      .catch(() => {
-        // Tauri event listener not available outside desktop context.
-      });
+      .catch(() => {});
   }
 
   /**
@@ -98,21 +95,16 @@ export class OauthCompletionWatcher implements OnDestroy {
   async checkNow(): Promise<void> {
     const ctx = this.context;
     const project = ctx?.activeProject();
-    // In-flight guard: a slow get_auth_status would otherwise let the next tick
-    // pass the same false→true edge and fire a second login callback.
     if (!ctx || !project || this.checkInFlight) return;
     this.checkInFlight = true;
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
-      // Drop a stale probe: the active project changed while we were awaiting,
-      // so this result belongs to a project the user already left.
       if (ctx.activeProject() !== project) return;
       if (status.oauth_authenticated && !ctx.isAuthenticated()) {
         this.stopPoll();
         await ctx.onLoginDetected();
       }
     } catch {
-      // Container not running yet — keep polling.
     } finally {
       this.checkInFlight = false;
     }

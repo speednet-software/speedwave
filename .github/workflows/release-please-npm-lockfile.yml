@@ -21,19 +21,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.head_ref }}
           token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Install Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: .node-version
 
-      # `--package-lock-only --ignore-scripts` rewrites only the workspace
-      # self-entry versions to match each package.json — no transitive bumps
-      # on a version-only release PR. See SPEED-190.
       - name: Regenerate npm lockfiles
         run: |
           set -e

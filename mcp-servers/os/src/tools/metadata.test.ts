@@ -7,7 +7,6 @@ import { createCalendarTools } from './calendar-tools.js';
 import { createMailTools } from './mail-tools.js';
 import { createNoteTools } from './notes-tools.js';
 
-// Mock the platform runner (required by tool modules)
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));

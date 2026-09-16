@@ -18,9 +18,7 @@ export class GlobalErrorHandler implements ErrorHandler {
     try {
       const { error } = await import('@tauri-apps/plugin-log');
       this.logError = error;
-    } catch {
-      // Not running inside Tauri — plugin unavailable
-    }
+    } catch {}
   }
 
   /**
@@ -32,10 +30,8 @@ export class GlobalErrorHandler implements ErrorHandler {
     const stack = error instanceof Error ? error.stack : undefined;
     const full = stack ? `${message}\n${stack}` : message;
 
-    // Always log to console as fallback
     console.error(error);
 
-    // Forward to Rust log pipeline if available
     this.initPromise
       .then(() => {
         if (this.logError) {

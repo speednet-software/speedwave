@@ -33,7 +33,6 @@ describe('validateGraphId', () => {
 
   it('without a sourceTool, derives the char set and length bounds from the regex', () => {
     const result = validateGraphId('bad/../path', 'listId');
-    // Both the min (1) and max (128) length bounds come from GRAPH_ID_RE.
     expect(result?.error?.message).toContain('1 to 128 characters');
     expect(result?.error?.message).toContain('[A-Za-z0-9._-]');
   });
@@ -76,8 +75,6 @@ describe('validateGraphId', () => {
 });
 
 describe('withValidation', () => {
-  // ─── validateParams guard ────────────────────────────────────────────────────
-
   describe('invalid params (INVALID_INPUT)', () => {
     it('returns INVALID_INPUT when params is null', async () => {
       const handler = withValidation(async (_p: Record<string, unknown>) => ({
@@ -133,8 +130,6 @@ describe('withValidation', () => {
     });
   });
 
-  // ─── handler success path ────────────────────────────────────────────────────
-
   describe('successful handler', () => {
     it('formats success result as JSON text', async () => {
       const handler = withValidation(async (_p: Record<string, unknown>): Promise<ToolResult> => ({
@@ -165,8 +160,6 @@ describe('withValidation', () => {
       expect(parsed.message).toBe('something went wrong');
     });
   });
-
-  // ─── HANDLER_ERROR catch branch ──────────────────────────────────────────────
 
   describe('HANDLER_ERROR (unexpected throw from handler)', () => {
     it('catches synchronous Error thrown from handler', async () => {

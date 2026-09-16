@@ -11,7 +11,6 @@ import * as toolRegistryModule from './tool-registry.js';
 import { TIMEOUTS } from '@speedwave/mcp-shared';
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 
-// Helper factory for mock execute results
 function createMockExecuteResult(data: unknown, executionMs = 100) {
   return {
     success: true as const,
@@ -24,7 +23,6 @@ function createMockExecuteResult(data: unknown, executionMs = 100) {
   };
 }
 
-// Mock the dependencies. Keep the real DETAIL_LEVELS SSOT; only stub searchTools.
 vi.mock('./search-tools.js', async (importOriginal) => {
   const actual = await importOriginal<typeof searchToolsModule>();
   return { ...actual, searchTools: vi.fn() };
@@ -34,7 +32,6 @@ vi.mock('./tool-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof toolRegistryModule>();
   return {
     ...actual,
-    // Override getExecutionTimeout to use actual implementation
     getExecutionTimeout: actual.getExecutionTimeout,
     getLongTimeoutTools: actual.getLongTimeoutTools,
     getRequiredTimeoutClass: actual.getRequiredTimeoutClass,
@@ -338,12 +335,12 @@ describe('createCodeExecutorHandlers', () => {
       const handlers = createCodeExecutorHandlers(mockConfig);
       await handlers.handleExecuteCode({
         code: 'return "done"',
-        timeout_ms: 200000, // Try to exceed EXECUTION_MS
+        timeout_ms: 200000,
       });
 
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'return "done"',
-        timeoutMs: TIMEOUTS.EXECUTION_MS, // Capped at EXECUTION_MS (120000)
+        timeoutMs: TIMEOUTS.EXECUTION_MS,
       });
     });
 
@@ -475,7 +472,6 @@ describe('createCodeExecutorHandlers', () => {
         code: 'return undefined',
       });
 
-      // undefined is converted to "null" to avoid MCP validation errors
       expect(result.content[0].text).toBe('null');
     });
 
@@ -507,7 +503,6 @@ describe('createCodeExecutorHandlers', () => {
       const customConfig = { timeoutMs: 70000 };
       const handlers = createCodeExecutorHandlers(customConfig);
 
-      // Custom timeout is smaller, should use custom
       await handlers.handleExecuteCode({
         code: 'return "done"',
         timeout_ms: 5000,
@@ -517,7 +512,6 @@ describe('createCodeExecutorHandlers', () => {
         timeoutMs: 5000,
       });
 
-      // Max timeout is smaller, should cap at 120000
       await handlers.handleExecuteCode({
         code: 'return "done"',
         timeout_ms: 150000,
@@ -590,12 +584,10 @@ describe('createCodeExecutorHandlers', () => {
     it('should preserve handler functionality after errors', async () => {
       const handlers = createCodeExecutorHandlers(mockConfig);
 
-      // First call fails
       vi.mocked(executorModule.executeCode).mockRejectedValueOnce(new Error('First error'));
       const firstResult = await handlers.handleExecuteCode({ code: 'bad' });
       expect(firstResult.isError).toBe(true);
 
-      // Second call succeeds
       vi.mocked(executorModule.executeCode).mockResolvedValueOnce(
         createMockExecuteResult('success', 50)
       );
@@ -650,7 +642,6 @@ describe('createCodeExecutorHandlers', () => {
         timeout_ms: 0,
       });
 
-      // Zero timeout should return validation error
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('timeout_ms must be positive');
       expect(executorModule.executeCode).not.toHaveBeenCalled();
@@ -663,7 +654,6 @@ describe('createCodeExecutorHandlers', () => {
         timeout_ms: -100,
       });
 
-      // Negative timeout should return validation error
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('timeout_ms must be positive');
       expect(executorModule.executeCode).not.toHaveBeenCalled();
@@ -676,7 +666,6 @@ describe('createCodeExecutorHandlers', () => {
         timeout_ms: 'invalid',
       });
 
-      // Non-numeric timeout should return validation error
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('timeout_ms must be a valid number');
       expect(executorModule.executeCode).not.toHaveBeenCalled();
@@ -691,7 +680,6 @@ describe('createCodeExecutorHandlers', () => {
         timeout_ms: 5000.7,
       });
 
-      // Float timeout should be floored to integer
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'return "test"',
         timeoutMs: 5000,
@@ -707,7 +695,6 @@ describe('createCodeExecutorHandlers', () => {
         code: 'return "test"',
       });
 
-      // Should still cap at 120000
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'return "test"',
         timeoutMs: TIMEOUTS.EXECUTION_MS,
@@ -726,7 +713,6 @@ describe('createCodeExecutorHandlers', () => {
         code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
       });
 
-      // Should use LONG_OPERATION_MS (300000) as default for downloadFile operations
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
@@ -743,7 +729,6 @@ describe('createCodeExecutorHandlers', () => {
         code: 'await sharepoint.uploadFile({ local_path: "/path", remote_path: "/dest" })',
       });
 
-      // Should use LONG_OPERATION_MS (300000) as default for uploadFile operations
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'await sharepoint.uploadFile({ local_path: "/path", remote_path: "/dest" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
@@ -760,7 +745,6 @@ describe('createCodeExecutorHandlers', () => {
         code: 'await redmine.listIssueIds({ status: "open" })',
       });
 
-      // Should use standard EXECUTION_MS (config default) for regular operations
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'await redmine.listIssueIds({ status: "open" })',
         timeoutMs: mockConfig.timeoutMs,
@@ -778,7 +762,6 @@ describe('createCodeExecutorHandlers', () => {
         timeout_ms: 250000,
       });
 
-      // Should use custom timeout (250000) since it's under LONG_OPERATION_MS (600000)
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeoutMs: 250000,
@@ -793,10 +776,9 @@ describe('createCodeExecutorHandlers', () => {
       const handlers = createCodeExecutorHandlers(mockConfig);
       await handlers.handleExecuteCode({
         code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
-        timeout_ms: 700000, // Try to exceed LONG_OPERATION_MS (600000)
+        timeout_ms: 700000,
       });
 
-      // Should cap at LONG_OPERATION_MS (600000)
       expect(executorModule.executeCode).toHaveBeenCalledWith({
         code: 'await sharepoint.downloadFile({ remote_path: "/doc.pdf", local_path: "/path" })',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
@@ -810,7 +792,6 @@ describe('createCodeExecutorHandlers', () => {
 
       const handlers = createCodeExecutorHandlers(mockConfig);
 
-      // Test with various whitespace patterns (registry-based detection uses flexible regex)
       const testCases = [
         'sharepoint.downloadFile({ remote_path: "/doc.pdf" })',
         'sharepoint .downloadFile({ remote_path: "/doc.pdf" })',
@@ -827,22 +808,18 @@ describe('createCodeExecutorHandlers', () => {
     });
 
     it('should use timeout from registry SSOT (tool metadata declares timeoutClass)', async () => {
-      // timeout class comes from tool metadata, not hardcoded regex patterns
       vi.mocked(executorModule.executeCode).mockResolvedValue(
         createMockExecuteResult({ result: 'ok' })
       );
 
       const handlers = createCodeExecutorHandlers(mockConfig);
 
-      // Tools with timeoutClass: 'long' in their metadata should get extended timeout
-      // sharepoint.downloadFile has timeoutClass: 'long'
       await handlers.handleExecuteCode({ code: 'sharepoint.downloadFile({})' });
       expect(executorModule.executeCode).toHaveBeenLastCalledWith({
         code: 'sharepoint.downloadFile({})',
         timeoutMs: TIMEOUTS.LONG_OPERATION_MS,
       });
 
-      // Regular tools without timeoutClass: 'long' should use standard timeout
       await handlers.handleExecuteCode({ code: 'redmine.listIssueIds({})' });
       expect(executorModule.executeCode).toHaveBeenLastCalledWith({
         code: 'redmine.listIssueIds({})',

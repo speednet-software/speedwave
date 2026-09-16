@@ -203,16 +203,12 @@ pub(crate) fn vm_exec_run(
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command.spawn()?;
 
-    // Feed stdin (or close it immediately).
     if let Some(mut sink) = child.stdin.take() {
         if !stdin.is_empty() {
             sink.write_all(stdin)?;
         }
-        // Dropping `sink` closes the pipe — sends EOF to the child.
     }
 
-    // Drain stdout/stderr in background threads to avoid pipe-buffer deadlock
-    // when output exceeds the OS pipe capacity (~64 KiB on macOS).
     let Some(mut out_pipe) = child.stdout.take() else {
         anyhow::bail!("vm_exec: stdout pipe missing on '{program}'");
     };
@@ -232,7 +228,6 @@ pub(crate) fn vm_exec_run(
         let _ = err_tx.send(buf);
     });
 
-    // Wait with timeout, killing the child if it overruns.
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait()? {
@@ -279,7 +274,6 @@ pub trait CommandRunner: Send + Sync {
     /// Like `run`, but returns raw stdout bytes without UTF-8 conversion.
     /// Needed for commands like `wsl.exe --list` that output UTF-16LE.
     fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
-        // Default: delegate to run() and return as UTF-8 bytes
         self.run(cmd, args).map(|s| s.into_bytes())
     }
 
@@ -304,8 +298,6 @@ pub trait CommandRunner: Send + Sync {
                     if status.success() {
                         return Ok(());
                     }
-                    // Bytes, not read_to_string: UTF-16LE wsl.exe stderr is
-                    // invalid UTF-8 and would drop the whole error detail.
                     let stderr = child
                         .stderr
                         .take()
@@ -620,8 +612,6 @@ pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
     argv.iter()
         .map(|a| match shlex::try_quote(a) {
             Ok(quoted) => quoted.into_owned(),
-            // `try_quote` only fails on null bytes (OS rejects them at execve);
-            // if one slips through, strip and log rather than truncate silently.
             Err(_) => {
                 log::error!("argv token contains a null byte; stripping nulls before quoting");
                 let stripped = a.replace('\0', "");
@@ -805,8 +795,6 @@ pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
         "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n",
     );
     for ch in scan_cni_ids(&msg, "CNI-") {
-        // Guarded `eval`: only shell parsing survives the `\"` in %q comments (xargs dies on
-        // "unmatched double quote"); the case-guard drops any rule line with a metacharacter.
         script.push_str(&format!(
             "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do case \"$r\" in *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*) continue;; esac; eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
              iptables -t nat -F {ch} 2>/dev/null || true\n\
@@ -865,7 +853,6 @@ pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(Str
     if !lower.contains("name-store error") || !lower.contains("is already used by id") {
         return Vec::new();
     }
-    // logrus escapes inner quotes (`\"`); names/IDs never contain backslashes.
     let msg = raw.replace('\\', "");
     let required_prefix = format!("{}_{}_", consts::compose_prefix(), project);
     const NAME_OPEN: &str = "name \"";
@@ -880,8 +867,6 @@ pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(Str
         let Some(k) = rest.find('"') else { break };
         let id = &rest[..k];
         rest = &rest[k + 1..];
-        // Empty ID is the documented nerdctl corruption variant (#3351); a live
-        // container can never be named by it, so it stays a healable target.
         let id_ok = id.is_empty()
             || (id.len() == 64
                 && id
@@ -1236,8 +1221,6 @@ pub(crate) fn parallel_stop_project_containers(
         "stopping {} container(s) in parallel for {project}",
         ids.len()
     );
-    // Chunked fan-out: each stop is its own ssh/wsl session; OpenSSH's
-    // default MaxSessions is 10, so cap below it with polling headroom.
     const MAX_PARALLEL_STOPS: usize = 8;
     for chunk in ids.chunks(MAX_PARALLEL_STOPS) {
         std::thread::scope(|scope| {
@@ -1400,7 +1383,6 @@ pub(crate) mod test_support {
 
         fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
             let key = Self::make_key(cmd, args);
-            // Check raw_responses first, fall back to run().into_bytes()
             if let Some(result) = self.raw_responses.get(&key) {
                 return match result {
                     Ok(val) => Ok(val.clone()),
@@ -1505,7 +1487,6 @@ mod tests {
 
     #[test]
     fn run_failure_decodes_localized_utf16_stderr() {
-        // Polish WSL: diacritics are invalid UTF-8 when read as bytes.
         let stderr = utf16le("Odmowa dostępu. Nie można otworzyć pliku konfiguracji.");
         let err = run_failure("wsl.exe", &stderr, b"");
         assert!(
@@ -1623,8 +1604,6 @@ mod tests {
 
     #[test]
     fn parse_real_nerdctl_output() {
-        // Real `nerdctl compose ps --format json` output; the test only checks
-        // Name and State, so the exact port is immaterial (ADR-038).
         let input = r#"[{"ID":"076c","Name":"speedwave_myproject_mcp_redmine","Image":"speedwave-mcp-redmine:latest","Command":"docker-entrypoint.sh node dist/index.js","Project":"myproject","Service":"mcp-redmine","State":"running","Health":"","ExitCode":0,"Publishers":[{"URL":"127.0.0.1","TargetPort":3000,"PublishedPort":3000,"Protocol":"tcp"}]},{"ID":"40c1","Name":"speedwave_myproject_claude","Image":"speedwave-claude:latest","Command":"/usr/local/bin/entrypoint.sh","Project":"myproject","Service":"claude","State":"exited","Health":"","ExitCode":1,"Publishers":[]}]"#;
         let result = parse_compose_ps_json(input);
         assert_eq!(result.len(), 2);
@@ -1643,7 +1622,6 @@ mod tests {
             fn run(&self, _cmd: &str, _args: &[&str]) -> anyhow::Result<String> {
                 Ok("from_run".to_string())
             }
-            // run_with_stderr NOT overridden — uses default impl
         }
 
         let runner = StubRunner;
@@ -1698,7 +1676,6 @@ mod tests {
 
     #[test]
     fn parse_version_returns_none_for_pre_release_suffix() {
-        // "2.0.0-beta1" → patch part "0-beta1" fails to parse as u32 → None
         assert_eq!(parse_version("2.0.0-beta1"), None);
     }
 
@@ -1731,7 +1708,6 @@ mod tests {
             fn run(&self, _cmd: &str, _args: &[&str]) -> anyhow::Result<String> {
                 Ok("from_run".to_string())
             }
-            // run_raw_stdout NOT overridden — uses default impl
         }
 
         let runner = StubRunner;
@@ -1750,9 +1726,7 @@ mod tests {
             .with_response("cmd --flag", "text_response")
             .with_raw_response("cmd --flag", vec![0xFF, 0xFE, 0x41, 0x00]);
 
-        // run() returns text response
         assert_eq!(runner.run("cmd", &["--flag"]).unwrap(), "text_response");
-        // run_raw_stdout() returns raw bytes (raw_response takes priority)
         assert_eq!(
             runner.run_raw_stdout("cmd", &["--flag"]).unwrap(),
             vec![0xFF, 0xFE, 0x41, 0x00]
@@ -1763,7 +1737,6 @@ mod tests {
     fn test_mock_runner_raw_fallback_to_run() {
         let runner = test_support::MockRunner::new().with_response("cmd --flag", "hello");
 
-        // No raw_response set, so run_raw_stdout falls back to run().into_bytes()
         assert_eq!(
             runner.run_raw_stdout("cmd", &["--flag"]).unwrap(),
             b"hello".to_vec()
@@ -1871,8 +1844,6 @@ services:
         .unwrap_err();
 
         assert!(err.to_string().contains("compose down failed"));
-        // Ordering: down → ps → rm-containers → network-ls. Containers MUST go
-        // before networks — nerdctl refuses network rm with attached containers.
         assert_eq!(
             commands.lock().unwrap().as_slice(),
             &[prestop_ps_key, down_key, ps_key, rm_key, net_ls_key]
@@ -1901,7 +1872,6 @@ services:
         };
         parallel_stop_project_containers(&runner, "nerdctl", "par-stop", &[]);
         let recorded = commands.lock().unwrap();
-        // Stops run concurrently — assert as a set, not a sequence.
         for id in ["id-a", "id-b", "id-c"] {
             assert!(
                 recorded.contains(&format!("nerdctl stop {id}")),
@@ -1994,7 +1964,6 @@ services:
         let runner = PartialFailRunner {
             commands: Arc::clone(&commands),
         };
-        // Must not panic or propagate — down/rm -f converge failed stops later.
         parallel_stop_project_containers(&runner, "nerdctl", "par-partial", &[]);
         let recorded = commands.lock().unwrap();
         assert!(recorded.contains(&"stop good-id".to_string()));
@@ -2184,24 +2153,18 @@ services:
             .with_response("nerdctl rm -f a b", "")
             .with_response("nerdctl rm -f --time=0 a b", "");
         let targets = vec!["a".to_string(), "b".to_string()];
-        // Graceful path — no --time=0.
         run_rm_force(&runner, "nerdctl", &[], &targets, false).unwrap();
-        // Force-kill path — emits --time=0.
         run_rm_force(&runner, "nerdctl", &[], &targets, true).unwrap();
     }
 
     #[test]
     fn run_rm_force_empty_targets_is_noop() {
-        // No targets → no command issued, returns Ok. MockRunner would error
-        // on any unexpected command, so reaching Ok proves nothing ran.
         let runner = test_support::MockRunner::new();
         run_rm_force(&runner, "nerdctl", &[], &[], true).unwrap();
     }
 
     #[test]
     fn force_remove_containers_run_fn_receives_id_batch_then_each_name() {
-        // The shared algorithm must hand the rm closure: first the id batch
-        // (all ids at once), then one single-element batch per configured name.
         let project = "run-fn-batches".to_string();
         let tmp = tempfile::tempdir().unwrap();
         let compose_dir = tmp.path().join("compose").join(&project);
@@ -2238,8 +2201,6 @@ services:
             ]
         );
     }
-
-    // Stale container detection & recovery tests.
 
     #[test]
     fn test_is_stale_container_error_matches_mount_namespace() {
@@ -2292,9 +2253,6 @@ services:
         assert!(!is_stopped_container_error(""));
     }
 
-    // ensure_exec_healthy tests via `MockRuntimeBuilder`: each probe pops one
-    // scripted exec-piped failure; empty queue → default `true` (success).
-
     /// Stderr classified as stale-mount by `is_stale_container_error`; single
     /// fixture so a classifier change reaches every test in one edit.
     const STALE_MOUNT_STDERR: &str = "current working directory is outside of container mount namespace root -- possible container breakout detected";
@@ -2311,7 +2269,6 @@ services:
 
     #[test]
     fn test_ensure_exec_healthy_recovers_stale_container() {
-        // Probe 1 fails (stale) -> recreate -> Probe 2 succeeds (queue drained).
         let (rt, handles) = MockRuntimeBuilder::new()
             .push_exec_piped_failure(STALE_MOUNT_STDERR)
             .build();
@@ -2353,7 +2310,6 @@ services:
 
     #[test]
     fn test_ensure_exec_healthy_still_broken_after_recovery() {
-        // Both probes fail (stale): probe1 -> recreate (succeeds) -> probe2 still fails.
         let (rt, handles) = MockRuntimeBuilder::new()
             .push_exec_piped_failure(STALE_MOUNT_STDERR)
             .push_exec_piped_failure(STALE_MOUNT_STDERR)
@@ -2471,7 +2427,6 @@ services:
     #[cfg(unix)]
     fn real_runner_run_with_timeout_captures_stderr() {
         let runner = RealRunner;
-        // `sh -c 'echo diagnostic >&2; exit 1'` writes to stderr then fails
         let result = runner.run_with_timeout(
             "sh",
             &["-c", "echo diagnostic >&2; exit 1"],
@@ -2505,7 +2460,6 @@ services:
 
     #[test]
     fn test_remove_images_default_impl_is_noop() {
-        // `NoopRuntime` does not override `remove_images`, so this exercises the trait default.
         let rt = NoopRuntime;
         assert!(
             rt.remove_images(&[], false).is_ok(),
@@ -2520,8 +2474,6 @@ services:
 
     #[test]
     fn noop_runtime_required_methods_are_callable() {
-        // These four are REQUIRED trait methods (no default body); pins that every
-        // impl supplies them, so production can never silently inherit a no-op.
         let rt = NoopRuntime;
         assert!(rt.compose_validate("proj").is_ok());
         assert!(rt.system_prune().is_ok());
@@ -2594,7 +2546,6 @@ services:
             !result.contains('\0'),
             "result must not contain null bytes, got: {result:?}"
         );
-        // Cleaned argv must still parse via `shlex::split` (fallback quoting valid).
         let parsed = shlex::split(&result).expect("fallback output must be parseable");
         assert_eq!(
             parsed,
@@ -2628,10 +2579,6 @@ services:
             );
         }
     }
-
-    // compose_validate_with_retry tests.
-
-    // `push_validate_result` is FIFO: first push -> first popped.
 
     #[test]
     fn compose_validate_with_retry_succeeds_on_first_attempt() {
@@ -2701,8 +2648,6 @@ services:
         reason = "SSOT guard: asserts COMPOSE_VALIDATE_MAX_ATTEMPTS stays sane"
     )]
     fn compose_validate_retry_window_is_long_enough_for_virtiofs_lag() {
-        // Regression: 3 attempts / 300 ms total was too short — the guest saw a
-        // stale compose.yml past the window. Pin the wider window + capped delay.
         assert!(
             COMPOSE_VALIDATE_MAX_ATTEMPTS >= 6,
             "retry window shrank below the virtiofs-lag fix"
@@ -2736,30 +2681,21 @@ services:
 
     #[test]
     fn is_propagation_error_matches_schema_validation() {
-        // A truncated virtiofs read of the networks section (last in the file)
-        // surfaces as a compose-go schema error, not "undefined network".
         assert!(is_propagation_error(&anyhow::anyhow!(
             "validating compose.yml: networks.x_network.driver must be a string"
         )));
-        // YAML parse symptom of a mid-line cut.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "yaml: line 12: could not find expected ':'"
         )));
-        // libyaml emits the "did not find expected" variant when the cut lands
-        // at a different token position — the third schema/parse fragment.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "yaml: line 8: did not find expected key"
         )));
-        // A cut at end-of-document (file truncated mid-write) — yaml-go variant.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "failed to parse compose.yml: yaml: line 365: found unexpected end of stream"
         )));
-        // A torn `cpus:` value under deploy.resources.limits surfaces as the
-        // compose-go schema type error for that field (real-world: mcp-office).
         assert!(is_propagation_error(&anyhow::anyhow!(
             "validating compose.yml: services.mcp-office.deploy.resources.limits.cpus must be a number or string"
         )));
-        // Same for a torn `memory:` limit value.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "validating compose.yml: services.mcp-office.deploy.resources.limits.memory must be a string"
         )));
@@ -2767,8 +2703,6 @@ services:
 
     #[test]
     fn is_propagation_error_matches_compose_file_enoent() {
-        // The path in nerdctl's `open <path>: <err>` always ends in compose.yml, so
-        // the scoped fragment is contiguous. Lima (host path) and WSL (drvfs) shapes.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "limactl failed: time=\"2026-08-25T09:37:03+02:00\" level=fatal msg=\"open /Users/u/.speedwave/compose/proj/compose.yml: no such file or directory\""
         )));
@@ -2783,13 +2717,9 @@ services:
             "connection refused"
         )));
         assert!(!is_propagation_error(&anyhow::anyhow!("EOF")));
-        // A bare "must be a string" on another field must NOT be retryable —
-        // the fragment is scoped to the network-driver torn-write.
         assert!(!is_propagation_error(&anyhow::anyhow!(
             "validating compose.yml: services.claude.image must be a string"
         )));
-        // ENOENT retry is scoped to compose.yml — a missing token or binary is
-        // a real error, not virtiofs lag on the freshly renamed compose file.
         assert!(!is_propagation_error(&anyhow::anyhow!(
             "open /Users/u/.speedwave/tokens/proj/slack/token: no such file or directory"
         )));
@@ -2797,8 +2727,6 @@ services:
 
     #[test]
     fn is_propagation_error_yaml_scanner_phrases_are_intentionally_retried() {
-        // libyaml SCANNER phrases (`could not/did not find expected`) signal a torn
-        // virtiofs page; worst case for a real malformed manifest is a bounded retry.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "yaml: line 5: could not find expected ':'"
         )));
@@ -2809,8 +2737,6 @@ services:
 
     #[test]
     fn is_propagation_error_handles_mixed_case() {
-        // nerdctl on some platforms emits title-cased messages — to_lowercase
-        // normalises them before substring match.
         assert!(is_propagation_error(&anyhow::anyhow!(
             "Service X refers to Undefined Network Y"
         )));
@@ -2953,8 +2879,6 @@ services:
 
     #[test]
     fn scan_cni_ids_excludes_shared_hostport_infrastructure_chains() {
-        // The hex-suffix filter targets ONLY per-container `CNI-<hex>` chains: the shared
-        // `CNI-HOSTPORT-*`/`CNI-DN-*` chains are live for healthy containers and must survive.
         let s =
             "CNI-HOSTPORT-DNAT CNI-HOSTPORT-SETMARK CNI-HOSTPORT-MASQ CNI-DN-abcdef CNI-68fe31e0";
         assert_eq!(
@@ -2978,8 +2902,6 @@ services:
         let b64 = cmd
             .trim_start_matches("echo ")
             .trim_end_matches(" | base64 -d | sh");
-        // The payload must carry no shell metacharacters — the whole point is that it
-        // survives the WSL default-shell reparse + `sh -c` layers that mangle raw quotes.
         assert!(
             !b64.is_empty()
                 && b64
@@ -3010,14 +2932,11 @@ services:
 
     #[test]
     fn cni_cleanup_command_targets_only_named_state() {
-        // Names the colliding chain → flush + delete THAT chain, never a VM-wide scan.
         let script = decode_payload(&cni_cleanup_command(&anyhow::anyhow!(
             "iptables -t nat -N CNI-68fe31e0 --wait: iptables: Chain already exists"
         )));
         assert!(script.contains("iptables -t nat -F CNI-68fe31e0"));
         assert!(script.contains("iptables -t nat -X CNI-68fe31e0"));
-        // Jump-rule delete: guarded `eval` (only shell parsing handles the `\"` inside
-        // CNI's %q comments; xargs errors "unmatched double quote" and drops `-j <ch>`).
         assert!(script.contains("eval \"iptables -t nat $r\""));
         assert!(script.contains("while IFS= read -r r"));
         assert!(
@@ -3043,7 +2962,6 @@ services:
             "must not blanket-delete bridges: {script}"
         );
 
-        // No id in the error → no iptables/bridge/network mutation at all (retry only).
         let bare = decode_payload(&cni_cleanup_command(&anyhow::anyhow!(
             "failed to call cni.Setup: plugin failed (add)"
         )));
@@ -3073,8 +2991,6 @@ services:
         let log = dir.path().join("calls.log");
         let pwned = dir.path().join("pwned");
 
-        // Fake iptables: `-S` emits one legit %q-commented jump rule (CNI-68fe31e0) and
-        // one command-substitution attempt (CNI-deadbeef); every other call logs argv.
         let legit = r#"-A POSTROUTING -s 10.4.0.0/24 -m comment --comment "name: \"speedwave_net\" id: \"abc\"" -j CNI-68fe31e0"#;
         let evil = format!(
             r#"-A POSTROUTING -s 10.4.1.0/24 -m comment --comment "x $(touch {})" -j CNI-deadbeef"#,
@@ -3116,8 +3032,6 @@ services:
             .map(|b| b.lines().map(str::to_string).collect())
             .collect();
 
-        // The %q comment must arrive UNESCAPED as one argv element, with `-j <chain>`
-        // intact — exactly what the xargs variant lost ("unmatched double quote").
         let delete = calls
             .iter()
             .find(|c| c.contains(&"-D".to_string()) && c.contains(&"CNI-68fe31e0".to_string()))
@@ -3134,7 +3048,6 @@ services:
             "chain flush must run"
         );
 
-        // The `$(…)` rule is skipped by the guard: nothing executed, no delete issued.
         assert!(!pwned.exists(), "command substitution must never execute");
         assert!(
             !calls
@@ -3207,8 +3120,6 @@ services:
     fn name_store_conflicts_scopes_names_by_project_prefix() {
         let foreign = own_name("other", "mcp_hub");
         assert!(name_store_conflicts(&ns_conflict_err(&foreign, DEAD_ID), "acme").is_empty());
-        // The prefix gate is deliberately not a uniqueness proof for `_`-nested projects:
-        // an `up` conflict only ever names the upping project; live safety is payload-enforced.
         let nested = own_name("foo_bar", "mcp_hub");
         assert_eq!(
             name_store_conflicts(&ns_conflict_err(&nested, DEAD_ID), "foo_bar").len(),
@@ -3228,7 +3139,6 @@ services:
         assert!(name_store_conflicts(&ns_conflict_err(&name, short), "acme").is_empty());
         let upper = DEAD_ID.to_uppercase();
         assert!(name_store_conflicts(&ns_conflict_err(&name, &upper), "acme").is_empty());
-        // Empty ID is the documented #3351 corruption variant — healable.
         assert_eq!(
             name_store_conflicts(&ns_conflict_err(&name, ""), "acme"),
             vec![(name, String::new())]
@@ -3262,7 +3172,6 @@ services:
         );
         let script = decode_payload(&cmd);
         assert!(script.contains(&format!("heal_entry \"$store/{name}\"")));
-        // Proof is bound to explicit engine coordinates, never ambient env.
         for flag in ["--address", "--namespace", "--data-root"] {
             assert!(script.contains(flag), "inspect must pass {flag}");
         }
@@ -3321,7 +3230,6 @@ services:
             script.contains(&format!("{longer}*) continue")),
             "foo's sweep must skip entries owned by registered foo_bar"
         );
-        // Without the longer sibling no case-guard is emitted (empty `case` is a syntax error).
         let solo =
             name_store_sweep_command_in(&test_layout("/var/lib/nerdctl"), "foo", &registered[..1]);
         assert!(!decode_payload(&solo).contains("continue"));

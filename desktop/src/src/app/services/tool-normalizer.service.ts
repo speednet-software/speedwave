@@ -63,7 +63,6 @@ export class ToolNormalizerService {
           return { kind: 'generic', raw_json: inputJson };
       }
     } catch {
-      // Unparseable input is displayed raw; the live stream path logs it once at ToolResult.
       return { kind: 'generic', raw_json: inputJson };
     }
   }

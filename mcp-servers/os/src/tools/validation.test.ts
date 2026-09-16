@@ -183,8 +183,6 @@ describe('validation', () => {
     });
 
     it('renders a genuinely-undefined field by omitting it from the received map', () => {
-      // b is absent (genuinely undefined); JSON.stringify drops it, but both names still
-      // appear in the next-step guidance derived from the single offending list.
       const result = requireFields({ a: 123 }, ['a', 'b']);
       expect(result.valid).toBe(false);
       if (!result.valid) {
@@ -199,7 +197,6 @@ describe('validation', () => {
       const result = requireFields({}, ['a', 'b']);
       expect(result.valid).toBe(false);
       if (!result.valid) {
-        // The "Invalid ..." prefix and the next step derive from one joined list.
         expect(result.error.error?.message).toContain('Invalid a, b');
         expect(result.error.error?.message).toContain('Provide a non-empty string for a, b');
       }
@@ -742,7 +739,6 @@ describe('validation', () => {
     });
 
     it('runs steps in order: required → booleans → strings → numbers', () => {
-      // required fails first even though numbers would also fail
       const result = validateAll(
         { count: 999 },
         {

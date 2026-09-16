@@ -60,7 +60,6 @@ export async function refreshMicrosoftToken(
     scope: req.scopes.join(' '),
   });
 
-  // Upper bound on the Microsoft token endpoint round-trip.
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
   let response: Response;
@@ -84,7 +83,6 @@ export async function refreshMicrosoftToken(
     clearTimeout(timeoutId);
   }
 
-  // A 3xx is not a valid token response; refuse rather than follow it.
   if (response.status >= 300 && response.status < 400) {
     return {
       ok: false,
@@ -135,8 +133,6 @@ export async function refreshMicrosoftToken(
   const grantedScopes =
     typeof grantedScope === 'string' && grantedScope.trim() ? grantedScope.trim().split(/\s+/) : [];
 
-  // `offline_access` is never echoed in the token response; treat as satisfied.
-  // Keep in sync with integrations_cmd.rs::OFFLINE_ACCESS_SCOPE.
   const missing = req.scopes.filter((s) => {
     if (s.toLowerCase() === 'offline_access') return false;
     return !grantedScopes.some((g) => g.toLowerCase() === s.toLowerCase());

@@ -1,6 +1,4 @@
 #!/bin/bash
-# Clipboard wrapper (ADR-052); six symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe/powershell.exe)
-# point here, routed by flag/-Command content. Write: stdin → ~/.clipboard-bridge + OSC 52 on tty.
 
 set -f
 
@@ -8,8 +6,6 @@ is_read=0
 for arg in "$@"; do
     case "$arg" in
         -o|--out|-out|--output|--paste) is_read=1; break ;;
-        # powershell.exe interop (platform "wsl"): Set-Clipboard = stdin write;
-        # read-style commands must exit 1 or they'd clobber the bridge (ADR-052).
         *Set-Clipboard*) break ;;
         *Get-Clipboard*|*ContainsImage*) exit 1 ;;
     esac
@@ -44,7 +40,6 @@ if [ "$is_read" -eq 1 ]; then
     esac
 fi
 
-# Write path.
 input=$(cat)
 
 bridge="${HOME}/.clipboard-bridge"

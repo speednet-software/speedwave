@@ -1,7 +1,5 @@
 #!/usr/bin/env bats
 
-# Guards scripts/check-windows-build-deps.sh: `make setup-dev` reports the Windows whisper
-# prerequisites through it, and a wrong verdict sends a dev after the wrong tool.
 
 DEPS_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-windows-build-deps.sh"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
@@ -15,8 +13,6 @@ teardown() {
     rm -rf "$WORK"
 }
 
-# Isolates the probe from the host toolchain: a stub `uname` picks the platform branch, and
-# SEALED_PATH carries only the dirs the scripts themselves need — never a provisioned ninja.
 deps_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri" "$WORK/bin"
     cp "$DEPS_SCRIPT" "$WORK/repo/scripts/check-windows-build-deps.sh"
@@ -34,7 +30,6 @@ deps_rig() {
             *) SEALED_PATH="$SEALED_PATH:$dir" ;;
         esac
     done
-    # The absent-ninja tests are only meaningful while the sealed PATH really has none.
     if PATH="$SEALED_PATH" command -v ninja >/dev/null 2>&1; then
         echo "sealed PATH leaks a ninja: $SEALED_PATH" >&2
         return 1
@@ -73,7 +68,6 @@ run_probe() {
     [[ "$output" == *"✅ VULKAN_SDK $WORK/sdk"* ]]
     [[ "$output" == *"✅ ninja 1.12.1"* ]]
     [[ "$output" == *"✅ MSVC env + CMAKE_GENERATOR"* ]]
-    # Indented: the gate's own verdict is nested under this section of `make setup-dev`.
     [[ "$output" == *"  ✅ Vulkan build path budget OK"* ]]
 }
 
@@ -109,7 +103,6 @@ run_probe() {
 }
 
 @test "a failing path budget is reported without failing the advisory probe" {
-    # Advisory by contract: the hard gates are stage-vulkan-windows and whisper-rs-sys.
     deps_rig
     local deep
     deep="/$(printf 'x%.0s' {1..80})"

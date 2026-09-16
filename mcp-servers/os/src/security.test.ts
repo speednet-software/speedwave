@@ -5,7 +5,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// vi.hoisted ensures these are created before vi.mock factories execute
 const { execFileAsyncMock, existsSyncMock } = vi.hoisted(() => ({
   execFileAsyncMock: vi.fn(),
   existsSyncMock: vi.fn(() => true),
@@ -46,8 +45,6 @@ describe('Security', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-
-  // ── Command Allowlist ──────────────────────────────────────────────────────────────────────
 
   describe('Command Allowlist', () => {
     it('rejects unknown command names', async () => {
@@ -116,8 +113,6 @@ describe('Security', () => {
     });
   });
 
-  // ── Tool ↔ Allowlist parity ────────────────────────────────────────────────────────────────
-
   describe('Tool ↔ Allowlist parity', () => {
     it('every registered tool handler invokes runCommand with an allowlisted command', async () => {
       execFileAsyncMock.mockResolvedValue({ stdout: '{}', stderr: '' });
@@ -125,7 +120,6 @@ describe('Security', () => {
       const tools = createToolDefinitions();
       const calledCommands: Array<{ domain: string; command: string }> = [];
 
-      // Spy on the real runCommand to capture actual calls
       const runCommandSpy = vi.spyOn(await import('./platform-runner.js'), 'runCommand');
       runCommandSpy.mockImplementation(async (domain, command) => {
         calledCommands.push({ domain, command });
@@ -136,7 +130,6 @@ describe('Security', () => {
         const required = tool.inputSchema.required ?? [];
         const params: Record<string, unknown> = {};
         for (const field of required) {
-          // Use correct types so handlers don't short-circuit on validation
           const prop = tool.inputSchema.properties?.[field] as
             { type?: string; description?: string } | undefined;
           const isDateField =
@@ -154,10 +147,8 @@ describe('Security', () => {
         await handler(params);
       }
 
-      // Verify runCommand was called for EVERY tool
       expect(calledCommands.length).toBe(tools.length);
 
-      // Verify every called command is in the allowlist
       for (const { domain, command } of calledCommands) {
         const allowed = ALLOWED_COMMANDS[domain as OsDomain];
         expect(allowed, `No allowlist for domain '${domain}'`).toBeDefined();
@@ -178,8 +169,6 @@ describe('Security', () => {
       expect(tools.length).toBe(allowlistTotal);
     });
   });
-
-  // ── ISO8601 Strictness ─────────────────────────────────────────────────────────────────────
 
   describe('ISO8601 Strictness', () => {
     it('rejects human-readable date formats', () => {
@@ -222,8 +211,6 @@ describe('Security', () => {
       expect(isValidISO8601('2026-02-20T10:00:00.123456Z')).toBe(true);
     });
   });
-
-  // ── Environment Isolation (SEC-025) ────────────────────────────────────────────────────────
 
   describe('Environment Isolation', () => {
     const envKeysToClean = [
@@ -283,8 +270,6 @@ describe('Security', () => {
       expect(opts.env.PATH).toBeDefined();
     });
   });
-
-  // ── Input Sanitization (withValidation) ────────────────────────────────────────────────────
 
   describe('Input Sanitization', () => {
     it('rejects null params via withValidation', async () => {

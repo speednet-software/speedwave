@@ -126,11 +126,9 @@ describe('TelemetrySectionComponent', () => {
     await create();
     await component.ngOnInit();
     fixture.detectChanges();
-    // protocol lives in "Transport & signals" — its header must show the indicator.
     expect(
       fixture.nativeElement.querySelector('[data-testid="telemetry-transport-managed"]')
     ).not.toBeNull();
-    // Other section headers stay clean.
     expect(
       fixture.nativeElement.querySelector('[data-testid="telemetry-privacy-managed"]')
     ).toBeNull();
@@ -176,7 +174,6 @@ describe('TelemetrySectionComponent', () => {
     await create();
     await component.ngOnInit();
     fixture.detectChanges();
-    // The switch is the shared app-toggle: a sr-only checkbox inside the toggle wrapper.
     expect(fixture.nativeElement.querySelector('app-toggle')).not.toBeNull();
     const toggle = fixture.nativeElement.querySelector('[data-testid="toggle"]');
     expect(toggle).not.toBeNull();
@@ -196,7 +193,6 @@ describe('TelemetrySectionComponent', () => {
   });
 
   it('save() omits a locked field entirely and still saves an edited unlocked field', async () => {
-    // The master switch is MDM-locked while endpoint stays editable.
     setup(
       baseResponse({
         locks: { ...baseResponse().locks, enabled: true },
@@ -311,7 +307,6 @@ describe('TelemetrySectionComponent', () => {
       ['1.9', 1],
     ])('parses %o to %o', async (input, expected) => {
       await create();
-      // parseInterval is protected; the tri-state input handlers exercise it.
       component.onMetricIntervalInput(input);
       expect(component.metricExportIntervalMs()).toBe(expected);
     });
@@ -432,7 +427,6 @@ describe('TelemetrySectionComponent', () => {
       await component.save();
       expect(component.saved()).toBe(true);
       component.ngOnDestroy();
-      // If the timer were still armed, this would flip `saved` back to false.
       vi.advanceTimersByTime(2000);
       expect(component.saved()).toBe(true);
     } finally {
@@ -453,7 +447,7 @@ describe('TelemetrySectionComponent', () => {
     await component.ngOnInit();
     const projectState = TestBed.inject(ProjectStateService);
     const spy = vi.spyOn(projectState, 'requestRestart');
-    allowRead = false; // update succeeds, the refresh read that follows fails
+    allowRead = false;
     await component.save();
     expect(spy).not.toHaveBeenCalled();
     expect(component.saved()).toBe(false);

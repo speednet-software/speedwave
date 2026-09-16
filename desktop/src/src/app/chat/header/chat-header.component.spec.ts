@@ -13,8 +13,6 @@ describe('ChatHeaderComponent', () => {
     fixture = TestBed.createComponent(ChatHeaderComponent);
   });
 
-  // ── Happy path — title rendering ──────────────────────────────────────
-
   it('renders the title', () => {
     fixture.componentRef.setInput('viewTitle', 'Refactoring container runtime');
     fixture.detectChanges();
@@ -34,16 +32,11 @@ describe('ChatHeaderComponent', () => {
     expect(titleEl.textContent?.trim()).toBe('Chat');
   });
 
-  // ── Project pill ──────────────────────────────────────────────────────
-  // Project pill extracted to <app-project-pill>; behaviour in project-pill.spec.ts.
-
   it('renders the shared project pill component', () => {
     fixture.detectChanges();
     const pill = fixture.nativeElement.querySelector('app-project-pill');
     expect(pill).not.toBeNull();
   });
-
-  // ── Compact mode — blocked chat states ────────────────────────────────
 
   it('shows conversation controls in full (default) mode', () => {
     fixture.detectChanges();
@@ -65,8 +58,6 @@ describe('ChatHeaderComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('app-project-pill')).not.toBeNull();
   });
-
-  // ── Toggle buttons — emission ────────────────────────────────────────
 
   it('emits toggleMemory when memory button is clicked', () => {
     fixture.detectChanges();
@@ -106,10 +97,6 @@ describe('ChatHeaderComponent', () => {
     expect(emitted).toBe(1);
   });
 
-  // openProjectSwitcher emit is now the shared pill's responsibility.
-
-  // ── ARIA aria-pressed reflects toggle state ──────────────────────────
-
   it('sets aria-pressed=true on memory button when memoryOpen is true', () => {
     fixture.componentRef.setInput('memoryOpen', true);
     fixture.detectChanges();
@@ -143,8 +130,6 @@ describe('ChatHeaderComponent', () => {
     ) as HTMLButtonElement;
     expect(btn.getAttribute('aria-pressed')).toBe('false');
   });
-
-  // ── Edge case — Unicode and long titles render unchanged ────────────
 
   it('renders Unicode characters in title verbatim', () => {
     fixture.componentRef.setInput('viewTitle', 'Σφαῖρα — тест 漢字');

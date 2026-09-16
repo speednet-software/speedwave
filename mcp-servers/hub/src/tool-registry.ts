@@ -17,8 +17,6 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// ── Mutable Tool Registry ────────────────────────────────────────────────────────────────────────
-
 /**
  * Mutable registry of all tool metadata by service, populated/refreshed by initializeRegistry().
  * Consumers should access via exported functions, not directly.
@@ -52,8 +50,6 @@ export const TOOL_REGISTRY: Readonly<Record<string, Readonly<Record<string, Tool
  * Empty until initializeRegistry() reads ENABLED_SERVICES env var.
  */
 export let SERVICE_NAMES: readonly string[] = [];
-
-// ── Initialization ───────────────────────────────────────────────────────────────────────────────
 
 /**
  * Retry schedule for cold-start workers (SharePoint OAuth can take 5–15s).
@@ -107,9 +103,8 @@ async function discoverWithStartupRetry(service: string): Promise<Record<string,
  */
 export async function initializeRegistry(): Promise<void> {
   if (_initialized) return;
-  _initialized = true; // Set immediately to prevent concurrent double-initialization
+  _initialized = true;
 
-  // Update SERVICE_NAMES to include plugin services from env
   SERVICE_NAMES = getAllServiceNames();
 
   console.log(`${ts()} [tool-registry] Initializing dynamic registry...`);
@@ -120,7 +115,6 @@ export async function initializeRegistry(): Promise<void> {
     console.log(`${ts()} [tool-registry] ${service}: ${Object.keys(tools).length} tools loaded`);
   }
 
-  // Start background refresh (every 5 minutes)
   _startBackgroundRefresh();
 
   const stats = getRegistryStats();
@@ -137,13 +131,12 @@ export async function refreshServiceTools(service: string): Promise<void> {
   try {
     const tools = await discoverAndMergeService(service);
     _registry[service] = tools;
-    cachedLongTimeoutTools = null; // Invalidate cache after update
+    cachedLongTimeoutTools = null;
   } catch (error) {
     console.warn(
       `${ts()} [tool-registry] Refresh failed for ${service}:`,
       error instanceof Error ? error.message : error
     );
-    // Keep existing data on refresh failure
   }
 }
 
@@ -185,9 +178,9 @@ function _startBackgroundRefresh(): void {
    * calls this once (returns early on duplicate calls via _initialized flag) */
   if (_refreshInterval) return;
 
-  const REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+  const REFRESH_MS = 5 * 60 * 1000;
   _refreshInterval = setInterval(async () => {
-    if (_refreshInProgress) return; // Skip overlapping refresh
+    if (_refreshInProgress) return;
     _refreshInProgress = true;
     try {
       for (const service of SERVICE_NAMES) {
@@ -198,13 +191,11 @@ function _startBackgroundRefresh(): void {
     }
   }, REFRESH_MS);
 
-  // Don't prevent process from exiting
   /* c8 ignore next 3 — Node.js setInterval returns Timeout with .unref(), browser returns number */
   if (_refreshInterval && typeof _refreshInterval === 'object' && 'unref' in _refreshInterval) {
     _refreshInterval.unref();
   }
 
-  // Start catch-up timers for initially-empty services with exponential backoff.
   for (const service of SERVICE_NAMES) {
     if (Object.keys(_registry[service] ?? {}).length === 0) {
       _scheduleEmptyServiceRecheck(service, 0);
@@ -245,13 +236,11 @@ function _scheduleEmptyServiceRecheck(service: string, failures: number): void {
       _refreshInProgress = false;
     }
     if (Object.keys(_registry[service] ?? {}).length > 0) {
-      // Success — drop timer; 5-min refresh handles maintenance.
       _emptyServiceTimers.delete(service);
       return;
     }
     _scheduleEmptyServiceRecheck(service, failures + 1);
   }, delay);
-  // Don't keep the process alive for catch-up timers.
   if (timer && typeof timer === 'object' && 'unref' in timer) {
     timer.unref();
   }
@@ -298,8 +287,6 @@ export function _setServiceNamesForTesting(names: string[]): void {
   SERVICE_NAMES = names;
 }
 
-// ── Registry Accessors (same API as before) ──────────────────────────────────────────────────────
-
 /**
  * Get tool metadata for a specific service and method
  * @param service - Service name
@@ -317,8 +304,6 @@ export function getServiceMethods(service: string): string[] {
   const tools = _registry[service];
   return tools ? Object.keys(tools) : [];
 }
-
-// ── Timeout Detection (SSOT - based on tool policy) ──────────────────────────────────────────────
 
 /**
  * Cached result for getLongTimeoutTools().
@@ -394,8 +379,6 @@ export function getExecutionTimeout(
   };
 }
 
-// ── Service Filtering (ENABLED_SERVICES / DISABLED_OS_SERVICES) ──────────────────────────────────
-
 let _enabledServicesCache: Set<string> | null = null;
 
 /**
@@ -451,8 +434,6 @@ export function resetServiceCaches(): void {
   _disabledOsCategoriesCache = null;
 }
 
-// ── Bridge Generation ────────────────────────────────────────────────────────────────────────────
-
 /**
  * Options for callWorker function
  */
@@ -491,8 +472,6 @@ export function buildServiceBridge(
 
   for (const methodName of Object.keys(tools)) {
     const metadata = tools[methodName];
-    // Bridge surface uses camelCase `methodName`; `tools/call` needs the worker's own tool name
-    // (e.g. snake_case for @playwright/mcp), falling back to `methodName` for legacy metadata.
     const workerToolName = metadata.workerToolName ?? methodName;
     bridge[methodName] = (params?: Record<string, unknown>) => {
       const perToolTimeout = metadata.timeoutMs;
@@ -505,8 +484,6 @@ export function buildServiceBridge(
 
   return bridge;
 }
-
-// ── Executor Wrapper Generation ──────────────────────────────────────────────────────────────────
 
 /**
  * Function type for wrapping tool calls with audit logging.
@@ -585,8 +562,6 @@ export function buildExecutorWrappers(
 
   return wrappers;
 }
-
-// ── Validation ───────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Validate that all tools in registry have required fields.

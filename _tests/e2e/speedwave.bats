@@ -2,13 +2,9 @@
 
 load setup
 
-# ── CLI argument parsing ─────────────────────────────────────────────────────
 
 @test "speedwave without runtime shows informative error" {
-    # When runtime is not available, CLI should exit with helpful message
-    # This test works even without Lima/nerdctl installed
     run "$SPEEDWAVE_BIN" 2>&1 || true
-    # Should mention setup wizard or runtime
     [[ "$output" == *"runtime"* ]] || [[ "$output" == *"setup"* ]] || [[ "$output" == *"Speedwave"* ]]
 }
 
@@ -18,7 +14,6 @@ load setup
     [[ "$output" == *"USAGE"* ]]
     [[ "$output" == *"speedwave check"* ]]
     [[ "$output" == *"plugin install"* ]]
-    # Must NOT show the runtime-not-running banner
     [[ "$output" != *"runtime is not running"* ]]
 }
 
@@ -37,14 +32,12 @@ load setup
 }
 
 @test "speedwave check produces a structured verdict" {
-    # Verdicts: "speedwave check OK" / "FAILED" / "runtime is not running" / "No project configured"
     cd "$TEST_TEMP_DIR"
     run "$SPEEDWAVE_BIN" check 2>&1 || true
     [[ "$output" == *"speedwave check OK"* ]] \
         || [[ "$output" == *"speedwave check FAILED"* ]] \
         || [[ "$output" == *"runtime is not running"* ]] \
         || [[ "$output" == *"No project configured"* ]]
-    # Must not crash with a panic
     [[ "$output" != *"panicked"* ]]
     [[ "$output" != *"PANIC"* ]]
 }
@@ -67,7 +60,6 @@ load setup
     [[ "$output" == *"usage"* ]] || [[ "$output" == *"Usage"* ]] || [[ "$output" == *"zip-path"* ]]
 }
 
-# ── Binary exists and is executable ─────────────────────────────────────────
 
 @test "speedwave binary exists" {
     [ -f "$SPEEDWAVE_BIN" ] || skip "Binary not built yet (run cargo build -p speedwave-cli first)"

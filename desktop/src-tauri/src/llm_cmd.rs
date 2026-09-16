@@ -6,8 +6,6 @@ pub(crate) mod usage;
 
 pub(crate) use discovery::validate_llm_base_url;
 
-// Re-export the commands + `#[tauri::command]` helper macros (`__cmd__*` /
-// `__tauri_command_name_*`) so `main.rs`'s `generate_handler!` resolves unchanged.
 pub(crate) use discovery::{
     __cmd__discover_llm_models, __tauri_command_name_discover_llm_models, discover_llm_models,
 };
@@ -22,8 +20,6 @@ pub(crate) use usage::{
 /// Production timeout for the HTTP probe. A model still loading times out and
 /// the UI falls back to free-text input.
 pub(crate) const DISCOVERY_TIMEOUT_SECS: u64 = 5;
-
-// HTTP client helper (shared by discovery + usage)
 
 /// Builds an HTTP client without auth. Test-only convenience; production
 /// always goes through `build_llm_probe_client_with_auth`.
@@ -59,7 +55,6 @@ pub(crate) fn build_llm_probe_client_with_auth(
             let name = name.trim();
             let value = rest.trim();
             if name.eq_ignore_ascii_case("authorization") {
-                // Guard against stale config smuggling Authorization.
                 return Err(
                     "custom_headers must not contain Authorization (use api_key)".to_string(),
                 );
@@ -94,8 +89,6 @@ pub(crate) fn strip_bearer_prefix(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // build_llm_probe_client_with_auth — header construction
 
     #[test]
     fn build_client_rejects_authorization_in_custom_headers() {
@@ -140,10 +133,8 @@ mod tests {
             strip_bearer_prefix("  sk-trim  "),
             Some("sk-trim".to_string())
         );
-        // Empty / whitespace-only → None.
         assert_eq!(strip_bearer_prefix(""), None);
         assert_eq!(strip_bearer_prefix("   "), None);
-        // `Bearer` alone is not a prefix; trims to the literal word.
         assert_eq!(strip_bearer_prefix("Bearer"), Some("Bearer".to_string()));
     }
 }

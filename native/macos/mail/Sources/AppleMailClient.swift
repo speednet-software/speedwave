@@ -6,7 +6,6 @@ enum AppleMailClient {
     static let name = "Apple Mail"
 
     static func isAvailable() -> Bool {
-        // Mail.app is always installed on macOS
         return true
     }
 
@@ -51,7 +50,6 @@ enum AppleMailClient {
             mailboxClause = "inbox"
         }
 
-        // Access each message individually; Apple Mail has no bulk property fetch.
         let script = """
         tell application "Mail"
             set output to ""

@@ -50,7 +50,6 @@ mod tests {
 
     #[test]
     fn verifier_length_in_rfc_range() {
-        // 32 bytes → 43 base64url chars, within RFC 7636 §4.1 [43,128].
         let pair = generate_pkce();
         assert!((43..=128).contains(&pair.verifier.len()));
     }

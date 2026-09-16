@@ -32,7 +32,6 @@ export async function rotateIfNeeded(logPath: string, maxBytes: number): Promise
     const st = await stat(logPath);
     size = st.size;
   } catch {
-    // No live file yet — nothing to rotate.
     return;
   }
   if (size <= maxBytes) return;
@@ -61,7 +60,6 @@ export async function appendAuditEvent(
   await rotateIfNeeded(logPath, maxBytes);
   try {
     await appendFile(logPath, line, { mode: 0o600 });
-    // chmod again — appendFile mode only applies on file creation.
     await chmod(logPath, 0o600);
   } catch (err) {
     console.error(

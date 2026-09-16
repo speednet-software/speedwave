@@ -78,7 +78,6 @@ export class AdvancedSectionComponent {
     this.resetting = true;
     try {
       await this.tauri.invoke('factory_reset');
-      // app.restart() fires before Tauri can return — this line is unreachable
       this.resetCompleted.emit();
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));

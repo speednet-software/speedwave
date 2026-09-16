@@ -11,8 +11,6 @@ import { validateOrigin } from './security.js';
 import { handleMCPPost, handleMCPDelete } from './transport.js';
 import { ts } from './logger.js';
 
-// ── Configuration Types ──────────────────────────────────────────────────────
-
 /**
  * Bearer token authentication configuration.
  * When set, all requests except publicPaths require a valid Authorization header.
@@ -84,15 +82,12 @@ export interface MCPServer {
   stop: () => Promise<void>;
 }
 
-// ── Server Factory ───────────────────────────────────────────────────────────
-
 /**
  * Create an MCP server with Streamable HTTP transport (Express, JSON-RPC 2.0, optional SSE, rate limiting,
  * sessions, health check). Security relies on Docker network isolation — no exposed ports.
  * @param options - server configuration
  */
 export function createMCPServer(options: MCPServerOptions): MCPServer {
-  // Windows supervisor sets MCP_LISTEN_HOST to the WSL adapter IP; see ADR-067.
   const {
     name,
     version,
@@ -105,15 +100,11 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   app.disable('x-powered-by');
   const rpcHandler = new JSONRPCHandler({ name, version });
 
-  // Server state
   let server: ReturnType<Express['listen']> | null = null;
   let rateLimitCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
-  // ── Middleware ──────────────────────────────────────────────────────────────
-
   app.use(express.json({ limit: '1mb' }));
 
-  // Bearer token auth middleware — registered before route handlers
   if (options.auth) {
     if (!options.auth.token || !options.auth.token.trim()) {
       throw new Error(`${name}: auth.token must be a non-empty string`);
@@ -170,8 +161,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     app.use(bearerAuth);
   }
 
-  // ── Rate Limiting Middleware ────────────────────────────────────────────────
-
   if (options.rateLimit) {
     const maxRequests = options.rateLimit.maxRequests ?? 60;
     const windowMs = options.rateLimit.windowMs ?? 60_000;
@@ -179,7 +168,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
       options.auth?.publicPaths ?? ['/health'];
     const hits = new Map<string, number[]>();
 
-    // Periodic cleanup every 5 minutes to prevent memory leak from stale IPs
     const CLEANUP_INTERVAL_MS = 5 * 60_000;
     rateLimitCleanupInterval = setInterval(() => {
       const now = Date.now();
@@ -194,8 +182,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     }, CLEANUP_INTERVAL_MS);
     rateLimitCleanupInterval.unref();
 
-    // All mcp-hub traffic arrives from the same container network IP, so this is effectively a
-    // global bucket rather than per-client rate limiting — acceptable for the threat model.
     function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
       if (rateLimitExcluded.includes(req.path)) {
         next();
@@ -224,8 +210,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     app.use(rateLimitMiddleware);
   }
 
-  // ── Health Check Endpoint ───────────────────────────────────────────────────
-
   app.get('/health', async (_req: Request, res: Response) => {
     if (options.healthCheck) {
       try {
@@ -238,8 +222,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     }
     res.json({ status: 'ok' });
   });
-
-  // ── Origin Validation Middleware (when allowedOrigins is configured) ───────
 
   if (options.allowedOrigins) {
     const origins = options.allowedOrigins;
@@ -256,8 +238,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     app.use(originCheck);
   }
 
-  // ── MCP Protocol Endpoints (Streamable HTTP) ────────────────────────────────
-
   app.post('/', async (req: Request, res: Response) => {
     await handleMCPPost(rpcHandler, req, res);
   });
@@ -266,38 +246,27 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     handleMCPDelete(req, res);
   });
 
-  // ── Method Not Allowed Handler (405 for unsupported HTTP methods on /) ─────
-
   app.all('/', (_req: Request, res: Response) => {
     res.setHeader('Allow', 'POST, DELETE');
     res.status(405).json({ error: 'Method Not Allowed' });
   });
 
-  // ── Tool Registration ───────────────────────────────────────────────────────
-
   function registerTool(tool: Tool, handler: ToolHandler): void {
     rpcHandler.registerTool(tool, handler);
   }
 
-  // Register initial tools
   for (const { tool, handler } of tools) {
     registerTool(tool, handler);
   }
 
-  // ── Server Lifecycle ────────────────────────────────────────────────────────
-
   async function start(): Promise<number> {
-    // Run onStart hook if provided
     if (options.onStart) {
       await options.onStart();
     }
 
-    // PID1 ignores default signal dispositions — without a handler, compose
-    // down waits the full 10s kill timeout per container (ADR-072).
     for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       process.on(signal, () => {
         const force = setTimeout(() => {
-          // close() waits for keep-alive/in-flight requests — cut them after 1s.
           console.log(`${ts()} ${signal}: forcing exit with requests in flight`);
           process.exit(0);
         }, 1000);
@@ -312,8 +281,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     return new Promise((resolve, reject) => {
       server = app.listen(port, host, () => {
         const addr = server!.address();
-        // addr is a string only when listening on a named pipe (never in Speedwave's TCP use).
-        // The fallback to `port` is defensive; the string-address branch is not reachable in tests.
         /* c8 ignore next */
         const actualPort = typeof addr === 'object' && addr ? addr.port : port;
         console.log(`${ts()} \n${'═'.repeat(60)}`);
@@ -351,8 +318,6 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     });
   }
 
-  // ── Return Server Instance ──────────────────────────────────────────────────
-
   return {
     app,
     rpcHandler,
@@ -362,16 +327,10 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   };
 }
 
-// ── Internal Helpers ─────────────────────────────────────────────────────────
-
-// Constant-time bearer-token compare via double-HMAC — equalises lengths for timingSafeEqual.
-// Not a password hash: bearer tokens are already high-entropy, so Argon2/bcrypt buys nothing.
 function safeTokenCompare(provided: string, expected: string): boolean {
   const hmac = (data: string) => createHmac('sha256', expected).update(data).digest();
   return timingSafeEqual(hmac(provided), hmac(expected));
 }
-
-// ── Helper Functions ─────────────────────────────────────────────────────────
 
 /**
  * Create a text response for tool results.

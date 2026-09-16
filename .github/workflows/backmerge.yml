@@ -1,4 +1,3 @@
-# Backmerge main → dev after release: force-push dev=main, or fall back to a merge PR if dev has new commits
 
 name: Backmerge
 
@@ -19,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}

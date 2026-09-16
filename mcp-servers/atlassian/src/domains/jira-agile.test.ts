@@ -94,14 +94,12 @@ describe('getBoard / getBoardConfiguration', () => {
   });
 
   it('gets board configuration', async () => {
-    client.get
-      .mockResolvedValueOnce(rawBoard()) // enforceBoard
-      .mockResolvedValueOnce({
-        id: 7,
-        name: 'Board',
-        filter: { id: '900' },
-        columnConfig: { columns: [{ name: 'To Do' }, { name: 'Done' }] },
-      });
+    client.get.mockResolvedValueOnce(rawBoard()).mockResolvedValueOnce({
+      id: 7,
+      name: 'Board',
+      filter: { id: '900' },
+      columnConfig: { columns: [{ name: 'To Do' }, { name: 'Done' }] },
+    });
     const c = createJiraAgileClient(client);
     expect(await c.getBoardConfiguration(7)).toEqual({
       id: 7,
@@ -125,9 +123,7 @@ describe('getBoard / getBoardConfiguration', () => {
 
 describe('sprints', () => {
   it('lists sprints with optional state', async () => {
-    client.get
-      .mockResolvedValueOnce(rawBoard()) // enforceBoard
-      .mockResolvedValueOnce({ values: [rawSprint()] });
+    client.get.mockResolvedValueOnce(rawBoard()).mockResolvedValueOnce({ values: [rawSprint()] });
     const c = createJiraAgileClient(client);
     const res = await c.listSprints(7, { state: 'active', maxResults: 999 });
     expect(client.get).toHaveBeenNthCalledWith(2, '/rest/agile/1.0/board/7/sprint', {
@@ -152,9 +148,7 @@ describe('sprints', () => {
   });
 
   it('gets a sprint and scope-checks its board', async () => {
-    client.get
-      .mockResolvedValueOnce(rawSprint()) // get sprint
-      .mockResolvedValueOnce(rawBoard()); // enforceBoard
+    client.get.mockResolvedValueOnce(rawSprint()).mockResolvedValueOnce(rawBoard());
     const c = createJiraAgileClient(client);
     expect(await c.getSprint(42)).toMatchObject({ id: 42, board_id: 7 });
   });
@@ -176,9 +170,7 @@ describe('sprints', () => {
 
 describe('moveIssuesToSprint', () => {
   it('scope-checks the sprint board then POSTs all given issues (no truncation)', async () => {
-    client.get
-      .mockResolvedValueOnce({ originBoardId: 7 }) // sprint lookup
-      .mockResolvedValueOnce(rawBoard()); // enforceBoard
+    client.get.mockResolvedValueOnce({ originBoardId: 7 }).mockResolvedValueOnce(rawBoard());
     client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
     const fifty = Array.from({ length: MOVE_ISSUES_MAX }, (_, i) => `PROJ-${i}`);
@@ -189,7 +181,7 @@ describe('moveIssuesToSprint', () => {
   });
 
   it('enforces the MOVE_ISSUES_MAX cap itself, as the SSOT (defense in depth even if a caller bypasses the tool handler)', async () => {
-    client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId, no allowlist → ok
+    client.get.mockResolvedValueOnce({});
     const c = createJiraAgileClient(client);
     const many = Array.from({ length: MOVE_ISSUES_MAX + 10 }, (_, i) => `PROJ-${i}`);
     await expect(c.moveIssuesToSprint(42, many)).rejects.toThrow(
@@ -201,19 +193,17 @@ describe('moveIssuesToSprint', () => {
   it('checks every issue for scope even past position 50: a batch of 51+ with the out-of-scope item beyond index 50 is rejected', async () => {
     client = stubClient(['PROJ']);
     client.get
-      .mockResolvedValueOnce({ originBoardId: 7 }) // sprint lookup
-      .mockResolvedValueOnce(rawBoard({ location: { projectKey: 'PROJ' } })); // enforceBoard
+      .mockResolvedValueOnce({ originBoardId: 7 })
+      .mockResolvedValueOnce(rawBoard({ location: { projectKey: 'PROJ' } }));
     const c = createJiraAgileClient(client);
     const issues = Array.from({ length: MOVE_ISSUES_MAX + 1 }, (_, i) => `PROJ-${i}`);
-    // The 51st issue (index 50) is out of scope; a truncating `.slice(0, 50)`
-    // before the scope-check loop would let it silently through.
     issues[MOVE_ISSUES_MAX] = 'OTHER-1';
     await expect(c.moveIssuesToSprint(42, issues)).rejects.toThrow(ScopeError);
     expect(client.post).not.toHaveBeenCalled();
   });
 
   it('skips the board scope check when the sprint has no originBoardId and no allowlist', async () => {
-    client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId
+    client.get.mockResolvedValueOnce({});
     client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
     await c.moveIssuesToSprint(42, ['PROJ-1']);
@@ -224,7 +214,7 @@ describe('moveIssuesToSprint', () => {
 
   it('fails closed: rejects when the sprint has no originBoardId and an allowlist is configured', async () => {
     client = stubClient(['ALLOWED']);
-    client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId
+    client.get.mockResolvedValueOnce({});
     const c = createJiraAgileClient(client);
     await expect(c.moveIssuesToSprint(42, ['ALLOWED-1'])).rejects.toThrow(ScopeError);
     expect(client.post).not.toHaveBeenCalled();

@@ -300,8 +300,6 @@ mod tests {
 
     #[test]
     fn whisper_catalogue_has_the_v1_default_set() {
-        // Decision 8: a CPU-live model, a GPU/Metal-live model, a finalize
-        // model. If any of these disappear, the v1 strategy breaks.
         assert!(
             whisper_model("small").is_some(),
             "v1 needs the `small` CPU-live model"
@@ -332,13 +330,11 @@ mod tests {
             m.file
         );
         assert!(is_hex64(m.sha256));
-        // Silero VAD is under 1 MiB — a jump above that means a wrong file was pinned.
         assert!(m.approx_bytes > 100_000 && m.approx_bytes < 10_000_000);
         assert!(!m.license.is_empty());
         let url = m.url();
         assert!(url.starts_with("https://huggingface.co/ggml-org/whisper-vad/resolve/main/"));
         assert!(url.ends_with(m.file));
-        // The VAD file must not collide with a Whisper catalogue filename.
         assert!(WHISPER_MODELS.iter().all(|w| w.file != m.file));
     }
 
@@ -372,8 +368,6 @@ mod tests {
 
     #[test]
     fn a_realistic_model_set_fits_under_the_global_dome() {
-        // A realistic worst case: one full-precision model per role (keeping `full` + `q5_*`
-        // both is redundant). Must fit under the consts.rs dome — raise it or trim otherwise.
         let total: u64 = WHISPER_MODELS
             .iter()
             .filter(|m| matches!(m.quantization, Quantization::Full))
@@ -386,8 +380,6 @@ mod tests {
             crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES as f64 / 1_073_741_824.0,
         );
-        // And `large-v3` alone (the single biggest entry) must be allowed —
-        // the dome can't be smaller than the largest model.
         let biggest = WHISPER_MODELS.iter().map(|m| m.approx_bytes).max().unwrap();
         assert!(biggest < crate::consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES);
     }

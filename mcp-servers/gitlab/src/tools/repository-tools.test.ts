@@ -9,7 +9,6 @@ import { createRepositoryTools } from './repository-tools.js';
 import { expectNotFoundTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
-// Mock client type with all repository-related methods
 type MockClient = {
   getTree: Mock;
   getFile: Mock;

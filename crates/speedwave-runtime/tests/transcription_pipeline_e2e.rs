@@ -46,14 +46,11 @@ fn synth_wav(dir: &std::path::Path, secs: f32) -> PathBuf {
 
 #[test]
 fn full_pipeline_capture_transcribe_finalize_markdown() {
-    // Opt-in: skip silently unless RUN_STT_E2E=1 (see the module doc).
     if env("RUN_STT_E2E").is_none() {
         return;
     }
     let model_key = env("STT_E2E_MODEL").unwrap_or_else(|| "small".to_string());
 
-    // Resolve the model — it must already be downloaded (the E2E VM pre-fetches
-    // it; we never auto-download a multi-hundred-MB model from a test).
     let models = ModelStore::new();
     let model_path = models
         .ensure_model(&model_key, &mut |_| {})
@@ -62,14 +59,11 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     let work = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(TranscriptStore::with_root(work.path()));
 
-    // Either a caller-supplied real-speech clip, or a synthetic tone.
     let wav = match env("STT_E2E_WAV") {
         Some(p) => PathBuf::from(p),
         None => synth_wav(work.path(), 6.0),
     };
 
-    // Choose the session id up front so the audio.wav path under <root>/<id>/
-    // is correct from the first write (mirrors the Tauri start command).
     let id = uuid::Uuid::new_v4();
     let audio_wav = store.session_dir(id).join("audio.wav");
     let session = TranscriptSession::new_with_id(
@@ -83,8 +77,6 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     );
     store.create(session).expect("create session");
 
-    // Live pass: FileAudioCapture replays the WAV (passed per-call as a Microphone source) →
-    // driver writes audio.wav + live segments.
     let stream = FileAudioCapture::new()
         .start(AudioSource::Microphone {
             device: Some(wav.to_string_lossy().into_owned()),
@@ -108,7 +100,6 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     driver.run(&audio_wav).expect("live driver run");
     assert!(audio_wav.is_file(), "live pass must write audio.wav");
 
-    // Offline finalize: re-transcribe the recorded WAV at higher quality.
     let finalize_transcriber = WhisperCppTranscriber::load(
         &model_path,
         model_key.clone(),

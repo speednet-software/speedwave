@@ -3,7 +3,6 @@ import { sanitize, RULE_COUNT } from './sanitizer';
 
 describe('sanitize', () => {
   it('rule count matches Rust SSOT EXPECTED_RULE_COUNT', () => {
-    // Mirrors `EXPECTED_RULE_COUNT` in crates/speedwave-runtime/src/log_sanitizer.rs.
     expect(RULE_COUNT).toBe(22);
   });
 
@@ -33,7 +32,6 @@ describe('sanitize', () => {
   it('redacts Slack rotated access tokens (xoxe.xoxp-…) in full', () => {
     const out = sanitize('rotated access xoxe.xoxp-FAKE-TOKEN-VALUE');
     expect(out).toContain('***REDACTED_SLACK_TOKEN***');
-    // The whole token must be consumed — no bare `xoxe.` prefix left behind.
     expect(out).not.toContain('xoxe.');
   });
 

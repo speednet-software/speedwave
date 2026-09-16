@@ -133,7 +133,6 @@ describe('withValidation', () => {
 
       const result = await wrapped({});
 
-      // JSON.stringify with indent 2
       expect(result.content[0].text).toBe(JSON.stringify({ a: 1 }, null, 2));
     });
   });

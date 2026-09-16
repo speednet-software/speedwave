@@ -84,7 +84,7 @@ describe('OauthCompletionWatcher', () => {
       return authStatus(true);
     };
 
-    await watcher.checkNow(); // never attached
+    await watcher.checkNow();
 
     const noProject = makeContext({ activeProject: () => null });
     watcher.attach(noProject.ctx);
@@ -105,8 +105,6 @@ describe('OauthCompletionWatcher', () => {
   });
 
   it('overlapping probes fire the callback only once (in-flight guard)', async () => {
-    // A slow get_auth_status must not let a second probe pass the same
-    // false→true edge and fire a duplicate login callback.
     const pendingProbe = createDeferred<unknown>();
     let firstProbe = true;
     mockTauri.invokeHandler = async () => {
@@ -120,7 +118,7 @@ describe('OauthCompletionWatcher', () => {
     watcher.attach(ctx);
 
     const first = watcher.checkNow();
-    const second = watcher.checkNow(); // overlaps while the first probe hangs
+    const second = watcher.checkNow();
     pendingProbe.resolve(authStatus(true));
     await Promise.all([first, second]);
 
@@ -130,7 +128,6 @@ describe('OauthCompletionWatcher', () => {
   it('drops a probe whose project changed mid-flight (stale drop, no callback)', async () => {
     let project = 'proj-a';
     mockTauri.invokeHandler = async () => {
-      // Simulate the user switching projects while this probe is in flight.
       project = 'proj-b';
       return authStatus(true);
     };
@@ -151,9 +148,9 @@ describe('OauthCompletionWatcher', () => {
     const { ctx, logins } = makeContext();
     watcher.attach(ctx);
 
-    await watcher.checkNow(); // rejected — must not throw
+    await watcher.checkNow();
     fail = false;
-    await watcher.checkNow(); // in-flight guard released — next probe works
+    await watcher.checkNow();
 
     expect(logins()).toBe(1);
   });
@@ -190,7 +187,7 @@ describe('OauthCompletionWatcher', () => {
       watcher.startPoll();
 
       vi.advanceTimersByTime(OauthCompletionWatcher.POLL_MS);
-      expect(invokes).toEqual([]); // gated tick skips the IPC
+      expect(invokes).toEqual([]);
 
       probe = true;
       vi.advanceTimersByTime(OauthCompletionWatcher.POLL_MS);
@@ -234,7 +231,6 @@ describe('OauthCompletionWatcher', () => {
       vi.advanceTimersByTime(
         (OauthCompletionWatcher.MAX_TICKS - 1) * OauthCompletionWatcher.POLL_MS
       );
-      // Well past the previous expiry point — the budget was reset.
       expect(watcher.isPolling()).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -277,7 +273,7 @@ describe('OauthCompletionWatcher', () => {
     watcher.watchWindowFocus();
     await flushMicrotasks();
 
-    watcher.destroy(); // still safe with no listener registered
+    watcher.destroy();
     expect(watcher.isPolling()).toBe(false);
   });
 
@@ -297,7 +293,7 @@ describe('OauthCompletionWatcher', () => {
   it('a focus registration settling after destroy is released immediately', async () => {
     watcher.attach(makeContext().ctx);
     watcher.watchWindowFocus();
-    watcher.destroy(); // before the listen promise settles
+    watcher.destroy();
     await flushMicrotasks();
 
     expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();

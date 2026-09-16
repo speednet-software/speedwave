@@ -29,8 +29,6 @@ import {
   type AuthedTokenState,
 } from '@speedwave/mcp-shared';
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
 /** Whether the Slack access token was loadable at startup. */
 export type SlackTokensStatus = 'present' | 'missing';
 
@@ -114,8 +112,6 @@ export interface SlackCurrentUser extends SlackUser {
   team_id?: string;
 }
 
-// ── Client Factory ────────────────────────────────────────────────────────
-
 /**
  * Initialize the Slack client from `access_token` in /tokens/ (written at sign-in by Desktop, refreshed by the host-side oauth worker).
  * Returns a `'missing'` container (never throws) when absent — graceful degradation so the server starts unconfigured. DO NOT change to throw.
@@ -148,8 +144,6 @@ export async function initializeSlackClients(): Promise<SlackClients> {
       statusTracker,
       _tokensStatus: 'present',
     };
-    // Background sanity check through the refresh wrapper, so a worker booting
-    // with an expired rotating token self-heals instead of reporting failure.
     backgroundConnectionTest(
       statusTracker,
       async () => {
@@ -169,8 +163,6 @@ export async function initializeSlackClients(): Promise<SlackClients> {
     return tokensMissing();
   }
 }
-
-// ── Refresh wrapper ───────────────────────────────────────────────────────
 
 /** Slack platform errors that mean "token stale" → refresh + retry once. */
 const AUTH_EXPIRED_ERRORS = new Set(['token_expired', 'invalid_auth']);
@@ -207,8 +199,6 @@ export async function slackCall<T>(
     },
   });
 }
-
-// ── Error Handling ────────────────────────────────────────────────────────
 
 const AUTH_FAILURE_MESSAGE = withSetupGuidance(
   'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
@@ -286,7 +276,6 @@ const SLACK_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
  * @param error - The thrown value to format.
  */
 export function formatSlackError(error: unknown): string {
-  // invalid_grant: refresh token dead (revocation or 30-day expiry) — only new sign-in helps.
   if (error instanceof OAuthRefreshError) {
     if (error.message.includes('invalid_grant')) {
       return withSetupGuidance(
@@ -296,7 +285,6 @@ export function formatSlackError(error: unknown): string {
     return `Slack token refresh failed: ${error.message}`;
   }
 
-  // Handle @slack/web-api error responses
   const e = error as { message?: string; data?: { error?: string }; error?: string };
   const slackError = e.data?.error || e.error;
 
@@ -308,7 +296,6 @@ export function formatSlackError(error: unknown): string {
     return 'Network error. Cannot connect to Slack API.';
   }
 
-  // Return Slack error code if known
   if (slackError) {
     return `Slack API error: ${slackError}`;
   }
@@ -316,9 +303,6 @@ export function formatSlackError(error: unknown): string {
   return e.message || 'Slack API error';
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-// conversations.list may return far fewer entries than limit; iterate next_cursor until exhausted.
 const CHANNEL_LIST_PAGE_LIMIT = 1000;
 
 /** Hard cap on pagination (20k channels) — runaway-cursor backstop. */
@@ -362,12 +346,10 @@ function nextCursorOf(result: ConversationsListResponse): string | undefined {
  * @param channel - Channel name (with or without `#`) or channel ID.
  */
 async function resolveChannelId(clients: SlackClients, channel: string): Promise<string> {
-  // If already looks like an ID, return as-is
   if (/^[CDG][A-Z0-9]+$/.test(channel)) {
     return channel;
   }
 
-  // Remove # prefix if present
   const channelName = channel.replace(/^#/, '');
 
   interface Channel {
@@ -397,8 +379,6 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
       'member of — Speedwave has no bot to invite, so a missing channel usually means you are not a member.'
   );
 }
-
-// ── Tool Implementations ──────────────────────────────────────────────────
 
 /**
  * Send a message to a channel as the signed-in user, at channel level or as a reply in a thread;
@@ -714,7 +694,6 @@ async function downloadSlackFileBytes(
     const contentType = resp.headers.get('content-type') || '';
     const htmlButNotHtmlFile = contentType.includes('text/html') && meta.mimetype !== 'text/html';
     if (!resp.ok || htmlButNotHtmlFile) {
-      // Mimic the platform-error shape so isSlackAuthExpiredError triggers.
       throw Object.assign(new Error('file download unauthorized'), {
         data: { error: 'token_expired' },
       });
@@ -751,7 +730,6 @@ export async function getFileContent(
         'Download it into the workspace with downloadFile instead.'
     );
   }
-  // Reject oversized files from metadata — bounded worker buffer.
   if (meta.size !== undefined && meta.size > MAX_DOWNLOAD_BYTES) {
     throw new Error(
       `File '${meta.name}' is ${meta.size} bytes — too large to read. ` +
@@ -820,7 +798,6 @@ export async function downloadFile(
   }
   const dir = path.join(workspaceDir(), SLACK_DOWNLOAD_SUBPATH);
   await mkdir(dir, { recursive: true });
-  // meta.id can fall back to the caller-provided file ID — sanitize it too.
   const target = path.join(dir, `${sanitizeFilename(meta.id)}-${sanitizeFilename(meta.name)}`);
   await writeFile(target, body);
   return {
@@ -949,7 +926,6 @@ export async function getCurrentUser(clients: SlackClients): Promise<SlackCurren
       base.name = info.user.name || base.name;
     }
   } catch (error) {
-    // Best-effort enrichment — auth.test alone is enough ground truth for "me".
     console.warn(
       `${ts()} Slack getCurrentUser: users.info enrichment failed: ${error instanceof Error ? error.message : String(error)}`
     );

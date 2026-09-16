@@ -135,8 +135,6 @@ mod tests {
 
     #[test]
     fn gpu_backend_features_are_pinned_in_the_manifest() {
-        // compiled_gpu_backend() keys on cfg(platform), not on how whisper-rs was built — pin the
-        // manifest so silently dropping a GPU feature cannot leave `accel_label` lying.
         fn target_deps<'a>(manifest: &'a str, header: &str) -> &'a str {
             let start = manifest.find(header).expect("target dep section present");
             let rest = &manifest[start + header.len()..];
@@ -191,8 +189,6 @@ mod tests {
 
     #[test]
     fn the_live_model_is_always_live_capable_on_its_own_class() {
-        // The catalogue owns that judgement per GPU class: a bare live_capable bool let a
-        // re-inverted tier mapping (turbo on CPU-only hosts) pass; the floor comparison catches it.
         for class in [GpuClass::None, GpuClass::Integrated, GpuClass::Discrete] {
             let m = live_model_for_class(class);
             assert!(
@@ -224,7 +220,6 @@ mod tests {
             finalize_model_for_this_build().key,
             finalize_model_for_class(class).key
         );
-        // gpu_class is cached — repeated calls agree.
         assert_eq!(gpu_class(), class);
     }
 
@@ -244,7 +239,6 @@ mod tests {
                 );
             }
         }
-        // A GPU label always names the compiled backend, never a bare "GPU".
         if label != "CPU" {
             let name = compiled_gpu_backend().unwrap();
             assert!(label.starts_with(name), "got {label}");
@@ -263,7 +257,6 @@ mod tests {
             t as usize <= num_cpus::get_physical().max(1),
             "must never oversubscribe physical cores"
         );
-        // The whole point: never the whisper.cpp default of 4 on a host with more cores.
         if num_cpus::get_physical() >= 8 {
             assert!(t >= 8, "an 8-core host should get 8 threads, got {t}");
         }

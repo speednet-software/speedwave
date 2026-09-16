@@ -252,7 +252,6 @@ export class ShellComponent implements OnInit, OnDestroy {
   /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {
     const url = this.currentUrlSignal();
-    // longest-route-prefix wins so /settings beats /settings-something nonexistent etc.
     const sorted = [...this.entryCatalog].sort((a, b) => b.route.length - a.route.length);
     const match = sorted.find((v) => url.startsWith(v.route));
     return match?.id ?? '';
@@ -299,7 +298,6 @@ export class ShellComponent implements OnInit, OnDestroy {
     const cmd = event.metaKey || event.ctrlKey;
     const key = event.key;
 
-    // ⎋ closes any open overlay first — independent of cmd modifier.
     if (key === 'Escape') {
       let consumed = false;
       if (this.ui.paletteOpen()) {

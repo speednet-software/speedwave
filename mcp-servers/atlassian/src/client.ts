@@ -102,7 +102,6 @@ export class AtlassianClient {
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      // No redirects; avoids leaking the Authorization header cross-host.
       maxRedirects: 0,
     });
   }
@@ -116,8 +115,6 @@ export class AtlassianClient {
   get confluenceSpaceKeys(): readonly string[] {
     return this.config.confluenceSpaceKeys;
   }
-
-  // ── Core request with per-request retry ─────────────────────────────────
 
   /**
    * Issue an HTTP request with the per-request retry policy applied (see {@link RequestOptions}).
@@ -140,7 +137,6 @@ export class AtlassianClient {
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
         const isRateLimited = status === 429;
         const isTransient5xx = typeof status === 'number' && status >= 500 && status <= 599;
-        // 429 always retried; 5xx only when retryable (idempotent).
         if (!isRateLimited && !(retryable && isTransient5xx)) break;
 
         const retryAfter =
@@ -220,7 +216,6 @@ export class AtlassianClient {
       return Promise.reject(new Error(`Invalid contentType: ${JSON.stringify(contentType)}`));
     }
     const boundary = `----speedwave${randomUUID().replace(/-/g, '')}`;
-    // Strip characters that would break the Content-Disposition header line.
     const safeName = String(filename).replace(/[\r\n"\\]/g, '_');
     const CRLF = '\r\n';
     const preamble = Buffer.from(
@@ -244,8 +239,6 @@ export class AtlassianClient {
     );
   }
 
-  // ── Connectivity ─────────────────────────────────────────────────────────
-
   /** Lightweight connectivity/credentials check (`GET /rest/api/3/myself`); `{ success: false, error }` otherwise. */
   async testConnection(): Promise<ConnectionTestResult> {
     try {
@@ -255,8 +248,6 @@ export class AtlassianClient {
       return { success: false, error: AtlassianClient.formatError(error) };
     }
   }
-
-  // ── Error formatting (secret-safe) ──────────────────────────────────────
 
   /**
    * Map an error to a concise, user-facing message. Guarantees no credential material
@@ -301,7 +292,6 @@ export class AtlassianClient {
       if (typeof status === 'number' && status >= 500) {
         return 'Atlassian server error. Try again later.';
       }
-      // No response: use the code, never the config (carries Authorization).
       const code = error.code ? ` (${error.code})` : '';
       return `Atlassian request failed${code}: unable to reach ${this.safeHost(error.config?.baseURL)}`;
     }
@@ -336,8 +326,6 @@ export class AtlassianClient {
       .replace(/ATATT[A-Za-z0-9_-]{20,}/g, '***REDACTED_ATLASSIAN_TOKEN***');
   }
 }
-
-// ── Initialization ─────────────────────────────────────────────────────────────
 
 /**
  * Build an {@link AtlassianClient} from `/tokens` and verify connectivity. Returns `null` (never throws)

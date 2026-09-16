@@ -52,7 +52,6 @@ describe('SetupWizardComponent', () => {
     expect(component.phase()).toBe('welcome');
   });
 
-  // Inline currentColor SVG — not a CSS-mask span (breaks under tauri://localhost) nor a static image.
   it('renders the Speedwave logo as an inline theme-adaptive SVG mark', () => {
     const logo = fixture.nativeElement.querySelector(
       'app-logo[role="img"][aria-label="Speedwave"]'
@@ -134,7 +133,6 @@ describe('SetupWizardComponent', () => {
     expect(component.error()).toContain('runtime check failed');
     expect(component.steps[0].status).toBe('error');
 
-    // Retry should work
     await component.retryCurrentStep();
     expect(component.error()).toBeNull();
     expect(component.steps[0].status).toBe('done');
@@ -322,7 +320,6 @@ describe('SetupWizardComponent', () => {
       await component.startSetup();
       await fixture.whenStable();
       const after = component.etaTotalSeconds();
-      // ETA is monotonically non-increasing as steps complete.
       expect(after !== null && before !== null && after <= before).toBe(true);
     });
   });

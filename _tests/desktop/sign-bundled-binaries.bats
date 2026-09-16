@@ -7,8 +7,6 @@ setup() {
     SRC_TAURI="$(mktemp -d "${BATS_TEST_TMPDIR}/sign-bundled.XXXXXX")"
     export SRC_TAURI
 
-    # Force the script's `uname` to return "Darwin" so Darwin-only branches run
-    # on Linux CI too.
     UNAME_SHIM_DIR="${BATS_TEST_TMPDIR}/uname-shim"
     mkdir -p "$UNAME_SHIM_DIR"
     cat > "$UNAME_SHIM_DIR/uname" <<'EOF'
@@ -27,11 +25,9 @@ with_darwin_uname() {
     PATH="$UNAME_SHIM_DIR:$PATH" "$@"
 }
 
-# Helpers mirror the production layout but stop short of signing (no real cert).
 
 write_mach_o() {
     mkdir -p "$(dirname "$1")"
-    # /bin/ls is Mach-O on macOS, ELF on Linux.
     if [[ "$(uname)" == "Darwin" ]]; then
         cp /bin/ls "$1"
     else
@@ -64,7 +60,6 @@ populate_targets() {
 }
 
 @test "exits 0 on non-Darwin host (no uname shim)" {
-    # With no signing identity set, the final exit code is 0 on any host.
     unset APPLE_SIGNING_IDENTITY
 
     run "$SCRIPT"
@@ -84,7 +79,6 @@ populate_targets() {
 @test "exits 1 when a SIGN_TARGETS path is missing" {
     export APPLE_SIGNING_IDENTITY="$IDENTITY"
     populate_targets
-    # Remove one expected binary to trigger the existence check
     rm "$SRC_TAURI/cli/speedwave"
 
     run with_darwin_uname "$SCRIPT"
@@ -98,7 +92,6 @@ populate_targets() {
 @test "exits 1 when a SIGN_TARGETS path is not a Mach-O binary" {
     export APPLE_SIGNING_IDENTITY="$IDENTITY"
     populate_targets
-    # Overwrite one target with a shell script — valid executable but not Mach-O
     printf '#!/bin/sh\nexit 0\n' > "$SRC_TAURI/cli/speedwave"
     chmod +x "$SRC_TAURI/cli/speedwave"
 
@@ -109,11 +102,9 @@ populate_targets() {
 }
 
 @test "SIGN_TARGETS covers every executable resource in tauri.macos.conf.json" {
-    # Every executable resource key (not ending in /) must have a SIGN_TARGETS entry.
     local macos_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.macos.conf.json"
     [ -f "$macos_conf" ]
 
-    # Extract resource keys that are individual files (not directories ending in /)
     local resources
     resources=$(python3 -c "
 import json, sys
@@ -124,14 +115,12 @@ for key in conf.get('bundle', {}).get('resources', {}):
         print(key)
 " | sort)
 
-    # Extract paths from SIGN_TARGETS (relative to SRC_TAURI)
     local targets
     targets=$(sed -n 's/.*"\$SRC_TAURI\/\([^":]*\).*/\1/p' "$SCRIPT" | sort)
 
     [ -n "$resources" ]
     [ -n "$targets" ]
 
-    # Every executable resource must have a SIGN_TARGETS entry
     local missing=""
     while IFS= read -r res; do
         if ! echo "$targets" | grep -qF "$res"; then
@@ -181,7 +170,6 @@ for key in conf.get('bundle', {}).get('resources', {}):
 }
 
 @test "speedwave CLI has no entitlements in SIGN_TARGETS" {
-    # speedwave is pure Rust — no entitlements; its entry ends with ":".
     grep -E '"\$SRC_TAURI/cli/speedwave:"[[:space:]]*$' "$SCRIPT"
 }
 
@@ -194,18 +182,14 @@ for key in conf.get('bundle', {}).get('resources', {}):
 }
 
 @test "post-sign verification rejects plists with zero entitlement keys" {
-    # Guard against silent pass when grep '<key>' yields nothing (malformed plist).
     grep -qF 'contains no <key> entries' "$SCRIPT"
 }
 
 @test "sign_macho fails fast when entitlements plist is missing" {
-    # Plist path must be validated too, not just the binary path.
     grep -qF 'entitlements plist does not exist' "$SCRIPT"
 }
 
 @test "signing and verification are separate functions" {
-    # sign_macho does signing; verify_macho does post-sign assertions.
-    # Keeps each responsibility independently testable.
     grep -qF 'verify_macho()' "$SCRIPT"
 }
 
@@ -221,8 +205,6 @@ for key in conf.get('bundle', {}).get('resources', {}):
 }
 
 @test "all entitlements plists are well-formed XML plists" {
-    # Parse with plistlib — catches truncation, missing close tags, encoding
-    # errors. plistlib is in Python stdlib (cross-platform, no plutil on Linux).
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     run python3 -c "
 import plistlib, glob, sys
@@ -237,7 +219,6 @@ for path in glob.glob('$ent_dir/*.plist'):
 }
 
 @test "each single-capability plist declares exactly one <key>" {
-    # One <key> per plist; node.plist is exempt (V8 needs two).
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     local plist keys
     for plist in virtualization.plist calendars.plist reminders.plist apple-events.plist; do
@@ -270,20 +251,15 @@ for path in glob.glob('$ent_dir/*.plist'):
 }
 
 @test "verify_identifier function is defined for native CLI sub-identifier check" {
-    # Sub-identifier binding ensures TCC.db rows match pl.speedwave.desktop.<svc>.
     grep -qF 'verify_identifier()' "$SCRIPT"
 }
 
 @test "verify_identifier extracts codesign Identifier line and compares to expected" {
-    # Sanity that the function still uses `codesign -dvvv | grep Identifier=`
-    # — if Apple changes that flag, the test catches the drift before release.
     grep -qF 'codesign -dvvv' "$SCRIPT"
     grep -qF "grep -E '^Identifier='" "$SCRIPT"
 }
 
 @test "expected sub-identifier mapping covers all native CLIs" {
-    # SSOT-alignment with native/macos/shared/Sources/SharedCLI/Utilities.swift
-    # ::subBundleIdentifier(for:); these exact values must match.
     grep -qF 'pl.speedwave.desktop.calendar' "$SCRIPT"
     grep -qF 'pl.speedwave.desktop.reminders' "$SCRIPT"
     grep -qF 'pl.speedwave.desktop.mail' "$SCRIPT"
@@ -292,23 +268,17 @@ for path in glob.glob('$ent_dir/*.plist'):
 }
 
 @test "verify_identifier is invoked for each native CLI in sign loop" {
-    # The post-sign loop must call verify_identifier, not just sign_macho + verify_macho.
     grep -qE 'verify_identifier "\$path"' "$SCRIPT"
 }
 
 @test "error message names the missing file and gives actionable hint" {
     export APPLE_SIGNING_IDENTITY="$IDENTITY"
     populate_targets
-    # Remove the first target so the missing-file check fires before codesign
-    # would attempt to run with a non-existent test identity.
     rm "$SRC_TAURI/cli/speedwave"
 
     run with_darwin_uname "$SCRIPT"
 
     [ "$status" -eq 1 ]
-    # Must identify the specific missing binary, not fail generically
     [[ "$output" == *"cli/speedwave"* ]]
-    # Must point operator at the fix: updating SIGN_TARGETS after changing
-    # tauri.macos.conf.json resources
     [[ "$output" == *"tauri.macos.conf.json"* ]]
 }

@@ -1,4 +1,3 @@
-
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { confirmRestartAndWait } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
@@ -186,8 +185,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
     try {
       await restartBtn.waitForExist({ timeout: 10_000 });
       await confirmRestartAndWait();
-    } catch {
-    }
+    } catch {}
     await openChat();
     await startNewConversation();
 
@@ -394,10 +392,13 @@ describe('Slash Popover + Model/Effort Selector', function () {
       if (!haiku) throw new Error('claude-haiku-4-5 missing from the catalog');
       await openModelSelector();
       await pickModelOption(haiku.id);
-      await browser.waitUntil(async () => !(await $('[data-testid="effort-segment"]').isExisting()), {
-        timeout: 30_000,
-        timeoutMsg: 'effort-segment still rendered after switching to Haiku 4.5',
-      });
+      await browser.waitUntil(
+        async () => !(await $('[data-testid="effort-segment"]').isExisting()),
+        {
+          timeout: 30_000,
+          timeoutMsg: 'effort-segment still rendered after switching to Haiku 4.5',
+        }
+      );
     });
   });
 });

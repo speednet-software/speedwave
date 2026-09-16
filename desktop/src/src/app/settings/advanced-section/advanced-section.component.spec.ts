@@ -33,7 +33,6 @@ describe('AdvancedSectionComponent', () => {
     const texts = Array.from(headings).map((h) => h.textContent?.trim());
     expect(texts).toContain('Danger Zone');
     expect(texts).not.toContain('Diagnostics');
-    // Diagnostics export now lives in the logs view; settings must not duplicate it.
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-export-diagnostics"]')
     ).toBeNull();

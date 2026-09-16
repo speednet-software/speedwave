@@ -161,7 +161,6 @@ function tokenMatchTier(fields: LowercasedToolFields, token: string): MatchTier 
  */
 function scoreTool(tool: ToolMetadata, contentTokens: string[]): MatchTier | undefined {
   if (contentTokens.length === 0) {
-    // Intended: a pure self-reference query ("me") lists userScoped tools across enabled services.
     return tool.userScoped ? MatchTier.Description : undefined;
   }
 
@@ -195,7 +194,6 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
 
   const enabled = getEnabledServices();
   const disabledOs = getDisabledOsCategories();
-  // A service the sandbox refuses to expose is uncallable, so never advertise its tools.
   const { skipped } = enabledSandboxGlobals();
   const servicesToSearch = (service ? [service] : [...SERVICE_NAMES]).filter(
     (s) => enabled.has(s) && !skipped.has(s)

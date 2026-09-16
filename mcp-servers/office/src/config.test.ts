@@ -22,7 +22,6 @@ describe('parsePositiveInt', () => {
 });
 
 describe('paths', () => {
-  // Canary: test mocks + SKILL.md hardcode `/workspace/.speedwave/office` — sync if changed.
   it('OUTPUT_DIR is `<WORKSPACE_ROOT>/.speedwave/office`', () => {
     expect(WORKSPACE_ROOT).toBe('/workspace');
     expect(OUTPUT_DIR).toBe('/workspace/.speedwave/office');

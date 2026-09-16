@@ -89,9 +89,6 @@ fn rules_yaml_is_valid_v3_with_the_expected_seven_rules() {
 
 #[test]
 fn rules_yaml_matches_the_resolvers_independently_embedded_copy() {
-    // speedwave_runtime::pii_policy::rule_library() embeds the same file via its own
-    // include_str! (crates/speedwave-runtime/src/pii_policy.rs) — this must be the
-    // exact same content read a second time, never a stale duplicate.
     let direct: RulesFile = serde_yaml_ng::from_str(RULES_YAML).expect("rules.yaml parses");
     let resolver_library =
         speedwave_runtime::pii_policy::rule_library().expect("resolver's rule library loads");
@@ -110,10 +107,6 @@ fn rules_yaml_matches_the_resolvers_independently_embedded_copy() {
 
 #[test]
 fn rules_yaml_matches_the_engines_independently_embedded_default_policy() {
-    // speedwave_pii_engine::default_policy_json() embeds the same file via its own
-    // include_str! (crates/pii-engine/src/policy.rs). pii_policy.rs already
-    // cross-checks the *id set* against this function internally; this test goes
-    // further and cross-checks patterns/displayName/tokenize too.
     let direct: RulesFile = serde_yaml_ng::from_str(RULES_YAML).expect("rules.yaml parses");
     let engine_default: serde_json::Value =
         serde_json::from_str(&speedwave_pii_engine::default_policy_json())

@@ -20,7 +20,6 @@ import {
 import { WebClient } from '@slack/web-api';
 import fs from 'fs/promises';
 
-// Mock WebClient constructor function
 const mockWebClientInstance = {
   chat: {
     postMessage: vi.fn(),
@@ -32,13 +31,11 @@ const mockWebClientInstance = {
   users: {
     lookupByEmail: vi.fn(),
   },
-  // Background auth.test defaults to success; override per-test with mockResolvedValueOnce
   auth: {
     test: vi.fn().mockResolvedValue({ ok: true }),
   },
 };
 
-// Class mock records the token so slackCall's rotate-on-change check (client.token !== token) works
 vi.mock('@slack/web-api', () => ({
   WebClient: vi.fn().mockImplementation(function (
     this: typeof mockWebClientInstance & { token?: string },
@@ -49,7 +46,6 @@ vi.mock('@slack/web-api', () => ({
   }),
 }));
 
-// Mock both named and default-object fs exports (oauth-client imports named; refresh reads bearer)
 const { readFileMock, mkdirMock, writeFileMock } = vi.hoisted(() => ({
   readFileMock: vi.fn(),
   mkdirMock: vi.fn().mockResolvedValue(undefined),
@@ -333,7 +329,6 @@ describe('slack client', () => {
     });
 
     it('wraps a non-Error fs rejection into an errno-aware message (still returns missing)', async () => {
-      // Non-Error rejection is wrapped so its message (not "Unknown error") surfaces in the warning
       vi.mocked(fs.readFile).mockRejectedValueOnce('plain string failure');
 
       const result = await initializeSlackClients();
@@ -359,7 +354,6 @@ describe('slack client', () => {
 
       const clients = await initializeSlackClients();
       expect(clients._tokensStatus).toBe('present');
-      // Wait for the background promise to settle.
       await vi.waitFor(() => expect(clients.statusTracker!.getStatus()).toBe('failed'));
       expect(clients.statusTracker!.getError()).toContain('account_inactive');
     });
@@ -411,8 +405,8 @@ describe('slack client', () => {
     it('refreshes once on token_expired and retries with the rotated token', async () => {
       stubOauthWorkerSuccess();
       vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('bearer-uuid') // /secrets/oauth-auth-token-slack
-        .mockResolvedValueOnce('xoxe.xoxp-rotated\n'); // /tokens/access_token re-read
+        .mockResolvedValueOnce('bearer-uuid')
+        .mockResolvedValueOnce('xoxe.xoxp-rotated\n');
 
       const clients = presentClients();
       const apiCall = vi
@@ -425,7 +419,6 @@ describe('slack client', () => {
       expect(result).toEqual({ ok: true });
       expect(apiCall).toHaveBeenCalledTimes(2);
       expect(clients.tokenState.accessToken).toBe('xoxe.xoxp-rotated');
-      // WebClient recreated with the rotated token (state transition).
       expect(WebClient).toHaveBeenCalledWith('xoxe.xoxp-rotated');
       expect(clients.user.token).toBe('xoxe.xoxp-rotated');
     });
@@ -444,7 +437,6 @@ describe('slack client', () => {
     });
 
     it('propagates a refresh failure without retrying the call', async () => {
-      // No WORKER_OAUTH_URL → refreshAccessToken throws not_configured.
       delete process.env.WORKER_OAUTH_URL;
       const clients = presentClients();
       const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
@@ -531,7 +523,6 @@ describe('slack client', () => {
     });
 
     it('resolves a channel that lives on a later list page', async () => {
-      // Pagination: a channel on page 2+ must still resolve even when pages are sparse
       const mockList = vi
         .fn()
         .mockResolvedValueOnce({
@@ -926,7 +917,6 @@ describe('slack client', () => {
       expect(result.messages[1].attachments_text).toBe(
         'SPW-208: spike: wybrac backend\nJira created a Task'
       );
-      // Plain messages carry neither key.
       expect(result.messages[0].attachments_text).toBeUndefined();
     });
 
@@ -1092,7 +1082,6 @@ describe('slack client', () => {
       const mockHistory = vi.fn().mockResolvedValue({
         messages: [
           {
-            // Missing user, text, ts fields
             type: 'message',
           },
           {
@@ -1380,7 +1369,6 @@ describe('slack client', () => {
         url_private: 'https://files.slack.com/files-pri/T1-F4/notes.md',
       });
       stubDownload('<html>login</html>', 'text/html');
-      // No WORKER_OAUTH_URL: refresh fails instead of returning the login page as content
       await expect(getFileContent(mockClients, { file: 'F4' })).rejects.toThrow();
     });
 
@@ -1488,7 +1476,7 @@ describe('slack client', () => {
         size: 4,
         url_private: 'https://files.slack.com/files-pri/T1-F1/analiza.pdf',
       });
-      const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
+      const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46]);
       const fetchMock = stubDownload(bytes);
 
       const result = await downloadFile(mockClients, { file: 'F1' });
@@ -1522,7 +1510,6 @@ describe('slack client', () => {
 
       const result = await downloadFile(mockClients, { file: 'F2' });
 
-      // No separators survive; leading dots stripped; unsafe chars → underscore.
       expect(result.path).toBe('/ws/.speedwave/slack/F2-pa_ss_wd_.txt');
       expect(result.path).not.toContain('..');
     });
@@ -1560,13 +1547,11 @@ describe('slack client', () => {
         url_private: 'https://files.slack.com/files-pri/T1-F5/doc.pdf',
       });
       stubDownload(Buffer.from('<html>login</html>'), 'text/html');
-      // No WORKER_OAUTH_URL: refresh fails instead of persisting the login page
       await expect(downloadFile(mockClients, { file: 'F5' })).rejects.toThrow();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
     it('sanitizes a hostile file ID falling back from files.info', async () => {
-      // files.info without an id → meta.id falls back to the caller's argument.
       stubInfo({
         name: 'x.pdf',
         mimetype: 'application/pdf',
@@ -1577,7 +1562,6 @@ describe('slack client', () => {
 
       const result = await downloadFile(mockClients, { file: '../../etc/passwd' });
 
-      // sanitizeFilename keeps only the basename — traversal segments drop out.
       expect(result.path).toBe('/ws/.speedwave/slack/passwd-x.pdf');
       expect(result.path).not.toContain('..');
     });
@@ -1734,7 +1718,6 @@ describe('slack client', () => {
     });
 
     it('caps pagination at the runaway-cursor backstop', async () => {
-      // A cursor that never empties must not loop forever.
       const mockList = vi.fn().mockResolvedValue({
         channels: [{ id: 'CX', name: 'x', is_member: true }],
         response_metadata: { next_cursor: 'cur-again' },
@@ -1799,7 +1782,6 @@ describe('slack client', () => {
       const mockList = vi.fn().mockResolvedValue({
         channels: [
           {
-            // Missing all fields except is_member
             is_member: true,
           },
           {
@@ -1816,7 +1798,6 @@ describe('slack client', () => {
 
       const result = await getChannels(mockClients);
 
-      // These channels pass the is_member filter, so they will be included
       expect(result.channels[0]).toEqual({
         id: '',
         name: '',
@@ -1901,7 +1882,6 @@ describe('slack client', () => {
       const list = stubList([
         {
           ok: true,
-          // No is_member field anywhere — im objects do not carry it.
           channels: [{ id: 'D1', is_im: true, user: 'U1' }],
           response_metadata: { next_cursor: 'CUR2' },
         },
@@ -2170,7 +2150,6 @@ describe('slack client', () => {
         user: {
           id: 'U12345',
           name: 'john.doe',
-          // Missing real_name and profile
         },
       });
 
@@ -2213,7 +2192,6 @@ describe('slack client', () => {
     });
 
     it('throws error for other API errors', async () => {
-      // token_revoked is terminal: no refresh attempt, error passes through.
       const mockLookup = vi.fn().mockRejectedValue({
         data: { error: 'token_revoked' },
       });

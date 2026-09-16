@@ -325,7 +325,6 @@ export class ServiceCardComponent {
       if (value !== undefined && value !== '') {
         credentials[field.key] = value;
       } else if (value === '' && field.optional) {
-        // Explicit empty string persists backend config change (omitting key leaves stale value).
         credentials[field.key] = '';
       }
     }

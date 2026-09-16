@@ -161,8 +161,6 @@ const OUTPUT_PROPS = {
   },
 } as const;
 
-// ── Tool definitions ─────────────────────────────────────────────────────────
-
 const readDocumentTool: Tool = {
   name: 'readDocument',
   description:

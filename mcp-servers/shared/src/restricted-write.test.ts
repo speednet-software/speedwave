@@ -9,7 +9,6 @@ describe('writeRestrictedSecret', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rw-test-'));
-    // Tighten parent dir to owner-only so writeRestrictedSecret accepts it
     if (process.platform !== 'win32') {
       await fs.chmod(tmpDir, 0o700);
     }
@@ -62,14 +61,12 @@ describe('writeRestrictedSecret', () => {
   );
 
   it('cleans up the tmp file when rename fails', async () => {
-    // Target resolves to an existing dir so rename fails during atomic write.
     const sub = path.join(tmpDir, 'sub');
     await fs.mkdir(sub, { mode: 0o700 });
     await fs.writeFile(path.join(sub, 'sentinel'), 'x');
 
     await expect(writeRestrictedSecret(sub, 'data')).rejects.toThrow();
 
-    // No leftover tmp files in parent
     const entries = await fs.readdir(tmpDir);
     const leftoverTmp = entries.filter((e) => e.startsWith(`${path.basename(sub)}.tmp.`));
     expect(leftoverTmp).toEqual([]);

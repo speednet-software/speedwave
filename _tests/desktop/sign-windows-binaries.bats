@@ -1,7 +1,5 @@
 #!/usr/bin/env bats
 
-# Guards scripts/sign-windows-binaries.ps1 and its two Tauri hooks in tauri.windows.conf.json
-# (ADR-086). Static checks: the script itself only runs on a Windows host with an Azure login.
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-windows-binaries.ps1"
 TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.conf.json"
@@ -11,7 +9,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "script starts with a UTF-8 BOM" {
-    # Windows PowerShell reads a BOM-less .ps1 in the system locale (cross-platform rules).
     [ "$(od -An -tx1 -N3 "$SCRIPT" | tr -d ' \n')" = "efbbbf" ]
 }
 
@@ -25,7 +22,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "script timestamps with the Microsoft RFC3161 authority" {
-    # Artifact Signing certificates expire after three days; an untimestamped signature dies with them.
     grep -qF "http://timestamp.acs.microsoft.com" "$SCRIPT"
     grep -qF -- "-TimestampRfc3161 \$TimestampServer" "$SCRIPT"
 }
@@ -38,8 +34,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "script re-executes the signing path under pwsh after the no-op check" {
-    # The ArtifactSigning module is Core-only (PSEdition_Core); Windows PowerShell 5.1 cannot even
-    # find it on PSGallery. The hooks still launch 5.1 so unsigned builds need no PowerShell 7.
     skip_line=$(grep -n "skipping Windows code signing" "$SCRIPT" | head -1 | cut -d: -f1)
     reexec_line=$(grep -n "PSEdition -ne 'Core'" "$SCRIPT" | head -1 | cut -d: -f1)
     import_line=$(grep -n "^Import-SigningModule" "$SCRIPT" | head -1 | cut -d: -f1)
@@ -51,8 +45,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
     grep -qF -- '& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Bundled' "$SCRIPT"
     grep -qF -- '& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath $File' "$SCRIPT"
     grep -qF 'exit $LASTEXITCODE' "$SCRIPT"
-    # An `if` used as an expression unrolls a one-element array into a string; splatting that
-    # string hands pwsh garbage arguments (seen live: "positional parameter ... argument ':'").
     if grep -qE '@forward|\$forward' "$SCRIPT"; then
         echo "ERROR: re-exec must pass its arguments literally, never through a splatted variable" >&2
         return 1
@@ -60,8 +52,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "script excludes the managed-identity probe but keeps the Azure CLI credential" {
-    # Hosted runners have no IMDS endpoint; the probe only delays every signing call. The CLI
-    # credential is how azure/login's OIDC session reaches the signer.
     grep -qF -- "-ExcludeManagedIdentityCredential" "$SCRIPT"
     if grep -qF -- "-ExcludeAzureCliCredential" "$SCRIPT"; then
         echo "ERROR: AzureCliCredential must stay enabled — azure/login's session is the CI credential" >&2
@@ -70,8 +60,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "script verifies the signature, its timestamp and the Artifact Signing EKU after signing" {
-    # Seen live: a pre-signed input passes Status=Valid with the old signer; only the EKU proves
-    # the signature was produced by our certificate profile.
     grep -qF "Get-AuthenticodeSignature" "$SCRIPT"
     grep -qF "TimeStamperCertificate" "$SCRIPT"
     grep -qF "\$ArtifactSigningEku = '1.3.6.1.4.1.311.97.1.0'" "$SCRIPT"
@@ -89,7 +77,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "every SignTargets entry is a Windows bundle resource" {
-    # Alignment pair: $SignTargets ↔ tauri.windows.conf.json bundle.resources (alignments rules).
     local resources
     resources="$(python3 -c "import json; print('\n'.join(json.load(open('$TAURI_WINDOWS_CONF'))['bundle']['resources'].keys()))")"
     local count=0
@@ -102,8 +89,6 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
 }
 
 @test "SignTargets covers every self-built PE resource in tauri.windows.conf.json" {
-    # Reverse direction of the alignment pair: a new .exe/.dll resource must be signed unless it is
-    # vendor-signed (node.exe) or hash-pinned (vulkan-1.dll), which must never be re-signed.
     local vendor_signed="nodejs/node.exe vulkan-1.dll"
     local targets
     targets="$(awk '/^\$SignTargets = @\(/,/^\)/' "$SCRIPT" | sed -n "s/^ *'\(.*\)'.*$/\1/p" | tr '\\' '/')"

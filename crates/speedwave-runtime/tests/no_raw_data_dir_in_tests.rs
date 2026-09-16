@@ -79,7 +79,6 @@ fn cfg_test_guards_a_module(lines: &[&str], cfg_idx: usize) -> bool {
 }
 
 fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
-    // Walk backwards for the nearest enclosing test marker.
     for i in (0..idx).rev() {
         let l = lines[i].trim_start();
         if l.starts_with("mod tests") || l.starts_with("#[test]") {
@@ -90,7 +89,6 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
         {
             return true;
         }
-        // Closing brace of a sibling top-level item — stop scanning back.
         if l == "}" && lines[i].starts_with('}') {
             return false;
         }
@@ -162,7 +160,6 @@ fn no_raw_data_dir_in_test_regions() {
     let root = manifest_root();
     let crates_root = root.join("crates");
     let desktop_src = root.join("desktop").join("src-tauri").join("src");
-    // Integration-test binaries for the Desktop crate: whole-file test code.
     let desktop_tests = root.join("desktop").join("src-tauri").join("tests");
 
     let mut files = Vec::new();
@@ -193,7 +190,6 @@ fn no_raw_data_dir_in_test_regions() {
                 continue;
             }
             if let Some(pat) = PATTERNS.iter().find(|p| matches_bare_call(line, p)) {
-                // Whole-file test binaries; in `src/` only genuine test regions.
                 if whole_file_is_test || is_in_test_module(&lines, idx) {
                     violations.push(format!(
                         "{}:{}: matches {pat:?}\n  > {}",

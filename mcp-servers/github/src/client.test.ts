@@ -5,7 +5,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import type { GitHubConfig, GitHubClient as GitHubClientType } from './client.js';
 
-// ── Mock functions shared across tests ───────────────────────────────────────
 const mockLoadTokenFile = vi.fn();
 
 /** Mutable holder so each test can swap the Octokit instance the mocked constructor returns. */
@@ -13,7 +12,6 @@ const octokitHolder: { instance: Record<string, unknown> | null } = { instance: 
 /** Records the options passed to `new Octokit(...)` so tests can assert on auth/throttle wiring. */
 const mockOctokitConstructor = vi.fn();
 
-// Mock @octokit/rest — Octokit.plugin(...) returns a class whose instances delegate to octokitHolder.
 vi.mock('@octokit/rest', () => {
   class MockOctokit {
     constructor(opts: unknown) {
@@ -31,7 +29,6 @@ vi.mock('@octokit/rest', () => {
 vi.mock('@octokit/plugin-throttling', () => ({ throttling: {} }));
 vi.mock('@octokit/plugin-retry', () => ({ retry: {} }));
 
-// Mock shared module — keep real exports, override loadTokenFile + ts.
 vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@speedwave/mcp-shared')>();
   return {
@@ -41,7 +38,6 @@ vi.mock('@speedwave/mcp-shared', async (importOriginal) => {
   };
 });
 
-// Import helpers after mocks are set up (dynamic import avoids hoisting conflict)
 const { withSetupGuidance } = await import('@speedwave/mcp-shared');
 
 /** Builds a fresh mock Octokit instance with all REST namespaces used by GitHubClient. */
@@ -180,7 +176,6 @@ describe('GitHubClient', () => {
     vi.restoreAllMocks();
   });
 
-  // ── constructor ────────────────────────────────────────────────────────────
   describe('constructor', () => {
     it('creates an Octokit instance with the provided auth token', () => {
       expect(mockOctokitConstructor).toHaveBeenCalled();
@@ -219,7 +214,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── formatError ────────────────────────────────────────────────────────────
   describe('formatError', () => {
     it('formats 401 with authentication guidance', () => {
       const msg = GitHubClientClass.formatError({ status: 401 });
@@ -242,7 +236,6 @@ describe('GitHubClient', () => {
     it('formats 403 without rate-limit header as permission error', () => {
       const msg = GitHubClientClass.formatError({ status: 403 });
       expect(msg).toContain('Permission denied');
-      // Generic post-OAuth-cutover message: mentions both reconnect (OAuth) and PAT.
       expect(msg).toContain('reconnect');
       expect(msg).toContain('PAT');
     });
@@ -343,7 +336,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── testConnection ─────────────────────────────────────────────────────────
   describe('testConnection', () => {
     it('returns success when getAuthenticated resolves', async () => {
       octokit.rest.users.getAuthenticated.mockResolvedValue({ data: { login: 'octocat' } });
@@ -403,7 +395,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── users ──────────────────────────────────────────────────────────────────
   describe('getCurrentUser', () => {
     it('returns the normalized authenticated user', async () => {
       octokit.rest.users.getAuthenticated.mockResolvedValue({
@@ -435,7 +426,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── repos ──────────────────────────────────────────────────────────────────
   describe('listRepos', () => {
     it('lists the authenticated user repos via paginate', async () => {
       octokit.paginate.mockResolvedValue([
@@ -580,7 +570,6 @@ describe('GitHubClient', () => {
       const repos = await client.listRepos({ limit: 120 });
 
       expect(repos).toHaveLength(120);
-      // per_page is 100, so 120 items are reached after the 2nd page; the 3rd/4th are never fetched.
       expect(pagesFetched).toBe(2);
     });
   });
@@ -639,7 +628,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── pull requests ──────────────────────────────────────────────────────────
   describe('listPullRequests', () => {
     it('lists PRs via paginate with defaults', async () => {
       octokit.paginate.mockResolvedValue([
@@ -853,8 +841,6 @@ describe('GitHubClient', () => {
     });
 
     it('stringifies a Buffer-typed response body that is not a TypedArray view', async () => {
-      // A real Buffer is also `ArrayBuffer.isView()`; synthesize a Buffer-prototyped object
-      // lacking typed-array internal slots to reach the `Buffer.isBuffer` fallback path.
       const bufferLike: Buffer = Object.assign(Object.create(Buffer.prototype) as Buffer, {
         toString: () => 'buffer diff',
       });
@@ -902,7 +888,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── pr review ──────────────────────────────────────────────────────────────
   describe('listPrCommits', () => {
     it('lists PR commits', async () => {
       octokit.paginate.mockResolvedValue([
@@ -1052,7 +1037,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── branches ───────────────────────────────────────────────────────────────
   describe('listBranches', () => {
     it('lists branches', async () => {
       octokit.paginate.mockResolvedValue([
@@ -1179,7 +1163,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── commits ────────────────────────────────────────────────────────────────
   describe('listCommits', () => {
     it('lists commits with filters', async () => {
       octokit.paginate.mockResolvedValue([
@@ -1284,7 +1267,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── repository content ─────────────────────────────────────────────────────
   describe('getTree', () => {
     it('resolves the default branch when ref omitted and returns tree items', async () => {
       octokit.rest.repos.get.mockResolvedValue({
@@ -1332,7 +1314,6 @@ describe('GitHubClient', () => {
     });
 
     it('throws a clear error when ref is omitted and the repo has no default branch', async () => {
-      // mapRepo normalises a missing default_branch to '' — getTree must not forward that.
       octokit.rest.repos.get.mockResolvedValue({ data: { id: 1 } });
       await expect(client.getTree('o', 'r')).rejects.toThrow('has no default branch');
       expect(octokit.rest.git.getTree).not.toHaveBeenCalled();
@@ -1405,7 +1386,6 @@ describe('GitHubClient', () => {
     });
 
     it('returns raw base64 (not UTF-8) for binary content that does not round-trip', async () => {
-      // A 1x1 PNG-like byte sequence with bytes invalid as UTF-8.
       const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd8]);
       const base64 = binary.toString('base64');
       octokit.rest.repos.getContent.mockResolvedValue({
@@ -1428,7 +1408,6 @@ describe('GitHubClient', () => {
         sha: 'imgsha',
         size: binary.length,
       });
-      // Round-trip: decoding the returned base64 must reproduce the original bytes exactly.
       expect(Buffer.from(file.content, 'base64').equals(binary)).toBe(true);
     });
 
@@ -1505,7 +1484,6 @@ describe('GitHubClient', () => {
         client.createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
       ).rejects.toThrow("Could not check whether 'a.txt' already exists in o/r before writing");
       expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
-      // The wrapped error carries the marker (and status) so withValidation never logs it as a bug.
       await client
         .createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
         .catch((error) => {
@@ -1573,7 +1551,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── actions ────────────────────────────────────────────────────────────────
   describe('listWorkflowRuns', () => {
     it('lists workflow runs', async () => {
       octokit.paginate.mockResolvedValue([
@@ -1789,7 +1766,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── issues ─────────────────────────────────────────────────────────────────
   describe('listIssues', () => {
     it('filters out pull requests', async () => {
       octokit.paginate.mockResolvedValue([
@@ -1878,7 +1854,6 @@ describe('GitHubClient', () => {
 
       expect(issues).toHaveLength(1);
       expect(issues[0].number).toBe(1);
-      // Page 1 alone already yields 1 non-PR issue meeting the limit; page 2 is never fetched.
       expect(pagesFetched).toBe(1);
     });
 
@@ -2026,7 +2001,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── labels ─────────────────────────────────────────────────────────────────
   describe('listLabels', () => {
     it('lists labels', async () => {
       octokit.paginate.mockResolvedValue([
@@ -2087,7 +2061,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── tags & releases ────────────────────────────────────────────────────────
   describe('createTag', () => {
     it('creates a lightweight tag ref pointing at the commit', async () => {
       octokit.rest.git.createRef.mockResolvedValue({ data: {} });
@@ -2233,7 +2206,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  // ── error surfacing ────────────────────────────────────────────────────────
   describe('error propagation', () => {
     it('lets API errors bubble out of public methods (formatted by callers / withValidation)', async () => {
       octokit.rest.repos.get.mockRejectedValue({ status: 404, message: 'Not Found' });
@@ -2247,7 +2219,6 @@ describe('GitHubClient', () => {
   });
 });
 
-// ── initializeGitHubClient ───────────────────────────────────────────────────
 describe('initializeGitHubClient', () => {
   let originalEnv: NodeJS.ProcessEnv;
   let initializeGitHubClient: typeof import('./client.js').initializeGitHubClient;
@@ -2286,8 +2257,6 @@ describe('initializeGitHubClient', () => {
   });
 
   it('loads the token by name via loadTokenFile regardless of TOKENS_DIR', async () => {
-    // The TOKENS_DIR-or-/tokens resolution now lives in the shared loadTokenFile
-    // (tested in shared/security.test.ts), so the worker just passes the name.
     process.env.TOKENS_DIR = '/custom/tokens';
     mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
@@ -2312,7 +2281,6 @@ describe('initializeGitHubClient', () => {
   });
 
   it('returns client + schedules background test when testConnection fails', async () => {
-    // testConnection runs in the background; the client is returned immediately.
     mockLoadTokenFile.mockResolvedValue('test-token');
     octokitHolder.instance = {
       rest: {
@@ -2392,7 +2360,6 @@ describe('initializeGitHubClient', () => {
     mockLoadTokenFile.mockRejectedValue(new Error('EACCES: permission denied, open /tokens/token'));
     const result = await initializeGitHubClient();
     expect(result).toBeNull();
-    // The warning must carry the underlying error detail.
     const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
       .map((c) => c.join(' '))
       .join('\n');
@@ -2423,7 +2390,6 @@ describe('initializeGitHubClient', () => {
   });
 });
 
-// ── response mappers (via public methods, covering defensive fallbacks) ──────
 describe('Response mappers — defensive fallbacks', () => {
   let GitHubClientClass: typeof GitHubClientType;
   let client: InstanceType<typeof GitHubClientType>;

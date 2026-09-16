@@ -93,7 +93,6 @@ function pageRuleBody(opts: PdfOptions): string {
       `pageSize must be a CSS page-size keyword (A4, Letter, …) or "<width> <height>" lengths, got: ${rawSize}`
     );
   }
-  // Strip any trailing orientation already present in the keyword.
   const baseSize = rawSize.replace(/\s+(portrait|landscape)\s*$/i, '');
   const size = opts.landscape ? `${baseSize} landscape` : rawSize;
   const margin = (opts.margin ?? '18mm').trim();
@@ -188,9 +187,7 @@ export async function htmlToPdf(
   const { filePath, isTemp } = await materializeTextInput(input, '.html');
   const baseUrl = baseUrlFor(filePath, isTemp);
   try {
-    // Validate `opts` once (throws on bad CSS), then reuse the rule body for both branches.
     const ruleBody = pageRuleBody(opts);
-    // If the HTML looks like a fragment, wrap it; otherwise inject our (validated) @page rule before </head>.
     const raw = await fsp.readFile(filePath, 'utf8');
     let finalHtml: string;
     if (/<html[\s>]/i.test(raw)) {
@@ -365,13 +362,11 @@ async function libreOfficeConvert(srcAbs: string, target: string): Promise<strin
             'normally, or simplify/re-save the source file and retry.'
         );
       }
-      // Move out of the temp dir we are about to delete.
       const staged = path.join(os.tmpdir(), `office-staged-${randomUUID()}${path.extname(file)}`);
       await fsp.copyFile(file, staged);
       return staged;
     } finally {
       await fsp.rm(outDir, { recursive: true, force: true }).catch(ignoreError);
-      // The per-call profile dir is small; clean it up best-effort.
       await fsp.rm(profilePath, { recursive: true, force: true }).catch(ignoreError);
     }
   });

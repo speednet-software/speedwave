@@ -165,7 +165,6 @@ describe('AskUserBlockComponent', () => {
     );
     expect(el().querySelectorAll('[data-testid="ask-user-block-locked"]').length).toBe(1);
     expect(el().querySelectorAll('[data-testid="ask-user-block"]').length).toBe(1);
-    // Q2 must not be rendered yet.
     const allTexts = Array.from(el().querySelectorAll('[data-testid="ask-question"]')).map(
       (e) => e.textContent
     );
@@ -215,12 +214,10 @@ describe('AskUserBlockComponent', () => {
         answers: ['first answer', null],
       })
     );
-    // Locked slot 0 shows its own answer badge.
     expect(
       el().querySelector('[data-testid="ask-user-block-locked"] [data-testid="selected-option"]')
         ?.textContent
     ).toContain('first answer');
-    // Active slot is index 1.
     expect(
       el().querySelector('[data-testid="ask-user-block"]')?.getAttribute('data-slot-index')
     ).toBe('1');
@@ -386,7 +383,6 @@ describe('AskUserBlockComponent', () => {
     component.freeformText.set('partial draft');
     expect(component.selected().size).toBe(1);
 
-    // Parent reducer advances current_index: new block with slot filled.
     setBlock(
       makeBlock({
         questions: [makeQuestion({ question: 'Q0' }), makeQuestion({ question: 'Q1' })],

@@ -67,7 +67,6 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
 
     async addLabels(pageId, labels) {
       await enforcePage(pageId);
-      // v2 has no bulk-add; the v1 endpoint accepts an array.
       const payload = labels.map((name) => ({ prefix: 'global', name }));
       const res = await client.post<{ results?: unknown[] }>(
         `/wiki/rest/api/content/${encodeURIComponent(pageId)}/label`,
@@ -95,8 +94,6 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
     },
   };
 }
-
-// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
  * Map a v2 footer-comment object to {@link ConfluenceComment}; `pageId` is used as a fallback.

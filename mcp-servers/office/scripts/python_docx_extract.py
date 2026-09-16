@@ -28,12 +28,11 @@ def _heading_level(style_name: str) -> int | None:
 def _run(argv: list[str]) -> None:
     if len(argv) != 1:
         fail("usage: python_docx_extract.py <input.docx>")
-    from docx import Document  # imported here so import errors become structured failures
+    from docx import Document
 
     doc = Document(argv[0])
     blocks: list[str] = []
 
-    # Walk the document body in order so tables and paragraphs interleave correctly.
     from docx.oxml.ns import qn
 
     body = doc.element.body

@@ -1,8 +1,4 @@
 #!/usr/bin/env bats
-# `make dev` must land Tauri on the port `ng serve` binds: angular.json's serve port equals
-# tauri.conf.json's devUrl, and both launch paths strip PORT (Angular 22 lets it override angular.json).
-# DEV_INSTANCE/DEV_PORT (ADR-031) move that pair, plus the data dir and the bundle identifier,
-# so several worktrees can run `make dev` at once.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 MAKEFILE="$REPO_ROOT/Makefile"
@@ -26,13 +22,10 @@ print(urlparse(json.load(open(sys.argv[1]))["build"]["devUrl"]).port)
 ' "$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
 }
 
-# The non-Windows `dev` recipe line that launches Tauri.
 _unix_dev_launch_line() {
     awk '/^dev:/ { in_dev = 1 } in_dev && /cargo tauri dev/ { print; exit }' "$MAKEFILE"
 }
 
-# Resolved dev-instance settings. SPEEDWAVE_DATA_DIR is unset so the Makefile's
-# own default applies: bats itself runs under a `make` that exports it.
 _dev_config() {
     env -u SPEEDWAVE_DATA_DIR -u DEV_TAURI_CONFIG make -C "$REPO_ROOT" dev-config "$@"
 }
@@ -94,8 +87,6 @@ _dev_config() {
     [[ "$output" == *'"script":"npx ng serve --port 4271"'* ]]
 }
 
-# The derived port is what makes a second instance a one-word command, so pin the
-# formula: 24 bits of sha256 over the name, folded into 20000-39999.
 @test "a named instance derives its port from its name" {
     run _dev_config DEV_INSTANCE=speed-533
     [ "$status" -eq 0 ]

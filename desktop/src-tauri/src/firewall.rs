@@ -84,7 +84,6 @@ mod windows_impl {
                 let node = dir
                     .join(speedwave_runtime::consts::NODEJS_SUBDIR)
                     .join("node.exe");
-                // Only authorize node.exe if it actually exists.
                 if node.is_file() {
                     progs.push(node.to_string_lossy().into_owned());
                 } else {
@@ -102,7 +101,6 @@ mod windows_impl {
     /// exit codes: 0 = elevated child ran, 10 = UAC cancelled / refused.
     fn attempt_elevated_install(script: &std::path::Path, programs: &[String]) {
         let powershell = system_powershell_path();
-        // Build the elevated child's -ArgumentList; each element PS-quoted.
         let mut args = vec![
             "'-NoProfile'".to_string(),
             "'-NonInteractive'".to_string(),
@@ -115,7 +113,6 @@ mod windows_impl {
         ];
         if !programs.is_empty() {
             args.push("'-Programs'".to_string());
-            // Single ';'-joined string (see run_firewall_mode), then PS-quoted.
             args.push(ps_quote(&programs.join(";")));
         }
         let inner = format!(
@@ -123,13 +120,11 @@ mod windows_impl {
             ps = ps_quote(&powershell.to_string_lossy()),
             argv = args.join(","),
         );
-        // system_command applies CREATE_NO_WINDOW so the launcher shows no console.
         let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
             .arg(&inner)
             .status();
         match result.map(|s| s.code()) {
-            // Launcher ran the elevated child; verify by rule PRESENCE.
             Ok(Some(0)) => {
                 if matches!(
                     run_firewall_mode(script, "ensure", programs),
@@ -142,7 +137,6 @@ mod windows_impl {
                     );
                 }
             }
-            // UAC cancelled / elevation refused.
             Ok(Some(10)) => {
                 log::warn!("firewall UAC declined — WDF prompts may appear until granted")
             }
@@ -161,7 +155,6 @@ mod windows_impl {
         programs: &[String],
     ) -> EnsureOutcome {
         let powershell = system_powershell_path();
-        // system_command applies CREATE_NO_WINDOW (SSOT: binary.rs).
         let mut cmd = speedwave_runtime::binary::system_command(&powershell.to_string_lossy());
         cmd.args([
             "-NoProfile",
@@ -173,7 +166,6 @@ mod windows_impl {
         .arg(script)
         .args(["-Mode", mode]);
         if !programs.is_empty() {
-            // Semicolon-separated single string; -File cannot bind an array.
             cmd.arg("-Programs").arg(programs.join(";"));
         }
         match cmd.status() {
@@ -226,7 +218,6 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn ensure_firewall_rule_is_noop_off_windows() {
-        // Must not panic and must be callable without Windows APIs.
         ensure_firewall_rule();
     }
 }

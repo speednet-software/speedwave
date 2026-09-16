@@ -81,7 +81,6 @@ export function run(command: string, args: string[], opts: RunOptions = {}): Pro
     let timedOut = false;
     let settled = false;
 
-    // Append `chunk` to `chunks` up to MAX_SUBPROCESS_OUTPUT_BYTES; returns [newLen, truncated].
     const collect = (chunks: Buffer[], len: number, chunk: Buffer): [number, boolean] => {
       if (len >= MAX_SUBPROCESS_OUTPUT_BYTES) {
         return [len, true];
@@ -208,7 +207,6 @@ export async function runPythonScript(
     }
   }
   if (parsed === undefined) {
-    // Empty or unparseable stdout is never treated as `{}`: a non-zero exit must surface its real detail.
     if (r.code !== 0) {
       throw runFailure(scriptName, timeoutMs, r);
     }

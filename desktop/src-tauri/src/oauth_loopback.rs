@@ -1,6 +1,3 @@
-// Loopback-redirect plumbing shared by the authorization_code OAuth flows (plugins — ADR-069,
-// Slack — ADR-071): callback server, CSRF query parsing, and the PKCE authorize-URL builder.
-
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -70,18 +67,14 @@ pub(crate) async fn wait_for_callback(
                         .await;
                         return Err(e);
                     }
-                    // Forged/stray request on a fixed loopback port — keep waiting
-                    // for the real IdP redirect instead of failing the flow.
                     CallbackOutcome::StateMismatch => {
                         log::debug!("oauth callback with wrong state ignored");
                         let _ = write_http_response(&mut stream, "Waiting…").await;
                     }
                 },
-                // Ignore non-callback requests (favicon, etc.) and keep waiting.
                 Ok(None) => {
                     let _ = write_http_response(&mut stream, "Waiting…").await;
                 }
-                // A broken connection (port scan, etc.) must not abort the flow.
                 Err(e) => {
                     log::debug!("oauth callback read error (ignored): {e}");
                     continue;
@@ -137,7 +130,6 @@ pub(crate) async fn read_callback_request(
         }
         acc.extend_from_slice(&chunk[..n]);
     };
-    // "GET /callback?code=…&state=… HTTP/1.1"
     let target = first_line.split_whitespace().nth(1).unwrap_or("");
     if let Some(q) = target.strip_prefix("/callback?") {
         Ok(Some(q.to_string()))
@@ -169,8 +161,6 @@ pub(crate) fn parse_callback_query(query: &str, expected_state: &str) -> Callbac
             _ => {}
         }
     }
-    // Verify CSRF state before the error branch (RFC 6749 §10.12). A mismatch is
-    // not terminal — an unauthenticated page can hit a fixed loopback port.
     if state.as_deref() != Some(expected_state) {
         return CallbackOutcome::StateMismatch;
     }
@@ -231,7 +221,6 @@ mod tests {
 
     #[test]
     fn build_authorize_url_uses_custom_scope_param() {
-        // Slack: scopes travel as `user_scope`; a plain `scope` key must NOT appear.
         let url = build_authorize_url(
             "https://slack.com/oauth/v2/authorize",
             "cid",
@@ -276,7 +265,6 @@ mod tests {
 
     #[test]
     fn parse_callback_query_state_mismatch_is_not_terminal() {
-        // A mismatched state is a forged/stray hit — the caller keeps waiting.
         assert_eq!(
             parse_callback_query("code=abc&state=evil", "xyz"),
             CallbackOutcome::StateMismatch
@@ -301,7 +289,6 @@ mod tests {
 
     #[test]
     fn parse_callback_query_checks_state_before_error() {
-        // A forged ?error= without a valid state is a mismatch, not "provider denied".
         assert_eq!(
             parse_callback_query("error=access_denied", "xyz"),
             CallbackOutcome::StateMismatch
@@ -328,15 +315,13 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let client = tokio::spawn(async move {
-            // Forged cross-origin GET with a wrong state (loses the race normally).
             let mut c1 = tokio::net::TcpStream::connect(addr).await.unwrap();
             c1.write_all(b"GET /callback?code=evil&state=wrong HTTP/1.1\r\nHost: x\r\n\r\n")
                 .await
                 .unwrap();
             let mut buf = [0u8; 64];
             use tokio::io::AsyncReadExt;
-            let _ = c1.read(&mut buf).await; // drain the "Waiting…" response
-                                             // The real IdP redirect with the expected state.
+            let _ = c1.read(&mut buf).await;
             let mut c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
             c2.write_all(b"GET /callback?code=real&state=good HTTP/1.1\r\nHost: x\r\n\r\n")
                 .await
@@ -350,7 +335,6 @@ mod tests {
         client.await.unwrap();
     }
 
-    // read_callback_request must accumulate a request line split across TCP segments.
     #[tokio::test]
     async fn read_callback_request_handles_fragmented_request_line() {
         use std::time::Duration;
@@ -362,7 +346,6 @@ mod tests {
 
         let writer = tokio::spawn(async move {
             let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-            // Split the request line mid-query, with a pause between writes.
             client.write_all(b"GET /callback?code=ab").await.unwrap();
             client.flush().await.unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -399,7 +382,6 @@ mod tests {
         writer.await.unwrap();
     }
 
-    // The reader stops at MAX_REQUEST_LINE_BYTES and parses what it has.
     #[tokio::test]
     async fn read_callback_request_caps_oversized_request_line() {
         use tokio::io::AsyncWriteExt;
@@ -421,7 +403,6 @@ mod tests {
         let _ = writer.await;
     }
 
-    // User cancellation must surface as CallbackFailure::Cancelled, never as error.
     #[tokio::test]
     async fn wait_for_callback_cancellation_is_distinct_from_error() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -436,7 +417,6 @@ mod tests {
         );
     }
 
-    // Dual-stack: a connection on the SECONDARY listener must be served too.
     #[tokio::test]
     async fn wait_for_callback_accepts_on_secondary_listener() {
         use tokio::io::AsyncWriteExt;

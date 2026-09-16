@@ -5,10 +5,8 @@ import XCTest
 
 final class RemindersTests: XCTestCase {
 
-    // MARK: - CLI Argument Parsing
 
     func testCommandListAdvertisesAllCommands() {
-        // commandList drives both the usage and unknown-command messages in runCLI.
         for cmd in ["check_permission", "list_lists", "list_reminders",
                     "get_reminder", "create_reminder", "update_reminder", "complete_reminder"] {
             XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
@@ -17,8 +15,6 @@ final class RemindersTests: XCTestCase {
     }
 
     func testTagRegexCompilesAndMatches() {
-        // Asserts the lazily-compiled static tagRegex initializer succeeded (no fatalError)
-        // and that extractTags, its only consumer, works end to end.
         XCTAssertEqual(extractTags(from: "[#a] [#b] text"), ["a", "b"])
         XCTAssertEqual(stripTags(from: "[#a] text"), "text")
     }
@@ -44,12 +40,10 @@ final class RemindersTests: XCTestCase {
         let data = emptyJSON.data(using: .utf8)!
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(parsed)
-        // Default limit should be used when not specified
         let limit = parsed?["limit"] as? Int ?? 20
         XCTAssertEqual(limit, 20)
     }
 
-    // MARK: - update_reminder Argument Shape
 
     func testUpdateReminderRequiresId() {
         let params: [String: Any] = [:]
@@ -63,7 +57,7 @@ final class RemindersTests: XCTestCase {
         ]
         XCTAssertNotNil(params["id"])
         XCTAssertNotNil(params["name"])
-        XCTAssertNil(params["due_date"])  // Unspecified fields must stay untouched by updateReminder
+        XCTAssertNil(params["due_date"])  
         XCTAssertNil(params["tags"])
     }
 
@@ -88,7 +82,6 @@ final class RemindersTests: XCTestCase {
     }
 
     func testUpdateReminderJSONNullArrivesAsNSNull() throws {
-        // updateReminder distinguishes "clear the due date" (JSON null) from "leave it" (key absent).
         let data = "{\"id\": \"r-1\", \"due_date\": null}".data(using: .utf8)!
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertTrue(params["due_date"] is NSNull)
@@ -96,7 +89,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertNil(params["name"])
     }
 
-    // MARK: - Due Date Parsing
 
     func testDueDateDateOnlyIsAllDayFloatingGregorian() throws {
         let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15"))
@@ -149,13 +141,11 @@ final class RemindersTests: XCTestCase {
     }
 
     func testDueDateWallClockKeepsDstGapTimeAsTyped() throws {
-        // 02:30 does not exist on 2026-03-29 in Europe/Warsaw; a floating time must still be stored as typed.
         let c = try XCTUnwrap(dueDateComponents(from: "2026-03-29T02:30:00"))
         XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 3, 29, 2, 30, 0])
         XCTAssertNil(c.timeZone)
     }
 
-    // MARK: - Due Date Formatting
 
     func testDueDateStringAllDayIsDateOnly() {
         let c = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 6, day: 5)
@@ -210,7 +200,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertNil(dict["all_day"])
     }
 
-    // MARK: - Tag Extraction from Notes
 
     func testExtractTagsSingleTag() {
         let tags = extractTags(from: "[#work] Some notes")
@@ -237,7 +226,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(tags, ["work"])
     }
 
-    // MARK: - Strip Tags from Notes
 
     func testStripTagsSingleTag() {
         let clean = stripTags(from: "[#work] Some notes")
@@ -259,7 +247,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(clean, "")
     }
 
-    // MARK: - Combine Tags with Notes
 
     func testCombineTagsWithNotes() {
         let result = combineTags(["work", "urgent"], with: "Some notes")
@@ -301,7 +288,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(result, "[#work]")
     }
 
-    // MARK: - Partial Notes/Tags Merge (update_reminder)
 
     func testMergeNotesTagsOnlyKeepsBodyByteForByte() {
         let existing = "[#Work] hello\n\n\n\nworld  \n"
@@ -341,29 +327,21 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(none.body, "body [#inline]")
     }
 
-    // MARK: - Permission Access
 
     func testRequestReminderAccessReturnsTuple() {
-        // Compile-time check: requestReminderAccess returns (granted: Bool, error: Error?)
         let store = EKEventStore()
         let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
-        // With a near-zero timeout, we just verify the return type
         XCTAssertNotNil(result)
     }
 
-    // MARK: - EventStoreGate — file-scope struct reachable via @testable import
 
     func testRemindersEventStoreGateConformsToPermissionGate() {
-        // Compile-time + smoke: EventStoreGate is file-scope and reachable from tests.
-        // Calling authorizationStatus() on a real EKEventStore is a pure read.
         let store = EKEventStore()
         let gate: PermissionGate = EventStoreGate(store: store)
         let _: RawAuthorizationStatus = gate.authorizationStatus()
     }
 
     func testRemindersEventStoreGateProducesRawStatus() {
-        // Sanity: at runtime, the gate's raw status is one of the documented cases.
-        // Reminders does not support .writeOnly (Calendar-only), but other cases are valid.
         let store = EKEventStore()
         let gate = EventStoreGate(store: store)
         let raw = gate.authorizationStatus()
@@ -375,7 +353,6 @@ final class RemindersTests: XCTestCase {
         }
     }
 
-    // MARK: - reminderToDict Output Keys
 
     func testReminderToDictOutputContainsListIdAndListName() throws {
         let store = EKEventStore()
