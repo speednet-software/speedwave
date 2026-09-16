@@ -98,6 +98,13 @@ pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 /// Claude Code env switch that turns off background prefetches, telemetry and update checks.
 pub const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str =
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
+/// Proxy URL with no listener (closed local port): short-lived Claude Code invocations get it as
+/// `https_proxy`/`HTTPS_PROXY` so a startup OAuth refresh cannot leave the container (ADR-052).
+pub const CLAUDE_OFFLINE_HTTPS_PROXY: &str = "http://127.0.0.1:1";
+
+/// Upper bound for one in-container exec probe (`true`, `claude auth status`): a stalled container
+/// runtime surfaces as an error instead of freezing the caller (measured stalls: ~10 min).
+pub const CONTAINER_EXEC_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// PATH set inside containers for the `speedwave` user.
 /// Claude Code installs to `~/.local/bin`, so it must be on PATH.
@@ -3221,5 +3228,18 @@ mod tests {
     #[test]
     fn openrouter_default_model_is_the_verified_or_shaped_sonnet_5_id() {
         assert_eq!(OPENROUTER_DEFAULT_MODEL, "anthropic/claude-sonnet-5");
+    }
+
+    #[test]
+    fn offline_https_proxy_is_closed_ipv4_loopback_port_one() {
+        let url: url::Url = CLAUDE_OFFLINE_HTTPS_PROXY
+            .parse()
+            .expect("CLAUDE_OFFLINE_HTTPS_PROXY must be a valid URL");
+        assert_eq!(url.scheme(), "http");
+        match url.host() {
+            Some(url::Host::Ipv4(addr)) => assert!(addr.is_loopback()),
+            other => panic!("expected an IPv4 loopback host, got {other:?}"),
+        }
+        assert_eq!(url.port(), Some(1));
     }
 }

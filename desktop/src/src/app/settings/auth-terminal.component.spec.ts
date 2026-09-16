@@ -6,6 +6,7 @@ import { TauriService } from '../services/tauri.service';
 import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { makeMockLogger } from '../testing/mock-logger';
+import { createDeferred } from '../testing/deferred';
 
 describe('AuthTerminalComponent', () => {
   let component: AuthTerminalComponent;
@@ -289,6 +290,66 @@ describe('AuthTerminalComponent', () => {
     invokeSpy.mockClear();
     vi.advanceTimersByTime(10000);
     expect(invokeSpy).not.toHaveBeenCalled();
+  });
+
+  it('emits done for a same-project true response', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: true };
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+
+    vi.advanceTimersByTime(3000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).toHaveBeenCalledWith(true);
+  });
+
+  it('does not emit done when destroyed before the poll response resolves', async () => {
+    const pending = createDeferred<{ oauth_authenticated: boolean }>();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return pending.promise;
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(3000); // triggers the poll tick; the request is now in flight
+
+    component.ngOnDestroy();
+    pending.resolve({ oauth_authenticated: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not emit done when the project input changed while the poll was in flight', async () => {
+    const pending = createDeferred<{ oauth_authenticated: boolean }>();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return pending.promise;
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(3000); // triggers the poll tick for 'test-project'
+
+    fixture.componentRef.setInput('project', 'other-project');
+    pending.resolve({ oauth_authenticated: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).not.toHaveBeenCalled();
   });
 
   it('renders the primary "Open terminal" button', async () => {

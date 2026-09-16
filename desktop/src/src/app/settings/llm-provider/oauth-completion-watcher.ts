@@ -1,22 +1,27 @@
 import { Injectable, OnDestroy, inject } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
-import type { AuthStatusResponse } from '../../services/project-state.service';
+import type { AuthStatusResponse, OauthSignIn } from '../../services/project-state.service';
+
+/** Anthropic sign-in verdict as shown by the UI, including the not-yet-loaded state. */
+export type SignInDisplay = OauthSignIn | 'pending';
 
 /** Host callbacks for the watcher — read live on every tick/probe. */
 export interface OauthWatchContext {
   /** Current active project; re-read after the probe to drop stale results. */
   activeProject(): string | null;
-  /** True once OAuth credentials are present — stops the poll, gates the edge. */
-  isAuthenticated(): boolean;
+  /** Verdict last applied to the tile; 'pending' before the first load resolves. */
+  lastKnown(): SignInDisplay;
   /** False makes a poll tick skip its IPC probe (e.g. non-Anthropic card active). */
   shouldProbe(): boolean;
-  /** Fired exactly once per detected external login (false→true edge). */
+  /** Fired exactly once per detected external login (none→verified edge). */
   onLoginDetected(): Promise<void>;
+  /** Fired when the probed verdict changed but wasn't a login edge — refreshes the tile. */
+  onVerdict(project: string, status: AuthStatusResponse): void;
 }
 
 /**
  * Detects an external-terminal OAuth login (no frontend callback): a bounded
- * poll plus a window-focus probe fire `onLoginDetected` on the false→true edge.
+ * poll plus a window-focus probe fire `onLoginDetected` on the none→verified edge.
  */
 @Injectable()
 export class OauthCompletionWatcher implements OnDestroy {
@@ -50,7 +55,7 @@ export class OauthCompletionWatcher implements OnDestroy {
     this.ticksLeft = OauthCompletionWatcher.MAX_TICKS;
     this.poll = setInterval(() => {
       const ctx = this.context;
-      if (!ctx || ctx.isAuthenticated() || this.ticksLeft-- <= 0) {
+      if (!ctx || ctx.lastKnown() === 'verified' || this.ticksLeft-- <= 0) {
         this.stopPoll();
         return;
       }
@@ -89,8 +94,8 @@ export class OauthCompletionWatcher implements OnDestroy {
   }
 
   /**
-   * One probe: on the credentials false→true edge, stop the poll and fire
-   * `onLoginDetected` once (in-flight + stale-project guarded).
+   * One probe: fires `onLoginDetected` on the none→verified edge, else
+   * `onVerdict` for any other verdict change (in-flight + stale-project guarded).
    */
   async checkNow(): Promise<void> {
     const ctx = this.context;
@@ -100,9 +105,14 @@ export class OauthCompletionWatcher implements OnDestroy {
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
       if (ctx.activeProject() !== project) return;
-      if (status.oauth_authenticated && !ctx.isAuthenticated()) {
+      const observed: OauthSignIn =
+        status.oauth_sign_in ?? (status.oauth_authenticated ? 'verified' : 'none');
+      const known = ctx.lastKnown();
+      if (observed === 'verified' && known === 'none') {
         this.stopPoll();
         await ctx.onLoginDetected();
+      } else if (observed !== known) {
+        ctx.onVerdict(project, status);
       }
     } catch {
     } finally {

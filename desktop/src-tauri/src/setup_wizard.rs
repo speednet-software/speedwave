@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::runtime::ensure_exec_healthy;
-use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
+use speedwave_runtime::{binary, build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -344,10 +344,30 @@ fn auth_status_exec_argv() -> Vec<String> {
     vec![
         "env".to_string(),
         format!("{}=1", consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV),
+        format!("https_proxy={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
+        format!("HTTPS_PROXY={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
+        "no_proxy=".to_string(),
+        "NO_PROXY=".to_string(),
         consts::CLAUDE_BINARY.to_string(),
         "auth".to_string(),
         "status".to_string(),
     ]
+}
+
+fn probe_claude_sign_in(rt: &runtime::LockedRuntime, project: &str) -> anyhow::Result<bool> {
+    let container_name = crate::chat::claude_container_name(project);
+    log::info!("checking Claude auth in container {container_name}");
+    ensure_exec_healthy(rt, project, &container_name)?;
+    log::info!("container {container_name} healthy, checking auth");
+    let argv = auth_status_exec_argv();
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut cmd = rt.container_exec_piped(&container_name, &argv_refs)?;
+    let output = binary::run_with_timeout_capture(&mut cmd, consts::CONTAINER_EXEC_PROBE_TIMEOUT)?;
+    log::info!(
+        "auth status check for {container_name} exited with {}",
+        output.status
+    );
+    Ok(output.status.success())
 }
 
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
@@ -359,20 +379,19 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
         log::info!("non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
+    probe_claude_sign_in(&runtime::detect_runtime(), project)
+}
+
+pub(crate) fn claude_sign_in_verdict(project: &str) -> anyhow::Result<Option<bool>> {
     let rt = runtime::detect_runtime();
-    let container_name = crate::chat::claude_container_name(project);
-    log::info!("checking Claude auth in container {container_name}");
-    ensure_exec_healthy(&rt, project, &container_name)?;
-    log::info!("container {container_name} healthy, checking auth");
-    let argv = auth_status_exec_argv();
-    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let mut cmd = rt.container_exec_piped(&container_name, &argv_refs)?;
-    let output = cmd.output()?;
-    log::info!(
-        "auth status check for {container_name} exited with {}",
-        output.status
-    );
-    Ok(output.status.success())
+    if !rt.is_available() || !runtime::project_has_compose_file(project) {
+        return Ok(None);
+    }
+    if rt.compose_ps(project)?.is_empty() {
+        return Ok(None);
+    }
+    rt.transaction(project, |rt| probe_claude_sign_in(rt, project))
+        .map(Some)
 }
 
 #[cfg(target_os = "macos")]
@@ -1005,16 +1024,86 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn auth_status_argv_turns_off_nonessential_traffic_for_the_claude_binary() {
+    fn auth_status_argv_runs_the_claude_binary_offline_with_nonessential_traffic_off() {
         assert_eq!(
             auth_status_exec_argv(),
             vec![
                 "env",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+                "https_proxy=http://127.0.0.1:1",
+                "HTTPS_PROXY=http://127.0.0.1:1",
+                "no_proxy=",
+                "NO_PROXY=",
                 "/usr/local/bin/claude",
                 "auth",
                 "status",
             ]
+        );
+    }
+
+    #[test]
+    fn auth_status_argv_routes_every_https_proxy_variable_to_a_closed_local_port() {
+        let argv = auth_status_exec_argv();
+        let binary_pos = argv
+            .iter()
+            .position(|a| a == consts::CLAUDE_BINARY)
+            .expect("argv must contain the Claude binary path");
+        let assignments = &argv[..binary_pos];
+
+        let mut seen_https_proxy_keys = Vec::new();
+        for assignment in assignments {
+            let Some((key, value)) = assignment.split_once('=') else {
+                continue;
+            };
+            if key.to_lowercase() == "https_proxy" {
+                assert_eq!(
+                    value,
+                    consts::CLAUDE_OFFLINE_HTTPS_PROXY,
+                    "{key} must route to the closed local port"
+                );
+                seen_https_proxy_keys.push(key.to_string());
+            }
+        }
+        assert!(
+            seen_https_proxy_keys.contains(&"https_proxy".to_string()),
+            "lowercase https_proxy must be present"
+        );
+        assert!(
+            seen_https_proxy_keys.contains(&"HTTPS_PROXY".to_string()),
+            "uppercase HTTPS_PROXY must be present"
+        );
+
+        assert!(
+            assignments.contains(&"no_proxy=".to_string()),
+            "no_proxy must be present and empty"
+        );
+        assert!(
+            assignments.contains(&"NO_PROXY=".to_string()),
+            "NO_PROXY must be present and empty"
+        );
+    }
+
+    #[test]
+    fn auth_status_argv_puts_the_env_assignments_before_the_binary() {
+        let argv = auth_status_exec_argv();
+        assert_eq!(argv.first().map(String::as_str), Some("env"));
+
+        let binary_pos = argv
+            .iter()
+            .position(|a| a == consts::CLAUDE_BINARY)
+            .expect("argv must contain the Claude binary path");
+        for (i, entry) in argv.iter().enumerate() {
+            if entry.contains('=') {
+                assert!(
+                    i < binary_pos,
+                    "env assignment {entry:?} must come before the binary path"
+                );
+            }
+        }
+
+        assert_eq!(
+            argv[argv.len() - 2..],
+            ["auth".to_string(), "status".to_string()]
         );
     }
 
@@ -1130,6 +1219,127 @@ mod tests {
         assert!(is_local_provider(Some("llamacpp")));
         assert!(!is_local_provider(Some("anthropic")));
         assert!(!is_local_provider(None));
+    }
+
+    #[test]
+    fn check_claude_auth_and_claude_sign_in_verdict_delegate_to_probe_claude_sign_in() {
+        let source = include_str!("setup_wizard.rs");
+
+        let probe_body = extract_fn_body(source, "fn probe_claude_sign_in(");
+        assert!(
+            probe_body.contains("auth_status_exec_argv()"),
+            "probe_claude_sign_in must run the offline auth-status probe"
+        );
+
+        let check_body = extract_fn_body(source, "pub fn check_claude_auth(");
+        assert!(
+            check_body.contains("probe_claude_sign_in("),
+            "check_claude_auth must delegate to probe_claude_sign_in"
+        );
+        assert!(
+            !check_body.contains("auth_status_exec_argv"),
+            "check_claude_auth must not run the probe directly"
+        );
+
+        let verdict_body = extract_fn_body(source, "pub(crate) fn claude_sign_in_verdict(");
+        assert!(
+            verdict_body.contains("probe_claude_sign_in("),
+            "claude_sign_in_verdict must delegate to probe_claude_sign_in"
+        );
+        assert!(
+            !verdict_body.contains("auth_status_exec_argv"),
+            "claude_sign_in_verdict must not run the probe directly"
+        );
+    }
+
+    #[test]
+    fn claude_sign_in_verdict_checks_availability_and_compose_state_before_probing() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub(crate) fn claude_sign_in_verdict(");
+
+        let available_pos = body
+            .find("is_available()")
+            .expect("claude_sign_in_verdict must check runtime availability");
+        let compose_file_pos = body
+            .find("project_has_compose_file(")
+            .expect("claude_sign_in_verdict must check for a rendered compose.yml");
+        let compose_ps_pos = body
+            .find("compose_ps(")
+            .expect("claude_sign_in_verdict must check for running containers");
+        let probe_pos = body
+            .find("probe_claude_sign_in(")
+            .expect("claude_sign_in_verdict must call probe_claude_sign_in");
+
+        assert!(
+            available_pos < probe_pos,
+            "availability must be checked before probing"
+        );
+        assert!(
+            compose_file_pos < probe_pos,
+            "compose.yml presence must be checked before probing"
+        );
+        assert!(
+            compose_ps_pos < probe_pos,
+            "running containers must be checked before probing"
+        );
+
+        for forbidden in ["compose_up", "start_containers", "ensure_images_ready"] {
+            assert!(
+                !body.contains(forbidden),
+                "claude_sign_in_verdict must never start containers (found {forbidden})"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_sign_in_verdict_never_applies_the_provider_gate() {
+        let source = include_str!("setup_wizard.rs");
+        let verdict_body = extract_fn_body(source, "pub(crate) fn claude_sign_in_verdict(");
+        assert!(
+            !verdict_body.contains("project_needs_anthropic_auth"),
+            "claude_sign_in_verdict must not re-apply the provider gate"
+        );
+
+        let check_body = extract_fn_body(source, "pub fn check_claude_auth(");
+        assert!(
+            check_body.contains("project_needs_anthropic_auth"),
+            "check_claude_auth must keep the provider gate"
+        );
+    }
+
+    #[test]
+    fn probe_claude_sign_in_reports_true_when_the_container_is_healthy_and_signed_in() {
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
+        let (rt, _handles) = MockRuntimeBuilder::new().build();
+        assert!(probe_claude_sign_in(&rt, "proj").unwrap());
+    }
+
+    #[test]
+    fn probe_claude_sign_in_propagates_a_non_recoverable_exec_error() {
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
+        let (rt, _handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("boom")
+            .build();
+        let err = probe_claude_sign_in(&rt, "proj").unwrap_err();
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn probe_claude_sign_in_uses_the_bounded_exec_timeout_helper() {
+        let source = include_str!("setup_wizard.rs");
+        let probe_body = extract_fn_body(source, "fn probe_claude_sign_in(");
+        assert!(
+            probe_body.contains("run_with_timeout_capture("),
+            "probe_claude_sign_in must bound the auth-status exec with the shared timeout helper"
+        );
+        assert!(
+            probe_body.contains("CONTAINER_EXEC_PROBE_TIMEOUT"),
+            "probe_claude_sign_in must use the shared exec-probe timeout constant"
+        );
+        assert!(
+            !probe_body.contains(".output()"),
+            "probe_claude_sign_in must not call the unbounded Command::output() directly"
+        );
     }
 
     fn project_with_v2_kind(

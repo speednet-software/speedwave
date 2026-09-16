@@ -595,6 +595,128 @@ describe('ChatStateService', () => {
       expect(service.messages[0].role).toBe('user');
     });
 
+    /**
+     * Installs an invoke handler whose `start_chat` stays pending on a deferred
+     * promise, counting `send_message` attempts that reject until allowed to succeed.
+     * @param sendSucceedsAfterStart - succeed send_message from the second attempt onward instead of always failing.
+     * @returns the deferred `start_chat` control and a live `send_message` attempt counter.
+     */
+    function installPendingStartHandler(sendSucceedsAfterStart = false) {
+      const pendingStart = createDeferred();
+      const sendAttempts = { count: 0 };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') return pendingStart.promise;
+        if (cmd === 'send_message') {
+          sendAttempts.count++;
+          if (sendSucceedsAfterStart && sendAttempts.count > 1) return undefined;
+          throw new Error('no active session');
+        }
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+      return { pendingStart, sendAttempts };
+    }
+
+    /**
+     * Whether any message carries the resend-after-start-failure error block.
+     * @param service - the chat state service under test.
+     * @returns true if the "Failed to send message after session started" error block exists.
+     */
+    function hasResendError(service: ChatStateService): boolean {
+      return service.messages.some((m) =>
+        m.blocks.some(
+          (b) =>
+            b.type === 'error' && b.content.includes('Failed to send message after session started')
+        )
+      );
+    }
+
+    it('does not resend when the in-flight start ends with sign-in required', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      const { pendingStart, sendAttempts } = installPendingStartHandler();
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      const sendPromise = service.sendMessage('hi');
+      await new Promise((r) => setTimeout(r, 0));
+      pendingStart.reject('Claude is not authenticated. Please authenticate first.');
+      await sendPromise;
+
+      expect(sendAttempts.count).toBe(1);
+      expect(hasResendError(service)).toBe(false);
+      expect(projectState.status()).toBe('auth_required');
+      expect(service.isStreaming).toBe(false);
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+    });
+
+    it('does not resend when the in-flight start fails', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      const { pendingStart, sendAttempts } = installPendingStartHandler();
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      const sendPromise = service.sendMessage('hi');
+      await new Promise((r) => setTimeout(r, 0));
+      pendingStart.reject('boom');
+      await sendPromise;
+
+      expect(sendAttempts.count).toBe(1);
+      expect(hasResendError(service)).toBe(false);
+      expect(projectState.status()).toBe('error');
+      expect(projectState.error).toContain('Failed to start chat session: boom');
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('resends once the in-flight start succeeds', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+
+      const { pendingStart, sendAttempts } = installPendingStartHandler(true);
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      const sendPromise = service.sendMessage('hi');
+      await new Promise((r) => setTimeout(r, 0));
+      pendingStart.resolve();
+      await sendPromise;
+
+      expect(sendAttempts.count).toBe(2);
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+    });
+
+    it('does not resend when a resume in progress ends with sign-in required', async () => {
+      let sendAttempt = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'send_message') {
+          sendAttempt++;
+          if (sendAttempt === 1) throw new Error('no active session');
+          return undefined;
+        }
+        return undefined;
+      };
+
+      const end = service.beginStartingSession();
+      setTimeout(() => end('auth'), 20);
+
+      await service.sendMessage('hi');
+
+      expect(sendAttempt).toBe(1);
+      expect(hasResendError(service)).toBe(false);
+      expect(service.isStreaming).toBe(false);
+    });
+
     it('auto-retries on "Broken pipe"', async () => {
       let sendAttempt = 0;
       mockTauri.invokeHandler = async (cmd: string) => {

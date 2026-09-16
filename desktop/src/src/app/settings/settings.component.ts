@@ -1,16 +1,15 @@
 import {
   ChangeDetectionStrategy,
-  ChangeDetectorRef,
   Component,
   DestroyRef,
   ElementRef,
   OnDestroy,
   OnInit,
+  computed,
   inject,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
-import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_MODES, type ThemeId, type ThemeMode } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
@@ -22,7 +21,6 @@ import { TelemetrySectionComponent } from './telemetry-section/telemetry-section
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
-import { ProjectList } from '../models/update';
 
 /** One theme card in the Appearance accent grid; swatch reads live `--accent` via `data-theme`. */
 interface ThemeCard {
@@ -117,7 +115,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         }
 
         <app-llm-provider
-          [activeProject]="activeProject"
+          [activeProject]="activeProject()"
           (providerChange)="llmProvider = $event"
           (errorOccurred)="error = $event"
         />
@@ -197,7 +195,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           <app-security-section (errorOccurred)="error = $event" />
         }
 
-        <app-update-section [activeProject]="activeProject" (errorOccurred)="error = $event" />
+        <app-update-section [activeProject]="activeProject()" (errorOccurred)="error = $event" />
 
         <app-advanced-section
           (errorOccurred)="error = $event"
@@ -208,7 +206,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
   `,
 })
 export class SettingsComponent implements OnInit, OnDestroy {
-  activeProject: string | null = null;
+  readonly activeProject = computed(() => this.projectState.activeProject());
   error = '';
   llmProvider = 'anthropic';
 
@@ -227,21 +225,12 @@ export class SettingsComponent implements OnInit, OnDestroy {
   private route = inject(ActivatedRoute);
   private host = inject(ElementRef<HTMLElement>);
   private destroyRef = inject(DestroyRef);
-  private cdr = inject(ChangeDetectorRef);
-  private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
-  private unsubProjectReady: (() => void) | null = null;
   /** Pending scroll-retry timer; cleared on re-entry and on destroy. */
   private scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Loads project information on component initialization. */
+  /** Wires the URL-fragment smooth-scroll listener. */
   ngOnInit(): void {
-    this.loadProjectInfo();
-
-    this.unsubProjectReady = this.projectState.onProjectReady(() => {
-      this.loadProjectInfo();
-    });
-
     this.route.fragment
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((fragment) => this.scrollToFragment(fragment));
@@ -269,12 +258,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Unsubscribes from the project ready listener and cancels any scroll retry. */
+  /** Cancels any pending scroll retry. */
   ngOnDestroy(): void {
-    if (this.unsubProjectReady) {
-      this.unsubProjectReady();
-      this.unsubProjectReady = null;
-    }
     if (this.scrollTimer !== null) {
       clearTimeout(this.scrollTimer);
       this.scrollTimer = null;
@@ -284,13 +269,5 @@ export class SettingsComponent implements OnInit, OnDestroy {
   /** Handles factory reset completion by navigating to setup. */
   onResetCompleted(): void {
     this.router.navigate(['/setup'], { replaceUrl: true });
-  }
-
-  private async loadProjectInfo(): Promise<void> {
-    try {
-      const result = await this.tauri.invoke<ProjectList>('list_projects');
-      this.activeProject = result.active_project;
-    } catch {}
-    this.cdr.markForCheck();
   }
 }

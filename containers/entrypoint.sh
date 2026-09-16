@@ -238,6 +238,12 @@ fi
 _bundled_marker="${HOME}/.claude/.speedwave-bundled-plugins-installed.v2"
 rm -f "${HOME}/.claude/.speedwave-bundled-plugins-installed"
 
+_plugin_installed() {
+    jq -r --arg id "$1" \
+        'if (.plugins | type) == "object" then (.plugins[$id] | type == "array" and length > 0) else empty end' \
+        "${HOME}/.claude/plugins/installed_plugins.json" 2>/dev/null || true
+}
+
 _retired="superpowers@claude-plugins-official"
 _retired_keep=""
 if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; then
@@ -246,10 +252,7 @@ if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; 
         _diag WARN CONFIG "jq not found — retired plugin removal skipped"
         _retired_keep="${_retired}"
     else
-        _present="$(timeout 30 claude plugin list --json 2>/dev/null | jq -r \
-            --arg id "${_retired}" --arg name "${_retired%@*}" --arg mp "${_retired#*@}" \
-            'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp)) | tostring' \
-            2>/dev/null)" || _present=""
+        _present="$(_plugin_installed "${_retired}")"
         _gone=0
         if [ "${_present}" = "false" ]; then
             rm -rf "${HOME}/.claude/plugins/cache/${_retired#*@}/${_retired%@*}"
@@ -312,18 +315,13 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             echo "${_retired_keep}" >> "${_new_marker}"
         fi
         _mp_add_attempted=""
-        _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
-        [ -n "${_installed//[$' \t\n\r']/}" ] || _installed='[]'
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
             if ! echo "${_plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
                 echo "WARNING: skipping invalid bundled-plugin name: ${_plugin}" >&2
                 _diag WARN CONFIG "invalid bundled-plugin name: ${_plugin}"
                 continue
             fi
-            _match="$(printf '%s' "${_installed}" | jq \
-                --arg id "${_plugin}@${_mp}" --arg name "${_plugin}" --arg mp "${_mp}" \
-                'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp))' \
-                2>/dev/null)" || _match=""
+            _match="$(_plugin_installed "${_plugin}@${_mp}")"
             if [ "${_match}" = "true" ]; then
                 if grep -qxF "${_plugin}@${_mp}" "${_bundled_marker}" 2>/dev/null; then
                     echo "${_plugin}@${_mp}" >> "${_new_marker}"
@@ -355,7 +353,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             rm -f "${_new_marker}"
         fi
     fi
-    unset _mp _plugin _installed _err _all_recorded _new_marker _match _mp_add_attempted
+    unset _mp _plugin _err _all_recorded _new_marker _match _mp_add_attempted
 fi
 unset _bundled_marker _retired_keep
 

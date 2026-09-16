@@ -1,4 +1,4 @@
-use crate::types::{check_project, AuthStatusResponse};
+use crate::types::{check_project, AuthStatusResponse, OauthSignIn};
 
 use super::{auth, setup_wizard};
 
@@ -75,6 +75,21 @@ pub(crate) fn project_llm_configured_in(
     !migrated_llm_for(user_config, project, evidence).is_unconfigured()
 }
 
+pub(crate) fn oauth_sign_in_from(
+    needs_anthropic_auth: bool,
+    verdict: Option<bool>,
+    saved: bool,
+) -> OauthSignIn {
+    match (needs_anthropic_auth, verdict, saved) {
+        (true, Some(true), _) => OauthSignIn::Verified,
+        (true, Some(false), _) => OauthSignIn::None,
+        (true, None, true) => OauthSignIn::SavedUnverified,
+        (true, None, false) => OauthSignIn::None,
+        (false, _, true) => OauthSignIn::SavedUnverified,
+        (false, _, false) => OauthSignIn::None,
+    }
+}
+
 #[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
@@ -82,16 +97,22 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         crate::containers_cmd::ensure_images_ready()?;
         log::info!("resolving auth status for project {project}");
         let api_key_configured = auth::has_api_key(&project);
-        let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
+        let oauth_saved = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
         );
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        let verdict = if needs_anthropic_auth {
+            setup_wizard::claude_sign_in_verdict(&project).map_err(|e| e.to_string())?
+        } else {
+            None
+        };
+        let oauth_sign_in = oauth_sign_in_from(needs_anthropic_auth, verdict, oauth_saved);
         let evidence = if api_key_configured {
             speedwave_runtime::config::AnthropicEvidence::ApiKey
-        } else if oauth_authenticated {
+        } else if oauth_saved {
             speedwave_runtime::config::AnthropicEvidence::Oauth
         } else {
             speedwave_runtime::config::AnthropicEvidence::None
@@ -100,7 +121,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let provider_configured = !migrated.is_unconfigured();
         Ok(AuthStatusResponse::from_flags(
             api_key_configured,
-            oauth_authenticated,
+            oauth_sign_in,
             needs_anthropic_auth,
             provider_configured,
         ))
@@ -272,17 +293,17 @@ mod tests {
         let ensure_pos = fn_body
             .find("ensure_images_ready")
             .expect("get_auth_status must call ensure_images_ready");
-        let oauth_pos = fn_body
-            .find("has_anthropic_oauth_credentials")
-            .expect("get_auth_status must read real OAuth state via credentials presence");
+        let verdict_pos = fn_body
+            .find("claude_sign_in_verdict")
+            .expect("get_auth_status must resolve the container sign-in verdict");
         assert!(
-            ensure_pos < oauth_pos,
-            "ensure_images_ready must come BEFORE the OAuth state read"
+            ensure_pos < verdict_pos,
+            "ensure_images_ready must come BEFORE the container sign-in verdict"
         );
     }
 
     #[test]
-    fn get_auth_status_oauth_is_credentials_presence_not_check_claude_auth() {
+    fn get_auth_status_takes_the_container_verdict_not_the_provider_gated_probe() {
         let source = include_str!("auth_commands.rs");
         let fn_start = source.find("pub async fn get_auth_status(").unwrap();
         let fn_end = source[fn_start..]
@@ -291,8 +312,12 @@ mod tests {
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
+            fn_body.contains("claude_sign_in_verdict"),
+            "oauth_sign_in must be resolved from the container sign-in verdict"
+        );
+        assert!(
             !fn_body.contains("check_claude_auth"),
-            "oauth_authenticated must not come from the provider-gated check_claude_auth"
+            "oauth_sign_in must not come from the provider-gated check_claude_auth"
         );
     }
 
@@ -342,6 +367,88 @@ mod tests {
             fn_body.contains("provider_configured,"),
             "get_auth_status must return the provider_configured field"
         );
+    }
+
+    #[test]
+    fn get_auth_status_feeds_from_flags_via_oauth_sign_in_from() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("oauth_sign_in_from("),
+            "get_auth_status must derive oauth_sign_in via oauth_sign_in_from"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_never_parses_the_credentials_file() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("has_anthropic_oauth_credentials"),
+            "get_auth_status must read the credentials-file evidence via the SSOT helper"
+        );
+        assert!(
+            !fn_body.contains(".credentials.json"),
+            "get_auth_status must never hand-parse the credentials file"
+        );
+        assert!(
+            !fn_body.contains("serde_json"),
+            "get_auth_status must never read the credentials file's contents"
+        );
+    }
+
+    #[test]
+    fn oauth_sign_in_from_covers_every_table_row() {
+        assert_eq!(
+            oauth_sign_in_from(true, Some(true), false),
+            OauthSignIn::Verified
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(true), true),
+            OauthSignIn::Verified
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(false), false),
+            OauthSignIn::None
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(false), true),
+            OauthSignIn::None
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, None, true),
+            OauthSignIn::SavedUnverified
+        );
+        assert_eq!(oauth_sign_in_from(true, None, false), OauthSignIn::None);
+
+        for verdict in [Some(true), Some(false), None] {
+            assert_eq!(
+                oauth_sign_in_from(false, verdict, true),
+                OauthSignIn::SavedUnverified,
+                "verdict={verdict:?}"
+            );
+            assert_eq!(
+                oauth_sign_in_from(false, verdict, false),
+                OauthSignIn::None,
+                "verdict={verdict:?}"
+            );
+        }
     }
 
     #[test]
@@ -1106,10 +1213,16 @@ mod tests {
 
     #[test]
     fn auth_status_response_serializes_all_fields() {
-        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, false);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true, // api_key_configured
+            crate::types::OauthSignIn::None,
+            true,  // needs_anthropic_auth
+            false, // provider_configured
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
+        assert_eq!(json["oauth_sign_in"], "none");
         assert_eq!(json["needs_anthropic_auth"], true);
         assert_eq!(json["provider_configured"], false);
         assert_eq!(json["status"], "no_provider");
@@ -1117,14 +1230,24 @@ mod tests {
 
     #[test]
     fn auth_status_response_status_ready_wire_string() {
-        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, true);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true,
+            crate::types::OauthSignIn::None,
+            true,
+            true,
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "ready");
     }
 
     #[test]
     fn auth_status_response_status_auth_required_wire_string() {
-        let resp = crate::types::AuthStatusResponse::from_flags(false, false, true, true);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            false,
+            crate::types::OauthSignIn::None,
+            true,
+            true,
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "auth_required");
     }
