@@ -1,4 +1,4 @@
-export PATH := $(HOME)/.cargo/bin:/opt/homebrew/bin:$(PATH)
+export PATH := $(HOME)/.cargo/bin:$(subst ::/opt/homebrew/bin,:/opt/homebrew/bin,$(PATH):/opt/homebrew/bin)
 
 ifeq ($(OS),Windows_NT)
 NPM := npm.cmd
@@ -95,7 +95,7 @@ dev-config: guard-dev-instance
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
-        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
+        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
@@ -410,13 +410,8 @@ test-desktop-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
-test-desktop-group-run:
-	@"$(MAKE)" test-mcp-run
-	@"$(MAKE)" test-desktop-build-run
-	@"$(MAKE)" test-desktop-run
-
-test-run-lanes: test-rust-run test-angular-run test-entrypoint \
-                test-desktop-config test-ci test-desktop-group-run test-proxy
+test-run-lanes: test-rust-run test-angular-run test-entrypoint test-desktop-config test-ci \
+                test-mcp-run test-desktop-build-run test-desktop-run test-proxy
 
 test-proxy: guard-not-prod-data-dir
 	cd containers/proxy && cargo test --locked
@@ -548,7 +543,7 @@ test-ci:
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
-	  _tests/ci/angular-coverage-gates.bats
+	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp

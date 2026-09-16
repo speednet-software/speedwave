@@ -701,8 +701,8 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
-/// Host build-output dir names that are never image content — skipped from digests here, pruned by
-/// bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
+/// Host build-output dir names that are never image content — skipped from digests here, skipped at
+/// copy time by bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
 pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
@@ -869,36 +869,38 @@ mod tests {
         let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
             .expect("containers/.dockerignore should exist");
 
-        let sh_line = sh
-            .lines()
-            .find(|l| l.contains("-prune"))
-            .expect("-prune find line should exist in .sh");
-        let sh_tokens: Vec<&str> = sh_line.split_whitespace().collect();
-        let mut sh_names: Vec<&str> = sh_tokens
-            .windows(2)
-            .filter(|w| w[0] == "-name")
-            .map(|w| w[1])
-            .collect();
-        sh_names.sort_unstable();
-
-        let ps1_line = ps1
-            .lines()
-            .find(|l| l.contains(" -in "))
-            .expect("-in prune line should exist in .ps1");
-        let mut ps1_names: Vec<&str> = ps1_line.split('\'').skip(1).step_by(2).collect();
-        ps1_names.sort_unstable();
-
         let mut expected: Vec<&str> = HOST_BUILD_OUTPUT_DIRS.to_vec();
         expected.sort_unstable();
 
-        assert_eq!(
-            sh_names, expected,
-            "bundle-build-context.sh prune must match HOST_BUILD_OUTPUT_DIRS"
+        let sh_lines: Vec<&str> = sh.lines().filter(|l| l.contains("-prune")).collect();
+        assert!(!sh_lines.is_empty(), "-prune find line should exist in .sh");
+        for line in sh_lines {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let mut names: Vec<&str> = tokens
+                .windows(2)
+                .filter(|w| w[0] == "-name")
+                .map(|w| w[1])
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names, expected,
+                "bundle-build-context.sh exclusion must match HOST_BUILD_OUTPUT_DIRS: {line}"
+            );
+        }
+
+        let ps1_lines: Vec<&str> = ps1.lines().filter(|l| l.contains(" -in ")).collect();
+        assert!(
+            !ps1_lines.is_empty(),
+            "-in exclusion line should exist in .ps1"
         );
-        assert_eq!(
-            ps1_names, expected,
-            "bundle-build-context.ps1 prune must match HOST_BUILD_OUTPUT_DIRS"
-        );
+        for line in ps1_lines {
+            let mut names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+            names.sort_unstable();
+            assert_eq!(
+                names, expected,
+                "bundle-build-context.ps1 exclusion must match HOST_BUILD_OUTPUT_DIRS: {line}"
+            );
+        }
         for name in HOST_BUILD_OUTPUT_DIRS {
             assert!(
                 dockerignore

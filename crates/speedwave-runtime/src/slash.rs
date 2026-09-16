@@ -1647,6 +1647,14 @@ mod tests {
         assert_eq!(spawn_calls, 1, "followers must share the leader's run");
     }
 
+    fn in_flight_slot_refs(project: &str) -> usize {
+        in_flight_map()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(project)
+            .map_or(0, std::sync::Arc::strong_count)
+    }
+
     #[test]
     fn leader_panic_publishes_error_instead_of_deadlocking_followers() {
         let project = unique_project_name("panic");
@@ -1663,25 +1671,21 @@ mod tests {
         started_rx
             .recv()
             .expect("leader must signal it has started");
+        let leader_refs = in_flight_slot_refs(&project);
+        assert!(
+            leader_refs > 0,
+            "leader must have registered its in-flight slot"
+        );
         let follower_project = project.clone();
         let follower =
             std::thread::spawn(move || lead_discovery(&follower_project, || unreachable!()));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let waiters = in_flight_map()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .get(&project)
-                .map(std::sync::Arc::strong_count)
-                .unwrap_or(0);
-            if waiters >= 4 {
-                break;
-            }
+        while in_flight_slot_refs(&project) <= leader_refs {
             assert!(
                 std::time::Instant::now() < deadline,
-                "follower never attached to the leader's in-flight slot"
+                "follower never joined the leader's in-flight slot"
             );
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         drop(release_tx);
         assert!(leader.join().is_err(), "leader must have panicked");
