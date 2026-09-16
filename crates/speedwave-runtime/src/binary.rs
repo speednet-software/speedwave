@@ -81,14 +81,7 @@ pub fn resolve_binary(cmd: &str) -> String {
             );
         }
     }
-    #[cfg(windows)]
-    {
-        resolve_system_program(cmd).into_owned()
-    }
-    #[cfg(not(windows))]
-    {
-        cmd.to_string()
-    }
+    cmd.to_string()
 }
 
 /// Windows process creation flag preventing a visible console window on child
@@ -154,11 +147,6 @@ pub fn command(cmd: &str) -> Command {
 /// Creates a `Command` for a system binary never bundled (`wsl.exe`, `powershell.exe`, `tasklist`,
 /// `taskkill`, `icacls`). Applies `CREATE_NO_WINDOW`; TTY commands use raw `Command::new()`.
 pub fn system_command(program: &str) -> Command {
-    #[cfg(target_os = "windows")]
-    let resolved = resolve_system_program(program);
-    #[cfg(target_os = "windows")]
-    let mut command = Command::new(resolved.as_ref());
-    #[cfg(not(target_os = "windows"))]
     let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
@@ -167,16 +155,6 @@ pub fn system_command(program: &str) -> Command {
     }
     apply_wsl_utf8(&mut command, program);
     command
-}
-
-/// Resolves a never-bundled OS command to its absolute `System32` path, blocking PATH-based
-/// binary substitution (ADR-048). Anything else is passed through verbatim.
-#[cfg(target_os = "windows")]
-fn resolve_system_program(program: &str) -> std::borrow::Cow<'_, str> {
-    if !is_always_system_command(program) || std::path::Path::new(program).is_absolute() {
-        return std::borrow::Cow::Borrowed(program);
-    }
-    std::borrow::Cow::Owned(system32_dir().join(program).to_string_lossy().into_owned())
 }
 
 /// Creates a `Command` for an interactive TTY spawn (wsl/ssh/self-reexec). Omits `CREATE_NO_WINDOW`

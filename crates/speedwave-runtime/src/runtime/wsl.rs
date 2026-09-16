@@ -820,7 +820,12 @@ impl ContainerRuntime for WslRuntime {
         use std::time::Duration;
         let distro = self.distro();
 
-        let wsl = "wsl.exe";
+        #[cfg(target_os = "windows")]
+        let wsl_path = crate::binary::system32_dir().join("wsl.exe");
+        #[cfg(not(target_os = "windows"))]
+        let wsl_path = std::path::PathBuf::from("wsl.exe");
+        let wsl = wsl_path.to_string_lossy();
+        let wsl = wsl.as_ref();
 
         if let Err(e) =
             self.runner
