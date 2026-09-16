@@ -546,24 +546,49 @@ pub fn scan_json_with_external(
     Ok(report)
 }
 
+/// A string leaf together with the object key it hangs under, so a caller can tell prose
+/// (`text`) from protocol plumbing (`type`, `tool_use_id`) and binary payloads (`data`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StringLeaf<'a> {
+    /// The leaf value.
+    pub text: &'a str,
+    /// Key of the object field holding it; `None` for an array element or a bare string root.
+    pub key: Option<&'a str>,
+}
+
 /// Every string leaf of a JSON tree, in the order [`scan_json`] visits them.
 pub fn collect_string_leaves(value: &serde_json::Value) -> Vec<&str> {
+    collect_string_leaves_with_keys(value)
+        .into_iter()
+        .map(|leaf| leaf.text)
+        .collect()
+}
+
+/// [`collect_string_leaves`] with each leaf's object key; same leaves, same order.
+pub fn collect_string_leaves_with_keys(value: &serde_json::Value) -> Vec<StringLeaf<'_>> {
     let mut leaves = Vec::new();
-    collect_leaves_into(value, &mut leaves);
+    collect_leaves_into(value, None, &mut leaves);
     leaves
 }
 
-fn collect_leaves_into<'a>(value: &'a serde_json::Value, leaves: &mut Vec<&'a str>) {
+fn collect_leaves_into<'a>(
+    value: &'a serde_json::Value,
+    key: Option<&'a str>,
+    leaves: &mut Vec<StringLeaf<'a>>,
+) {
     match value {
-        serde_json::Value::String(s) => leaves.push(s.as_str()),
+        serde_json::Value::String(s) => leaves.push(StringLeaf {
+            text: s.as_str(),
+            key,
+        }),
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_leaves_into(item, leaves);
+                collect_leaves_into(item, key, leaves);
             }
         }
         serde_json::Value::Object(map) => {
-            for (_, field_value) in map {
-                collect_leaves_into(field_value, leaves);
+            for (field, field_value) in map {
+                collect_leaves_into(field_value, Some(field.as_str()), leaves);
             }
         }
         _ => {}
@@ -959,6 +984,49 @@ mod tests {
 
     fn test_key() -> EngineKey {
         EngineKey::from_bytes([9u8; 32])
+    }
+
+    #[test]
+    fn leaf_keys_name_the_field_each_string_hangs_under_without_changing_the_leaf_order() {
+        let value = serde_json::json!({
+            "content": [
+                {"type": "image", "source": {"media_type": "image/png", "data": "AAAA"}},
+                {"type": "text", "text": "Jan"}
+            ],
+            "tool_use_id": "abc"
+        });
+        let keyed = collect_string_leaves_with_keys(&value);
+        assert_eq!(
+            keyed
+                .iter()
+                .map(|leaf| (leaf.key, leaf.text))
+                .collect::<Vec<_>>(),
+            [
+                (Some("data"), "AAAA"),
+                (Some("media_type"), "image/png"),
+                (Some("type"), "image"),
+                (Some("text"), "Jan"),
+                (Some("type"), "text"),
+                (Some("tool_use_id"), "abc"),
+            ]
+        );
+        assert_eq!(
+            keyed.iter().map(|leaf| leaf.text).collect::<Vec<_>>(),
+            collect_string_leaves(&value)
+        );
+        assert_eq!(
+            collect_string_leaves_with_keys(&serde_json::json!(["a", "b"])),
+            [
+                StringLeaf {
+                    text: "a",
+                    key: None
+                },
+                StringLeaf {
+                    text: "b",
+                    key: None
+                }
+            ]
+        );
     }
 
     const FULL_POLICY: &str = r#"{

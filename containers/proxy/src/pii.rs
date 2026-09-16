@@ -5,10 +5,11 @@ use std::path::Path;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
-    alias_json, collect_string_leaves, compile_policy_v3, default_policy_json, detokenize_text,
-    detokenize_text_with, incomplete_token_span_start, scan_json, scan_json_with_external,
-    unalias_text_preserving_tokens, unalias_text_preserving_tokens_with, CompiledKeyword,
-    CompiledPolicy, Detection, DetokenizeError, EngineKey, ExternalSpan, ScanError,
+    alias_json, collect_string_leaves, collect_string_leaves_with_keys, compile_policy_v3,
+    default_policy_json, detokenize_text, detokenize_text_with, incomplete_token_span_start,
+    scan_json, scan_json_with_external, unalias_text_preserving_tokens,
+    unalias_text_preserving_tokens_with, CompiledKeyword, CompiledPolicy, Detection,
+    DetokenizeError, EngineKey, ExternalSpan, ScanError,
 };
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
@@ -119,25 +120,42 @@ pub struct ScanReport {
     pub external: Vec<Detection>,
 }
 
+/// Object keys whose string values are protocol plumbing or binary payloads, never prose:
+/// block ids and `type` discriminators carry no PII, and `data` / `signature` hold base64
+/// (an attached image is megabytes, which would be thousands of detector windows and, over
+/// the request cap, would drop the whole request back to rules only). The rule engine still
+/// scans them; only the neural detector skips them.
+const NON_PROSE_LEAF_KEYS: &[&str] = &[
+    "type",
+    "id",
+    "tool_use_id",
+    "media_type",
+    "data",
+    "signature",
+    "url",
+    "file_id",
+];
+
 /// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then each
-/// `messages[].content`. The detector receives exactly this list and answers per leaf.
+/// `messages[].content`. The detector receives exactly this list and answers per leaf; leaves it
+/// must not spend windows on are blanked, which keeps the indices aligned and costs no detection.
 pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
     let mut leaves = Vec::new();
+    let push = |subtree: &serde_json::Value, leaves: &mut Vec<String>| {
+        leaves.extend(collect_string_leaves_with_keys(subtree).into_iter().map(
+            |leaf| match leaf.key {
+                Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
+                _ => leaf.text.to_string(),
+            },
+        ));
+    };
     if let Some(system) = body.get("system") {
-        leaves.extend(
-            collect_string_leaves(system)
-                .into_iter()
-                .map(str::to_string),
-        );
+        push(system, &mut leaves);
     }
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
         for message in messages {
             if let Some(content) = message.get("content") {
-                leaves.extend(
-                    collect_string_leaves(content)
-                        .into_iter()
-                        .map(str::to_string),
-                );
+                push(content, &mut leaves);
             }
         }
     }
@@ -1121,9 +1139,10 @@ mod tests {
 
     #[test]
     fn scan_leaves_are_every_string_under_system_and_message_content_in_walk_order() {
-        // Structural strings ("type", tool ids) are leaves too: the list must index exactly
+        // Structural strings ("type", tool ids) hold a slot each: the list must index exactly
         // the strings scan_json_value visits, in the same order (object keys sorted by
-        // serde_json), so the detector's per-leaf answer lands on the right string.
+        // serde_json), so the detector's per-leaf answer lands on the right string. They are
+        // blanked, not dropped, because only prose is worth a detector window.
         let body = json!({
             "model": "claude",
             "system": [{"type": "text", "text": "sys"}],
@@ -1137,19 +1156,37 @@ mod tests {
         let leaves = collect_scan_leaves(&body);
         assert_eq!(
             leaves,
-            [
-                "sys",
-                "text",
-                "first",
-                "second",
-                "text",
-                "third",
-                "text",
-                "id",
-                "tool_result"
-            ]
+            ["sys", "", "first", "second", "", "third", "", "", ""]
+        );
+        assert_eq!(
+            leaves.len(),
+            collect_string_leaves(&body["system"]).len()
+                + body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| collect_string_leaves(&m["content"]).len())
+                    .sum::<usize>(),
+            "blanking must not change how many leaves the scan indexes"
         );
         assert!(collect_scan_leaves(&json!({"model": "x"})).is_empty());
+    }
+
+    #[test]
+    fn an_attached_image_is_blanked_instead_of_being_sent_to_the_detector() {
+        // A base64 attachment is megabytes of non-prose: detecting on it costs thousands of
+        // windows and, past the request cap, would drop the whole request to rules only.
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAA"}},
+                    {"type": "text", "text": "Jan Kowalski"}
+                ]
+            }]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "", "", "Jan Kowalski", ""]);
     }
 
     #[test]
@@ -1165,7 +1202,7 @@ mod tests {
         let leaves = collect_scan_leaves(&body);
         assert_eq!(
             leaves,
-            ["Jan Kowalski", "nothing here", "mieszka w Gdańsku", "text"]
+            ["Jan Kowalski", "nothing here", "mieszka w Gdańsku", ""]
         );
         let external = vec![
             vec![external(4, 12, "SURNAME")],

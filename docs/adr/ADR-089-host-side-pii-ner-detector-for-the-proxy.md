@@ -26,8 +26,16 @@ The URL goes through `compose::container_facing_port`, so under WSL2 mirrored mo
 
 - Existing tokens win over rules, rules win over detector spans: a span is sealed only when it lies entirely inside text no rule and no earlier token claimed; overlapping spans keep the earliest, then the longest. Observation-mode categories from the policy count detector hits without sealing them.
 - Default labels (`compose::DEFAULT_NER_LABELS`) omit `ORG`, `IMEI`, `URL` and `IP_ADDRESS`: routine technical content in a coding assistant, and tokenized URLs would break tool calls. The proxy filters by label and by `min_confidence` on top of the detector's own 0.6 pipeline threshold.
-- An unavailable detector (503 while the model loads, timeout, malformed answer, wrong list count, oversized request above 4 MiB) degrades the request to rules only, logs at most once per minute and writes one `NER_UNAVAILABLE` / `passed` audit row with `source: "ner"`; `ner.required: true` turns that into a 503 to the caller. Timeouts: 500 ms connect, 5 s total, no redirects.
+- An unavailable detector (503 while the model loads, timeout, malformed answer, wrong list count, oversized request above 4 MiB) degrades the request to rules only, logs at most once per minute and writes one `NER_UNAVAILABLE` / `passed` audit row with `source: "ner"`; `ner.required: true` turns that into a 503 to the caller. Timeouts: 2 s connect, 15 s total, no redirects. A send that got no answer at all is repeated once before degrading, because `/v1/detect` is pure inference and the failures seen in practice were transport failures on the container-to-host hop under a burst of parallel sessions, not a detector that was down.
 - Audit rows of sealed detector spans carry `source: "ner"`; rule rows are unchanged, so the hub's audit consumers see the same shape as before.
+
+### What the detector is asked to look at
+
+Two filters sit in front of the round trip; both keep one slot per leaf, so the per-leaf answer still lands on the right string.
+
+- Leaves that are not prose are blanked: `type`, `id`, `tool_use_id`, `media_type`, `data`, `signature`, `url`, `file_id` (`pii::NON_PROSE_LEAF_KEYS`). The rule engine still scans them. Without this an attached image sends megabytes of base64 through the model — thousands of windows, or the 4 MiB cap, which would drop the whole request to rules only.
+- Spans already detected for a text are cached in the proxy for the process lifetime, keyed by the text's length and two per-process randomly seeded hashes, so the cache holds offsets and never request text. Two generations bound it (2048 entries each, a hit promotes the entry back into the young one). A continued conversation therefore pays for its new leaves only, and a client that retries the same body — Claude Code backs off and retries through upstream 429s, dozens of times — pays once.
+- One detector call at a time per proxy (`NerClient::gate`): the host serializes inference anyway, and the caller that waits usually finds its leaves already cached by the call ahead of it. The cache is re-read after the gate for exactly that reason.
 
 ### Security gates
 
@@ -41,6 +49,7 @@ The hub (`mcp-hub`, Node, wasm engine) keeps rules only for now; tool results fl
 
 ## Consequences
 
-- Every `/v1/messages` gains one host round trip before forwarding. The CPU budget for a long conversation (about 100 KB of text, several hundred windows) is measured with `make bench-pii-ner` before anyone sets `required: true`.
+- Every `/v1/messages` gains one host round trip before forwarding, carrying the leaves that are new to this proxy. The CPU budget for a long conversation (about 100 KB of text, several hundred windows) is measured with `make bench-pii-ner` before anyone sets `required: true`; that full price is paid on a session's first turn, after which the cache leaves only the new message.
+- The cache is per proxy process: restarting the project's containers re-detects the conversation from scratch.
 - Request text now leaves the proxy container to a second process on the same machine. It is the user's own machine and the same text the Desktop UI displayed; the gate above pins the destination to the host gateway.
 - The CLI (`speedwave`) never starts the service: exactly one supervisor, the Desktop app, as for mcp-os and oauth. A CLI-only session renders `proxy.json` without `ner` and keeps rule-based protection.

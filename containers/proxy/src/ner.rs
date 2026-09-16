@@ -1,7 +1,9 @@
 //! Client of the host-side PII NER detector (ADR-089): one POST per request carrying every
 //! scanned string leaf, byte-offset spans back. Any failure degrades to `Unavailable`.
 
-use std::collections::HashSet;
+use std::collections::hash_map::RandomState;
+use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -21,15 +23,24 @@ const DETECT_PATH: &str = "/v1/detect";
 /// Largest total text volume sent to the detector; bigger requests skip NER (regex still runs).
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Generous by local-hop standards: a burst of parallel sessions opens several connections to
+/// the host gateway at once and a 500 ms budget lost that race, which silently degraded a
+/// request to rules only. A dead detector still refuses instantly.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Detected span lists kept per generation; two generations bound the cache.
+const CACHE_GENERATION_ENTRIES: usize = 2048;
 
 fn default_min_confidence() -> f32 {
     0.6
 }
 
+/// A first turn carrying a full context window is seconds of inference; cutting it off means
+/// forwarding that turn with rules only, so the client waits rather than leaks. Repeat turns
+/// hit the cache and never come near this.
 fn default_timeout_ms() -> u64 {
-    5000
+    15000
 }
 
 /// The `ner` object of `proxy.json`; rendered by `compose/pii_ner.rs::NerRenderConfig`.
@@ -89,6 +100,78 @@ struct WireSpan {
     confidence: f32,
 }
 
+/// Identifies a text without keeping it: its length plus two independently seeded hashes.
+type CacheKey = (usize, u64, u64);
+
+/// Spans already detected for a text, so a retried or continued conversation pays for new
+/// leaves only. The cache holds offsets, never request text, and is keyed by a hash seeded
+/// per process, so the key of a leaf cannot be computed outside the running proxy.
+///
+/// Two generations bound it: when the young one fills, it displaces the old one and starts
+/// over. A leaf that keeps being sent (the system prompt) is promoted back on every hit and
+/// survives; a burst of one-off leaves ages out without unbounded growth.
+struct SpanCache {
+    seed_a: RandomState,
+    seed_b: RandomState,
+    generations: Mutex<Generations>,
+}
+
+#[derive(Default)]
+struct Generations {
+    young: HashMap<CacheKey, Vec<ExternalSpan>>,
+    old: HashMap<CacheKey, Vec<ExternalSpan>>,
+}
+
+impl SpanCache {
+    fn new() -> Self {
+        Self {
+            seed_a: RandomState::new(),
+            seed_b: RandomState::new(),
+            generations: Mutex::new(Generations::default()),
+        }
+    }
+
+    fn key(&self, text: &str) -> CacheKey {
+        (
+            text.len(),
+            self.seed_a.hash_one(text),
+            self.seed_b.hash_one(text),
+        )
+    }
+
+    fn get(&self, key: &CacheKey) -> Option<Vec<ExternalSpan>> {
+        let mut generations = self
+            .generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(spans) = generations.young.get(key) {
+            return Some(spans.clone());
+        }
+        let spans = generations.old.get(key).cloned()?;
+        generations.young.insert(*key, spans.clone());
+        Some(spans)
+    }
+
+    fn put(&self, key: CacheKey, spans: Vec<ExternalSpan>) {
+        let mut generations = self
+            .generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if generations.young.len() >= CACHE_GENERATION_ENTRIES {
+            generations.old = std::mem::take(&mut generations.young);
+        }
+        generations.young.insert(key, spans);
+    }
+}
+
+/// A detector round trip that did not produce spans.
+enum PostError {
+    /// Nothing came back: connection refused, reset, connect timeout, read timeout.
+    Transport(reqwest::Error),
+    /// The detector answered, but not with a usable body.
+    Rejected(String),
+}
+
 /// Ready-to-call detector client; built once at startup from the `ner` section.
 pub struct NerClient {
     endpoint: String,
@@ -98,6 +181,10 @@ pub struct NerClient {
     required: bool,
     client: reqwest::Client,
     last_warn: Mutex<Option<Instant>>,
+    cache: SpanCache,
+    /// One detector call at a time: the host serialises inference anyway, so a queued caller
+    /// costs nothing extra and usually finds its leaves cached by the call ahead of it.
+    gate: tokio::sync::Semaphore,
 }
 
 impl std::fmt::Debug for NerClient {
@@ -152,6 +239,11 @@ fn error_chain(error: &reqwest::Error) -> String {
     parts.join(": ")
 }
 
+/// The span lists once every slot is filled, else `None`.
+fn all_resolved(resolved: &[Option<Vec<ExternalSpan>>]) -> Option<Vec<Vec<ExternalSpan>>> {
+    resolved.iter().cloned().collect()
+}
+
 impl NerClient {
     /// Validates the URL shape and builds the client; an error is a fatal config error.
     pub fn from_config(cfg: NerConfig) -> Result<Self, String> {
@@ -177,6 +269,8 @@ impl NerClient {
             required: cfg.required,
             client,
             last_warn: Mutex::new(None),
+            cache: SpanCache::new(),
+            gate: tokio::sync::Semaphore::new(1),
         })
     }
 
@@ -185,53 +279,134 @@ impl NerClient {
         self.required
     }
 
-    /// Detects spans for every text in one round trip; the result has exactly one list per
-    /// input text or is `Unavailable`.
+    /// Detects spans for every text; the result has exactly one list per input text, in the
+    /// same order, or is `Unavailable`. Blank texts and texts detected before never reach the
+    /// detector, so a retried request and a continued conversation pay for new leaves only.
     pub async fn detect_batch(&self, texts: &[String]) -> NerOutcome {
         if texts.is_empty() {
             return NerOutcome::Spans(Vec::new());
         }
-        let total: usize = texts.iter().map(String::len).sum();
+        let keys: Vec<Option<CacheKey>> = texts
+            .iter()
+            .map(|text| (!text.is_empty()).then(|| self.cache.key(text)))
+            .collect();
+        let mut resolved: Vec<Option<Vec<ExternalSpan>>> = keys
+            .iter()
+            .map(|key| match key {
+                None => Some(Vec::new()),
+                Some(key) => self.cache.get(key),
+            })
+            .collect();
+        if let Some(spans) = all_resolved(&resolved) {
+            return NerOutcome::Spans(spans);
+        }
+
+        let _turn = self.gate.acquire().await;
+        for (slot, key) in resolved.iter_mut().zip(&keys) {
+            if let (None, Some(key)) = (&slot, key) {
+                *slot = self.cache.get(key);
+            }
+        }
+        let mut pending: Vec<String> = Vec::new();
+        let mut pending_keys: Vec<CacheKey> = Vec::new();
+        for (index, slot) in resolved.iter().enumerate() {
+            if slot.is_some() {
+                continue;
+            }
+            let Some(key) = keys[index] else { continue };
+            if pending_keys.contains(&key) {
+                continue;
+            }
+            pending_keys.push(key);
+            pending.push(texts[index].clone());
+        }
+        if pending.is_empty() {
+            return match all_resolved(&resolved) {
+                Some(spans) => NerOutcome::Spans(spans),
+                None => NerOutcome::Unavailable("internal: unresolved leaf".to_string()),
+            };
+        }
+        let total: usize = pending.iter().map(String::len).sum();
         if total > MAX_REQUEST_BYTES {
             return NerOutcome::Unavailable(format!(
                 "request text of {total} bytes exceeds the {MAX_REQUEST_BYTES} byte cap"
             ));
         }
-        let response = match self
+
+        let parsed = match self.post_once_then_retry(&pending).await {
+            Ok(parsed) => parsed,
+            Err(reason) => return NerOutcome::Unavailable(reason),
+        };
+        if parsed.spans.len() != pending.len() {
+            return NerOutcome::Unavailable(format!(
+                "detector returned {} span lists for {} texts",
+                parsed.spans.len(),
+                pending.len()
+            ));
+        }
+        let mut fresh: HashMap<CacheKey, Vec<ExternalSpan>> = HashMap::new();
+        for (key, list) in pending_keys.into_iter().zip(parsed.spans) {
+            let spans = self.filter_spans(list);
+            self.cache.put(key, spans.clone());
+            fresh.insert(key, spans);
+        }
+        for (slot, key) in resolved.iter_mut().zip(&keys) {
+            if let (None, Some(key)) = (&slot, key) {
+                *slot = fresh.get(key).cloned();
+            }
+        }
+        match all_resolved(&resolved) {
+            Some(spans) => NerOutcome::Spans(spans),
+            None => NerOutcome::Unavailable("detector answer did not cover every text".to_string()),
+        }
+    }
+
+    /// `/v1/detect` is pure inference, so a send that never got an answer is safe to repeat
+    /// once: a connection the VM gateway dropped between two bursts costs a retry, not a
+    /// request forwarded with rules only. A timeout is not repeated, it would only double the
+    /// wait the caller already paid.
+    async fn post_once_then_retry(&self, texts: &[String]) -> Result<DetectResponse, String> {
+        match self.post(texts).await {
+            Ok(parsed) => Ok(parsed),
+            Err(PostError::Rejected(reason)) => Err(reason),
+            Err(PostError::Transport(first)) if first.is_timeout() => {
+                Err(format!("request failed: {}", error_chain(&first)))
+            }
+            Err(PostError::Transport(first)) => {
+                log::debug!(
+                    "retrying the PII NER detector after a transport error: {}",
+                    error_chain(&first)
+                );
+                match self.post(texts).await {
+                    Ok(parsed) => Ok(parsed),
+                    Err(PostError::Rejected(reason)) => Err(reason),
+                    Err(PostError::Transport(second)) => Err(format!(
+                        "request failed twice: {}; first: {}",
+                        error_chain(&second),
+                        error_chain(&first)
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn post(&self, texts: &[String]) -> Result<DetectResponse, PostError> {
+        let response = self
             .client
             .post(&self.endpoint)
             .header(NER_AUTH_HEADER, &self.token)
             .json(&DetectRequest { texts })
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return NerOutcome::Unavailable(format!("request failed: {}", error_chain(&e)))
-            }
-        };
+            .map_err(PostError::Transport)?;
         let status = response.status();
         if status != reqwest::StatusCode::OK {
-            return NerOutcome::Unavailable(format!("detector answered {status}"));
+            return Err(PostError::Rejected(format!("detector answered {status}")));
         }
-        let parsed: DetectResponse = match response.json().await {
-            Ok(p) => p,
-            Err(e) => return NerOutcome::Unavailable(format!("malformed detector response: {e}")),
-        };
-        if parsed.spans.len() != texts.len() {
-            return NerOutcome::Unavailable(format!(
-                "detector returned {} span lists for {} texts",
-                parsed.spans.len(),
-                texts.len()
-            ));
-        }
-        NerOutcome::Spans(
-            parsed
-                .spans
-                .into_iter()
-                .map(|list| self.filter_spans(list))
-                .collect(),
-        )
+        response
+            .json()
+            .await
+            .map_err(|e| PostError::Rejected(format!("malformed detector response: {e}")))
     }
 
     fn filter_spans(&self, spans: Vec<WireSpan>) -> Vec<ExternalSpan> {
@@ -380,6 +555,171 @@ mod tests {
             client.detect_batch(&huge).await,
             NerOutcome::Unavailable(_)
         ));
+    }
+
+    /// Detector stand-in: answers every text with one span, counts the texts per request and
+    /// can drop the first connection unanswered the way the VM gateway drops a stale one.
+    struct FakeDetector {
+        port: u16,
+        batches: std::sync::Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[derive(Deserialize)]
+    struct WireRequest {
+        texts: Vec<String>,
+    }
+
+    impl FakeDetector {
+        async fn spawn(drop_first_connection: bool) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let batches = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let recorded = std::sync::Arc::clone(&batches);
+            tokio::spawn(async move {
+                let mut drop_next = drop_first_connection;
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    if drop_next {
+                        drop_next = false;
+                        drop(stream);
+                        continue;
+                    }
+                    let Some(texts) = read_texts(&mut stream).await else {
+                        continue;
+                    };
+                    recorded
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(texts.len());
+                    let spans: Vec<serde_json::Value> = texts
+                        .iter()
+                        .map(|text| {
+                            serde_json::json!([{
+                                "start": 0,
+                                "end": text.len().min(3),
+                                "label": "SURNAME",
+                                "confidence": 0.9,
+                            }])
+                        })
+                        .collect();
+                    let body = serde_json::json!({ "spans": spans }).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                }
+            });
+            Self { port, batches }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        fn batches(&self) -> Vec<usize> {
+            self.batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    /// Reads one HTTP request off the socket and returns the `texts` it carries.
+    async fn read_texts(stream: &mut tokio::net::TcpStream) -> Option<Vec<String>> {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            let Some(head) = buffer
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|at| at + 4)
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buffer[..head]).to_lowercase();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse().ok())?;
+            if buffer.len() >= head + length {
+                let parsed: WireRequest =
+                    serde_json::from_slice(&buffer[head..head + length]).ok()?;
+                return Some(parsed.texts);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repeated_text_is_detected_once_and_then_served_from_the_cache() {
+        let detector = FakeDetector::spawn(false).await;
+        let client = NerClient::for_test(cfg(&detector.url()));
+        let leaves = vec!["Kowalski".to_string(), "Kowalski".to_string()];
+
+        let first = client.detect_batch(&leaves).await;
+        let NerOutcome::Spans(spans) = &first else {
+            panic!("{first:?}")
+        };
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0], spans[1]);
+        assert_eq!(spans[0].len(), 1);
+
+        let second = client.detect_batch(&leaves).await;
+        assert_eq!(first, second);
+        assert_eq!(
+            detector.batches(),
+            vec![1],
+            "one round trip with one text: the repeat inside the batch and the second call are cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_leaves_never_reach_the_detector_but_keep_their_slot() {
+        let detector = FakeDetector::spawn(false).await;
+        let client = NerClient::for_test(cfg(&detector.url()));
+
+        let outcome = client
+            .detect_batch(&[String::new(), "Kowalski".to_string(), String::new()])
+            .await;
+        let NerOutcome::Spans(spans) = &outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(spans.len(), 3);
+        assert!(spans[0].is_empty() && spans[2].is_empty());
+        assert_eq!(spans[1].len(), 1);
+        assert_eq!(detector.batches(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried_before_degrading_to_rules_only() {
+        let detector = FakeDetector::spawn(true).await;
+        let client = NerClient::for_test(cfg(&detector.url()));
+
+        let outcome = client.detect_batch(&["Kowalski".to_string()]).await;
+        let NerOutcome::Spans(spans) = &outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(spans[0].len(), 1);
+        assert_eq!(detector.batches(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn the_cache_survives_a_generation_rotation_for_a_text_that_keeps_coming_back() {
+        let client = NerClient::for_test(cfg("http://127.0.0.1:1"));
+        let hot = client.cache.key("system prompt");
+        client.cache.put(hot, vec![]);
+        for filler in 0..CACHE_GENERATION_ENTRIES {
+            let key = client.cache.key(&format!("leaf {filler}"));
+            client.cache.put(key, vec![]);
+            assert!(client.cache.get(&hot).is_some(), "rotation {filler}");
+        }
     }
 
     #[tokio::test]
