@@ -1097,7 +1097,7 @@ mod tests {
     fn restore_set_is_persisted_before_restore_projects() {
         let source = include_str!("reconcile.rs");
         let anchor = source
-            .find("Persist the merged set FIRST")
+            .find("state.pending_running_projects = projects.clone();")
             .expect("restore-set persist must exist");
         let window = &source[anchor..anchor + 700];
         let save_pos = window.find("save_bundle_state").expect("must save state");
@@ -1142,7 +1142,7 @@ mod tests {
     fn teardown_convergence_skips_when_config_unreadable() {
         let source = include_str!("reconcile.rs");
         let anchor = source
-            .find("Converge crash-orphans")
+            .find("no reconcile changes needed, setting images Ready")
             .expect("convergence block must exist");
         let window = &source[anchor..anchor + 1400];
         let load_pos = window
@@ -1166,7 +1166,7 @@ mod tests {
         let source = include_str!("reconcile.rs");
 
         let anchor = source
-            .find("Converge crash-interrupted teardowns before restoring projects")
+            .find("failed to load user config, using pending list only")
             .expect("id-changed convergence block must exist");
         let window = &source[anchor..anchor + 1500];
         assert!(
@@ -1174,7 +1174,7 @@ mod tests {
             "id-changed path must read persisted teardown intents"
         );
         assert!(
-            window.contains("id-changed path"),
+            window.contains("(id-changed path)"),
             "id-changed convergence block must be labelled so it is distinguishable from the no-change block"
         );
         assert!(

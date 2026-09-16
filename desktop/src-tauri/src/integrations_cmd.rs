@@ -2085,7 +2085,7 @@ mod tests {
             .expect("restart_integration_containers must exist");
         let body = &source[fn_start..];
         let up_err = body
-            .find("up failed: {e}, attempting rollback")
+            .find("up failed while restarting integration containers: {e}, attempting rollback")
             .expect("up-failure arm must exist");
         let window = &body[up_err..up_err + 600];
         assert!(
@@ -2131,9 +2131,9 @@ mod tests {
             .find("fn restart_integration_containers(")
             .expect("restart_integration_containers function must exist");
         let fn_end = source[fn_start..]
-            .find("\n    // -- restart_integration_containers structural tests --")
+            .find("\n#[cfg(test)]")
             .map(|e| fn_start + e)
-            .unwrap_or(source.len());
+            .expect("test module boundary must exist after restart_integration_containers");
         let fn_body = &source[fn_start..fn_end];
 
         assert!(

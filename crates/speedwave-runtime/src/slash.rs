@@ -195,13 +195,17 @@ fn lead_discovery(
         drop(guard);
         outcome
     } else {
-        let mut res = slot.result.lock().unwrap_or_else(|p| p.into_inner());
-        while res.is_none() {
-            res = slot.ready.wait(res).unwrap_or_else(|p| p.into_inner());
-        }
-        res.clone()
-            .unwrap_or_else(|| Err("discovery leader failed".to_string()))
+        follow_slot(&slot)
     }
+}
+
+fn follow_slot(slot: &InFlightSlot) -> Result<RawDiscovery, String> {
+    let mut res = slot.result.lock().unwrap_or_else(|p| p.into_inner());
+    while res.is_none() {
+        res = slot.ready.wait(res).unwrap_or_else(|p| p.into_inner());
+    }
+    res.clone()
+        .unwrap_or_else(|| Err("discovery leader failed".to_string()))
 }
 
 /// Invalidates the cached discovery for one project. Call on plugin
