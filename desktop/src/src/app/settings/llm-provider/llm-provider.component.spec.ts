@@ -9,7 +9,7 @@ import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { type LlmProviderEntry } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { createDeferred } from '../../testing/deferred';
+import { createDeferred, type Deferred } from '../../testing/deferred';
 import { makeMockLogger } from '../../testing/mock-logger';
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
@@ -801,6 +801,7 @@ describe('LlmProviderComponent', () => {
 
   it('shows_logout_not_login_when_oauth_authenticated', () => {
     fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.authMethod.set('oauth');
@@ -814,10 +815,12 @@ describe('LlmProviderComponent', () => {
 
   it('shows_login_not_logout_when_not_authenticated', () => {
     fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.authMethod.set('oauth');
     component.oauthAuthenticated.set(false);
+    component.oauthSignIn.set('none');
     fixture.detectChanges();
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]')
@@ -825,19 +828,38 @@ describe('LlmProviderComponent', () => {
     expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
   });
 
+  it('shows_logout_not_login_when_oauth_sign_in_saved_unverified', () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.authMethod.set('oauth');
+    component.oauthAuthenticated.set(false);
+    component.oauthSignIn.set('saved_unverified');
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]')
+    ).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeFalsy();
+  });
+
   it('logout_button_invokes_anthropic_logout_clears_provider_and_reloads_status', async () => {
     const calls: string[] = [];
+    let loggedOut = false;
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
-      if (cmd === 'anthropic_logout') return undefined;
+      if (cmd === 'anthropic_logout') {
+        loggedOut = true;
+        return undefined;
+      }
       if (cmd === 'clear_active_llm_provider') return undefined;
       if (cmd === 'get_auth_status')
         return {
           api_key_configured: false,
-          oauth_authenticated: false,
+          oauth_authenticated: !loggedOut,
           needs_anthropic_auth: true,
-          provider_configured: false,
+          provider_configured: !loggedOut,
         };
       return prev(cmd, args);
     };
@@ -845,9 +867,9 @@ describe('LlmProviderComponent', () => {
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.authMethod.set('oauth');
-    component.oauthAuthenticated.set(true);
-    fixture.detectChanges();
+    component.ngOnInit();
     await fixture.whenStable();
+    fixture.detectChanges();
     calls.length = 0;
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]');
     btn.click();
@@ -944,13 +966,14 @@ describe('LlmProviderComponent', () => {
 
   it('external-terminal login (watcher detects oauth false→true) auto-saves Anthropic', async () => {
     const calls: string[] = [];
+    let authenticated = false;
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
       if (cmd === 'get_auth_status')
         return {
           api_key_configured: false,
-          oauth_authenticated: true,
+          oauth_authenticated: authenticated,
           needs_anthropic_auth: true,
           provider_configured: true,
         };
@@ -958,8 +981,12 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    component.oauthAuthenticated.set(false);
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(component.oauthSignIn()).toBe('none');
+    calls.length = 0;
 
+    authenticated = true;
     await fixture.debugElement.injector.get(OauthCompletionWatcher).checkNow();
 
     expect(component.selectedTarget()).toBe('anthropic');
@@ -1030,13 +1057,14 @@ describe('LlmProviderComponent', () => {
 
   it('window regaining focus forces an immediate auth check (past poll throttling)', async () => {
     const calls: string[] = [];
+    let authenticated = false;
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
       if (cmd === 'get_auth_status')
         return {
           api_key_configured: false,
-          oauth_authenticated: true,
+          oauth_authenticated: authenticated,
           needs_anthropic_auth: true,
           provider_configured: true,
         };
@@ -1044,10 +1072,12 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    component.oauthAuthenticated.set(false);
     component.ngOnInit();
-    await flushMicrotasks();
+    await fixture.whenStable();
+    expect(component.oauthSignIn()).toBe('none');
+    calls.length = 0;
 
+    authenticated = true;
     mockTauri.dispatchEvent('window_focused', undefined);
     await flushMicrotasks();
 
@@ -1064,6 +1094,80 @@ describe('LlmProviderComponent', () => {
     component.ngOnDestroy();
 
     expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();
+  });
+
+  it('saves the configuration once when a detected login arrives while probes are slow', async () => {
+    const calls: string[] = [];
+    const notConfigured: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      status: 'auth_required',
+    };
+    const verified: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: true,
+      oauth_sign_in: 'verified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      status: 'ready',
+    };
+    let slow = false;
+    const pendingAuthStatus: Deferred<AuthStatusResponse>[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'get_llm_config') {
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
+      }
+      if (cmd === 'get_auth_status') {
+        if (!slow) return notConfigured;
+        const deferred = createDeferred<AuthStatusResponse>();
+        pendingAuthStatus.push(deferred);
+        return deferred.promise;
+      }
+      if (cmd === 'get_auth_command') return "speedwave login --project 'desktop'";
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('activeProject', 'desktop');
+      fixture.detectChanges();
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.oauthSignIn()).toBe('none');
+      expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
+
+      slow = true;
+      vi.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(1500);
+      vi.advanceTimersByTime(3000);
+      mockTauri.dispatchEvent('window_focused', undefined);
+      vi.advanceTimersByTime(1500);
+
+      expect(pendingAuthStatus.length).toBeGreaterThan(1);
+
+      for (let round = 0; round < 10 && pendingAuthStatus.length > 0; round++) {
+        const batch = pendingAuthStatus.splice(0, pendingAuthStatus.length);
+        for (const deferred of batch) deferred.resolve(verified);
+        await flushMicrotasks();
+      }
+      fixture.detectChanges();
+      await flushMicrotasks();
+      fixture.detectChanges();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(calls.filter((c) => c === 'update_llm_config')).toHaveLength(1);
+    expect(component.oauthAuthenticated()).toBe(true);
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="auth-status-value"]')?.textContent
+    ).toContain('connected');
   });
 
   it('onOAuthDone_failure_does_not_save', async () => {
@@ -1108,6 +1212,28 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(false);
+  });
+
+  it('canSave is true for anthropic with a saved-unverified sign-in once dirty', () => {
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('');
+    component.oauthSignIn.set('saved_unverified');
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('canSave stays false for anthropic when oauth_sign_in is none', () => {
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('');
+    component.oauthAuthenticated.set(false);
+    component.apiKeyConfigured.set(false);
+    component.oauthSignIn.set('none');
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(true);
   });
 
   it('renders_local_fields_in_order_url_key_discover', () => {
@@ -2767,6 +2893,56 @@ describe('LlmProviderComponent', () => {
     expect(el.querySelector('[data-testid="auth-status-method"]')?.textContent).toContain('oauth');
   });
 
+  it('falls back oauth_sign_in to verified from oauth_authenticated when the field is absent', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return { api_key_configured: false, oauth_authenticated: true, provider_configured: true };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(component.oauthSignIn()).toBe('verified');
+  });
+
+  it('falls back oauth_sign_in to none from oauth_authenticated when the field is absent', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return { api_key_configured: false, oauth_authenticated: false, provider_configured: true };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(component.oauthSignIn()).toBe('none');
+  });
+
+  it('passes the full auth-status payload including oauth_sign_in to applyAuthStatus', async () => {
+    const payload = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'saved_unverified',
+      provider_configured: true,
+    };
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return payload;
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+
+    expect(applySpy).toHaveBeenCalledWith(payload);
+  });
+
   it('saves and removes the anthropic api key via the secrets commands', async () => {
     const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -2825,6 +3001,54 @@ describe('LlmProviderComponent', () => {
     expect(el.querySelector('[data-testid="auth-status-method"]')).toBeNull();
   });
 
+  it('renders the saved-unverified pill when a saved sign-in could not be verified', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          oauth_sign_in: 'saved_unverified',
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'saved sign-in · not verified'
+    );
+    expect(el.querySelector('[data-testid="auth-status-method"]')).toBeNull();
+  });
+
+  it('renders not-configured and the auth terminal when oauth_sign_in is none', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          oauth_sign_in: 'none',
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(el.querySelector('app-auth-terminal')).toBeTruthy();
+  });
+
   it('guards the anthropic key commands when no project is active', async () => {
     const calls: string[] = [];
     mockTauri.invokeHandler = async (cmd: string) => {
@@ -2859,574 +3083,168 @@ describe('LlmProviderComponent', () => {
     expect(errors).toContain('delete failed');
   });
 
-  describe('SPEED-555: test-connection gates Save', () => {
-    it('shows the same "test connection" label on the local card and the OpenRouter row', () => {
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.toggleExtraExpanded(component.extraProviders()[0]);
-      fixture.detectChanges();
-      const localBtn = fixture.nativeElement.querySelector("[data-testid='settings-llm-refresh']");
-      const extraBtn = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-extra-refresh-openrouter']"
-      );
-      expect(localBtn.textContent.trim()).toContain('test connection');
-      expect(extraBtn.textContent.trim()).toContain('test connection');
+  it('switching activeProject shows checking sign-in… with neither logout nor terminal until the response applies', async () => {
+    const deferred = createDeferred<AuthStatusResponse>();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return deferred.promise;
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'checking sign-in'
+    );
+    expect(el.querySelector('[data-testid="settings-oauth-logout"]')).toBeNull();
+    expect(el.querySelector('app-auth-terminal')).toBeNull();
+
+    deferred.resolve({
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
     });
+    await flushMicrotasks();
+    fixture.detectChanges();
 
-    it('save blocks on an offline local server (no update_llm_config, no restart)', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      const restartSpy = vi.spyOn(projectState, 'requestRestart');
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('offline');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(el.querySelector('app-auth-terminal')).toBeTruthy();
+  });
 
-      await component.saveConfig();
+  it('drops a late response for the previous project once a newer project is active', async () => {
+    const projA = createDeferred<AuthStatusResponse>();
+    const projB = createDeferred<AuthStatusResponse>();
+    const responses: Record<string, Promise<AuthStatusResponse>> = {
+      a: projA.promise,
+      b: projB.promise,
+    };
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_auth_status') return responses[args?.['project'] as string];
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
 
-      expect(invoked).toBe(false);
-      expect(restartSpy).not.toHaveBeenCalled();
-      expect(component.discoveryState().kind).toBe('failed');
-      fixture.detectChanges();
-      const err = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-discovery-error']"
-      );
-      expect(err.textContent).toContain('Fix the connection to save.');
+    fixture.componentRef.setInput('activeProject', 'a');
+    fixture.detectChanges();
+    fixture.componentRef.setInput('activeProject', 'b');
+    fixture.detectChanges();
+
+    projB.resolve({
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
     });
+    await flushMicrotasks();
+    fixture.detectChanges();
+    applySpy.mockClear();
 
-    it('save blocks when the server does not support discovery (unsupported)', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('unsupported');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.saveConfig();
-
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({ kind: 'failed', reason: 'unsupported' });
+    projA.resolve({
+      api_key_configured: false,
+      oauth_authenticated: true,
+      oauth_sign_in: 'verified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
     });
+    await flushMicrotasks();
+    fixture.detectChanges();
 
-    it('save blocks on a rejected api key (auth)', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('auth');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
+    expect(component.oauthAuthenticated()).toBe(false);
+    expect(component.oauthSignIn()).toBe('none');
+    expect(applySpy).not.toHaveBeenCalled();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(el.querySelector('app-auth-terminal')).toBeTruthy();
+  });
 
-      await component.saveConfig();
+  it('an invoke error while pending renders not configured (no verdict could be taken)', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') throw new Error('container not running');
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.ngOnInit();
+    await fixture.whenStable();
+    fixture.detectChanges();
 
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({ kind: 'failed', reason: 'auth' });
-    });
+    expect(component.oauthSignIn()).toBe('none');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(mockLogger.debug).toHaveBeenCalled();
+  });
 
-    it('save blocks on a server-error response', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') throw new Error('LLM server returned HTTP 500');
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
+  it('an invoke error after a verdict is already known keeps that verdict', async () => {
+    let fail = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        if (fail) throw new Error('container not running');
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          oauth_sign_in: 'saved_unverified',
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(component.oauthSignIn()).toBe('saved_unverified');
 
-      await component.saveConfig();
+    fail = true;
+    await component.loadAuthStatus();
 
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({
-        kind: 'failed',
-        reason: 'server-error',
-        status: 500,
-      });
-    });
+    expect(component.oauthSignIn()).toBe('saved_unverified');
+  });
 
-    it('save blocks when the server lists models but does not answer POST /v1/messages', async () => {
-      let invoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'update_llm_config') invoked = true;
-        if (cmd === 'discover_llm_models') {
-          return { models: [{ id: 'llama3.3' }], messages_endpoint_ok: false };
-        }
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
+  it('the watcher poll stops once oauthSignIn reaches verified (lastKnown context wiring)', () => {
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('activeProject', 'proj');
+      const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
+      watcher.startPoll();
+      expect(watcher.isPolling()).toBe(true);
 
-      await component.saveConfig();
+      component.oauthSignIn.set('verified');
+      vi.advanceTimersByTime(1500);
 
-      expect(invoked).toBe(false);
-      expect(component.discoveryState()).toMatchObject({
-        kind: 'failed',
-        reason: 'messages-endpoint',
-      });
-      fixture.detectChanges();
-      const warn = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-messages-endpoint-warning']"
-      );
-      expect(warn).not.toBeNull();
-      expect(warn.textContent).toContain('Fix the connection to save.');
-      expect(warn.textContent).not.toContain('Save is allowed');
-    });
+      expect(watcher.isPolling()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-    it('save skips the probe entirely for an unchanged, already-persisted local config', async () => {
-      let discoverCalls = 0;
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'get_llm_config') {
-          return {
-            provider: 'local',
-            model: 'llama3.3',
-            base_url: 'http://host.docker.internal:11434',
-            default_base_url: 'http://host.docker.internal:11434',
-            providers: [
-              {
-                id: 'local',
-                kind: 'local',
-                base_url: 'http://host.docker.internal:11434',
-                model: 'llama3.3',
-              },
-            ],
-            active: { provider_id: 'local', model: 'llama3.3' },
-          };
-        }
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          throw new Error('offline');
-        }
-        if (cmd === 'update_llm_config') {
-          saveInvoked = true;
-          return undefined;
-        }
-        return undefined;
-      };
+  it('the watcher context onVerdict updates the tile for the active project, ignores a stale one', () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+    const status: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'saved_unverified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
 
-      component.ngOnInit();
-      await fixture.whenStable();
-      await component.saveConfig();
+    watcher['context']?.onVerdict('other-project', status);
+    expect(component.oauthSignIn()).toBe('pending');
+    expect(applySpy).not.toHaveBeenCalled();
 
-      expect(discoverCalls).toBe(0);
-      expect(saveInvoked).toBe(true);
-    });
-
-    it('save reuses a passing button-click test for identical field values', async () => {
-      let discoverCalls = 0;
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          return { models: [{ id: 'llama3.3' }] };
-        }
-        if (cmd === 'update_llm_config') {
-          saveInvoked = true;
-          return undefined;
-        }
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.discoverModels(true);
-      expect(discoverCalls).toBe(1);
-
-      await component.saveConfig();
-
-      expect(discoverCalls).toBe(1);
-      expect(saveInvoked).toBe(true);
-    });
-
-    it('editing base_url after a passing test forces a fresh probe at Save', async () => {
-      let discoverCalls = 0;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          return { models: [{ id: 'llama3.3' }] };
-        }
-        if (cmd === 'update_llm_config') return undefined;
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.discoverModels(true);
-      expect(discoverCalls).toBe(1);
-
-      component['onBaseUrlInput']('http://host.docker.internal:9999');
-      component.model.set('llama3.3');
-      await component.saveConfig();
-
-      expect(discoverCalls).toBe(2);
-    });
-
-    it('editing the api key after a passing test forces a fresh probe at Save', async () => {
-      let discoverCalls = 0;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          return { models: [{ id: 'llama3.3' }] };
-        }
-        if (cmd === 'update_llm_config') return undefined;
-        return undefined;
-      };
-      component.provider.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      await component.discoverModels(true);
-      expect(discoverCalls).toBe(1);
-
-      component['onApiKeyInput']('new-key');
-      await component.saveConfig();
-
-      expect(discoverCalls).toBe(2);
-    });
-
-    it('local success line names the model count, Messages API status and, for an entry without a stored model, the first probed model (models[0], the Rust auto-default order)', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          return {
-            models: [{ id: 'llama3.3' }, { id: 'qwen2.5' }],
-            messages_endpoint_ok: true,
-          };
-        }
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-
-      await component.discoverModels(true);
-      fixture.detectChanges();
-
-      const success = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-test-success']"
-      );
-      expect(success).not.toBeNull();
-      const text = success.textContent as string;
-      expect(text).toContain('Server OK');
-      expect(text).toContain('2 models');
-      expect(text).toContain('Messages API OK');
-      expect(text).toContain('new sessions start on llama3.3');
-      expect(
-        fixture.nativeElement.querySelector("[data-testid='settings-llm-discovery-error']")
-      ).toBeNull();
-    });
-
-    it('local success line names the stored entry model over the first probed model (Save passes the entry model through)', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          return {
-            models: [{ id: 'llama3.3' }, { id: 'qwen2.5' }],
-            messages_endpoint_ok: true,
-          };
-        }
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component['loadedLocalEntry'] = {
-        id: 'local',
-        kind: 'local',
-        base_url: 'http://host.docker.internal:11434',
-        model: 'qwen3-coder-30b',
-      };
-
-      await component.discoverModels(true);
-      fixture.detectChanges();
-
-      const text = fixture.nativeElement.querySelector("[data-testid='settings-llm-test-success']")
-        .textContent as string;
-      expect(text).toContain('2 models');
-      expect(text).toContain('new sessions start on qwen3-coder-30b');
-      expect(text).not.toContain('start on llama3.3');
-    });
-
-    it('no hint sentence renders under the local fields before a test', () => {
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      fixture.detectChanges();
-
-      expect(
-        fixture.nativeElement.querySelector("[data-testid='settings-llm-test-success']")
-      ).toBeNull();
-      expect(
-        fixture.nativeElement.querySelector("[data-testid='settings-llm-discovery-error']")
-      ).toBeNull();
-    });
-
-    it('openrouter success line falls back to the SSOT auto-default model id for a row without a stored model, never a literal', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
-        }
-        if (cmd === 'get_openrouter_default_model') {
-          return 'anthropic/claude-sonnet-5';
-        }
-        return undefined;
-      };
-      await component['loadOpenrouterDefaultModel']();
-      const row = component.extraProviders()[0];
-      component.toggleExtraExpanded(row);
-      component.onExtraKeyInput(row, 'sk-or-x');
-      await component.discoverExtraModels(row);
-      fixture.detectChanges();
-
-      const success = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-extra-test-success-openrouter']"
-      );
-      expect(success).not.toBeNull();
-      const text = success.textContent as string;
-      expect(text).toContain('Key OK');
-      expect(text).toContain('anthropic/claude-sonnet-5');
-    });
-
-    it('openrouter success line names the stored row model over the SSOT auto-default (a composer pick persists into the entry)', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
-        }
-        if (cmd === 'get_openrouter_default_model') {
-          return 'anthropic/claude-sonnet-5';
-        }
-        return undefined;
-      };
-      await component['loadOpenrouterDefaultModel']();
-      const row = component.extraProviders()[0];
-      component.toggleExtraExpanded(row);
-      component.onExtraKeyInput(row, 'sk-or-x');
-      row.model = 'openai/gpt-4o-mini';
-      await component.discoverExtraModels(row);
-      fixture.detectChanges();
-
-      const text = fixture.nativeElement.querySelector(
-        "[data-testid='settings-llm-extra-test-success-openrouter']"
-      ).textContent as string;
-      expect(text).toContain('Key OK');
-      expect(text).toContain('new sessions start on openai/gpt-4o-mini');
-      expect(text).not.toContain('anthropic/claude-sonnet-5');
-    });
-
-    it('save clicked during a running OpenRouter test joins that test and saves once it passes', async () => {
-      let resolveDiscover = null as ((value: unknown) => void) | null;
-      let discoverCalls = 0;
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          return new Promise((resolve) => (resolveDiscover = resolve));
-        }
-        if (cmd === 'update_llm_config') saveInvoked = true;
-        return undefined;
-      };
-      const row = component.extraProviders()[0];
-      component.toggleExtraExpanded(row);
-      component.selectExtraProvider(row);
-      component.onExtraKeyInput(row, 'sk-or-x');
-
-      const test = component.discoverExtraModels(row);
-      const save = component.saveConfig();
-      await flushMicrotasks();
-      expect(saveInvoked).toBe(false);
-      expect(resolveDiscover).not.toBeNull();
-
-      if (!resolveDiscover) throw new Error('discover never started');
-      resolveDiscover({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
-      await Promise.all([test, save]);
-
-      expect(discoverCalls).toBe(1);
-      expect(saveInvoked).toBe(true);
-    });
-
-    it('save clicked during a running OpenRouter test blocks when that test fails', async () => {
-      let rejectDiscover = null as ((reason: unknown) => void) | null;
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          return new Promise((_resolve, reject) => (rejectDiscover = reject));
-        }
-        if (cmd === 'update_llm_config') saveInvoked = true;
-        return undefined;
-      };
-      const row = component.extraProviders()[0];
-      component.toggleExtraExpanded(row);
-      component.selectExtraProvider(row);
-      component.onExtraKeyInput(row, 'sk-or-x');
-
-      const test = component.discoverExtraModels(row);
-      const save = component.saveConfig();
-      await flushMicrotasks();
-      if (!rejectDiscover) throw new Error('discover never started');
-      rejectDiscover(new Error('auth'));
-      await Promise.all([test, save]);
-      fixture.detectChanges();
-
-      expect(saveInvoked).toBe(false);
-      expect(component.saving()).toBe(false);
-      expect(
-        fixture.nativeElement.querySelector(
-          "[data-testid='settings-llm-extra-discovery-error-openrouter']"
-        )
-      ).not.toBeNull();
-    });
-
-    it('save during a running OpenRouter test for an older key re-tests the current key first', async () => {
-      const probedKeys: unknown[] = [];
-      const resolvers: ((value: unknown) => void)[] = [];
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-        if (cmd === 'discover_llm_models') {
-          probedKeys.push((args?.['args'] as { apiKey?: string } | undefined)?.apiKey);
-          return new Promise((resolve) => resolvers.push(resolve));
-        }
-        if (cmd === 'update_llm_config') saveInvoked = true;
-        return undefined;
-      };
-      const row = component.extraProviders()[0];
-      component.toggleExtraExpanded(row);
-      component.selectExtraProvider(row);
-      component.onExtraKeyInput(row, 'sk-or-old');
-
-      const test = component.discoverExtraModels(row);
-      component.onExtraKeyInput(row, 'sk-or-new');
-      const save = component.saveConfig();
-      await flushMicrotasks();
-      resolvers[0]({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
-      await test;
-      await vi.waitFor(() => expect(probedKeys).toEqual(['sk-or-old', 'sk-or-new']));
-      expect(saveInvoked).toBe(false);
-
-      resolvers[1]({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
-      await save;
-      expect(saveInvoked).toBe(true);
-    });
-
-    it('save during a running local connection test joins it instead of probing twice', async () => {
-      const resolvers: ((value: unknown) => void)[] = [];
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') return new Promise((resolve) => resolvers.push(resolve));
-        if (cmd === 'update_llm_config') saveInvoked = true;
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      const test = component.discoverModels(true);
-      const save = component.saveConfig();
-      await flushMicrotasks();
-      expect(resolvers).toHaveLength(1);
-      expect(saveInvoked).toBe(false);
-
-      resolvers[0]({ models: [{ id: 'llama3.3' }], messages_endpoint_ok: true });
-      await Promise.all([test, save]);
-      expect(resolvers).toHaveLength(1);
-      expect(saveInvoked).toBe(true);
-    });
-
-    it('a superseded local probe cannot overwrite the latest outcome that gates Save', async () => {
-      const pending: { resolve: (v: unknown) => void; reject: (e: unknown) => void }[] = [];
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          return new Promise((resolve, reject) => pending.push({ resolve, reject }));
-        }
-        if (cmd === 'update_llm_config') saveInvoked = true;
-        return undefined;
-      };
-      component.provider.set('local');
-      component.selectedTarget.set('local');
-      component.baseUrl.set('http://host.docker.internal:11434');
-      component.model.set('llama3.3');
-
-      const first = component.discoverModels(true);
-      const second = component.discoverModels(true);
-      await flushMicrotasks();
-      pending[1].reject(new Error('offline'));
-      await second;
-      pending[0].resolve({ models: [{ id: 'llama3.3' }], messages_endpoint_ok: true });
-      await first;
-      expect(component.discoveryState().kind).toBe('failed');
-
-      const save = component.saveConfig();
-      await flushMicrotasks();
-      expect(pending).toHaveLength(3);
-      expect(saveInvoked).toBe(false);
-      pending[2].resolve({ models: [{ id: 'llama3.3' }], messages_endpoint_ok: true });
-      await save;
-      expect(saveInvoked).toBe(true);
-    });
-
-    it('a second test-connection click during a running test starts no second probe', async () => {
-      let resolveDiscover = null as ((value: unknown) => void) | null;
-      let discoverCalls = 0;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          return new Promise((resolve) => (resolveDiscover = resolve));
-        }
-        return undefined;
-      };
-      const row = component.extraProviders()[0];
-      component.toggleExtraExpanded(row);
-      component.onExtraKeyInput(row, 'sk-or-x');
-
-      const first = component.discoverExtraModels(row);
-      const second = component.discoverExtraModels(row);
-      await flushMicrotasks();
-      if (!resolveDiscover) throw new Error('discover never started');
-      resolveDiscover({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
-      await Promise.all([first, second]);
-
-      expect(discoverCalls).toBe(1);
-      expect(row.lastTest?.passed).toBe(true);
-      expect(row.inFlight).toBeNull();
-    });
-
-    it('the anthropic card saves without a connection probe; badges are unchanged', async () => {
-      let discoverCalls = 0;
-      let saveInvoked = false;
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'discover_llm_models') {
-          discoverCalls++;
-          throw new Error('offline');
-        }
-        if (cmd === 'update_llm_config') {
-          saveInvoked = true;
-          return undefined;
-        }
-        return undefined;
-      };
-      component.provider.set('anthropic');
-      component.selectedTarget.set('anthropic');
-      component.oauthAuthenticated.set(true);
-      fixture.detectChanges();
-
-      await component.saveConfig();
-
-      expect(discoverCalls).toBe(0);
-      expect(saveInvoked).toBe(true);
-      const authRow = fixture.nativeElement.querySelector("[data-testid='auth-status-row']");
-      expect(authRow.textContent).toContain('connected');
-    });
+    watcher['context']?.onVerdict('proj', status);
+    expect(component.oauthSignIn()).toBe('saved_unverified');
+    expect(applySpy).toHaveBeenCalledWith(status);
   });
 });

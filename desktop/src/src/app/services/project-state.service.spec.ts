@@ -1540,6 +1540,53 @@ describe('ProjectStateService', () => {
       expect(service.status()).toBe('auth_required');
       expect(cb).not.toHaveBeenCalled();
     });
+
+    it('applyAuthStatus with oauth_sign_in saved_unverified leaves status untouched and fires no listeners', () => {
+      for (const status of ['auth_required', 'no_provider', 'ready', 'starting'] as const) {
+        service.status.set(status);
+        const changeCb = vi.fn();
+        const readyCb = vi.fn();
+        service.onChange(changeCb);
+        service.onProjectReady(readyCb);
+        service.applyAuthStatus({
+          status: 'auth_required',
+          oauth_sign_in: 'saved_unverified',
+          api_key_configured: false,
+          oauth_authenticated: false,
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        });
+        expect(service.status()).toBe(status);
+        expect(changeCb).not.toHaveBeenCalled();
+        expect(readyCb).not.toHaveBeenCalled();
+      }
+    });
+
+    it('applyAuthStatus promotes auth_required to ready with oauth_sign_in verified', () => {
+      service.status.set('auth_required');
+      service.applyAuthStatus({
+        status: 'ready',
+        oauth_sign_in: 'verified',
+        api_key_configured: false,
+        oauth_authenticated: true,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('ready');
+    });
+
+    it('applyAuthStatus moves no_provider to auth_required with oauth_sign_in none', () => {
+      service.status.set('no_provider');
+      service.applyAuthStatus({
+        status: 'auth_required',
+        oauth_sign_in: 'none',
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('auth_required');
+    });
   });
 
   describe('restart state', () => {

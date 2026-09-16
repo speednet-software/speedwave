@@ -74,6 +74,15 @@ impl AuthReadiness {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OauthSignIn {
+    Verified,
+    SavedUnverified,
+    #[default]
+    None,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
@@ -83,15 +92,18 @@ pub(crate) struct AuthStatusResponse {
     pub(crate) provider_configured: bool,
     #[serde(default)]
     pub(crate) status: AuthReadiness,
+    #[serde(default)]
+    pub(crate) oauth_sign_in: OauthSignIn,
 }
 
 impl AuthStatusResponse {
     pub(crate) fn from_flags(
         api_key_configured: bool,
-        oauth_authenticated: bool,
+        oauth_sign_in: OauthSignIn,
         needs_anthropic_auth: bool,
         provider_configured: bool,
     ) -> Self {
+        let oauth_authenticated = oauth_sign_in == OauthSignIn::Verified;
         Self {
             api_key_configured,
             oauth_authenticated,
@@ -103,6 +115,7 @@ impl AuthStatusResponse {
                 api_key_configured,
                 oauth_authenticated,
             ),
+            oauth_sign_in,
         }
     }
 }
@@ -688,12 +701,86 @@ mod tests {
 
     #[test]
     fn auth_status_from_flags_populates_consistent_status() {
-        let resp = AuthStatusResponse::from_flags(false, true, true, true);
+        let resp = AuthStatusResponse::from_flags(false, OauthSignIn::Verified, true, true);
         assert_eq!(resp.status, AuthReadiness::Ready);
-        let resp = AuthStatusResponse::from_flags(false, false, true, true);
+        let resp = AuthStatusResponse::from_flags(false, OauthSignIn::None, true, true);
         assert_eq!(resp.status, AuthReadiness::AuthRequired);
-        let resp = AuthStatusResponse::from_flags(true, true, true, false);
+        let resp = AuthStatusResponse::from_flags(true, OauthSignIn::Verified, true, false);
         assert_eq!(resp.status, AuthReadiness::NoProvider);
+    }
+
+    #[test]
+    fn oauth_sign_in_default_is_none() {
+        assert_eq!(OauthSignIn::default(), OauthSignIn::None);
+    }
+
+    #[test]
+    fn oauth_sign_in_wire_strings_are_snake_case() {
+        let cases = [
+            (OauthSignIn::Verified, "\"verified\""),
+            (OauthSignIn::SavedUnverified, "\"saved_unverified\""),
+            (OauthSignIn::None, "\"none\""),
+        ];
+        for (v, wire) in cases {
+            assert_eq!(serde_json::to_string(&v).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<OauthSignIn>(wire).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn oauth_sign_in_matches_ts_union() {
+        let all = [
+            OauthSignIn::Verified,
+            OauthSignIn::SavedUnverified,
+            OauthSignIn::None,
+        ];
+        for v in all {
+            match v {
+                OauthSignIn::Verified | OauthSignIn::SavedUnverified | OauthSignIn::None => {}
+            }
+        }
+        let mut rust: Vec<String> = all
+            .iter()
+            .map(|v| {
+                serde_json::to_value(v)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust.sort();
+
+        let src = include_str!("../../src/src/app/services/project-state.service.ts");
+        let marker = "export type OauthSignIn =";
+        let idx = src
+            .find(marker)
+            .expect("project-state.service.ts must declare `export type OauthSignIn`");
+        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
+        let mut ts: Vec<String> = union
+            .split('|')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts.sort();
+
+        assert_eq!(
+            rust, ts,
+            "TS OauthSignIn union must match Rust OauthSignIn serde strings"
+        );
+    }
+
+    #[test]
+    fn from_flags_sets_oauth_authenticated_true_only_when_verified() {
+        let resp = AuthStatusResponse::from_flags(false, OauthSignIn::Verified, true, true);
+        assert!(resp.oauth_authenticated);
+        assert_eq!(resp.oauth_sign_in, OauthSignIn::Verified);
+
+        for not_verified in [OauthSignIn::SavedUnverified, OauthSignIn::None] {
+            let resp = AuthStatusResponse::from_flags(false, not_verified, true, true);
+            assert!(!resp.oauth_authenticated);
+            assert_eq!(resp.oauth_sign_in, not_verified);
+        }
     }
 
     #[test]

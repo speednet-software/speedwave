@@ -624,17 +624,27 @@ pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
         .join(" ")
 }
 
-/// Probes whether `nerdctl exec` works by running `true` — `Ok(())` on success,
-/// else the stderr content as an error.
-fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Result<()> {
-    let mut cmd = runtime.container_exec_piped(container, &["true"])?;
-    let output = cmd.output()?;
+fn run_exec_probe(cmd: &mut Command, timeout: std::time::Duration) -> anyhow::Result<()> {
+    let output = binary::run_with_timeout_capture(cmd, timeout)?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("{}", stderr.trim())
     }
+}
+
+fn probe_container_exec_with_timeout(
+    runtime: &LockedRuntime,
+    container: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<()> {
+    let mut cmd = runtime.container_exec_piped(container, &["true"])?;
+    run_exec_probe(&mut cmd, timeout)
+}
+
+fn probe_container_exec(runtime: &LockedRuntime, container: &str) -> anyhow::Result<()> {
+    probe_container_exec_with_timeout(runtime, container, consts::CONTAINER_EXEC_PROBE_TIMEOUT)
 }
 
 /// Logs each container's name + state from `compose_ps` on the recovery path,
@@ -2378,6 +2388,63 @@ services:
         assert!(!is_missing_container_error_msg("connection refused"));
         assert!(!is_missing_container_error_msg("mount namespace root"));
         assert!(!is_missing_container_error_msg("permission denied"));
+    }
+
+    #[cfg(unix)]
+    fn hanging_exec_command() -> Command {
+        let mut c = crate::binary::system_command("sleep");
+        c.arg("5");
+        c
+    }
+
+    #[cfg(windows)]
+    fn hanging_exec_command() -> Command {
+        let mut c = crate::binary::system_command("ping");
+        c.args(["-n", "6", "127.0.0.1"]);
+        c
+    }
+
+    #[test]
+    fn run_exec_probe_times_out_on_a_stalled_command_instead_of_hanging() {
+        let start = std::time::Instant::now();
+        let err = run_exec_probe(
+            &mut hanging_exec_command(),
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must not wait for the full 5s sleep, elapsed: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn probe_container_exec_with_timeout_succeeds_on_a_fast_exec() {
+        let (rt, _handles) = MockRuntimeBuilder::new().build();
+        probe_container_exec_with_timeout(&rt, "container", std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    #[test]
+    fn probe_container_exec_reports_stderr_text_on_a_nonzero_exit() {
+        let (rt, _handles) = MockRuntimeBuilder::new()
+            .push_exec_piped_failure("boom from nerdctl exec")
+            .build();
+        let err = probe_container_exec(&rt, "container").unwrap_err();
+        assert!(
+            err.to_string().contains("boom from nerdctl exec"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn classifiers_reject_the_run_with_timeout_capture_message_shape() {
+        let msg = "command 'sh' timed out after 60s";
+        assert!(!is_stale_container_error(msg));
+        assert!(!is_missing_container_error_msg(msg));
+        assert!(!is_stopped_container_error(msg));
     }
 
     #[test]
