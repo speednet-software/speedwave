@@ -10,12 +10,16 @@ setup() {
     MAKE_BIN="$(command -v make)"
     mkdir -p "$CALLER_BIN" "$FAKE_HOME"
     for tool in node npm npx; do
-        printf '#!/bin/sh\nexit 0\n' >"$CALLER_BIN/$tool"
+        {
+            echo '#!/bin/sh'
+            echo "echo $CALLER_BIN/$tool"
+        } >"$CALLER_BIN/$tool"
         chmod +x "$CALLER_BIN/$tool"
     done
     cat >"$PROBE" <<'EOF'
 probe-path: ; @printf '%s' "$$PATH" >"$(OUT)"
-probe-tools: ; @for tool in node npm npx; do command -v "$$tool"; done >"$(OUT)"
+probe-tools: ; @{ printf '%s\n' "$$PATH"; for tool in node npm npx; do command -v "$$tool"; done; } >"$(OUT)"
+probe-direct: ; @node --version
 probe-recursive: ; @"$(MAKE)" --no-print-directory -f Makefile -f "$(PROBE)" probe-tools
 EOF
 }
@@ -30,14 +34,32 @@ run_probe() {
     }
 }
 
+expect_homebrew_last() {
+    case "$1" in
+        *"/opt/homebrew/bin"*) ;;
+        *)
+            echo "Homebrew fallback missing from PATH: $1"
+            return 1
+            ;;
+    esac
+    case "${1%%/opt/homebrew/bin*}" in
+        *"$CALLER_BIN"*) ;;
+        *)
+            echo "Homebrew precedes the caller's PATH: $1"
+            return 1
+            ;;
+    esac
+}
+
 expect_caller_tools() {
     local expected
     expected="$(printf '%s\n' "$CALLER_BIN/node" "$CALLER_BIN/npm" "$CALLER_BIN/npx")"
-    [ "$(cat "$OUT")" = "$expected" ] || {
+    [ "$(tail -n +2 "$OUT")" = "$expected" ] || {
         echo "make resolved:"
         cat "$OUT"
         return 1
     }
+    expect_homebrew_last "$(head -n 1 "$OUT")"
 }
 
 @test "make exports cargo before the caller's PATH and Homebrew after it" {
@@ -51,6 +73,14 @@ expect_caller_tools() {
 @test "make recipes run the caller's node, npm and npx" {
     run_probe probe-tools
     expect_caller_tools
+}
+
+@test "a bare recipe line runs the caller's node" {
+    run_probe probe-direct
+    [ "$output" = "$CALLER_BIN/node" ] || {
+        echo "bare recipe line ran: $output"
+        return 1
+    }
 }
 
 @test "a recursive make keeps the caller's node, npm and npx" {
