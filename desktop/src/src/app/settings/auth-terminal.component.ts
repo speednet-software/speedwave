@@ -101,6 +101,8 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   private copyTimer?: ReturnType<typeof setTimeout>;
   /** True once destroyed — drops a poll response that resolves after teardown. */
   private destroyed = false;
+  /** True once `done` has fired — drops a still-in-flight tick's later, redundant emit. */
+  private doneEmitted = false;
 
   /** Fetches the CLI command, detects platform, and starts polling for auth status. */
   ngOnInit(): void {
@@ -180,11 +182,12 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
           'get_auth_status',
           { project }
         );
-        if (this.destroyed || this.project() !== project) return;
+        if (this.destroyed || this.project() !== project || this.doneEmitted) return;
         if (result.oauth_authenticated) {
           if (this.pollTimer) {
             clearInterval(this.pollTimer);
           }
+          this.doneEmitted = true;
           this.done.emit(true);
         }
       } catch (err: unknown) {

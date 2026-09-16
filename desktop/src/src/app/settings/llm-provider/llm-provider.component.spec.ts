@@ -9,7 +9,7 @@ import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { type LlmProviderEntry } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { createDeferred } from '../../testing/deferred';
+import { createDeferred, type Deferred } from '../../testing/deferred';
 import { makeMockLogger } from '../../testing/mock-logger';
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
@@ -1094,6 +1094,80 @@ describe('LlmProviderComponent', () => {
     component.ngOnDestroy();
 
     expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();
+  });
+
+  it('saves the configuration once when a detected login arrives while probes are slow', async () => {
+    const calls: string[] = [];
+    const notConfigured: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      status: 'auth_required',
+    };
+    const verified: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: true,
+      oauth_sign_in: 'verified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      status: 'ready',
+    };
+    let slow = false;
+    const pendingAuthStatus: Deferred<AuthStatusResponse>[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'get_llm_config') {
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
+      }
+      if (cmd === 'get_auth_status') {
+        if (!slow) return notConfigured;
+        const deferred = createDeferred<AuthStatusResponse>();
+        pendingAuthStatus.push(deferred);
+        return deferred.promise;
+      }
+      if (cmd === 'get_auth_command') return "speedwave login --project 'desktop'";
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('activeProject', 'desktop');
+      fixture.detectChanges();
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.oauthSignIn()).toBe('none');
+      expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
+
+      slow = true;
+      vi.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(1500);
+      vi.advanceTimersByTime(3000);
+      mockTauri.dispatchEvent('window_focused', undefined);
+      vi.advanceTimersByTime(1500);
+
+      expect(pendingAuthStatus.length).toBeGreaterThan(1);
+
+      for (let round = 0; round < 10 && pendingAuthStatus.length > 0; round++) {
+        const batch = pendingAuthStatus.splice(0, pendingAuthStatus.length);
+        for (const deferred of batch) deferred.resolve(verified);
+        await flushMicrotasks();
+      }
+      fixture.detectChanges();
+      await flushMicrotasks();
+      fixture.detectChanges();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(calls.filter((c) => c === 'update_llm_config')).toHaveLength(1);
+    expect(component.oauthAuthenticated()).toBe(true);
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="auth-status-value"]')?.textContent
+    ).toContain('connected');
   });
 
   it('onOAuthDone_failure_does_not_save', async () => {

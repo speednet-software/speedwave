@@ -352,6 +352,30 @@ describe('AuthTerminalComponent', () => {
     expect(doneSpy).not.toHaveBeenCalled();
   });
 
+  it('emits done only once when two overlapping in-flight polls both resolve true', async () => {
+    const first = createDeferred<{ oauth_authenticated: boolean }>();
+    const second = createDeferred<{ oauth_authenticated: boolean }>();
+    const responses = [first.promise, second.promise];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return responses.shift();
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(3000);
+    vi.advanceTimersByTime(3000);
+
+    first.resolve({ oauth_authenticated: true });
+    second.resolve({ oauth_authenticated: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('renders the primary "Open terminal" button', async () => {
     fixture.detectChanges();
     await vi.advanceTimersByTimeAsync(0);

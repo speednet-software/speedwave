@@ -1037,16 +1037,25 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  private oauthDoneInFlight = false;
+
   /**
    * Auto-selects + saves Anthropic on OAuth success, unconditionally: the prior active provider may still be routing live, so saveConfig must run even if the card was already showing Anthropic.
+   * Single-flight: concurrent callers (poll tick, focus probe, terminal emit racing together) return immediately instead of each reloading status and saving again.
    * @param _success - unused; the handler re-checks auth status instead of trusting the caller's flag
    */
   async onOAuthDone(_success: boolean): Promise<void> {
-    await this.loadAuthStatus();
-    if (this.oauthAuthenticated()) {
-      this.selectedTarget.set('anthropic');
-      this.provider.set('anthropic');
-      await this.saveConfig(true);
+    if (this.oauthDoneInFlight) return;
+    this.oauthDoneInFlight = true;
+    try {
+      await this.loadAuthStatus();
+      if (this.oauthAuthenticated()) {
+        this.selectedTarget.set('anthropic');
+        this.provider.set('anthropic');
+        await this.saveConfig(true);
+      }
+    } finally {
+      this.oauthDoneInFlight = false;
     }
     this.cdr.markForCheck();
   }
