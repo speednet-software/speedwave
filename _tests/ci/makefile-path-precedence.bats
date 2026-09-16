@@ -2,11 +2,11 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
-setup() {
-    CALLER_BIN="$BATS_TEST_TMPDIR/caller-bin"
-    FAKE_HOME="$BATS_TEST_TMPDIR/home"
-    PROBE="$BATS_TEST_TMPDIR/probe.mk"
-    OUT="$BATS_TEST_TMPDIR/probe.out"
+setup_file() {
+    export CALLER_BIN="$BATS_FILE_TMPDIR/caller-bin"
+    export FAKE_HOME="$BATS_FILE_TMPDIR/home"
+    export PROBE="$BATS_FILE_TMPDIR/probe.mk"
+    export MAKE_BIN
     MAKE_BIN="$(command -v make)"
     mkdir -p "$CALLER_BIN" "$FAKE_HOME"
     for tool in node npm npx; do
@@ -17,17 +17,17 @@ setup() {
         chmod +x "$CALLER_BIN/$tool"
     done
     cat >"$PROBE" <<'EOF'
-probe-path: ; @printf '%s' "$$PATH" >"$(OUT)"
-probe-tools: ; @{ printf '%s\n' "$$PATH"; for tool in node npm npx; do command -v "$$tool"; done; } >"$(OUT)"
+.PHONY: probe-path probe-tools probe-direct probe-recursive
+probe-path: ; @printf '%s\n' "$$PATH"
+probe-tools: ; @printf '%s\n' "$$PATH"; for tool in node npm npx; do command -v "$$tool"; done
 probe-direct: ; @node --version
 probe-recursive: ; @"$(MAKE)" --no-print-directory -f Makefile -f "$(PROBE)" probe-tools
 EOF
 }
 
 run_probe() {
-    run env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL PATH="$CALLER_BIN:/usr/bin:/bin" HOME="$FAKE_HOME" \
-        "$MAKE_BIN" --no-print-directory -C "$REPO_ROOT" -f Makefile -f "$PROBE" \
-        OUT="$OUT" PROBE="$PROBE" "$1"
+    run env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL PATH="${2:-$CALLER_BIN:/usr/bin:/bin}" HOME="$FAKE_HOME" \
+        "$MAKE_BIN" --no-print-directory -C "$REPO_ROOT" -f Makefile -f "$PROBE" PROBE="$PROBE" "$1"
     [ "$status" -eq 0 ] || {
         echo "make $1 failed ($status): $output"
         return 1
@@ -52,20 +52,26 @@ expect_homebrew_last() {
 }
 
 expect_caller_tools() {
-    local expected
-    expected="$(printf '%s\n' "$CALLER_BIN/node" "$CALLER_BIN/npm" "$CALLER_BIN/npx")"
-    [ "$(tail -n +2 "$OUT")" = "$expected" ] || {
-        echo "make resolved:"
-        cat "$OUT"
+    [ "${#lines[@]}" -eq 4 ] && [ "${lines[1]}" = "$CALLER_BIN/node" ] \
+        && [ "${lines[2]}" = "$CALLER_BIN/npm" ] && [ "${lines[3]}" = "$CALLER_BIN/npx" ] || {
+        echo "make resolved: $output"
         return 1
     }
-    expect_homebrew_last "$(head -n 1 "$OUT")"
+    expect_homebrew_last "${lines[0]}"
 }
 
 @test "make exports cargo before the caller's PATH and Homebrew after it" {
     run_probe probe-path
-    [ "$(cat "$OUT")" = "$FAKE_HOME/.cargo/bin:$CALLER_BIN:/usr/bin:/bin:/opt/homebrew/bin" ] || {
-        echo "make exported PATH=$(cat "$OUT")"
+    [ "$output" = "$FAKE_HOME/.cargo/bin:$CALLER_BIN:/usr/bin:/bin:/opt/homebrew/bin" ] || {
+        echo "make exported PATH=$output"
+        return 1
+    }
+}
+
+@test "a trailing colon in the caller's PATH leaves no empty entry before Homebrew" {
+    run_probe probe-path "$CALLER_BIN:/usr/bin:/bin:"
+    [ "$output" = "$FAKE_HOME/.cargo/bin:$CALLER_BIN:/usr/bin:/bin:/opt/homebrew/bin" ] || {
+        echo "make exported PATH=$output"
         return 1
     }
 }

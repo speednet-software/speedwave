@@ -1,4 +1,4 @@
-export PATH := $(HOME)/.cargo/bin:$(PATH):/opt/homebrew/bin
+export PATH := $(HOME)/.cargo/bin:$(subst ::/opt/homebrew/bin,:/opt/homebrew/bin,$(PATH):/opt/homebrew/bin)
 
 ifeq ($(OS),Windows_NT)
 NPM := npm.cmd
