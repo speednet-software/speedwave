@@ -342,7 +342,7 @@ pub trait CommandRunner: Send + Sync {
 pub struct RealRunner;
 
 /// Combines two output streams, returning whichever is non-empty (or both joined by newline).
-fn combine_outputs(primary: &str, secondary: &str) -> String {
+pub(crate) fn combine_outputs(primary: &str, secondary: &str) -> String {
     if secondary.trim().is_empty() {
         primary.to_string()
     } else if primary.trim().is_empty() {
