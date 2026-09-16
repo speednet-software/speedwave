@@ -140,6 +140,18 @@ fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("building the detector client: {e}"))
 }
 
+/// The error and every cause below it, so a connection refusal, a reset or a connect
+/// timeout is named in the log instead of the generic "error sending request".
+fn error_chain(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
 impl NerClient {
     /// Validates the URL shape and builds the client; an error is a fatal config error.
     pub fn from_config(cfg: NerConfig) -> Result<Self, String> {
@@ -194,7 +206,9 @@ impl NerClient {
             .await
         {
             Ok(r) => r,
-            Err(e) => return NerOutcome::Unavailable(format!("request failed: {e}")),
+            Err(e) => {
+                return NerOutcome::Unavailable(format!("request failed: {}", error_chain(&e)))
+            }
         };
         let status = response.status();
         if status != reqwest::StatusCode::OK {
