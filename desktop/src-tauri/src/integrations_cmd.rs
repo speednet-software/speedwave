@@ -2131,9 +2131,9 @@ mod tests {
             .find("fn restart_integration_containers(")
             .expect("restart_integration_containers function must exist");
         let fn_end = source[fn_start..]
-            .find("\n// ── Tests ──")
+            .find("\n#[cfg(test)]")
             .map(|e| fn_start + e)
-            .expect("Tests divider must exist after restart_integration_containers");
+            .expect("test module boundary must exist after restart_integration_containers");
         let fn_body = &source[fn_start..fn_end];
 
         assert!(
