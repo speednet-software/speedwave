@@ -84,10 +84,12 @@ teardown() {
     [ -x "$SCRIPT" ]
 }
 
-@test "bundle script creates build-context/containers/" {
+@test "bundle script creates build-context/containers/ with its dotfiles and nested dirs" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ -d "$DEST/build-context/containers" ]
+    [ -f "$DEST/build-context/containers/.dockerignore" ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
 }
 
 @test "bundle script copies Containerfile.claude" {
@@ -126,7 +128,7 @@ teardown() {
     fi
 }
 
-@test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
+@test "bundle script excludes host build outputs from containers/ at copy time (target, dist, node_modules)" {
     local copy="$DEST/containers-src"
     stage_tracked_copy "$REAL_CONTAINERS" "$copy"
     local marker="$copy/.bats-prune-check"
@@ -143,6 +145,21 @@ teardown() {
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/target" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/dist" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/node_modules" ]
+}
+
+@test "bundle script never enumerates containers/proxy/target: an unreadable transient rustc deps file cannot break the copy" {
+    local copy="$DEST/containers-src"
+    stage_tracked_copy "$REAL_CONTAINERS" "$copy"
+    local plant="$copy/proxy/target/debug/deps/rustcbats0PLANT"
+    mkdir -p "$(dirname "$plant")"
+    echo transient > "$plant"
+    chmod 000 "$plant"
+    [ "$(find "$copy/proxy/target" -type f | wc -l)" -eq 1 ]
+
+    BUNDLE_CONTAINERS_DIR="$copy" run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
+    [ ! -e "$DEST/build-context/containers/proxy/target" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
@@ -380,7 +397,7 @@ EOF
         [[ "$resolved" == *'$'* ]] && continue
         checked=$((checked + 1))
         [ -e "$resolved" ] || { echo "Source path does not exist: $src (resolved: $resolved)"; return 1; }
-    done < <(grep -E '^\s*cp ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR|CONTAINERS_DIR)(/[^"]+)?"' | tr -d '"' | sort -u)
+    done < <(grep -E '^\s*(cp|copy_tree) ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR|CONTAINERS_DIR)(/[^"]+)?"' | tr -d '"' | sort -u)
     [ "$checked" -gt 0 ]
 }
 

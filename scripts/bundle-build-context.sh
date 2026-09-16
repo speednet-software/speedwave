@@ -43,17 +43,20 @@ if [ "${#wasm_artifacts[@]}" -eq 0 ] || [ ! -s "${wasm_artifacts[0]}" ]; then
 fi
 
 
-mkdir -p "$DEST/build-context"
-cp -r "$CONTAINERS_DIR" "$DEST/build-context/containers"
+copy_tree() {
+  local src="$1" dest="$2"
+  mkdir -p "$dest"
+  (cd "$src" && find . -type d \
+      \( -name target -o -name dist -o -name node_modules \) -prune -o ! -type d -print0 |
+    tar -cf - --null -T -) | tar -xpmf - -C "$dest"
+}
 
-mkdir -p "$DEST/build-context/containers/crates"
-cp -r "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
+copy_tree "$CONTAINERS_DIR" "$DEST/build-context/containers"
+
+copy_tree "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
 
 mkdir -p "$DEST/build-context/containers/mcp-servers/policies"
 cp "$MCP_SERVERS_DIR/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"
-
-find "$DEST/build-context/containers" -type d \
-    \( -name target -o -name dist -o -name node_modules \) -prune -exec rm -rf {} +
 
 find "$DEST/build-context/containers" -type f -name '*.sh' -print0 |
     xargs -0 sed -i.bak 's/\r//g'
