@@ -184,6 +184,7 @@ try {
 Write-Host "== Enabling Windows long paths (ninja needs them for the whisper.cpp Vulkan build) =="
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
     -Name 'LongPathsEnabled' -Value 1 -Type DWord
+# No 2>&1 capture: under EAP=Stop, merged native stderr becomes a terminating NativeCommandError.
 try {
     git config --system core.longpaths true
     if ($LASTEXITCODE -ne 0) {
