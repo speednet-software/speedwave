@@ -1,1 +1,193 @@
-LyoqCiAqIEFsaWdubWVudCBndWFyZDogdGhlIGFudGktRk9VQyBpbmxpbmUgc2NyaXB0IGluIGluZGV4Lmh0bWwgaGFyZGNvZGVzIHRoZSBtb2RlIHN0b3JhZ2UKICoga2V5IGFuZCB0aGUgZmlyc3QtcnVuIGRlZmF1bHQ7IGJvdGggbXVzdCBtYXRjaCB0aGVtZS5zZXJ2aWNlLnRzLgogKi8KaW1wb3J0IHsgZGVzY3JpYmUsIGl0LCBleHBlY3QsIGJlZm9yZUVhY2gsIGFmdGVyRWFjaCB9IGZyb20gJ3ZpdGVzdCc7CmltcG9ydCB7IHJlYWRGaWxlU3luYyB9IGZyb20gJ25vZGU6ZnMnOwppbXBvcnQgeyBqb2luIH0gZnJvbSAnbm9kZTpwYXRoJzsKaW1wb3J0IHsgZmluZFNyY1Jvb3QgfSBmcm9tICcuL3Rlc3Rpbmcvc3JjLXJvb3QnOwppbXBvcnQgeyBNT0RFX1NUT1JBR0VfS0VZIH0gZnJvbSAnLi9zZXJ2aWNlcy90aGVtZS5zZXJ2aWNlJzsKCmNvbnN0IFNSQ19ST09UID0gZmluZFNyY1Jvb3QoKTsKY29uc3QgSU5ERVhfSFRNTCA9IHJlYWRGaWxlU3luYyhqb2luKFNSQ19ST09ULCAnaW5kZXguaHRtbCcpLCAndXRmLTgnKTsKY29uc3QgVEhFTUVfU0VSVklDRSA9IHJlYWRGaWxlU3luYyhqb2luKFNSQ19ST09ULCAnYXBwJywgJ3NlcnZpY2VzJywgJ3RoZW1lLnNlcnZpY2UudHMnKSwgJ3V0Zi04Jyk7CgovKioKICogRXh0cmFjdHMgYSBzaW5nbGUtcXVvdGVkIGxpdGVyYWwgYXNzaWduZWQgdG8gYW4gZXhwb3J0ZWQgY29uc3QgaW4gdGhlbWUuc2VydmljZS50cy4KICogQHBhcmFtIGNvbnN0TmFtZSAtIE5hbWUgb2YgdGhlIGV4cG9ydGVkIGNvbnN0LgogKiBAcmV0dXJucyBUaGUgbGl0ZXJhbCdzIHZhbHVlLgogKi8KZnVuY3Rpb24gc2VydmljZUxpdGVyYWwoY29uc3ROYW1lOiBzdHJpbmcpOiBzdHJpbmcgewogIGNvbnN0IG1hdGNoID0gbmV3IFJlZ0V4cChgZXhwb3J0IGNvbnN0ICR7Y29uc3ROYW1lfVtePV0qPVxccyonKFteJ10rKSdgKS5leGVjKFRIRU1FX1NFUlZJQ0UpOwogIGlmICghbWF0Y2gpIHRocm93IG5ldyBFcnJvcihgdGhlbWUuc2VydmljZS50czogbm8gc2luZ2xlLXF1b3RlZCBsaXRlcmFsIGZvciAke2NvbnN0TmFtZX1gKTsKICByZXR1cm4gbWF0Y2hbMV07Cn0KCmRlc2NyaWJlKCdhbnRpLUZPVUMgc2NyaXB0IOKGlCB0aGVtZS5zZXJ2aWNlLnRzIGFsaWdubWVudCcsICgpID0+IHsKICBpdCgncmVhZHMgdGhlIHN0b3JhZ2Uga2V5IHRoZSBzZXJ2aWNlIHdyaXRlcycsICgpID0+IHsKICAgIGV4cGVjdChJTkRFWF9IVE1MKS50b0NvbnRhaW4oYGxvY2FsU3RvcmFnZS5nZXRJdGVtKCcke3NlcnZpY2VMaXRlcmFsKCdNT0RFX1NUT1JBR0VfS0VZJyl9JylgKTsKICB9KTsKCiAgaXQoJ2ZhbGxzIGJhY2sgdG8gdGhlIHNhbWUgZmlyc3QtcnVuIGRlZmF1bHQgYXMgdGhlIHNlcnZpY2UnLCAoKSA9PiB7CiAgICBleHBlY3QoSU5ERVhfSFRNTCkudG9Db250YWluKGA6ICcke3NlcnZpY2VMaXRlcmFsKCdERUZBVUxUX1RIRU1FX01PREUnKX0nYCk7CiAgfSk7CgogIGl0KCdyZXNvbHZlcyBhdXRvIGFnYWluc3QgdGhlIE9TIHByZWZlcmVuY2UgYmVmb3JlIHRoZSBhcHAgYm9vdHMnLCAoKSA9PiB7CiAgICBleHBlY3QoSU5ERVhfSFRNTCkudG9Db250YWluKCJ3aW5kb3cubWF0Y2hNZWRpYSgnKHByZWZlcnMtY29sb3Itc2NoZW1lOiBkYXJrKScpLm1hdGNoZXMiKTsKICB9KTsKCiAgaXQoJ2ZhaWxzIGxvdWRseSB3aGVuIGEgY29uc3QgbGl0ZXJhbCBpcyBtaXNzaW5nJywgKCkgPT4gewogICAgZXhwZWN0KCgpID0+IHNlcnZpY2VMaXRlcmFsKCdOT19TVUNIX0NPTlNUJykpLnRvVGhyb3coL25vIHNpbmdsZS1xdW90ZWQgbGl0ZXJhbC8pOwogIH0pOwp9KTsKCi8qKgogKiBFeHRyYWN0cyB0aGUgaW5saW5lIGA8c2NyaXB0PmAgYm9keSBmcm9tIGluZGV4Lmh0bWwuCiAqIEByZXR1cm5zIFRoZSBzY3JpcHQgc291cmNlLCB3aXRob3V0IHRoZSBzdXJyb3VuZGluZyB0YWdzLgogKi8KZnVuY3Rpb24gaW5saW5lU2NyaXB0U291cmNlKCk6IHN0cmluZyB7CiAgY29uc3QgbWF0Y2ggPSAvPHNjcmlwdD4oW1xzXFNdKj8pPFwvc2NyaXB0Pi8uZXhlYyhJTkRFWF9IVE1MKTsKICBpZiAoIW1hdGNoKSB0aHJvdyBuZXcgRXJyb3IoJ2luZGV4Lmh0bWw6IG5vIGlubGluZSBhbnRpLUZPVUMgc2NyaXB0IGZvdW5kJyk7CiAgcmV0dXJuIG1hdGNoWzFdOwp9CgovKiogRXhlY3V0ZXMgdGhlIHJlYWwgYW50aS1GT1VDIHNvdXJjZSBhZ2FpbnN0IHRoZSBjdXJyZW50IERPTSBhbmQgZ2xvYmFscy4gKi8KZnVuY3Rpb24gcnVuQW50aUZvdWNTY3JpcHQoKTogdm9pZCB7CiAgbmV3IEZ1bmN0aW9uKGlubGluZVNjcmlwdFNvdXJjZSgpKSgpOwp9CgovKioKICogU3R1YnMgYHdpbmRvdy5tYXRjaE1lZGlhYCB3aXRoIGEgZml4ZWQgYChwcmVmZXJzLWNvbG9yLXNjaGVtZTogZGFyaylgIGFuc3dlci4KICogQHBhcmFtIHByZWZlcnNEYXJrIC0gVmFsdWUgdGhlIHN0dWIgcmVwb3J0cyBhcyBgbWF0Y2hlc2AuCiAqIEByZXR1cm5zIENhbGxiYWNrIHJlc3RvcmluZyB0aGUgcHJldmlvdXMgYG1hdGNoTWVkaWFgLgogKi8KZnVuY3Rpb24gc3R1Yk1hdGNoTWVkaWEocHJlZmVyc0Rhcms6IGJvb2xlYW4pOiAoKSA9PiB2b2lkIHsKICBjb25zdCBvcmlnaW5hbCA9IE9iamVjdC5nZXRPd25Qcm9wZXJ0eURlc2NyaXB0b3Iod2luZG93LCAnbWF0Y2hNZWRpYScpOwogIE9iamVjdC5kZWZpbmVQcm9wZXJ0eSh3aW5kb3csICdtYXRjaE1lZGlhJywgewogICAgY29uZmlndXJhYmxlOiB0cnVlLAogICAgd3JpdGFibGU6IHRydWUsCiAgICB2YWx1ZTogKCkgPT4gKHsgbWF0Y2hlczogcHJlZmVyc0RhcmsgfSkgYXMgdW5rbm93biBhcyBNZWRpYVF1ZXJ5TGlzdCwKICB9KTsKICByZXR1cm4gKCkgPT4gewogICAgaWYgKG9yaWdpbmFsKSB7CiAgICAgIE9iamVjdC5kZWZpbmVQcm9wZXJ0eSh3aW5kb3csICdtYXRjaE1lZGlhJywgb3JpZ2luYWwpOwogICAgfSBlbHNlIHsKICAgICAgUmVmbGVjdC5kZWxldGVQcm9wZXJ0eSh3aW5kb3cgYXMgdW5rbm93biBhcyBSZWNvcmQ8c3RyaW5nLCB1bmtub3duPiwgJ21hdGNoTWVkaWEnKTsKICAgIH0KICB9Owp9CgpkZXNjcmliZSgnYW50aS1GT1VDIHNjcmlwdCBiZWhhdmlvcicsICgpID0+IHsKICBsZXQgcmVzdG9yZU1lZGlhOiAoKSA9PiB2b2lkID0gKCkgPT4gdW5kZWZpbmVkOwogIGxldCBvcmlnaW5hbExvY2FsU3RvcmFnZTogUHJvcGVydHlEZXNjcmlwdG9yIHwgdW5kZWZpbmVkOwoKICBiZWZvcmVFYWNoKCgpID0+IHsKICAgIG9yaWdpbmFsTG9jYWxTdG9yYWdlID0gT2JqZWN0LmdldE93blByb3BlcnR5RGVzY3JpcHRvcihnbG9iYWxUaGlzLCAnbG9jYWxTdG9yYWdlJyk7CiAgICBsb2NhbFN0b3JhZ2UuY2xlYXIoKTsKICAgIGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QucmVtb3ZlKCdkYXJrJyk7CiAgfSk7CgogIGFmdGVyRWFjaCgoKSA9PiB7CiAgICByZXN0b3JlTWVkaWEoKTsKICAgIHJlc3RvcmVNZWRpYSA9ICgpID0+IHVuZGVmaW5lZDsKICAgIGlmIChvcmlnaW5hbExvY2FsU3RvcmFnZSkgewogICAgICBPYmplY3QuZGVmaW5lUHJvcGVydHkoZ2xvYmFsVGhpcywgJ2xvY2FsU3RvcmFnZScsIG9yaWdpbmFsTG9jYWxTdG9yYWdlKTsKICAgIH0KICAgIGxvY2FsU3RvcmFnZS5jbGVhcigpOwogICAgZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5yZW1vdmUoJ2RhcmsnKTsKICB9KTsKCiAgLy8gSGFwcHkgcGF0aHMg4oCUIGZpcnN0IHJ1biAoZW1wdHkgc3RvcmFnZSkgZm9sbG93cyB0aGUgT1MsIGJvdGggZGlyZWN0aW9ucy4KICBpdCgncGFpbnRzIGxpZ2h0IG9uIGEgZmlyc3QgcnVuIHVuZGVyIGEgbGlnaHQgc3lzdGVtJywgKCkgPT4gewogICAgcmVzdG9yZU1lZGlhID0gc3R1Yk1hdGNoTWVkaWEoZmFsc2UpOwogICAgcnVuQW50aUZvdWNTY3JpcHQoKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUoZmFsc2UpOwogIH0pOwoKICBpdCgncGFpbnRzIGRhcmsgb24gYSBmaXJzdCBydW4gdW5kZXIgYSBkYXJrIHN5c3RlbScsICgpID0+IHsKICAgIHJlc3RvcmVNZWRpYSA9IHN0dWJNYXRjaE1lZGlhKHRydWUpOwogICAgcnVuQW50aUZvdWNTY3JpcHQoKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUodHJ1ZSk7CiAgfSk7CgogIGl0KCduZXZlciBwZXJzaXN0cyBhIG1vZGUgdGhlIHVzZXIgZGlkIG5vdCBjaG9vc2UnLCAoKSA9PiB7CiAgICByZXN0b3JlTWVkaWEgPSBzdHViTWF0Y2hNZWRpYSh0cnVlKTsKICAgIHJ1bkFudGlGb3VjU2NyaXB0KCk7CiAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSkpLnRvQmVOdWxsKCk7CiAgfSk7CgogIGl0KCdob25vdXJzIGEgc3RvcmVkIGxpZ2h0IGNob2ljZSBvbiBhIGRhcmsgc3lzdGVtJywgKCkgPT4gewogICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSwgJ2xpZ2h0Jyk7CiAgICByZXN0b3JlTWVkaWEgPSBzdHViTWF0Y2hNZWRpYSh0cnVlKTsKICAgIHJ1bkFudGlGb3VjU2NyaXB0KCk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKGZhbHNlKTsKICB9KTsKCiAgaXQoJ2hvbm91cnMgYSBzdG9yZWQgZGFyayBjaG9pY2Ugb24gYSBsaWdodCBzeXN0ZW0nLCAoKSA9PiB7CiAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShNT0RFX1NUT1JBR0VfS0VZLCAnZGFyaycpOwogICAgcmVzdG9yZU1lZGlhID0gc3R1Yk1hdGNoTWVkaWEoZmFsc2UpOwogICAgcnVuQW50aUZvdWNTY3JpcHQoKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUodHJ1ZSk7CiAgfSk7CgogIGl0KCdyZXNvbHZlcyBhIHN0b3JlZCBhdXRvIGFnYWluc3QgdGhlIHN5c3RlbSBwcmVmZXJlbmNlJywgKCkgPT4gewogICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSwgJ2F1dG8nKTsKICAgIHJlc3RvcmVNZWRpYSA9IHN0dWJNYXRjaE1lZGlhKHRydWUpOwogICAgcnVuQW50aUZvdWNTY3JpcHQoKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUodHJ1ZSk7CgogICAgcmVzdG9yZU1lZGlhKCk7CiAgICBkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LnJlbW92ZSgnZGFyaycpOwogICAgcmVzdG9yZU1lZGlhID0gc3R1Yk1hdGNoTWVkaWEoZmFsc2UpOwogICAgcnVuQW50aUZvdWNTY3JpcHQoKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUoZmFsc2UpOwogIH0pOwoKICAvLyBFZGdlIGNhc2VzCiAgaXQoJ3RyZWF0cyBhbiBlbXB0eSBzdG9yZWQgdmFsdWUgYXMgdGhlIGZpcnN0LXJ1biBkZWZhdWx0JywgKCkgPT4gewogICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSwgJycpOwogICAgcmVzdG9yZU1lZGlhID0gc3R1Yk1hdGNoTWVkaWEodHJ1ZSk7CiAgICBydW5BbnRpRm91Y1NjcmlwdCgpOwogICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZSh0cnVlKTsKICB9KTsKCiAgLy8gT25seSBsaWdodC9kYXJrIGFyZSBleHBsaWNpdCB1c2VyIGNob2ljZXM7IGFueXRoaW5nIGVsc2UgaXMgdGhlIGF1dG8gZGVmYXVsdCwKICAvLyBtYXRjaGluZyByZWFkU3RvcmVkQ2hvaWNlJ3MgYWxsb3dsaXN0IGluIHRoZW1lLnNlcnZpY2UudHMuCiAgaXQoJ3RyZWF0cyBhbiB1bmtub3duIHN0b3JlZCB2YWx1ZSBhcyBhdXRvIGFuZCBmb2xsb3dzIHRoZSBzeXN0ZW0nLCAoKSA9PiB7CiAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShNT0RFX1NUT1JBR0VfS0VZLCAnc2VwaWEnKTsKICAgIHJlc3RvcmVNZWRpYSA9IHN0dWJNYXRjaE1lZGlhKHRydWUpOwogICAgcnVuQW50aUZvdWNTY3JpcHQoKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUodHJ1ZSk7CiAgfSk7CgogIC8vIEVycm9yIHBhdGhzIOKAlCB0aGUgY2F0Y2ggYnJhbmNoIG11c3QgbGVhdmUgdGhlIGRvY3VtZW50IGxpZ2h0LCBuZXZlciB0aHJvdy4KICBpdCgnc3RheXMgbGlnaHQgYW5kIHNpbGVudCB3aGVuIGxvY2FsU3RvcmFnZSByZWFkcyB0aHJvdycsICgpID0+IHsKICAgIE9iamVjdC5kZWZpbmVQcm9wZXJ0eShnbG9iYWxUaGlzLCAnbG9jYWxTdG9yYWdlJywgewogICAgICBjb25maWd1cmFibGU6IHRydWUsCiAgICAgIHdyaXRhYmxlOiB0cnVlLAogICAgICB2YWx1ZTogewogICAgICAgIGdldEl0ZW06ICgpID0+IHsKICAgICAgICAgIHRocm93IG5ldyBFcnJvcignc3RvcmFnZSBkaXNhYmxlZCcpOwogICAgICAgIH0sCiAgICAgICAgc2V0SXRlbTogKCkgPT4gdW5kZWZpbmVkLAogICAgICAgIHJlbW92ZUl0ZW06ICgpID0+IHVuZGVmaW5lZCwKICAgICAgICBjbGVhcjogKCkgPT4gdW5kZWZpbmVkLAogICAgICAgIGtleTogKCkgPT4gbnVsbCwKICAgICAgICBsZW5ndGg6IDAsCiAgICAgIH0gc2F0aXNmaWVzIFN0b3JhZ2UsCiAgICB9KTsKICAgIHJlc3RvcmVNZWRpYSA9IHN0dWJNYXRjaE1lZGlhKHRydWUpOwogICAgZXhwZWN0KCgpID0+IHJ1bkFudGlGb3VjU2NyaXB0KCkpLm5vdC50b1Rocm93KCk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKGZhbHNlKTsKICB9KTsKCiAgaXQoJ3N0YXlzIGxpZ2h0IGFuZCBzaWxlbnQgd2hlbiBtYXRjaE1lZGlhIGlzIHVuYXZhaWxhYmxlJywgKCkgPT4gewogICAgY29uc3Qgb3JpZ2luYWwgPSBPYmplY3QuZ2V0T3duUHJvcGVydHlEZXNjcmlwdG9yKHdpbmRvdywgJ21hdGNoTWVkaWEnKTsKICAgIFJlZmxlY3QuZGVsZXRlUHJvcGVydHkod2luZG93IGFzIHVua25vd24gYXMgUmVjb3JkPHN0cmluZywgdW5rbm93bj4sICdtYXRjaE1lZGlhJyk7CiAgICByZXN0b3JlTWVkaWEgPSAoKSA9PiB7CiAgICAgIGlmIChvcmlnaW5hbCkgT2JqZWN0LmRlZmluZVByb3BlcnR5KHdpbmRvdywgJ21hdGNoTWVkaWEnLCBvcmlnaW5hbCk7CiAgICB9OwogICAgZXhwZWN0KCgpID0+IHJ1bkFudGlGb3VjU2NyaXB0KCkpLm5vdC50b1Rocm93KCk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKGZhbHNlKTsKICB9KTsKfSk7Cg==
+/**
+ * Alignment guard: the anti-FOUC inline script in index.html hardcodes the mode storage
+ * key and the first-run default; both must match theme.service.ts.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { findSrcRoot } from './testing/src-root';
+import { MODE_STORAGE_KEY } from './services/theme.service';
+
+const SRC_ROOT = findSrcRoot();
+const INDEX_HTML = readFileSync(join(SRC_ROOT, 'index.html'), 'utf-8');
+const THEME_SERVICE = readFileSync(join(SRC_ROOT, 'app', 'services', 'theme.service.ts'), 'utf-8');
+
+/**
+ * Extracts a single-quoted literal assigned to an exported const in theme.service.ts.
+ * @param constName - Name of the exported const.
+ * @returns The literal's value.
+ */
+function serviceLiteral(constName: string): string {
+  const match = new RegExp(`export const ${constName}[^=]*=\\s*'([^']+)'`).exec(THEME_SERVICE);
+  if (!match) throw new Error(`theme.service.ts: no single-quoted literal for ${constName}`);
+  return match[1];
+}
+
+describe('anti-FOUC script ↔ theme.service.ts alignment', () => {
+  it('reads the storage key the service writes', () => {
+    expect(INDEX_HTML).toContain(`localStorage.getItem('${serviceLiteral('MODE_STORAGE_KEY')}')`);
+  });
+
+  it('falls back to the same first-run default as the service', () => {
+    expect(INDEX_HTML).toContain(`: '${serviceLiteral('DEFAULT_THEME_MODE')}'`);
+  });
+
+  it('resolves auto against the OS preference before the app boots', () => {
+    expect(INDEX_HTML).toContain("window.matchMedia('(prefers-color-scheme: dark)').matches");
+  });
+
+  it('fails loudly when a const literal is missing', () => {
+    expect(() => serviceLiteral('NO_SUCH_CONST')).toThrow(/no single-quoted literal/);
+  });
+});
+
+/**
+ * Extracts the inline `<script>` body from index.html.
+ * @returns The script source, without the surrounding tags.
+ */
+function inlineScriptSource(): string {
+  const match = /<script>([\s\S]*?)<\/script>/.exec(INDEX_HTML);
+  if (!match) throw new Error('index.html: no inline anti-FOUC script found');
+  return match[1];
+}
+
+/** Executes the real anti-FOUC source against the current DOM and globals. */
+function runAntiFoucScript(): void {
+  new Function(inlineScriptSource())();
+}
+
+/**
+ * Stubs `window.matchMedia` with a fixed `(prefers-color-scheme: dark)` answer.
+ * @param prefersDark - Value the stub reports as `matches`.
+ * @returns Callback restoring the previous `matchMedia`.
+ */
+function stubMatchMedia(prefersDark: boolean): () => void {
+  const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: () => ({ matches: prefersDark }) as unknown as MediaQueryList,
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(window, 'matchMedia', original);
+    } else {
+      Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia');
+    }
+  };
+}
+
+describe('anti-FOUC script behavior', () => {
+  let restoreMedia: () => void = () => undefined;
+  let originalLocalStorage: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    localStorage.clear();
+    document.documentElement.classList.remove('dark');
+  });
+
+  afterEach(() => {
+    restoreMedia();
+    restoreMedia = () => undefined;
+    if (originalLocalStorage) {
+      Object.defineProperty(globalThis, 'localStorage', originalLocalStorage);
+    }
+    localStorage.clear();
+    document.documentElement.classList.remove('dark');
+  });
+
+  // Happy paths — first run (empty storage) follows the OS, both directions.
+  it('paints light on a first run under a light system', () => {
+    restoreMedia = stubMatchMedia(false);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  it('paints dark on a first run under a dark system', () => {
+    restoreMedia = stubMatchMedia(true);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+
+  it('never persists a mode the user did not choose', () => {
+    restoreMedia = stubMatchMedia(true);
+    runAntiFoucScript();
+    expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+  });
+
+  it('honours a stored light choice on a dark system', () => {
+    localStorage.setItem(MODE_STORAGE_KEY, 'light');
+    restoreMedia = stubMatchMedia(true);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  it('honours a stored dark choice on a light system', () => {
+    localStorage.setItem(MODE_STORAGE_KEY, 'dark');
+    restoreMedia = stubMatchMedia(false);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+
+  it('resolves a stored auto against the system preference', () => {
+    localStorage.setItem(MODE_STORAGE_KEY, 'auto');
+    restoreMedia = stubMatchMedia(true);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+
+    restoreMedia();
+    document.documentElement.classList.remove('dark');
+    restoreMedia = stubMatchMedia(false);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  // Edge cases
+  it('treats an empty stored value as the first-run default', () => {
+    localStorage.setItem(MODE_STORAGE_KEY, '');
+    restoreMedia = stubMatchMedia(true);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+
+  // Only light/dark are explicit user choices; anything else is the auto default,
+  // matching readStoredChoice's allowlist in theme.service.ts.
+  it('treats an unknown stored value as auto and follows the system', () => {
+    localStorage.setItem(MODE_STORAGE_KEY, 'sepia');
+    restoreMedia = stubMatchMedia(true);
+    runAntiFoucScript();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+  });
+
+  // Error paths — the catch branch must leave the document light, never throw.
+  it('stays light and silent when localStorage reads throw', () => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      writable: true,
+      value: {
+        getItem: () => {
+          throw new Error('storage disabled');
+        },
+        setItem: () => undefined,
+        removeItem: () => undefined,
+        clear: () => undefined,
+        key: () => null,
+        length: 0,
+      } satisfies Storage,
+    });
+    restoreMedia = stubMatchMedia(true);
+    expect(() => runAntiFoucScript()).not.toThrow();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+
+  it('stays light and silent when matchMedia is unavailable', () => {
+    const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+    Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia');
+    restoreMedia = () => {
+      if (original) Object.defineProperty(window, 'matchMedia', original);
+    };
+    expect(() => runAntiFoucScript()).not.toThrow();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+  });
+});
