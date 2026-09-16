@@ -462,8 +462,10 @@ mod tests {
     fn batch_preserves_order_and_spans_stay_inside_their_text() {
         let (_dir, detector) = detector();
         let texts = ["anna kowalski", "", "w łodzi a b c"];
-        let mut opts = DetectOptions::default();
-        opts.min_score = 0.0;
+        let opts = DetectOptions {
+            min_score: 0.0,
+            ..Default::default()
+        };
         let batches = detector.detect_batch(&texts, &opts).unwrap();
         assert_eq!(batches.len(), 3);
         assert!(batches[1].is_empty());
@@ -484,8 +486,10 @@ mod tests {
     fn detect_is_predict_windows_followed_by_spans_from_windows() {
         let (_dir, detector) = detector();
         let text = "anna kowalski mieszka w łodzi";
-        let mut opts = DetectOptions::default();
-        opts.min_score = 0.0;
+        let opts = DetectOptions {
+            min_score: 0.0,
+            ..Default::default()
+        };
         let windows = detector.predict_windows(text, &opts).unwrap();
         let composed = detector.spans_from_windows(text, &windows, &opts).unwrap();
         assert_eq!(composed, detector.detect(text, &opts).unwrap());
@@ -515,8 +519,10 @@ mod tests {
     #[test]
     fn min_score_one_filters_everything() {
         let (_dir, detector) = detector();
-        let mut opts = DetectOptions::default();
-        opts.min_score = 1.0;
+        let opts = DetectOptions {
+            min_score: 1.0,
+            ..Default::default()
+        };
         assert!(detector
             .detect("anna kowalski mieszka", &opts)
             .unwrap()

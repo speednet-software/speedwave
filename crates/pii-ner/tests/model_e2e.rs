@@ -8,6 +8,11 @@
 //! on a threshold may flip), post-processing of the reference windows is identical, and
 //! `detect` equals `predict_windows` followed by `spans_from_windows`.
 
+#![expect(
+    clippy::expect_used,
+    reason = "fixture and artifact setup; a failure here must abort the test"
+)]
+
 use std::path::{Path, PathBuf};
 
 use speedwave_pii_ner::{

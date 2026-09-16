@@ -20,6 +20,10 @@ impl<B: Backend> BertEmbeddings<B> {
         let [batch, seq] = ids.dims();
         let words = self.word.forward(ids);
         let hidden = words.dims()[2];
+        #[expect(
+            clippy::single_range_in_vec_init,
+            reason = "a one-element slice spec is burn's way of cutting dimension 0"
+        )]
         let positions = self
             .position
             .val()
