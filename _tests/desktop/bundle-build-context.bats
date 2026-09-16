@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.sh"
+BUILD_WASM="$BATS_TEST_DIRNAME/../../crates/pii-engine-wasm/build-wasm.sh"
 REAL_MCP_SERVERS="$BATS_TEST_DIRNAME/../../mcp-servers"
+REAL_CONTAINERS="$BATS_TEST_DIRNAME/../../containers"
 
 rm_with_retry() {
     local target="$1"
@@ -13,17 +15,50 @@ rm_with_retry() {
     rm -rf "$target"
 }
 
-stage_mcp_servers_copy() {
-    local dir="$1" f files=()
-    git -C "$REAL_MCP_SERVERS" ls-files -z --cached -- . > "$dir.list"
+stage_tracked_copy() {
+    local src="$1" dir="$2" f files=()
+    git -C "$src" ls-files -z --cached -- . > "$dir.list"
     while IFS= read -r -d '' f; do
-        if [ -e "$REAL_MCP_SERVERS/$f" ]; then files+=("$f"); fi
+        if [ -e "$src/$f" ]; then files+=("$f"); fi
     done < "$dir.list"
     [ "${#files[@]}" -gt 0 ]
     printf '%s\0' "${files[@]}" > "$dir.list"
-    tar -C "$REAL_MCP_SERVERS" -cf "$dir.tar" --null -T "$dir.list"
+    tar -C "$src" -cf "$dir.tar" --null -T "$dir.list"
     mkdir -p "$dir"
     tar -xf "$dir.tar" -C "$dir"
+    [ "$(find "$dir" \( -type f -o -type l \) | wc -l)" -eq "${#files[@]}" ]
+}
+
+assert_run_waits_for_lock() {
+    local lock="$1" sentinel="$2" pid i rc=0 why=""
+    shift 2
+    mkdir -p "$lock" "$(dirname "$sentinel")"
+    echo "$$" > "$lock/pid"
+    touch "$sentinel"
+    [ "$(cat "$lock/pid")" = "$$" ]
+    [ -f "$sentinel" ]
+
+    "$@" &
+    pid=$!
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [ -f "$sentinel" ] || why="started its body while $lock was held"
+        [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ] || why="reclaimed or overwrote the held $lock"
+        kill -0 "$pid" 2>/dev/null || why="exited instead of waiting for $lock"
+        [ -z "$why" ] || break
+        sleep 0.2
+    done
+    if [ -n "$why" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "$* $why"
+        return 1
+    fi
+
+    rm -rf "$lock"
+    wait "$pid" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ ! -e "$sentinel" ]
+    [ ! -d "$lock" ]
 }
 
 tree_fingerprint() {
@@ -36,6 +71,9 @@ tree_fingerprint() {
 setup() {
     DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats.XXXXXX")"
     export BUNDLE_DEST="$DEST"
+    WASM_DIR="$DEST/wasm"
+    export BUNDLE_WASM_PKG_DIR="$WASM_DIR/wasm-pkg"
+    WASM_LOCK="$WASM_DIR/.wasm-build.lock"
 }
 
 teardown() {
@@ -46,10 +84,12 @@ teardown() {
     [ -x "$SCRIPT" ]
 }
 
-@test "bundle script creates build-context/containers/" {
+@test "bundle script creates build-context/containers/ with its dotfiles and nested dirs" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ -d "$DEST/build-context/containers" ]
+    [ -f "$DEST/build-context/containers/.dockerignore" ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
 }
 
 @test "bundle script copies Containerfile.claude" {
@@ -88,21 +128,38 @@ teardown() {
     fi
 }
 
-@test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
-    local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"
-    trap 'rm_with_retry "$marker"' RETURN
+@test "bundle script excludes host build outputs from containers/ at copy time (target, dist, node_modules)" {
+    local copy="$DEST/containers-src"
+    stage_tracked_copy "$REAL_CONTAINERS" "$copy"
+    local marker="$copy/.bats-prune-check"
     mkdir -p "$marker/target" "$marker/dist" "$marker/node_modules"
     echo x > "$marker/target/blob"
     echo x > "$marker/dist/blob"
     echo x > "$marker/node_modules/blob"
     echo x > "$marker/keep.txt"
+    [ "$(find "$marker" -type f | wc -l)" -eq 4 ]
 
-    run "$SCRIPT"
+    BUNDLE_CONTAINERS_DIR="$copy" run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ -f "$DEST/build-context/containers/.bats-prune-check/keep.txt" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/target" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/dist" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/node_modules" ]
+}
+
+@test "bundle script never enumerates containers/proxy/target: an unreadable transient rustc deps file cannot break the copy" {
+    local copy="$DEST/containers-src"
+    stage_tracked_copy "$REAL_CONTAINERS" "$copy"
+    local plant="$copy/proxy/target/debug/deps/rustcbats0PLANT"
+    mkdir -p "$(dirname "$plant")"
+    echo transient > "$plant"
+    chmod 000 "$plant"
+    [ "$(find "$copy/proxy/target" -type f | wc -l)" -eq 1 ]
+
+    BUNDLE_CONTAINERS_DIR="$copy" run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
+    [ ! -e "$DEST/build-context/containers/proxy/target" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
@@ -140,21 +197,86 @@ teardown() {
 }
 
 @test "bundle script rebuilds policies/wasm-pkg from source even when a stale artifact already exists" {
-    local src="$BATS_TEST_DIRNAME/../../mcp-servers/policies/wasm-pkg"
-    trap 'rm -rf "$src"' RETURN
-    mkdir -p "$src"
-    echo fake-wasm > "$src/pii_engine_wasm_bg.wasm"
+    mkdir -p "$BUNDLE_WASM_PKG_DIR"
+    echo fake-wasm > "$BUNDLE_WASM_PKG_DIR/pii_engine_wasm_bg.wasm"
+    [ "$(grep -rl fake-wasm "$BUNDLE_WASM_PKG_DIR" | wc -l)" -eq 1 ]
 
     run "$SCRIPT"
     [ "$status" -eq 0 ]
 
     local dest_dir="$DEST/build-context/mcp-servers/policies/wasm-pkg"
     shopt -s nullglob
-    local staged=("$dest_dir"/*_bg.wasm)
+    local built=("$BUNDLE_WASM_PKG_DIR"/*_bg.wasm) staged=("$dest_dir"/*_bg.wasm)
     shopt -u nullglob
-    [ "${#staged[@]}" -gt 0 ]
+    [ "${#built[@]}" -eq 1 ]
+    [ "${#staged[@]}" -eq 1 ]
     [ -s "${staged[0]}" ]
-    ! grep -q "fake-wasm" "${staged[0]}"
+    [ "$(grep -rl fake-wasm "$BUNDLE_WASM_PKG_DIR" "$dest_dir" | wc -l)" -eq 0 ]
+}
+
+@test "build-wasm.sh anchors a relative out dir to the caller's cwd, not the crate dir" {
+    local stub_dir="$DEST/stub-bin" caller="$DEST/caller" rel
+    mkdir -p "$stub_dir"
+    cat >"$stub_dir/wasm-pack" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$WASM_PACK_ARGS"
+EOF
+    chmod +x "$stub_dir/wasm-pack"
+
+    for rel in 'rel/wasm-pkg' 'rel\wasm-pkg'; do
+        mkdir -p "$caller/rel/wasm-pkg"
+        echo stale > "$caller/rel/wasm-pkg/stale_bg.wasm"
+        [ -f "$caller/rel/wasm-pkg/stale_bg.wasm" ]
+
+        WASM_PACK_ARGS="$DEST/wasm-pack-args" PATH="$stub_dir:$PATH" \
+            run bash -c 'cd "$1" && bash "$2" "$3"' _ "$caller" "$BUILD_WASM" "$rel"
+        [ "$status" -eq 0 ]
+        [ ! -e "$caller/rel/wasm-pkg" ]
+        [ "$(grep -A1 -x -e '--out-dir' "$DEST/wasm-pack-args" | tail -n 1)" = "$(cd "$caller" && pwd)/rel/wasm-pkg" ]
+    done
+}
+
+@test "build-wasm.sh keeps the same absolute path forms as scripts/cargo-target-dir.sh" {
+    local absolute='/* | [A-Za-z]:* | \\\\*)'
+    [ "$(grep -cF -- "$absolute" "$BUILD_WASM")" -eq 1 ]
+    [ "$(grep -cF -- "$absolute" "$BATS_TEST_DIRNAME/../../scripts/cargo-target-dir.sh")" -eq 1 ]
+}
+
+@test "build-wasm.sh --lock waits on the lock beside its out dir until it is released" {
+    local stub_dir="$DEST/stub-bin" out="$DEST/npm-build/wasm-pkg"
+    mkdir -p "$stub_dir"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/wasm-pack"
+    chmod +x "$stub_dir/wasm-pack"
+
+    assert_run_waits_for_lock "$DEST/npm-build/.wasm-build.lock" "$out/stale_bg.wasm" \
+        env PATH="$stub_dir:$PATH" bash "$BUILD_WASM" --lock "$out"
+}
+
+@test "build-wasm.sh without --lock builds under a lock its caller already holds" {
+    local stub_dir="$DEST/stub-bin" out="$DEST/bundle-build/wasm-pkg" lock="$DEST/bundle-build/.wasm-build.lock" pid i
+    mkdir -p "$stub_dir" "$lock" "$out"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/wasm-pack"
+    chmod +x "$stub_dir/wasm-pack"
+    echo "$$" > "$lock/pid"
+    echo stale > "$out/stale_bg.wasm"
+    [ "$(cat "$lock/pid")" = "$$" ]
+    [ -f "$out/stale_bg.wasm" ]
+
+    env PATH="$stub_dir:$PATH" bash "$BUILD_WASM" "$out" &
+    pid=$!
+    for i in $(seq 50); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "build-wasm.sh waited on the lock its caller holds"
+        return 1
+    fi
+    wait "$pid"
+    [ ! -e "$out/stale_bg.wasm" ]
+    [ "$(cat "$lock/pid")" = "$$" ]
 }
 
 @test "bundle script fails hard when the wasm toolchain is unavailable" {
@@ -271,10 +393,11 @@ EOF
     while IFS= read -r src; do
         resolved="${src//\$REPO_ROOT/$repo_root}"
         resolved="${resolved//\$MCP_SERVERS_DIR/$repo_root/mcp-servers}"
+        resolved="${resolved//\$CONTAINERS_DIR/$repo_root/containers}"
         [[ "$resolved" == *'$'* ]] && continue
         checked=$((checked + 1))
         [ -e "$resolved" ] || { echo "Source path does not exist: $src (resolved: $resolved)"; return 1; }
-    done < <(grep -E '^\s*cp ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR)/[^"]+"' | tr -d '"' | sort -u)
+    done < <(grep -E '^\s*(cp|copy_tree) ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR|CONTAINERS_DIR)(/[^"]+)?"' | tr -d '"' | sort -u)
     [ "$checked" -gt 0 ]
 }
 
@@ -303,28 +426,16 @@ EOF
 }
 
 @test "bundle script strips CR from a CRLF source script (defense-in-depth)" {
-    local src="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
-    local backup
-    backup="$(mktemp)"
-    cp "$src" "$backup"
-    local src_perms
-    src_perms=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%A' "$src")
+    local copy="$DEST/containers-src"
+    stage_tracked_copy "$REAL_CONTAINERS" "$copy"
+    printf '#!/bin/bash\r\necho hi\r\n' > "$copy/install-claude.sh"
+    chmod 0755 "$copy/install-claude.sh"
+    [ "$(grep -c $'\r' "$copy/install-claude.sh")" -eq 2 ]
+    printf '#!/bin/bash\necho hi\n' > "$DEST/expected-lf.sh"
 
-    printf '#!/bin/bash\r\necho hi\r\n' > "$src"
-    chmod 0755 "$src"
-
-    run "$SCRIPT"
-    local bundler_status=$status
-
-    cp "$backup" "$src"
-    chmod "$src_perms" "$src"
-    rm -f "$backup"
-
-    [ "$bundler_status" -eq 0 ]
-    if grep -q $'\r' "$DEST/build-context/containers/install-claude.sh"; then
-        echo "Bundler did not strip CR from destination"
-        return 1
-    fi
+    BUNDLE_CONTAINERS_DIR="$copy" run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    cmp "$DEST/expected-lf.sh" "$DEST/build-context/containers/install-claude.sh"
 }
 
 @test "bundle script preserves source script permissions" {
@@ -341,10 +452,11 @@ EOF
     [ "$src_perms" = "$dst_perms" ]
 }
 
-@test "bundle script releases the lock on success" {
+@test "bundle script releases both locks on success" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ ! -d "$DEST/.bundle.lock" ]
+    [ ! -d "$WASM_LOCK" ]
 }
 
 @test "bundle script reclaims a stale lock whose holder PID is dead" {
@@ -357,31 +469,13 @@ EOF
 }
 
 @test "lock held by a live holder blocks a second run until released" {
-    mkdir -p "$DEST/.bundle.lock"
-    echo "$$" > "$DEST/.bundle.lock/pid"   
-
-    "$SCRIPT" &
-    local pid=$!
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        [ ! -d "$DEST/build-context" ] || {
-            echo "script started its body while the lock was held"
-            return 1
-        }
-        kill -0 "$pid" 2>/dev/null || {
-            echo "script exited instead of waiting for the lock"
-            return 1
-        }
-        sleep 0.2
-    done
-    [ -f "$DEST/.bundle.lock/pid" ]                 
-    [ "$(cat "$DEST/.bundle.lock/pid")" = "$$" ]    
-
-    rm -rf "$DEST/.bundle.lock"                      
-    wait "$pid"; local rc=$?
-    [ "$rc" -eq 0 ]
+    assert_run_waits_for_lock "$DEST/.bundle.lock" "$DEST/build-context/held-sentinel" "$SCRIPT"
     [ -d "$DEST/build-context/containers" ]
-    [ ! -d "$DEST/.bundle.lock" ]                    
+}
+
+@test "wasm-build lock beside BUNDLE_WASM_PKG_DIR blocks a run until released" {
+    assert_run_waits_for_lock "$WASM_LOCK" "$DEST/build-context/held-sentinel" "$SCRIPT"
+    [ -d "$DEST/build-context/containers" ]
 }
 
 @test "concurrent runs on the same DEST both finish with a valid package.json" {
@@ -400,18 +494,21 @@ EOF
     node -e "JSON.parse(require('fs').readFileSync('$pkg','utf8'))"
 }
 
-@test "bundle script fails fast when BUNDLE_MCP_SERVERS_DIR points at a missing tree" {
-    local stub_dir="$DEST/stub-bin"
+@test "bundle script fails fast when a source-tree knob points at a missing tree" {
+    local stub_dir="$DEST/stub-bin" knob
     mkdir -p "$stub_dir"
     printf '#!/usr/bin/env bash\ntouch "%s/wasm-pack-ran"\nexit 1\n' "$DEST" > "$stub_dir/wasm-pack"
     chmod +x "$stub_dir/wasm-pack"
 
-    PATH="$stub_dir:$PATH" BUNDLE_MCP_SERVERS_DIR="$DEST/no-such-mcp-servers" run "$SCRIPT"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"BUNDLE_MCP_SERVERS_DIR"* ]]
-    [ ! -e "$DEST/wasm-pack-ran" ]
-    [ ! -d "$DEST/mcp-os" ]
-    [ ! -d "$DEST/.bundle.lock" ]
+    for knob in BUNDLE_MCP_SERVERS_DIR BUNDLE_CONTAINERS_DIR; do
+        PATH="$stub_dir:$PATH" run env "$knob=$DEST/no-such-tree" "$SCRIPT"
+        [ "$status" -ne 0 ]
+        [ "$(printf '%s' "$output" | grep -cF -- "$knob")" -eq 1 ]
+        [ ! -e "$DEST/wasm-pack-ran" ]
+        [ ! -d "$DEST/mcp-os" ]
+        [ ! -d "$DEST/.bundle.lock" ]
+        [ ! -d "$WASM_DIR" ]
+    done
 }
 
 @test "bundle-build-context.ps1 checks LASTEXITCODE after every npm call" {
@@ -422,13 +519,44 @@ EOF
     [ -z "$output" ]
 }
 
+@test "bundle-build-context.ps1 releases on every exit only the locks it acquired" {
+    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
+    [ "$(grep -c '^try {$' "$ps1")" -eq 1 ]
+    [ "$(grep -c '^} finally {$' "$ps1")" -eq 1 ]
+    run awk '
+        /^try \{$/ { in_try = 1 }
+        /^\} finally \{$/ { in_try = 0; in_finally = 1 }
+        /^[[:space:]]*Acquire-Lock \$/ { if (in_try) inside++; else outside++ }
+        /\$heldLocks\.Add\(\$dir\)/ { added = NR }
+        /Out-File -FilePath "\$dir\\pid"/ { pid_write = NR }
+        in_finally && /Remove-Item/ { removes = $0 }
+        END {
+            if (inside != 2 || outside != 0) print "Acquire-Lock calls inside the try: " inside ", outside: " outside
+            if (!added || !pid_write || added > pid_write) print "a lock must be registered before its PID write"
+            if (removes !~ /\$heldLocks/ || removes ~ /\$lockDir|\$wasmLockDir/) print "the finally must remove only $heldLocks: " removes
+        }' "$ps1"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "bundle-build-context.ps1 derives the wasm lock dir for a bare out dir name, like dirname" {
+    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
+    run awk '
+        index($0, "$wasmParentDir = Split-Path -Parent $wasmPkgDir") == 1 { split_at = NR }
+        index($0, "if (-not $wasmParentDir) { $wasmParentDir = ") == 1 { fallback_at = NR; fallback = $0 }
+        index($0, "$wasmLockDir = Join-Path $wasmParentDir") == 1 { join_at = NR }
+        END { exit !(split_at && split_at < fallback_at && fallback_at < join_at && fallback ~ /= .\.. \}$/) }' "$ps1"
+    [ "$status" -eq 0 ]
+}
+
 @test "bundle script --ci builds a clean scratch copy and leaves a concurrent run on the real tree intact" {
     local d ws workspaces=(os shared oauth) dist_dirs=()
     for ws in "${workspaces[@]}"; do dist_dirs+=("$REAL_MCP_SERVERS/$ws/dist"); done
     for d in "${dist_dirs[@]}"; do [ -d "$d" ]; done
-    [ -d "$REAL_MCP_SERVERS/node_modules" ]
+    local hidden_lock="$REAL_MCP_SERVERS/node_modules/.package-lock.json"
+    [ -f "$hidden_lock" ]
     local copy="$DEST/mcp-servers-src"
-    stage_mcp_servers_copy "$copy"
+    stage_tracked_copy "$REAL_MCP_SERVERS" "$copy"
     [ -f "$copy/package-lock.json" ]
     [ ! -d "$copy/node_modules" ]
     for ws in "${workspaces[@]}"; do [ ! -d "$copy/$ws/dist" ]; done
@@ -450,8 +578,9 @@ EOF
     [ "$r_plain" -eq 0 ]
     [ -z "$(find "${dist_dirs[@]}" -type f -newer "$marker")" ]
     [ "$(tree_fingerprint "${dist_dirs[@]}")" = "$before" ]
-    [ -z "$(find "$REAL_MCP_SERVERS/node_modules" -maxdepth 0 -newer "$marker")" ]
-    [ -d "$copy/node_modules" ]
+    [ -f "$hidden_lock" ]
+    [ -z "$(find "$hidden_lock" -newer "$marker")" ]
+    [ -f "$copy/node_modules/.package-lock.json" ]
     for ws in "${workspaces[@]}"; do [ -d "$copy/$ws/dist" ]; done
     [ -d "$DEST/mcp-os/os/dist" ]
     [ -d "$DEST/mcp-os/shared/dist" ]

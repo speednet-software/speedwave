@@ -4,14 +4,22 @@ $ErrorActionPreference = 'Stop'
 $dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 $mcpServersDir = if ($env:BUNDLE_MCP_SERVERS_DIR) { $env:BUNDLE_MCP_SERVERS_DIR } else { 'mcp-servers' }
+$containersDir = if ($env:BUNDLE_CONTAINERS_DIR) { $env:BUNDLE_CONTAINERS_DIR } else { 'containers' }
 if (-not (Test-Path -Path $mcpServersDir -PathType Container)) {
     [Console]::Error.WriteLine("ERROR: mcp-servers tree not found at $mcpServersDir (BUNDLE_MCP_SERVERS_DIR).")
     exit 1
 }
+if (-not (Test-Path -Path $containersDir -PathType Container)) {
+    [Console]::Error.WriteLine("ERROR: containers tree not found at $containersDir (BUNDLE_CONTAINERS_DIR).")
+    exit 1
+}
 
 $lockDir = "$dest\.bundle.lock"
-$wasmPkgDir = 'mcp-servers/policies/wasm-pkg'
-$wasmLockDir = 'mcp-servers/policies/.wasm-build.lock'
+$wasmPkgDir = if ($env:BUNDLE_WASM_PKG_DIR) { $env:BUNDLE_WASM_PKG_DIR } else { 'mcp-servers/policies/wasm-pkg' }
+$wasmParentDir = Split-Path -Parent $wasmPkgDir
+if (-not $wasmParentDir) { $wasmParentDir = '.' }
+$wasmLockDir = Join-Path $wasmParentDir '.wasm-build.lock'
+New-Item -ItemType Directory -Path $wasmParentDir -Force | Out-Null
 
 function Test-LockHolderDead {
     param([string]$dir)
@@ -27,6 +35,8 @@ function Test-LockHolderDead {
     }
 }
 
+$heldLocks = [System.Collections.Generic.List[string]]::new()
+
 function Acquire-Lock {
     param([string]$dir)
     while ($true) {
@@ -41,14 +51,14 @@ function Acquire-Lock {
             Start-Sleep -Milliseconds 300
         }
     }
+    $heldLocks.Add($dir)
     "$PID" | Out-File -FilePath "$dir\pid" -Encoding ascii
     return $true
 }
 
+try {
 Acquire-Lock $lockDir | Out-Null
 Acquire-Lock $wasmLockDir | Out-Null
-
-try {
 
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
 
@@ -65,26 +75,25 @@ if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 }
 }
 
 
-New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
-Copy-Item -Recurse containers "$dest\build-context\containers"
-
-New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
-Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
-
-New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
-Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
-
-function Remove-BuildOutputs {
-    param([string]$root)
-    foreach ($dir in Get-ChildItem -Path $root -Directory -Force) {
-        if ($dir.Name -in 'target', 'dist', 'node_modules') {
-            Remove-Item -Recurse -Force $dir.FullName
+function Copy-Tree {
+    param([string]$src, [string]$destDir)
+    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $src -Force) {
+        if ($item.PSIsContainer) {
+            if ($item.Name -in 'target', 'dist', 'node_modules') { continue }
+            Copy-Tree $item.FullName (Join-Path $destDir $item.Name)
         } else {
-            Remove-BuildOutputs $dir.FullName
+            Copy-Item -LiteralPath $item.FullName -Destination $destDir
         }
     }
 }
-Remove-BuildOutputs "$dest\build-context\containers"
+
+Copy-Tree $containersDir "$dest\build-context\containers"
+
+Copy-Tree crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
+
+New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
+Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
 
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -File |
@@ -161,5 +170,5 @@ Stage-Host-Worker -worker oauth -bundle oauth
 Write-Host "Build context bundled into $dest"
 
 } finally {
-    Remove-Item -Recurse -Force $lockDir,$wasmLockDir -ErrorAction SilentlyContinue
+    if ($heldLocks.Count -gt 0) { Remove-Item -Recurse -Force $heldLocks -ErrorAction SilentlyContinue }
 }
