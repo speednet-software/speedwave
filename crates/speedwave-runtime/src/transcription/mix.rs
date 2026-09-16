@@ -955,9 +955,16 @@ mod tests {
                 b.push(MixSource::Mic, 0, &vec![1.0; want]);
             })
         };
-        let chunk = poll_paired_chunk(&buf)
-            .unwrap()
-            .expect("a chunk is delivered");
+        // The push can land after KEEPALIVE_AFTER under load, so skip keepalives until it does;
+        // a push that never lands still fails the poll at STALL_GIVE_UP.
+        let chunk = loop {
+            let chunk = poll_paired_chunk(&buf)
+                .unwrap()
+                .expect("a chunk is delivered");
+            if !chunk.is_keepalive() {
+                break chunk;
+            }
+        };
         assert_eq!(chunk.samples.len(), want);
         assert!(chunk.samples.iter().all(|&s| (s - 1.0).abs() < 1e-6));
         let mic = chunk.mic.expect("mic channel present");
