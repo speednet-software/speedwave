@@ -1,10 +1,6 @@
 #!/usr/bin/env bats
-# SSOT-alignment test: each native macOS CLI binary carries an embedded
-# `__TEXT,__info_plist` section with the right id, usage description, version. macOS-only.
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
-# Mirrors scripts/build-native-macos.sh::PACKAGES. Word-split on use: macOS ships
-# bash 3.2, which has no associative arrays.
 SERVICES="calendar reminders mail notes audio-capture"
 
 setup() {
@@ -13,8 +9,6 @@ setup() {
     fi
 }
 
-# Must match SharedCLI/Utilities.swift::subBundleIdentifier (and, for
-# audio-capture, native/macos/audio-capture/Resources/Info.plist).
 expected_bundle_id() {
     case "$1" in
         calendar) echo "pl.speedwave.desktop.calendar" ;;
@@ -36,7 +30,6 @@ expected_usage_key() {
     esac
 }
 
-# Mirrors scripts/build-native-macos.sh::resolve_binary_path; empty when nothing is built.
 resolve_binary() {
     local svc="$1"
     local pkg_dir="$REPO_ROOT/native/macos/$svc"
@@ -55,8 +48,6 @@ resolve_binary() {
         ! -path "*.dSYM*" ! -path "*Intermediates*" 2>/dev/null | head -n 1
 }
 
-# All-or-nothing gate: skipping per-service mid-loop would report `ok` for a run
-# that covered fewer services than SERVICES lists.
 require_built_binaries() {
     local svc missing=""
     for svc in $SERVICES; do
@@ -65,7 +56,6 @@ require_built_binaries() {
     [ -z "$missing" ] || skip "built binaries missing for:$missing — run make build-native-macos (scripts/build-native-macos.sh for universal ones)"
 }
 
-# segedit reads single-arch Mach-O only, so thin a universal binary to the host arch first.
 extract_embedded_plist() {
     local bin="$1"
     local out="$2"
@@ -80,21 +70,16 @@ extract_embedded_plist() {
     segedit "$bin" -extract __TEXT __info_plist "$out" 2>/dev/null
 }
 
-# `// empty` keeps a missing key empty instead of the literal "null", so the
-# caller's emptiness check still reaches its skip.
 tauri_conf_version() {
     local conf="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
     if command -v jq >/dev/null 2>&1; then
         jq -r '.version // empty' "$conf"
         return 0
     fi
-    # Anchored like scripts/build-native-macos.sh, so a nested "version" cannot win.
     grep -E '^[[:space:]]*"version"[[:space:]]*:' "$conf" | head -1 |
         sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
 }
 
-# Compares one key of an already-extracted plist, naming the service, key and
-# both values on failure — the only diagnostic a bats failure carries.
 assert_plist_key() {
     local svc="$1" plist="$2" key="$3" expected="$4" actual
     actual="$(plutil -extract "$key" raw "$plist" 2>/dev/null)" || {
@@ -112,7 +97,6 @@ assert_plist_key() {
     local svc bin lines
     for svc in $SERVICES; do
         bin="$(resolve_binary "$svc")"
-        # otool -s prints a section header plus hex lines; under 3 lines means absent.
         lines=$(otool -s __TEXT __info_plist "$bin" 2>/dev/null | wc -l | tr -d ' ')
         if [ "$lines" -lt 3 ]; then
             echo "$svc-cli has no __TEXT __info_plist section (otool reported $lines lines)" >&2
@@ -124,8 +108,6 @@ assert_plist_key() {
 
 @test "embedded plist carries the right identifier, executable and version" {
     require_built_binaries
-    # One extraction per service serves all three keys; each thins a universal
-    # binary, so re-extracting per key would triple the lipo/segedit work.
     local tauri_version svc bin tmp expected
     tauri_version="$(tauri_conf_version)"
     [ -n "$tauri_version" ] || skip "cannot read version from tauri.conf.json"
@@ -150,8 +132,6 @@ assert_plist_key() {
 }
 
 @test "each CLI Info.plist has correct UsageDescription key" {
-    # Source Info.plist files (read directly, not from binary) must
-    # carry the right TCC usage description for each service.
     local svc plist key val
     for svc in $SERVICES; do
         plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
@@ -184,8 +164,6 @@ assert_plist_key() {
 }
 
 @test "Package.swift files declare Info.plist linker flags for every CLI" {
-    # Every CLI's Package.swift must carry the -sectcreate __TEXT
-    # __info_plist flags pointing at Resources/Info.plist.
     local svc pkg
     for svc in $SERVICES; do
         pkg="$REPO_ROOT/native/macos/$svc/Package.swift"

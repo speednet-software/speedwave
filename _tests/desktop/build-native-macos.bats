@@ -1,24 +1,17 @@
 #!/usr/bin/env bats
-# Version stamping must keep the x-release-please-version markers: release-please
-# rewrites these plists through them, and PlistBuddy -c Set drops every comment.
 
 SPW_ROOT="$BATS_TEST_DIRNAME/../.."
 SCRIPT="$SPW_ROOT/scripts/build-native-macos.sh"
-# Mirrors scripts/build-native-macos.sh::PACKAGES.
 SPW_PACKAGES="reminders calendar mail notes audio-capture"
 
 setup() {
     if [ "$(uname)" != "Darwin" ]; then
         skip "macOS-only: the script exits early off Darwin and needs PlistBuddy"
     fi
-    # Sourcing stops before the build loop, so this costs no swift build.
-    # It also defines APP_VERSION and PACKAGES, hence the override and the SPW_ prefix.
     . "$SCRIPT"
     APP_VERSION="9.9.9"
 }
 
-# The sourced script defines its own PACKAGES, so a name collision would silently
-# shrink every loop below to one service.
 assert_package_list() {
     local pkg n=0
     for pkg in $SPW_PACKAGES; do n=$((n + 1)); done
@@ -105,7 +98,6 @@ PY
 
 @test "every committed CLI plist is listed in release-please extra-files" {
     assert_package_list
-    # A marker only bumps when release-please is pointed at the file.
     local pkg
     for pkg in $SPW_PACKAGES; do
         grep -qF "native/macos/$pkg/Resources/Info.plist" "$SPW_ROOT/release-please-config.json" || {
