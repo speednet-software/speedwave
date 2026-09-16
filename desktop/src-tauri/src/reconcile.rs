@@ -496,6 +496,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
 
+        // Converge crash-orphans: teardown intents left by a crashed session are
+        // resumed here, skipped entirely when config is unreadable (fail safe).
         match config::load_user_config() {
             Ok(cfg) => {
                 for project in crate::containers_cmd::crashed_teardown_intents() {
@@ -650,6 +652,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         }
     };
 
+    // Converge crash-interrupted teardowns before restoring projects: the id-changed
+    // path skips only projects already queued for restore (teardown vs restore race).
     for project in crate::containers_cmd::crashed_teardown_intents() {
         if user_config.active_project.as_deref() == Some(project.as_str()) {
             continue;
@@ -677,6 +681,8 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
+        // Persist the merged set FIRST: a failed restore must not drop
+        // already-downed projects from the retry list.
         state.pending_running_projects = projects.clone();
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         log::info!("restoring {} project(s)", projects.len());

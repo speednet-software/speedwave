@@ -1696,8 +1696,8 @@ mod tests {
             .expect("Exit arm must exist");
         let after_arm = &source[arm_start..];
         let arm_end = after_arm
-            .find("\n            _ => {}")
-            .unwrap_or(after_arm.len());
+            .find("\n        _ => {}")
+            .expect("catch-all arm must exist after RunEvent::Exit");
         let exit_arm = &after_arm[..arm_end];
         assert!(
             exit_arm.contains("run_exit_cleanup(&cleanup_ctx_runevent)"),
