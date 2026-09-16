@@ -1,1 +1,203 @@
-aW1wb3J0IHsgaW5qZWN0LCBJbmplY3RhYmxlLCBPbkRlc3Ryb3ksIHNpZ25hbCwgdHlwZSBTaWduYWwgfSBmcm9tICdAYW5ndWxhci9jb3JlJzsKaW1wb3J0IHsgd2FybiBhcyBwbHVnaW5Mb2dXYXJuIH0gZnJvbSAnQHRhdXJpLWFwcHMvcGx1Z2luLWxvZyc7CmltcG9ydCB7IE5hdGl2ZVRoZW1lQWRhcHRlciwgdHlwZSBFZmZlY3RpdmVNb2RlIH0gZnJvbSAnLi9uYXRpdmUtdGhlbWUtYWRhcHRlcic7CgpleHBvcnQgdHlwZSB7IEVmZmVjdGl2ZU1vZGUgfSBmcm9tICcuL25hdGl2ZS10aGVtZS1hZGFwdGVyJzsKCi8qKiBJZGVudGlmaWVycyBmb3IgZXZlcnkgYWNjZW50IHRoZW1lIGV4cG9zZWQgaW4gU2V0dGluZ3Mg4oaSIEFwcGVhcmFuY2UuICovCmV4cG9ydCB0eXBlIFRoZW1lSWQgPSAnZW1iZXInIHwgJ2NyaW1zb24nIHwgJ21pbnQnIHwgJ2lyaXMnIHwgJ2N5YW4nIHwgJ3NhbmQnOwoKLyoqIERpc3BsYXkgb3JkZXIgZm9yIHRoZSBBcHBlYXJhbmNlIGFjY2VudCBwaWNrZXIuIEVtYmVyIGlzIGZpcnN0IGFuZCBkZWZhdWx0LiAqLwpleHBvcnQgY29uc3QgVEhFTUVfSURTOiByZWFkb25seSBUaGVtZUlkW10gPSBbCiAgJ2VtYmVyJywKICAnY3JpbXNvbicsCiAgJ21pbnQnLAogICdpcmlzJywKICAnY3lhbicsCiAgJ3NhbmQnLApdIGFzIGNvbnN0OwoKLyoqIEFwcGVhcmFuY2UgbW9kZXMg4oCUIGxpZ2h0L2RhcmsgYXJlIGV4cGxpY2l0LCBhdXRvIGZvbGxvd3MgYHByZWZlcnMtY29sb3Itc2NoZW1lYC4gKi8KZXhwb3J0IHR5cGUgVGhlbWVNb2RlID0gJ2xpZ2h0JyB8ICdkYXJrJyB8ICdhdXRvJzsKCi8qKiBEaXNwbGF5IG9yZGVyIGZvciB0aGUgTU9ERSBwaWNrZXIgaW4gQXBwZWFyYW5jZS4gKi8KZXhwb3J0IGNvbnN0IFRIRU1FX01PREVTOiByZWFkb25seSBUaGVtZU1vZGVbXSA9IFsnbGlnaHQnLCAnZGFyaycsICdhdXRvJ10gYXMgY29uc3Q7CgovKiogRmlyc3QtcnVuIG1vZGU7IHRoZSBhbnRpLUZPVUMgc2NyaXB0IGluIGluZGV4Lmh0bWwgbWlycm9ycyBpdCAocGlubmVkIGJ5IGEgdW5pdCB0ZXN0KS4gKi8KZXhwb3J0IGNvbnN0IERFRkFVTFRfVEhFTUVfTU9ERTogVGhlbWVNb2RlID0gJ2F1dG8nOwoKLyoqIGxvY2FsU3RvcmFnZSBrZXkgZm9yIHRoZSBhY2NlbnQgdGhlbWUuIEV4cG9ydGVkIHNvIHRlc3RzIGFzc2VydCB0aGUgcmVhbCBrZXkgKG5vIGRyaWZ0KS4gKi8KZXhwb3J0IGNvbnN0IFRIRU1FX1NUT1JBR0VfS0VZID0gJ3NwZWVkd2F2ZS10aGVtZSc7Ci8qKiBsb2NhbFN0b3JhZ2Uga2V5IGZvciB0aGUgYXBwZWFyYW5jZSBtb2RlLiBFeHBvcnRlZCBzbyB0ZXN0cyBhc3NlcnQgdGhlIHJlYWwga2V5IChubyBkcmlmdCkuICovCmV4cG9ydCBjb25zdCBNT0RFX1NUT1JBR0VfS0VZID0gJ3NwZWVkd2F2ZS10aGVtZS1tb2RlJzsKCi8qKgogKiBQZXJzaXN0cyBhIHZhbHVlIHRvIGxvY2FsU3RvcmFnZSwgdG9sZXJhdGluZyBwcml2YXRlLW1vZGUgLyBxdW90YSBmYWlsdXJlcy4KICogQHBhcmFtIGtleSAtIGxvY2FsU3RvcmFnZSBrZXkgdG8gd3JpdGUuCiAqIEBwYXJhbSB2YWx1ZSAtIFZhbHVlIHRvIHN0b3JlLgogKi8KZnVuY3Rpb24gc2FmZVBlcnNpc3Qoa2V5OiBzdHJpbmcsIHZhbHVlOiBzdHJpbmcpOiB2b2lkIHsKICB0cnkgewogICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oa2V5LCB2YWx1ZSk7CiAgfSBjYXRjaCB7fQp9CgovKioKICogUmVhZHMgYSBwZXJzaXN0ZWQgY2hvaWNlLCB2YWxpZGF0aW5nIGl0IGFnYWluc3QgYW4gYWxsb3dsaXN0LgogKiBAcGFyYW0ga2V5IC0gbG9jYWxTdG9yYWdlIGtleSB0byByZWFkLgogKiBAcGFyYW0gYWxsb3dsaXN0IC0gUGVybWl0dGVkIHZhbHVlczsgYW55dGhpbmcgZWxzZSBmYWxscyBiYWNrLgogKiBAcGFyYW0gZmFsbGJhY2sgLSBSZXR1cm5lZCBmb3IgbWlzc2luZyAvIHVua25vd24gLyB1bnJlYWRhYmxlIGVudHJpZXMuCiAqLwpmdW5jdGlvbiByZWFkU3RvcmVkQ2hvaWNlPFQgZXh0ZW5kcyBzdHJpbmc+KGtleTogc3RyaW5nLCBhbGxvd2xpc3Q6IHJlYWRvbmx5IFRbXSwgZmFsbGJhY2s6IFQpOiBUIHsKICBsZXQgc2F2ZWQ6IHN0cmluZyB8IG51bGw7CiAgdHJ5IHsKICAgIHNhdmVkID0gbG9jYWxTdG9yYWdlLmdldEl0ZW0oa2V5KTsKICB9IGNhdGNoIHsKICAgIHNhdmVkID0gbnVsbDsKICB9CiAgcmV0dXJuIChhbGxvd2xpc3QgYXMgcmVhZG9ubHkgc3RyaW5nW10pLmluY2x1ZGVzKHNhdmVkID8/ICcnKSA/IChzYXZlZCBhcyBUKSA6IGZhbGxiYWNrOwp9CgovKioKICogQXBwbGllcyBhIHRoZW1lIHRvIDxodG1sPiBhbmQgcGVyc2lzdHMgaXQuIEVtYmVyIGlzIHRoZSBkZWZhdWx0IOKGkiBubyBhdHRyIHdyaXR0ZW4uCiAqIEBwYXJhbSBpZCBBY2NlbnQgdGhlbWUgdG8gYWN0aXZhdGUgYW5kIHBlcnNpc3QuCiAqLwpmdW5jdGlvbiB3cml0ZVRoZW1lKGlkOiBUaGVtZUlkKTogdm9pZCB7CiAgY29uc3QgaHRtbCA9IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudDsKICBpZiAoaWQgPT09ICdlbWJlcicpIHsKICAgIGh0bWwucmVtb3ZlQXR0cmlidXRlKCdkYXRhLXRoZW1lJyk7CiAgfSBlbHNlIHsKICAgIGh0bWwuc2V0QXR0cmlidXRlKCdkYXRhLXRoZW1lJywgaWQpOwogIH0KICBzYWZlUGVyc2lzdChUSEVNRV9TVE9SQUdFX0tFWSwgaWQpOwp9CgovKiogRGVmZW5zaXZlIG1hdGNoTWVkaWEgYWNjZXNzb3Ig4oCUIHVuZGVmaW5lZCBpbiBTU1IgYW5kIHNvbWUgdGVzdCBlbnZpcm9ubWVudHMuICovCmZ1bmN0aW9uIGdldERhcmtNUSgpOiBNZWRpYVF1ZXJ5TGlzdCB8IG51bGwgewogIHRyeSB7CiAgICByZXR1cm4gdHlwZW9mIHdpbmRvdyAhPT0gJ3VuZGVmaW5lZCcgJiYgdHlwZW9mIHdpbmRvdy5tYXRjaE1lZGlhID09PSAnZnVuY3Rpb24nCiAgICAgID8gd2luZG93Lm1hdGNoTWVkaWEoJyhwcmVmZXJzLWNvbG9yLXNjaGVtZTogZGFyayknKQogICAgICA6IG51bGw7CiAgfSBjYXRjaCAoZXJyKSB7CiAgICBwbHVnaW5Mb2dXYXJuKGBUaGVtZVNlcnZpY2U6IG1hdGNoTWVkaWEgdW5hdmFpbGFibGU6ICR7U3RyaW5nKGVycil9YCkuY2F0Y2goKCkgPT4ge30pOwogICAgcmV0dXJuIG51bGw7CiAgfQp9CgovKioKICogUmVzb2x2ZXMgYGF1dG9gIHRvIHRoZSBlZmZlY3RpdmUgbW9kZSB2aWEgYHByZWZlcnMtY29sb3Itc2NoZW1lYDsgbGlnaHQvZGFyayBwYXNzIHRocm91Z2guCiAqIEBwYXJhbSBtb2RlIFVzZXItc2VsZWN0ZWQgYXBwZWFyYW5jZSBtb2RlLgogKi8KZnVuY3Rpb24gcmVzb2x2ZUVmZmVjdGl2ZU1vZGUobW9kZTogVGhlbWVNb2RlKTogRWZmZWN0aXZlTW9kZSB7CiAgaWYgKG1vZGUgPT09ICdsaWdodCcgfHwgbW9kZSA9PT0gJ2RhcmsnKSByZXR1cm4gbW9kZTsKICByZXR1cm4gZ2V0RGFya01RKCk/Lm1hdGNoZXMgPyAnZGFyaycgOiAnbGlnaHQnOwp9CgovKioKICogVG9nZ2xlcyBgLmRhcmtgIG9uIDxodG1sPiB0byBtYXRjaCB0aGUgZWZmZWN0aXZlIG1vZGUuCiAqIEBwYXJhbSBlZmZlY3RpdmUgUmVzb2x2ZWQgbGlnaHQvZGFyayBtb2RlLgogKi8KZnVuY3Rpb24gYXBwbHlNb2RlQ2xhc3MoZWZmZWN0aXZlOiBFZmZlY3RpdmVNb2RlKTogdm9pZCB7CiAgY29uc3QgaHRtbCA9IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudDsKICBpZiAoZWZmZWN0aXZlID09PSAnZGFyaycpIHsKICAgIGh0bWwuY2xhc3NMaXN0LmFkZCgnZGFyaycpOwogIH0gZWxzZSB7CiAgICBodG1sLmNsYXNzTGlzdC5yZW1vdmUoJ2RhcmsnKTsKICB9Cn0KCi8qKgogKiBTU09UIGZvciB0aGUgYWN0aXZlIGFjY2VudCB0aGVtZSAoe0BsaW5rIHRoZW1lfSwgc2l4IHZhcmlhbnRzIHZpYSBgW2RhdGEtdGhlbWVdYCkgYW5kCiAqIGFwcGVhcmFuY2UgbW9kZSAoe0BsaW5rIG1vZGV9LCBsaWdodC9kYXJrL2F1dG8pOyBuYXRpdmUgY2hyb21lIHN5bmMgdmlhIHtAbGluayBOYXRpdmVUaGVtZUFkYXB0ZXJ9LgogKi8KQEluamVjdGFibGUoeyBwcm92aWRlZEluOiAncm9vdCcgfSkKZXhwb3J0IGNsYXNzIFRoZW1lU2VydmljZSBpbXBsZW1lbnRzIE9uRGVzdHJveSB7CiAgcHJpdmF0ZSByZWFkb25seSBuYXRpdmUgPSBpbmplY3QoTmF0aXZlVGhlbWVBZGFwdGVyKTsKCiAgcHJpdmF0ZSByZWFkb25seSB0aGVtZVNpZ25hbCA9IHNpZ25hbDxUaGVtZUlkPigKICAgIHJlYWRTdG9yZWRDaG9pY2UoVEhFTUVfU1RPUkFHRV9LRVksIFRIRU1FX0lEUywgJ2VtYmVyJykKICApOwogIHByaXZhdGUgcmVhZG9ubHkgbW9kZVNpZ25hbCA9IHNpZ25hbDxUaGVtZU1vZGU+KAogICAgcmVhZFN0b3JlZENob2ljZShNT0RFX1NUT1JBR0VfS0VZLCBUSEVNRV9NT0RFUywgREVGQVVMVF9USEVNRV9NT0RFKQogICk7CgogIC8qKiBSZWFkLW9ubHkgc2lnbmFsIG9mIHRoZSBjdXJyZW50IGFjY2VudCB0aGVtZSBpZC4gKi8KICByZWFkb25seSB0aGVtZTogU2lnbmFsPFRoZW1lSWQ+ID0gdGhpcy50aGVtZVNpZ25hbC5hc1JlYWRvbmx5KCk7CiAgLyoqIFJlYWQtb25seSBzaWduYWwgb2YgdGhlIGN1cnJlbnQgYXBwZWFyYW5jZSBtb2RlIChsaWdodC9kYXJrL2F1dG8pLiAqLwogIHJlYWRvbmx5IG1vZGU6IFNpZ25hbDxUaGVtZU1vZGU+ID0gdGhpcy5tb2RlU2lnbmFsLmFzUmVhZG9ubHkoKTsKCiAgcHJpdmF0ZSByZWFkb25seSBtZWRpYVF1ZXJ5ID0gZ2V0RGFya01RKCk7CiAgcHJpdmF0ZSByZWFkb25seSBtZWRpYUxpc3RlbmVyID0gKCk6IHZvaWQgPT4gewogICAgaWYgKHRoaXMubW9kZVNpZ25hbCgpID09PSAnYXV0bycpIHRoaXMuYXBwbHlNb2RlKCdhdXRvJyk7CiAgfTsKICBwcml2YXRlIHJlYWRvbmx5IGFib3J0Q29udHJvbGxlciA9IG5ldyBBYm9ydENvbnRyb2xsZXIoKTsKCiAgLyoqCiAgICogUmVmbGVjdHMgdGhlIHBlcnNpc3RlZCB0aGVtZSArIG1vZGUgb250byB0aGUgRE9NIGFuZCBzdWJzY3JpYmVzIHRvIHN5c3RlbQogICAqIHRoZW1lIGNoYW5nZXMgKGFjdGl2ZSBvbmx5IHdoaWxlIHtAbGluayBtb2RlfSA9PT0gYCdhdXRvJ2ApLgogICAqLwogIGNvbnN0cnVjdG9yKCkgewogICAgd3JpdGVUaGVtZSh0aGlzLnRoZW1lU2lnbmFsKCkpOwogICAgdGhpcy5hcHBseU1vZGUodGhpcy5tb2RlU2lnbmFsKCkpOwoKICAgIGlmICh0aGlzLm1lZGlhUXVlcnkpIHsKICAgICAgaWYgKHR5cGVvZiB0aGlzLm1lZGlhUXVlcnkuYWRkRXZlbnRMaXN0ZW5lciA9PT0gJ2Z1bmN0aW9uJykgewogICAgICAgIHRoaXMubWVkaWFRdWVyeS5hZGRFdmVudExpc3RlbmVyKCdjaGFuZ2UnLCB0aGlzLm1lZGlhTGlzdGVuZXIsIHsKICAgICAgICAgIHNpZ25hbDogdGhpcy5hYm9ydENvbnRyb2xsZXIuc2lnbmFsLAogICAgICAgIH0pOwogICAgICB9IGVsc2UgaWYgKHR5cGVvZiB0aGlzLm1lZGlhUXVlcnkuYWRkTGlzdGVuZXIgPT09ICdmdW5jdGlvbicpIHsKICAgICAgICB0aGlzLm1lZGlhUXVlcnkuYWRkTGlzdGVuZXIodGhpcy5tZWRpYUxpc3RlbmVyKTsKICAgICAgfQogICAgfQogIH0KCiAgLyoqIFJlbW92ZXMgdGhlIG1hdGNoTWVkaWEgbGlzdGVuZXIgd2hlbiB0aGUgcm9vdCBzZXJ2aWNlIGlzIHRvcm4gZG93bi4gKi8KICBuZ09uRGVzdHJveSgpOiB2b2lkIHsKICAgIHRoaXMuYWJvcnRDb250cm9sbGVyLmFib3J0KCk7CiAgICBpZiAodGhpcy5tZWRpYVF1ZXJ5ICYmIHR5cGVvZiB0aGlzLm1lZGlhUXVlcnkuYWRkRXZlbnRMaXN0ZW5lciAhPT0gJ2Z1bmN0aW9uJykgewogICAgICB0cnkgewogICAgICAgIHRoaXMubWVkaWFRdWVyeS5yZW1vdmVMaXN0ZW5lcj8uKHRoaXMubWVkaWFMaXN0ZW5lcik7CiAgICAgIH0gY2F0Y2gge30KICAgIH0KICB9CgogIC8qKgogICAqIFN3aXRjaGVzIHRvIGEgc3BlY2lmaWMgYWNjZW50IHRoZW1lIGFuZCBwZXJzaXN0cyB0aGUgY2hvaWNlLgogICAqIEBwYXJhbSBpZCBBY2NlbnQgdGhlbWUgdG8gYWN0aXZhdGU7IG5vLW9wIGlmIGFscmVhZHkgYWN0aXZlLgogICAqLwogIHNldFRoZW1lKGlkOiBUaGVtZUlkKTogdm9pZCB7CiAgICBpZiAodGhpcy50aGVtZVNpZ25hbCgpID09PSBpZCkgcmV0dXJuOwogICAgdGhpcy50aGVtZVNpZ25hbC5zZXQoaWQpOwogICAgd3JpdGVUaGVtZShpZCk7CiAgfQoKICAvKioKICAgKiBTd2l0Y2hlcyB0aGUgYXBwZWFyYW5jZSBtb2RlIGFuZCBwZXJzaXN0cyB0aGUgY2hvaWNlLgogICAqIEBwYXJhbSBtb2RlIE1vZGUgdG8gYWN0aXZhdGU7IG5vLW9wIGlmIGFscmVhZHkgYWN0aXZlLgogICAqLwogIHNldE1vZGUobW9kZTogVGhlbWVNb2RlKTogdm9pZCB7CiAgICBpZiAodGhpcy5tb2RlU2lnbmFsKCkgPT09IG1vZGUpIHJldHVybjsKICAgIHRoaXMubW9kZVNpZ25hbC5zZXQobW9kZSk7CiAgICB0aGlzLmFwcGx5TW9kZShtb2RlKTsKICAgIHNhZmVQZXJzaXN0KE1PREVfU1RPUkFHRV9LRVksIG1vZGUpOwogIH0KCiAgLyoqCiAgICogUmVzb2x2ZXMgZWZmZWN0aXZlIG1vZGUsIGFwcGxpZXMgRE9NIGNsYXNzLCBzeW5jcyBuYXRpdmUgY2hyb21lLgogICAqIERvZXMgTk9UIHBlcnNpc3Q7IHBlcnNpc3RlbmNlIGlzIGluIHtAbGluayBzZXRNb2RlfSAoZXhwbGljaXQgdXNlciBpbnRlbnQgb25seSkuCiAgICogQHBhcmFtIG1vZGUgLSBNb2RlIHRvIGFwcGx5IChsaWdodC9kYXJrL2F1dG8pLgogICAqLwogIHByaXZhdGUgYXBwbHlNb2RlKG1vZGU6IFRoZW1lTW9kZSk6IHZvaWQgewogICAgY29uc3QgZWZmZWN0aXZlID0gcmVzb2x2ZUVmZmVjdGl2ZU1vZGUobW9kZSk7CiAgICBhcHBseU1vZGVDbGFzcyhlZmZlY3RpdmUpOwogICAgdGhpcy5uYXRpdmUuc3luY1dpbmRvd1RoZW1lKGVmZmVjdGl2ZSk7CiAgfQp9CgovKioKICogQXBwLWluaXRpYWxpemVyIGhvb2s6IGluc3RhbnRpYXRlcyBUaGVtZVNlcnZpY2Ugc28gdGhlIHBlcnNpc3RlZCB0aGVtZSByZWFjaGVzCiAqIHRoZSBET00gYXQgYm9vdCwgbm90IG9ubHkgYWZ0ZXIgU2V0dGluZ3MgaXMgZmlyc3Qgb3BlbmVkLgogKi8KZXhwb3J0IGZ1bmN0aW9uIGFwcGx5UGVyc2lzdGVkVGhlbWVPblN0YXJ0dXAoKTogdm9pZCB7CiAgaW5qZWN0KFRoZW1lU2VydmljZSk7Cn0K
+import { inject, Injectable, OnDestroy, signal, type Signal } from '@angular/core';
+import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
+import { NativeThemeAdapter, type EffectiveMode } from './native-theme-adapter';
+
+export type { EffectiveMode } from './native-theme-adapter';
+
+/** Identifiers for every accent theme exposed in Settings → Appearance. */
+export type ThemeId = 'ember' | 'crimson' | 'mint' | 'iris' | 'cyan' | 'sand';
+
+/** Display order for the Appearance accent picker. Ember is first and default. */
+export const THEME_IDS: readonly ThemeId[] = [
+  'ember',
+  'crimson',
+  'mint',
+  'iris',
+  'cyan',
+  'sand',
+] as const;
+
+/** Appearance modes — light/dark are explicit, auto follows `prefers-color-scheme`. */
+export type ThemeMode = 'light' | 'dark' | 'auto';
+
+/** Display order for the MODE picker in Appearance. */
+export const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'auto'] as const;
+
+/** First-run mode; the anti-FOUC script in index.html mirrors it (pinned by a unit test). */
+export const DEFAULT_THEME_MODE: ThemeMode = 'auto';
+
+/** localStorage key for the accent theme. Exported so tests assert the real key (no drift). */
+export const THEME_STORAGE_KEY = 'speedwave-theme';
+/** localStorage key for the appearance mode. Exported so tests assert the real key (no drift). */
+export const MODE_STORAGE_KEY = 'speedwave-theme-mode';
+
+/**
+ * Persists a value to localStorage, tolerating private-mode / quota failures.
+ * @param key - localStorage key to write.
+ * @param value - Value to store.
+ */
+function safePersist(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+/**
+ * Reads a persisted choice, validating it against an allowlist.
+ * @param key - localStorage key to read.
+ * @param allowlist - Permitted values; anything else falls back.
+ * @param fallback - Returned for missing / unknown / unreadable entries.
+ */
+function readStoredChoice<T extends string>(key: string, allowlist: readonly T[], fallback: T): T {
+  let saved: string | null;
+  try {
+    saved = localStorage.getItem(key);
+  } catch {
+    saved = null;
+  }
+  return (allowlist as readonly string[]).includes(saved ?? '') ? (saved as T) : fallback;
+}
+
+/**
+ * Applies a theme to <html> and persists it. Ember is the default → no attr written.
+ * @param id Accent theme to activate and persist.
+ */
+function writeTheme(id: ThemeId): void {
+  const html = document.documentElement;
+  if (id === 'ember') {
+    html.removeAttribute('data-theme');
+  } else {
+    html.setAttribute('data-theme', id);
+  }
+  safePersist(THEME_STORAGE_KEY, id);
+}
+
+/** Defensive matchMedia accessor — undefined in SSR and some test environments. */
+function getDarkMQ(): MediaQueryList | null {
+  try {
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)')
+      : null;
+  } catch (err) {
+    pluginLogWarn(`ThemeService: matchMedia unavailable: ${String(err)}`).catch(() => {});
+    return null;
+  }
+}
+
+/**
+ * Resolves `auto` to the effective mode via `prefers-color-scheme`; light/dark pass through.
+ * @param mode User-selected appearance mode.
+ */
+function resolveEffectiveMode(mode: ThemeMode): EffectiveMode {
+  if (mode === 'light' || mode === 'dark') return mode;
+  return getDarkMQ()?.matches ? 'dark' : 'light';
+}
+
+/**
+ * Toggles `.dark` on <html> to match the effective mode.
+ * @param effective Resolved light/dark mode.
+ */
+function applyModeClass(effective: EffectiveMode): void {
+  const html = document.documentElement;
+  if (effective === 'dark') {
+    html.classList.add('dark');
+  } else {
+    html.classList.remove('dark');
+  }
+}
+
+/**
+ * SSOT for the active accent theme ({@link theme}, six variants via `[data-theme]`) and
+ * appearance mode ({@link mode}, light/dark/auto); native chrome sync via {@link NativeThemeAdapter}.
+ */
+@Injectable({ providedIn: 'root' })
+export class ThemeService implements OnDestroy {
+  private readonly native = inject(NativeThemeAdapter);
+
+  private readonly themeSignal = signal<ThemeId>(
+    readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'ember')
+  );
+  private readonly modeSignal = signal<ThemeMode>(
+    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, DEFAULT_THEME_MODE)
+  );
+
+  /** Read-only signal of the current accent theme id. */
+  readonly theme: Signal<ThemeId> = this.themeSignal.asReadonly();
+  /** Read-only signal of the current appearance mode (light/dark/auto). */
+  readonly mode: Signal<ThemeMode> = this.modeSignal.asReadonly();
+
+  private readonly mediaQuery = getDarkMQ();
+  private readonly mediaListener = (): void => {
+    if (this.modeSignal() === 'auto') this.applyMode('auto');
+  };
+  private readonly abortController = new AbortController();
+
+  /**
+   * Reflects the persisted theme + mode onto the DOM and subscribes to system
+   * theme changes (active only while {@link mode} === `'auto'`).
+   */
+  constructor() {
+    writeTheme(this.themeSignal());
+    this.applyMode(this.modeSignal());
+
+    if (this.mediaQuery) {
+      if (typeof this.mediaQuery.addEventListener === 'function') {
+        this.mediaQuery.addEventListener('change', this.mediaListener, {
+          signal: this.abortController.signal,
+        });
+      } else if (typeof this.mediaQuery.addListener === 'function') {
+        this.mediaQuery.addListener(this.mediaListener);
+      }
+    }
+  }
+
+  /** Removes the matchMedia listener when the root service is torn down. */
+  ngOnDestroy(): void {
+    this.abortController.abort();
+    if (this.mediaQuery && typeof this.mediaQuery.addEventListener !== 'function') {
+      try {
+        this.mediaQuery.removeListener?.(this.mediaListener);
+      } catch {}
+    }
+  }
+
+  /**
+   * Switches to a specific accent theme and persists the choice.
+   * @param id Accent theme to activate; no-op if already active.
+   */
+  setTheme(id: ThemeId): void {
+    if (this.themeSignal() === id) return;
+    this.themeSignal.set(id);
+    writeTheme(id);
+  }
+
+  /**
+   * Switches the appearance mode and persists the choice.
+   * @param mode Mode to activate; no-op if already active.
+   */
+  setMode(mode: ThemeMode): void {
+    if (this.modeSignal() === mode) return;
+    this.modeSignal.set(mode);
+    this.applyMode(mode);
+    safePersist(MODE_STORAGE_KEY, mode);
+  }
+
+  /**
+   * Resolves effective mode, applies DOM class, syncs native chrome.
+   * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
+   * @param mode - Mode to apply (light/dark/auto).
+   */
+  private applyMode(mode: ThemeMode): void {
+    const effective = resolveEffectiveMode(mode);
+    applyModeClass(effective);
+    this.native.syncWindowTheme(effective);
+  }
+}
+
+/**
+ * App-initializer hook: instantiates ThemeService so the persisted theme reaches
+ * the DOM at boot, not only after Settings is first opened.
+ */
+export function applyPersistedThemeOnStartup(): void {
+  inject(ThemeService);
+}
