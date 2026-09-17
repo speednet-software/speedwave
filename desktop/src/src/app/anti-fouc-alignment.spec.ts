@@ -46,7 +46,7 @@ describe('anti-FOUC script ↔ theme.service.ts alignment', () => {
  * @returns The script source, without the surrounding tags.
  */
 function inlineScriptSource(): string {
-  const match = /<script>([\s\S]*?)<\/script>/.exec(INDEX_HTML);
+  const match = /<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/i.exec(INDEX_HTML);
   if (!match) throw new Error('index.html: no inline anti-FOUC script found');
   return match[1];
 }
