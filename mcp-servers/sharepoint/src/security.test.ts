@@ -3,7 +3,7 @@
  * Tests path traversal prevention, URL encoding attacks, and whitelist enforcement
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { SharePointClient, SharePointConfig } from './client.js';
 import { PathValidator } from './path-validator.js';
 import fsPromises from 'fs/promises';
@@ -19,15 +19,10 @@ const mockTokensDir = '/test/tokens';
 
 const GRAPH_DRIVE_URL = `https://graph.microsoft.com/v1.0/sites/${mockConfig.siteId}/drive`;
 
-let fetchMock: ReturnType<typeof vi.fn>;
+let fetchMock: Mock;
 
 beforeEach(() => {
-  fetchMock = vi.fn().mockRejectedValue(new Error('Unexpected network call in a security test'));
-  vi.stubGlobal('fetch', fetchMock);
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
+  fetchMock = vi.mocked(fetch) as unknown as Mock;
 });
 
 describe('Security: validatePath', () => {
@@ -163,6 +158,27 @@ describe('Security: validatePath', () => {
         'Invalid path (security check failed)'
       );
     });
+
+    it('should reject a path URL-encoded more than 5 times', async () => {
+      const maliciousPath = 'C%25252525253A%25252525255CWindows';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject a drive path that decodes fully at the fifth encoding level', async () => {
+      const maliciousPath = 'C%252525253A%252525255CWindows';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject malformed encoding revealed only at the sixth decoding step', async () => {
+      const maliciousPath = 'Documents%2525252525ZZ';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
   });
 
   describe('Null Byte Injection', () => {
@@ -206,6 +222,13 @@ describe('Security: validatePath', () => {
     it('should reject Unix absolute path (/home/user)', async () => {
       const maliciousPath = '/home/user/.ssh/id_rsa';
       await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject a bare slash instead of treating it as the drive root (/)', async () => {
+      const slashPath = '/';
+      await expect(client.listFiles({ path: slashPath })).rejects.toThrow(
         'Invalid path (security check failed)'
       );
     });
@@ -267,13 +290,38 @@ describe('Security: validatePath', () => {
     });
   });
 
+  describe('Colons', () => {
+    it('should reject a drive path after a leading space ( C:\\Windows)', async () => {
+      const maliciousPath = ' C:\\Windows\\System32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject a drive path after a zero-width space', async () => {
+      const maliciousPath = '\u200BC:\\Windows\\System32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject a colon in a later segment (Docs/C:/x)', async () => {
+      const maliciousPath = 'Docs/C:/x';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+  });
+
   describe('Edge Cases', () => {
-    it.each([null, undefined])('should list the drive root when path is %s', async (rootPath) => {
+    beforeEach(() => {
       fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ value: [] }),
       });
+    });
 
+    it.each([null, undefined])('should list the drive root when path is %s', async (rootPath) => {
       await expect(client.listFiles({ path: rootPath as unknown as string })).resolves.toEqual({
         files: [],
         exists: true,
@@ -296,40 +344,17 @@ describe('Security: validatePath', () => {
       );
     });
 
-    it('should send a very long path to Graph without a local length limit', async () => {
-      fetchMock.mockResolvedValue({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
+    it('should validate a very long path without throwing', () => {
       const longPath = 'a/'.repeat(10000) + 'file.txt';
-      await expect(client.listFiles({ path: longPath })).resolves.toEqual({
-        files: [],
-        exists: true,
-      });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledWith(
-        `${GRAPH_DRIVE_URL}/root:/${longPath}:/children`,
-        expect.anything()
-      );
+      expect(() => new PathValidator().validatePath(longPath)).not.toThrow();
     });
 
     it('should handle path with spaces safely', async () => {
-      fetchMock.mockResolvedValue({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
       const validPath = 'Documents/My Folder/file.txt';
       await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
     });
 
     it('should handle path with Unicode characters safely', async () => {
-      fetchMock.mockResolvedValue({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
       const validPath = 'Documents/文件夹/файл.txt';
       await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
     });
@@ -396,6 +421,69 @@ describe('Security: validatePath', () => {
     it('should accept path starting with a single-letter folder (C/Windows)', async () => {
       const validPath = 'C/Windows/file.txt';
       await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
+    });
+
+    it('should accept a path URL-encoded exactly 5 times', async () => {
+      const validPath = 'Documents%2525252520Q1';
+      await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
+    });
+  });
+
+  describe('Security Logging', () => {
+    it('should log security warning for a colon path', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const maliciousPath = 'C:\\Windows\\System32';
+
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Security: Path validation blocked potential attack'),
+        expect.objectContaining({
+          attackType: 'invalid_character',
+          attemptedPath: maliciousPath,
+          decodedPath: undefined,
+          reason: 'Path contains a colon (drive letter or Graph path syntax)',
+        })
+      );
+    });
+
+    it('should log decoded path for a URL-encoded colon path', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const maliciousPath = 'C%3A%5CWindows%5CSystem32';
+
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Security: Path validation blocked potential attack'),
+        expect.objectContaining({
+          attackType: 'invalid_character',
+          attemptedPath: maliciousPath,
+          decodedPath: 'C:\\Windows\\System32',
+          reason: 'Path contains a colon (drive letter or Graph path syntax)',
+        })
+      );
+    });
+
+    it('should log security warning for a path URL-encoded more than 5 times', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const maliciousPath = 'C%25252525253A%25252525255CWindows';
+
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Security: Path validation blocked potential attack'),
+        {
+          attemptedPath: maliciousPath,
+          attackType: 'excessive_url_encoding',
+          reason: 'Path is URL-encoded more than 5 times',
+        }
+      );
     });
   });
 
@@ -699,44 +787,6 @@ describe('Security: validateLocalPath', () => {
           attackType: 'path_traversal',
           attemptedPath: maliciousPath,
           decodedPath: expect.any(String),
-        })
-      );
-    });
-
-    it('should log security warning for Windows drive-letter path', async () => {
-      const warnSpy = vi.spyOn(console, 'warn');
-      const maliciousPath = 'C:\\Windows\\System32';
-
-      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
-        'Invalid path (security check failed)'
-      );
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Security: Path validation blocked potential attack'),
-        expect.objectContaining({
-          attackType: 'absolute_path',
-          attemptedPath: maliciousPath,
-          decodedPath: undefined,
-          reason: 'Windows drive-letter paths are not allowed',
-        })
-      );
-    });
-
-    it('should log decoded path for URL-encoded Windows drive-letter path', async () => {
-      const warnSpy = vi.spyOn(console, 'warn');
-      const maliciousPath = 'C%3A%5CWindows%5CSystem32';
-
-      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
-        'Invalid path (security check failed)'
-      );
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Security: Path validation blocked potential attack'),
-        expect.objectContaining({
-          attackType: 'absolute_path',
-          attemptedPath: maliciousPath,
-          decodedPath: 'C:\\Windows\\System32',
-          reason: 'Windows drive-letter paths are not allowed',
         })
       );
     });

@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import {
+  createFileTools,
   handleListFileIds,
   handleGetFileFull,
   handleDownloadFile,
@@ -33,6 +34,15 @@ describe('file-tools', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('listFileIds schema', () => {
+    it('tells the model to omit path for the drive root', () => {
+      const tool = createFileTools(null).find((td) => td.tool.name === 'listFileIds')!.tool;
+      expect((tool.inputSchema.properties.path as { description: string }).description).toBe(
+        'Folder path relative to the drive root, e.g. documents/reports; omit for the root'
+      );
+    });
   });
 
   describe('handleListFileIds', () => {
