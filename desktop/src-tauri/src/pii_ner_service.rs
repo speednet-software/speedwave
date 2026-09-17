@@ -50,7 +50,7 @@ impl SpanDetector for ModelDetector {
 pub(crate) enum DetectorState {
     Loading,
     Ready(Arc<dyn SpanDetector>),
-    Failed(String),
+    Failed,
 }
 
 pub(crate) struct ServiceState {
@@ -85,7 +85,7 @@ impl ServiceState {
         {
             DetectorState::Ready(d) => Ok(Arc::clone(d)),
             DetectorState::Loading => Err("PII detector is still loading"),
-            DetectorState::Failed(_) => Err("PII detector failed to load"),
+            DetectorState::Failed => Err("PII detector failed to load"),
         }
     }
 }
@@ -293,7 +293,7 @@ impl PiiNerService {
                             log::warn!("pii-ner watchdog failed to re-create the lock file: {e}");
                         }
                     }
-                    if ticks % 6 == 0 {
+                    if ticks.is_multiple_of(6) {
                         crate::mirror_relay::ensure_relay_for_port(port);
                     }
                 }
@@ -315,7 +315,7 @@ impl PiiNerService {
                     }
                     Err(e) => {
                         log::error!("PII NER detector failed to load: {e}");
-                        loader_state.set(DetectorState::Failed(e));
+                        loader_state.set(DetectorState::Failed);
                     }
                 }
             })?;
@@ -479,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn loading_and_failed_detectors_answer_503_with_retry_after() {
-        for state in [DetectorState::Loading, DetectorState::Failed("boom".into())] {
+        for state in [DetectorState::Loading, DetectorState::Failed] {
             let state = ServiceState::new(state, "tok".into());
             let (status, headers, _) =
                 call(state, MAX_BODY_BYTES, Some("tok"), r#"{"texts":["x"]}"#).await;
