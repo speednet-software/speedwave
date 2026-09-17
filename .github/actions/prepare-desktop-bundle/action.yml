@@ -54,8 +54,6 @@ runs:
       shell: bash
       run: scripts/bundle-build-context.sh --ci
 
-    # PII NER model artifact (ADR-089): the pinned redact.tflite is downloaded, verified by
-    # sha256 and converted with the stdlib-only tool into desktop/src-tauri/pii-ner/.
     - name: Convert the PII NER model for bundling
       shell: bash
       run: |

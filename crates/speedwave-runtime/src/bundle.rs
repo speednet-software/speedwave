@@ -102,7 +102,6 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "oauth/oauth/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // PII NER model artifact (ADR-089): converted by `make prepare-pii-ner-model`.
     BundledAssetSpec {
         path: "pii-ner/manifest.json",
         kind: BundledAssetKind::File,

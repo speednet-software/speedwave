@@ -228,8 +228,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
-    // Host NER detector (ADR-090): one round trip with every leaf; an unavailable detector
-    // degrades to rules only unless the config marks it required.
     let external = match cfg.ner.as_deref() {
         None => None,
         Some(ner) => match ner.detect_batch(&pii::collect_scan_leaves(&parsed)).await {

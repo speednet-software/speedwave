@@ -1006,9 +1006,6 @@ mod tests {
                     .uri("/v1/messages")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        // `system` carries the same name as the conversation on purpose: the
-                        // detector must never be offered the client's scaffolding, only the
-                        // two message leaves.
                         r#"{"model":"local/x","system":"Jan Kowalski","messages":[{"role":"user","content":"Jan Kowalski"},{"role":"user","content":"mieszka w Gdańsku"}]}"#,
                     ))
                     .unwrap(),

@@ -321,7 +321,6 @@ jobs:
       - name: cargo test (full suite incl. test-support)
         run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --features speedwave-runtime/test-support
 
-      # Same steps as `make test-pii-ner-tools` / `make test-pii-ner-model` without make.
       - name: pii-ner converter tests and model e2e (CPU)
         run: |
           PY=$(command -v python3 || command -v python)

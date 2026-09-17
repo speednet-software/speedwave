@@ -542,9 +542,6 @@ mod tests {
 
     #[test]
     fn restart_reuses_the_persistent_token_and_the_port_of_a_stale_lock() {
-        // A clean stop removes the lock and the next start binds an ephemeral port, like
-        // every other host bridge. After a crash the lock survives, and its port is tried
-        // first so a rendered proxy.json stays valid.
         let tmp = tempfile::tempdir().unwrap();
         let loader = || -> Loader { Box::new(|| Err("no model in this test".to_string())) };
         let first = PiiNerService::start(tmp.path(), loader()).unwrap();

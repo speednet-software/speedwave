@@ -1117,10 +1117,6 @@ mod tests {
 
     #[test]
     fn scan_leaves_are_every_string_under_system_and_message_content_in_walk_order() {
-        // Structural strings ("type", tool ids) hold a slot each: the list must index exactly
-        // the strings scan_json_value visits, in the same order (object keys sorted by
-        // serde_json), so the detector's per-leaf answer lands on the right string. They are
-        // blanked, not dropped, because only prose is worth a detector window.
         let body = json!({
             "model": "claude",
             "system": [{"type": "text", "text": "sys"}],
@@ -1149,8 +1145,6 @@ mod tests {
 
     #[test]
     fn the_client_scaffolding_is_never_offered_to_the_detector() {
-        // The detector reads "Claude" as a GIVEN_NAME at 0.95, so sealing `system` shipped a
-        // rewritten preamble and Anthropic answered rate_limit_error on the OAuth leg.
         let body = json!({
             "system": [
                 {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
@@ -1169,8 +1163,6 @@ mod tests {
 
     #[test]
     fn an_attached_image_is_blanked_instead_of_being_sent_to_the_detector() {
-        // A base64 attachment is megabytes of non-prose: detecting on it costs thousands of
-        // windows and, past the request cap, would drop the whole request to rules only.
         let body = json!({
             "messages": [{
                 "role": "user",

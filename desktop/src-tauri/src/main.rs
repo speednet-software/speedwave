@@ -797,8 +797,6 @@ fn main() {
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
                 .level_for("whisper_rs", log::LevelFilter::Info)
-                // The PII NER detector (ADR-089) runs on burn: wgpu, naga and CubeCL trace
-                // every kernel dispatch and buffer write, thousands of lines per forward pass.
                 .level_for("wgpu_core", log::LevelFilter::Warn)
                 .level_for("wgpu_hal", log::LevelFilter::Warn)
                 .level_for("wgpu", log::LevelFilter::Warn)
@@ -888,7 +886,6 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
-
             if setup_started {
                 let cleaned =
                     speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
@@ -936,7 +933,6 @@ fn main() {
                     log::warn!("mcp-os script not found — OS integrations will be unavailable");
                 }
 
-                // Compose regen + recreate so hub and proxy pick up the new host ports.
                 reconcile::reconcile_compose_port(app.handle());
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());

@@ -12,7 +12,6 @@ homepage = "https://github.com/speednet-software/speedwave"
 [dependencies]
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription"] }
 speedwave-pii-engine = { path = "../../crates/pii-engine" }
-# Host-side PII NER detector (ADR-089/089): burn model served in-process to the proxy.
 speedwave-pii-ner = { path = "../../crates/pii-ner" }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
