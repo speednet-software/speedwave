@@ -12,8 +12,6 @@ import {
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
 /** Input parameters for the detectMailClients tool (no params required). */
 type DetectMailClientsParams = Record<string, never>;
 
@@ -88,8 +86,6 @@ interface ReplyToEmailParams {
   /** Safety check flag that must be true to send. */
   confirm_send: boolean;
 }
-
-// ── Tool Definitions ──────────────────────────────────────────────────────
 
 const detectMailClientsTool: Tool = {
   name: 'detectMailClients',
@@ -405,7 +401,6 @@ const sendEmailTool: Tool = {
   ],
 };
 
-// Email reply is irreversible (destructive operation)
 const replyToEmailTool: Tool = {
   name: 'replyToEmail',
   description:
@@ -460,8 +455,6 @@ const replyToEmailTool: Tool = {
     },
   ],
 };
-
-// ── Handlers ───────────────────────────────────────────────────────────────
 
 /**
  * Detects available mail clients on this device.
@@ -610,8 +603,6 @@ export async function handleReplyToEmail(params: ReplyToEmailParams): Promise<To
   const result = await runCommand('mail', 'reply_to_email', p);
   return { success: true, data: result.parsed };
 }
-
-// ── Export ─────────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all mail operations. */
 export function createMailTools(): ToolDefinition[] {

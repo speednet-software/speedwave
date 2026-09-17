@@ -1,12 +1,7 @@
-//! Renders the per-project `proxy.json` routing config (ADR-073): no secrets
-//! (keys by env name `SPW_KEY_<ID>`), never a key value or Anthropic cred name.
-
 use crate::config::{LlmConfig, LlmProviderKind};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-/// Auth leg of a rendered route — mirror of `router.rs::Auth` (untagged: a
-/// bare `"passthrough"`/`"none"` string, or a key-swap object).
 #[derive(Serialize)]
 #[serde(untagged)]
 enum RouteAuth {
@@ -17,8 +12,6 @@ enum RouteAuth {
     },
 }
 
-/// One rendered route. Field order is the golden wire order — mirror of
-/// `router.rs::Route`; serde keeps declaration order.
 #[derive(Serialize)]
 struct RenderRoute {
     prefix: String,
@@ -67,13 +60,10 @@ pub fn proxy_config_path_in(data_dir: &Path, project: &str) -> PathBuf {
 /// `CALLER_AUTH_HEADER` in `containers/proxy/src/main.rs`.
 pub const PROXY_CALLER_AUTH_HEADER: &str = "x-speedwave-proxy-auth";
 
-/// Path of the persisted per-project caller secret: `<config_dir>/caller-token`.
 fn caller_token_path_in(data_dir: &Path, project: &str) -> PathBuf {
     proxy_config_dir_in(data_dir, project).join("caller-token")
 }
 
-/// Reads the stable per-project caller secret, creating it (0600) on first use.
-/// Stable across renders so it doesn't churn the proxy state digest every start.
 pub fn ensure_caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<String> {
     crate::validation::validate_project_name(project)?;
     let path = caller_token_path_in(data_dir, project);
@@ -98,14 +88,12 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
     render_proxy_config_with(llm, None)
 }
 
-/// [`render_proxy_config`] plus the optional per-project `caller_token` the
-/// proxy's auth middleware requires on `/v1/*`.
 pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> String {
     render_proxy_config_full(llm, caller_token, None)
 }
 
 /// [`render_proxy_config_with`] plus the optional `ner` section pointing the proxy at the
-/// live host-side detector (ADR-089).
+/// live host-side detector (ADR-090).
 pub(crate) fn render_proxy_config_full(
     llm: &LlmConfig,
     caller_token: Option<&str>,
@@ -113,15 +101,11 @@ pub(crate) fn render_proxy_config_full(
 ) -> String {
     let mut routes = Vec::new();
 
-    // OAuth vs API key render the same passthrough route; the kind is learned
-    // host-side from the active provider (ADR-073) — never sniffed in the proxy.
     let anthropic_kind = match llm.active_provider().map(|p| p.kind) {
-        Some(LlmProviderKind::AnthropicApiKey) => "anthropic_apikey",
-        _ => "anthropic_oauth",
+        Some(LlmProviderKind::AnthropicApiKey) => LlmProviderKind::AnthropicApiKey.wire_str(),
+        _ => LlmProviderKind::AnthropicOauth.wire_str(),
     };
 
-    // Anthropic passthrough is always first — bare model names resolve here and
-    // the caller's Authorization header is forwarded unchanged.
     routes.push(RenderRoute {
         prefix: "anthropic".into(),
         base_url: "https://api.anthropic.com".into(),
@@ -136,11 +120,10 @@ pub(crate) fn render_proxy_config_full(
             continue;
         }
         match entry.kind {
-            // Subscription + API-key Anthropic both ride the passthrough; no route.
             LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {}
             LlmProviderKind::OpenRouter => {
                 routes.push(RenderRoute {
-                    prefix: "openrouter".into(),
+                    prefix: entry.id.clone(),
                     base_url: "https://openrouter.ai/api".into(),
                     auth: RouteAuth::Swap {
                         swap_env: spw_key_env_name(&entry.id),
@@ -155,8 +138,6 @@ pub(crate) fn render_proxy_config_full(
                     log::warn!("provider '{}' has no base_url — skipped", entry.id);
                     continue;
                 };
-                // Normalize BEFORE validating — v1 configs persisted the raw form
-                // (`…/v1/`), and the forwarder appends `/v1/messages` itself.
                 let base_url = super::llm::strip_trailing_v1(base_url);
                 if let Err(e) = super::llm::validate_base_url(&base_url) {
                     log::warn!(
@@ -184,8 +165,6 @@ pub(crate) fn render_proxy_config_full(
         }
     }
 
-    // serde guarantees valid JSON + the golden field order; serialization of a
-    // plain struct cannot fail, so the fallback is unreachable.
     serde_json::to_string(&RenderConfig {
         routes,
         caller_token: caller_token.map(str::to_string),
@@ -221,8 +200,6 @@ pub fn write_proxy_config_in(
     Ok(path)
 }
 
-/// `SPW_CONFIG_DIGEST`: sha256 over every `/config` file + each key file's name
-/// and content-hash (values folded as sha256, never raw); change forces recreate.
 pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -263,8 +240,6 @@ pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     crate::bundle::bytes_to_hex(&hasher.finalize())
 }
 
-/// v1→v2 key-file migration: copies legacy `local-llm/api_key` into the llm token namespace once
-/// when the target is missing. Gated on the legacy file, not `has_api_key` (ADR-073 upgrade path).
 pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
     let has_local_entry = llm
         .providers
@@ -279,7 +254,6 @@ pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &
     if target.exists() {
         return;
     }
-    // Source of truth for "is there a legacy key to migrate": the legacy file.
     let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
         log::debug!("no legacy local-llm api_key to migrate (missing or unreadable)");
         return;
@@ -380,14 +354,13 @@ mod tests {
         let out = render_proxy_config(&cfg);
         assert!(!out.contains("sk-"));
         assert!(!out.contains("ANTHROPIC_API_KEY") && !out.contains("ANTHROPIC_AUTH_TOKEN"));
-        assert!(out.contains("SPW_KEY_OPENROUTER")); // env NAME only
+        assert!(out.contains("SPW_KEY_OPENROUTER"));
     }
 
     #[test]
     fn render_embeds_caller_token_when_present_and_omits_when_none() {
         let cfg = full_provider_mix();
         let with = render_proxy_config_with(&cfg, Some("secret-abc"));
-        // No `{with}`: it embeds the caller token (cleartext-logging).
         assert!(
             with.contains(r#""caller_token":"secret-abc""#),
             "token must be embedded"
@@ -486,7 +459,6 @@ mod tests {
         assert_eq!(spw_key_env_name("my-anthropic"), "SPW_KEY_MY_ANTHROPIC");
     }
 
-    /// Golden file: the full provider mix renders the expected JSON routing config.
     #[test]
     fn render_full_provider_mix_golden() {
         let llm = full_provider_mix();
@@ -494,8 +466,26 @@ mod tests {
         assert_eq!(render_proxy_config(&llm), expected);
     }
 
-    /// The anthropic passthrough route's kind reflects the active provider:
-    /// `anthropic_apikey` when the active entry is an API key, else oauth.
+    #[test]
+    fn openrouter_route_prefix_follows_a_custom_entry_id_not_a_hardcoded_literal() {
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: true,
+                ..entry("my-or", LlmProviderKind::OpenRouter)
+            }],
+            ..Default::default()
+        };
+        let json = render_proxy_config(&llm);
+        assert!(
+            json.contains(r#""prefix":"my-or""#),
+            "route prefix must be the entry's own id, not a hardcoded 'openrouter': {json}"
+        );
+        assert!(
+            !json.contains(r#""prefix":"openrouter""#),
+            "must not fall back to the hardcoded literal: {json}"
+        );
+    }
+
     #[test]
     fn anthropic_route_kind_reflects_active_provider() {
         let mut cfg = full_provider_mix();
@@ -505,10 +495,9 @@ mod tests {
         });
         let out = render_proxy_config(&cfg);
         assert!(out.contains(r#""prefix":"anthropic""#));
-        assert!(out.contains(r#""provider_kind":"anthropic_apikey""#));
+        assert!(out.contains(r#""provider_kind":"anthropic_api_key""#));
     }
 
-    /// A local route carries its `provider_kind`/`provider_id`.
     #[test]
     fn local_route_carries_kind_and_id() {
         let out = render_proxy_config(&full_provider_mix());
@@ -517,8 +506,6 @@ mod tests {
         ));
     }
 
-    /// v0.13.3 persisted the raw form (`…/v1/`, `…/`); the route must
-    /// normalize-then-validate instead of dropping it.
     #[test]
     fn render_accepts_v1_persisted_trailing_slash_base_url() {
         for stored in [
@@ -542,8 +529,6 @@ mod tests {
 
     #[test]
     fn render_strips_trailing_v1_so_forwarder_does_not_double_it() {
-        // Forwarder appends `/v1/messages`; a base_url ending in `/v1` must not
-        // survive or the URL becomes `…/v1/v1/messages` → 404.
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 base_url: Some("http://host.docker.internal:9000/v1".into()),
@@ -588,7 +573,6 @@ mod tests {
             ..Default::default()
         };
         let json = render_proxy_config(&llm);
-        // Only the built-in anthropic passthrough route.
         assert!(
             json.contains(r#""prefix":"anthropic""#),
             "anthropic passthrough must be present: {json}"
@@ -597,7 +581,6 @@ mod tests {
             json.contains(r#""auth":"passthrough""#),
             "must be passthrough: {json}"
         );
-        // No other routes for OAuth-only config.
         let route_count = json.matches(r#""prefix":"#).count();
         assert_eq!(
             route_count, 1,
@@ -661,8 +644,6 @@ mod tests {
         }
     }
 
-    /// v1→v2 key migration: legacy `local-llm/api_key` is lifted into the llm
-    /// namespace once, without clobbering an existing new-namespace key.
     #[test]
     fn migrate_legacy_local_key_copies_and_does_not_clobber() {
         let dir = tempfile::tempdir().unwrap();
@@ -688,14 +669,11 @@ mod tests {
             "legacy key must be copied (trimmed) into the llm namespace"
         );
 
-        // Idempotent + non-clobbering: a newer key in the llm namespace wins.
         std::fs::write(&target, "sk-new-token").unwrap();
         migrate_legacy_local_key_in(dir.path(), "proj", &llm);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
     }
 
-    /// Regression: migration must run even when `has_api_key == false` (a fresh upgrade re-derives
-    /// the flag from the empty new path); gating on it would skip the copy, leaving `auth:none`.
     #[test]
     fn migrate_legacy_local_key_runs_when_flag_is_false() {
         let dir = tempfile::tempdir().unwrap();
@@ -703,7 +681,6 @@ mod tests {
             super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
         std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
 
-        // has_api_key:false mirrors the post-disk-sync state on a fresh upgrade.
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 has_api_key: false,
@@ -724,7 +701,6 @@ mod tests {
         );
     }
 
-    /// No legacy file → nothing to migrate, no target written (no spurious key).
     #[test]
     fn migrate_legacy_local_key_noop_without_legacy_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -741,8 +717,6 @@ mod tests {
         assert!(!target.exists(), "no legacy file → no target key written");
     }
 
-    /// No `local` entry → migration is skipped even if a legacy file exists
-    /// (e.g. a project that switched to anthropic/openrouter).
     #[test]
     fn migrate_legacy_local_key_skipped_without_local_entry() {
         let dir = tempfile::tempdir().unwrap();
@@ -759,8 +733,6 @@ mod tests {
         assert!(!target.exists(), "no local entry → migration must not run");
     }
 
-    /// End-to-end ordering: migrate the legacy key, THEN re-derive the flag — `has_api_key` must
-    /// end up `true`, matching `resolve_project_config`'s sequence (migrate then sync).
     #[test]
     fn migrate_then_sync_yields_has_api_key_true() {
         let dir = tempfile::tempdir().unwrap();
@@ -811,7 +783,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-x").unwrap();
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
-        // Second removal: missing file is fine.
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
         assert!(remove_llm_provider_key_in(dir.path(), "proj", "../x").is_err());
     }
@@ -835,7 +806,6 @@ mod tests {
         assert_ne!(d1, d2);
         assert!(!d2.contains("sk-or-v1-abc"));
 
-        // Same-length rotation must flip the digest: it hashes content, not size/mtime.
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
         let d3 = proxy_state_digest_in(dir.path(), "proj");
         assert_ne!(d2, d3, "same-length key rotation must change the digest");
@@ -864,7 +834,6 @@ mod tests {
         write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         let d1 = proxy_state_digest_in(dir.path(), "proj");
 
-        // Patching proxy.json must change the digest.
         let proxy_json = proxy_config_path_in(dir.path(), "proj");
         std::fs::write(&proxy_json, r#"{"routes":[]}"#).unwrap();
         assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
@@ -878,8 +847,6 @@ mod tests {
         assert_eq!(d, proxy_state_digest_in(dir.path(), "proj"));
     }
 
-    /// A pre-existing key in the new namespace must survive a second
-    /// `write_proxy_config_in` call (e.g. user rotated the key after migration).
     #[test]
     fn write_proxy_config_does_not_overwrite_existing_llm_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -891,7 +858,6 @@ mod tests {
             }],
             ..Default::default()
         };
-        // Simulate post-migration state: user-rotated key already in new namespace.
         write_llm_provider_key_in(dir.path(), "proj", "local", "sk-rotated").unwrap();
         write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         let target =
@@ -903,8 +869,6 @@ mod tests {
         );
     }
 
-    /// `migrate_legacy_local_key_in` is non-fatal when the legacy file is unreadable (e.g.
-    /// permission-denied): it returns without writing a target key and without panicking.
     #[cfg(unix)]
     #[test]
     fn migrate_legacy_local_key_noop_when_legacy_file_unreadable() {
@@ -923,10 +887,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        // Must not panic; the unreadable legacy file is silently skipped.
         migrate_legacy_local_key_in(dir.path(), "proj", &llm);
 
-        // Restore permissions before tempdir cleanup.
         let _ = std::fs::set_permissions(&legacy_file, std::fs::Permissions::from_mode(0o600));
 
         let target =
@@ -937,8 +899,6 @@ mod tests {
         );
     }
 
-    /// `write_proxy_config_in` trusts the resolved `has_api_key` flag: `true`
-    /// renders a bearer swap, not `auth:none`, so the key reaches the backend.
     #[test]
     fn write_renders_bearer_when_has_api_key_set() {
         let dir = tempfile::tempdir().unwrap();

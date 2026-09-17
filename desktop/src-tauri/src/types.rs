@@ -1,11 +1,7 @@
-// Types returned to the Angular frontend, integration metadata constants,
-// and associated helper functions.
-
 use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_CREDENTIAL_BYTES: usize = 4096;
 
-/// Converts a `Result<T, String>` into `anyhow::Result<T>`.
 pub(crate) trait IntoAnyhow<T> {
     fn into_anyhow(self) -> anyhow::Result<T>;
 }
@@ -15,8 +11,6 @@ impl<T> IntoAnyhow<T> for Result<T, String> {
         self.map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
-
-// ── DTOs ──
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ProjectEntry {
@@ -39,23 +33,24 @@ pub(crate) struct BundleReconcileStatus {
     pub(crate) applied_bundle_id: Option<String>,
 }
 
-/// Write-only (backend → frontend) flattened snapshot of `claude.llm` plus the computed
-/// `default_base_url`; new optional `LlmConfig` fields need `skip_serializing_if` set.
 #[derive(Serialize)]
 pub(crate) struct LlmConfigResponse {
     #[serde(flatten)]
     pub(crate) llm: speedwave_runtime::config::LlmConfig,
-    /// Backend-authoritative default base URL for the selected provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) default_base_url: Option<String>,
 }
 
-/// Auth-status discriminant derived from the `AuthStatusResponse` flags.
-/// Wire strings are snake_case: `no_provider` | `ready` | `auth_required`.
+#[derive(Serialize)]
+pub(crate) struct AnthropicModelWire {
+    #[serde(flatten)]
+    pub(crate) info: speedwave_runtime::defaults::AnthropicModelInfo,
+    pub(crate) has_1m: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AuthReadiness {
-    /// Fail-safe default: an absent/unknown status routes to provider setup.
     #[default]
     NoProvider,
     Ready,
@@ -63,8 +58,6 @@ pub(crate) enum AuthReadiness {
 }
 
 impl AuthReadiness {
-    /// SSOT derivation (mirrors `authStatusToProjectStatus` in
-    /// `project-state.service.ts`): no provider wins, then the R7 gate + flags.
     pub(crate) fn derive(
         provider_configured: bool,
         needs_anthropic_auth: bool,
@@ -81,33 +74,36 @@ impl AuthReadiness {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OauthSignIn {
+    Verified,
+    SavedUnverified,
+    #[default]
+    None,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AuthStatusResponse {
     pub(crate) api_key_configured: bool,
-    /// True when `claude auth status` inside the running container succeeds.
     pub(crate) oauth_authenticated: bool,
-    /// Whether the active provider needs Anthropic auth at all (R7); `false`
-    /// for non-anthropic kinds, so the UI gate never blocks on the two flags.
     pub(crate) needs_anthropic_auth: bool,
-    /// False when the project has no active LLM provider (logout) — the UI shows
-    /// "choose a provider" instead of a fake-ready chat.
     #[serde(default)]
     pub(crate) provider_configured: bool,
-    /// Backend-derived discriminant (`AuthReadiness::derive`) — the frontend
-    /// consumes this instead of re-deriving from the raw flags above.
     #[serde(default)]
     pub(crate) status: AuthReadiness,
+    #[serde(default)]
+    pub(crate) oauth_sign_in: OauthSignIn,
 }
 
 impl AuthStatusResponse {
-    /// Builds the response with `status` derived from the flags — the only
-    /// constructor, so no site can ship an inconsistent discriminant.
     pub(crate) fn from_flags(
         api_key_configured: bool,
-        oauth_authenticated: bool,
+        oauth_sign_in: OauthSignIn,
         needs_anthropic_auth: bool,
         provider_configured: bool,
     ) -> Self {
+        let oauth_authenticated = oauth_sign_in == OauthSignIn::Verified;
         Self {
             api_key_configured,
             oauth_authenticated,
@@ -119,12 +115,11 @@ impl AuthStatusResponse {
                 api_key_configured,
                 oauth_authenticated,
             ),
+            oauth_sign_in,
         }
     }
 }
 
-/// Update DTO for the LLM settings save path; mirrors `LlmConfig` plus tri-state
-/// `api_key`/`custom_headers` (`double_option`): omitted=unchanged, null=delete, string=write.
 #[derive(Deserialize, Default)]
 pub(crate) struct LlmConfigUpdate {
     pub(crate) provider: Option<String>,
@@ -136,20 +131,14 @@ pub(crate) struct LlmConfigUpdate {
     pub(crate) api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub(crate) custom_headers: Option<Option<String>>,
-    /// v2 provider list (ADR-073). When present, replaces the stored list wholesale (UI always
-    /// sends the full set). Key VALUES never ride this DTO — see `set_llm_provider_key`.
     #[serde(default)]
     pub(crate) providers: Option<Vec<speedwave_runtime::config::LlmProviderEntry>>,
-    /// v2 active provider+model selection (ADR-073).
     #[serde(default)]
     pub(crate) active: Option<speedwave_runtime::config::LlmActive>,
-    /// ADR-073 kill-switch passthrough; omitted = leave unchanged.
     #[serde(default)]
     pub(crate) proxy_enabled: Option<bool>,
 }
 
-/// Which telemetry fields MDM locked, by semantic name — mirrors `TelemetryConfig`'s
-/// field set so the UI greys the right controls without knowing any `OTEL_*` key.
 #[derive(Serialize, Default)]
 pub(crate) struct TelemetryLocks {
     pub(crate) enabled: bool,
@@ -168,8 +157,6 @@ pub(crate) struct TelemetryLocks {
     pub(crate) logs_export_interval_ms: bool,
 }
 
-/// Effective telemetry the frontend renders. Never carries the headers value —
-/// only `has_headers` — so the secret stays on the host.
 #[derive(Serialize)]
 pub(crate) struct TelemetryConfigResponse {
     pub(crate) enabled: bool,
@@ -177,7 +164,6 @@ pub(crate) struct TelemetryConfigResponse {
     pub(crate) protocol: speedwave_runtime::config::OtlpProtocol,
     pub(crate) export_metrics: bool,
     pub(crate) export_logs: bool,
-    /// True when a headers secret is set (the value itself is never sent).
     pub(crate) has_headers: bool,
     pub(crate) resource_attributes: Option<String>,
     pub(crate) include_account_uuid: bool,
@@ -187,14 +173,11 @@ pub(crate) struct TelemetryConfigResponse {
     pub(crate) log_raw_api_bodies: bool,
     pub(crate) metric_export_interval_ms: Option<u64>,
     pub(crate) logs_export_interval_ms: Option<u64>,
-    /// Per-field lock flags so the UI greys locked fields.
     pub(crate) locks: TelemetryLocks,
     pub(crate) any_locked: bool,
     pub(crate) kill_switch: bool,
 }
 
-/// User-supplied telemetry update. `headers` is tri-state (omit = keep, null =
-/// clear, string = replace). MDM-locked fields are ignored server-side.
 #[derive(Deserialize, Default)]
 pub(crate) struct TelemetryConfigUpdate {
     #[serde(default)]
@@ -227,17 +210,12 @@ pub(crate) struct TelemetryConfigUpdate {
     pub(crate) logs_export_interval_ms: Option<Option<u64>>,
 }
 
-/// A built-in PII rule from the library (`mcp-servers/policies/rules.yaml`), for
-/// the Settings category checklist. PII categories are an open rule-id set, not
-/// a fixed enum — the frontend fetches this list instead of hard-coding one.
 #[derive(Serialize, Clone)]
 pub(crate) struct PiiRuleInfo {
     pub(crate) id: String,
     pub(crate) display_name: String,
 }
 
-/// A built-in PII policy template's Settings-picker metadata. `categories` keys
-/// are rule ids from the library; an id absent from the map is off in this template.
 #[derive(Serialize, Clone)]
 pub(crate) struct SecurityPolicyTemplateInfo {
     pub(crate) id: String,
@@ -247,8 +225,6 @@ pub(crate) struct SecurityPolicyTemplateInfo {
         std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
 }
 
-/// A user-defined policy's Settings-picker metadata (editable); mirrors
-/// `PiiPolicyDefinition` (the v1 `sensitive_keys` concept has no v3 counterpart).
 #[derive(Serialize, Clone)]
 pub(crate) struct CustomPolicyDto {
     pub(crate) id: String,
@@ -260,20 +236,14 @@ pub(crate) struct CustomPolicyDto {
     pub(crate) keywords: Vec<speedwave_runtime::pii_policy::KeywordV3>,
 }
 
-/// Effective PII policy for the active project: `enabled_policies` is the
-/// user ∪ MDM-forced set, `forced_policies` the MDM-locked subset.
 #[derive(Serialize)]
 pub(crate) struct SecurityPolicyResponse {
     pub(crate) enabled_policies: Vec<String>,
     pub(crate) forced_policies: Vec<String>,
-    /// Rules with at least one flag on in the resolved union (mirrors `ResolvedPiiPolicy::rules`);
-    /// a rule id absent here is fully off across every enabled policy.
     pub(crate) effective_rules: Vec<speedwave_runtime::pii_policy::RuleOutput>,
     pub(crate) custom_policies: Vec<CustomPolicyDto>,
 }
 
-/// A custom detection rule as entered in the Settings form: the UI never
-/// computes the rule id — the server derives it from `display_name` on every save.
 #[derive(Deserialize, Clone)]
 pub(crate) struct SecurityPolicyCustomPatternInput {
     pub(crate) display_name: String,
@@ -281,8 +251,6 @@ pub(crate) struct SecurityPolicyCustomPatternInput {
     pub(crate) case_insensitive: bool,
 }
 
-/// A user-defined policy as entered in the Settings form; the server derives
-/// the id from `name`. `enabled` is this policy's own state, never forced.
 #[derive(Deserialize, Clone)]
 pub(crate) struct CustomPolicyDtoInput {
     pub(crate) name: String,
@@ -294,8 +262,6 @@ pub(crate) struct CustomPolicyDtoInput {
     pub(crate) keywords: Vec<speedwave_runtime::pii_policy::KeywordV3>,
 }
 
-/// User-supplied PII policy update (Settings → Security save path). `policies`
-/// and each custom entry's `enabled` carry the user's own selection only, never forced ids.
 #[derive(Deserialize)]
 pub(crate) struct SecurityPolicyUpdate {
     pub(crate) policies: Vec<String>,
@@ -325,13 +291,8 @@ pub(crate) struct IntegrationStatusEntry {
     pub(crate) current_values: std::collections::HashMap<String, String>,
     pub(crate) mappings: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub(crate) badge: Option<String>,
-    /// OAuth re-authorization required (stale scopes, expired token, etc.).
-    /// `None` = no action required.
     pub(crate) oauth_action_required: Option<String>,
-    /// "Connected to <workspace>" hint for OAuth services persisting identity
-    /// in providerData (Slack: teamName · authedUserId). `None` = nothing to show.
     pub(crate) oauth_identity: Option<String>,
-    /// IdP brand name for OAuth button copy, from the descriptor SSOT.
     pub(crate) oauth_provider_label: Option<String>,
 }
 
@@ -349,14 +310,10 @@ pub(crate) struct IntegrationsResponse {
     pub(crate) os: Vec<OsIntegrationStatusEntry>,
 }
 
-// ── Integration metadata helpers — delegates to consts SSOT ──
-
 pub(crate) fn get_allowed_fields(service: &str) -> Option<&'static [&'static str]> {
     speedwave_runtime::consts::find_mcp_service(service).map(|svc| svc.credential_files)
 }
 
-/// Returns the field's physical storage tier (plan §PR3:290-299).
-/// `None` when the field is not declared in the service's `auth_fields`.
 pub(crate) fn field_storage(
     service: &str,
     key: &str,
@@ -369,8 +326,6 @@ pub(crate) fn field_storage(
     })
 }
 
-/// `true` if `key` is allowed on `service`, across both storage tiers (worker credential files
-/// + OAuth state fields) — accepts UI fields whose home is `oauth/<project>/<service>.json`.
 pub(crate) fn is_allowed_field(service: &str, key: &str) -> bool {
     let Some(svc) = speedwave_runtime::consts::find_mcp_service(service) else {
         return false;
@@ -413,8 +368,6 @@ pub(crate) fn check_project(name: &str) -> Result<(), String> {
     speedwave_runtime::validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
-// ── Tests ──
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -423,8 +376,6 @@ pub(crate) fn check_project(name: &str) -> Result<(), String> {
 )]
 mod tests {
     use super::*;
-
-    // -- check_project tests --
 
     #[test]
     fn check_project_rejects_path_traversal() {
@@ -437,8 +388,6 @@ mod tests {
         let result = check_project("");
         assert!(result.is_err(), "empty project name should be rejected");
     }
-
-    // -- Credential allowlist tests --
 
     #[test]
     fn get_allowed_fields_returns_fields_for_known_services() {
@@ -459,11 +408,9 @@ mod tests {
 
     #[test]
     fn allowed_fields_match_auth_fields() {
-        // Verify auth fields belong to credential_files or oauth_state_fields storage tier.
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let auth_fields = get_auth_fields(svc.config_key);
             for field in &auth_fields {
-                // config.json is a virtual file for redmine, not an auth field
                 if field.key == "config.json" {
                     continue;
                 }
@@ -524,7 +471,6 @@ mod tests {
 
     #[test]
     fn secret_fields_list_covers_sensitive_keys() {
-        // Descriptor-derived keys with is_secret=true.
         assert!(is_secret_field("api_key"));
         assert!(is_secret_field("token"));
         assert!(is_secret_field("access_token"));
@@ -571,7 +517,6 @@ mod tests {
 
     #[test]
     fn get_auth_fields_classic_form_services_no_oauth_flow() {
-        // Services using PAT/API key auth (not OAuth flows like SharePoint, GitHub, Slack).
         for svc_key in &["gitlab", "atlassian", "redmine"] {
             let fields = get_auth_fields(svc_key);
             for field in &fields {
@@ -586,7 +531,6 @@ mod tests {
 
     #[test]
     fn get_auth_fields_github_token_uses_oauth_flow() {
-        // GitHub `token` is populated by the OAuth App device flow, so oauth_flow=true.
         let fields = get_auth_fields("github");
         let token = fields
             .iter()
@@ -615,7 +559,6 @@ mod tests {
     fn toggleable_services_have_auth_fields() {
         for svc in speedwave_runtime::consts::TOGGLEABLE_MCP_SERVICES {
             let fields = get_auth_fields(svc.config_key);
-            // Credential-less services (e.g. Playwright) declare `auth_fields: &[]`.
             if svc.auth_fields.is_empty() {
                 assert!(
                     fields.is_empty(),
@@ -633,7 +576,6 @@ mod tests {
         }
     }
 
-    /// Verify `#[serde(flatten)]` surfaces `LlmConfig` fields at top level (not nested under `llm:`).
     #[test]
     fn llm_config_response_flattens_inner_llm_at_top_level() {
         let resp = LlmConfigResponse {
@@ -657,7 +599,6 @@ mod tests {
             json["default_base_url"],
             "http://host.docker.internal:11434"
         );
-        // No `llm:` wrapper — flatten makes the inner fields top-level.
         assert!(
             json.get("llm").is_none(),
             "llm wrapper must not appear: {json}"
@@ -666,7 +607,6 @@ mod tests {
 
     #[test]
     fn llm_config_response_omits_context_tokens_when_unset() {
-        // Default config (no active project) must skip the `context_tokens` key entirely.
         let resp = LlmConfigResponse {
             llm: speedwave_runtime::config::LlmConfig::default(),
             default_base_url: None,
@@ -678,11 +618,8 @@ mod tests {
         );
     }
 
-    // ── AuthReadiness derivation (SSOT for the frontend discriminant) ──
-
     #[test]
     fn auth_readiness_no_provider_wins_over_everything() {
-        // provider_configured=false → NoProvider regardless of the other flags.
         for needs in [false, true] {
             for key in [false, true] {
                 for oauth in [false, true] {
@@ -698,7 +635,6 @@ mod tests {
 
     #[test]
     fn auth_readiness_ready_when_no_anthropic_auth_needed() {
-        // R7: non-anthropic providers are ready without any credential flag.
         assert_eq!(
             AuthReadiness::derive(true, false, false, false),
             AuthReadiness::Ready
@@ -744,8 +680,6 @@ mod tests {
 
     #[test]
     fn auth_status_missing_provider_configured_deserializes_to_no_provider() {
-        // Fail-safe: a legacy payload without `provider_configured`/`status`
-        // reads as false → derives NoProvider (provider setup, not fake-ready).
         let json = r#"{
             "api_key_configured": true,
             "oauth_authenticated": true,
@@ -767,23 +701,95 @@ mod tests {
 
     #[test]
     fn auth_status_from_flags_populates_consistent_status() {
-        let resp = AuthStatusResponse::from_flags(false, true, true, true);
+        let resp = AuthStatusResponse::from_flags(false, OauthSignIn::Verified, true, true);
         assert_eq!(resp.status, AuthReadiness::Ready);
-        let resp = AuthStatusResponse::from_flags(false, false, true, true);
+        let resp = AuthStatusResponse::from_flags(false, OauthSignIn::None, true, true);
         assert_eq!(resp.status, AuthReadiness::AuthRequired);
-        let resp = AuthStatusResponse::from_flags(true, true, true, false);
+        let resp = AuthStatusResponse::from_flags(true, OauthSignIn::Verified, true, false);
         assert_eq!(resp.status, AuthReadiness::NoProvider);
     }
 
     #[test]
+    fn oauth_sign_in_default_is_none() {
+        assert_eq!(OauthSignIn::default(), OauthSignIn::None);
+    }
+
+    #[test]
+    fn oauth_sign_in_wire_strings_are_snake_case() {
+        let cases = [
+            (OauthSignIn::Verified, "\"verified\""),
+            (OauthSignIn::SavedUnverified, "\"saved_unverified\""),
+            (OauthSignIn::None, "\"none\""),
+        ];
+        for (v, wire) in cases {
+            assert_eq!(serde_json::to_string(&v).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<OauthSignIn>(wire).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn oauth_sign_in_matches_ts_union() {
+        let all = [
+            OauthSignIn::Verified,
+            OauthSignIn::SavedUnverified,
+            OauthSignIn::None,
+        ];
+        for v in all {
+            match v {
+                OauthSignIn::Verified | OauthSignIn::SavedUnverified | OauthSignIn::None => {}
+            }
+        }
+        let mut rust: Vec<String> = all
+            .iter()
+            .map(|v| {
+                serde_json::to_value(v)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        rust.sort();
+
+        let src = include_str!("../../src/src/app/services/project-state.service.ts");
+        let marker = "export type OauthSignIn =";
+        let idx = src
+            .find(marker)
+            .expect("project-state.service.ts must declare `export type OauthSignIn`");
+        let union = src[idx + marker.len()..].split(';').next().unwrap_or("");
+        let mut ts: Vec<String> = union
+            .split('|')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        ts.sort();
+
+        assert_eq!(
+            rust, ts,
+            "TS OauthSignIn union must match Rust OauthSignIn serde strings"
+        );
+    }
+
+    #[test]
+    fn from_flags_sets_oauth_authenticated_true_only_when_verified() {
+        let resp = AuthStatusResponse::from_flags(false, OauthSignIn::Verified, true, true);
+        assert!(resp.oauth_authenticated);
+        assert_eq!(resp.oauth_sign_in, OauthSignIn::Verified);
+
+        for not_verified in [OauthSignIn::SavedUnverified, OauthSignIn::None] {
+            let resp = AuthStatusResponse::from_flags(false, not_verified, true, true);
+            assert!(!resp.oauth_authenticated);
+            assert_eq!(resp.oauth_sign_in, not_verified);
+        }
+    }
+
+    #[test]
     fn max_credential_bytes_matches_ts_constant() {
-        // Cross-language SSOT guard: TS `MAX_PLUGIN_CREDENTIAL_BYTES` must equal Rust `MAX_CREDENTIAL_BYTES`.
         let src = include_str!("../../src/src/app/models/plugin.ts");
         let needle = "export const MAX_PLUGIN_CREDENTIAL_BYTES";
         let idx = src
             .find(needle)
             .expect("plugin.ts must declare `export const MAX_PLUGIN_CREDENTIAL_BYTES = N`");
-        // Take the rest of the line after the marker and extract the integer.
         let line = src[idx + needle.len()..].lines().next().unwrap_or("");
         let digits: String = line.chars().filter(|c| c.is_ascii_digit()).collect();
         let ts_val: usize = digits
@@ -792,6 +798,50 @@ mod tests {
         assert_eq!(
             ts_val, MAX_CREDENTIAL_BYTES,
             "TS MAX_PLUGIN_CREDENTIAL_BYTES must match Rust types::MAX_CREDENTIAL_BYTES"
+        );
+    }
+
+    #[test]
+    fn anthropic_model_wire_fields_match_ts_mirror() {
+        const UNMIRRORED: &[&str] = &["pricing", "pricing_1m"];
+
+        let sample = speedwave_runtime::defaults::ANTHROPIC_MODELS
+            .first()
+            .expect("catalog must not be empty");
+        let wire = AnthropicModelWire {
+            info: sample.clone(),
+            has_1m: sample.has_1m(),
+        };
+        let json = serde_json::to_value(&wire).expect("AnthropicModelWire must serialize");
+        let mut rust: Vec<&str> = json
+            .as_object()
+            .expect("wire serializes as an object")
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !UNMIRRORED.contains(k))
+            .collect();
+        rust.sort_unstable();
+
+        let ts_src = include_str!("../../src/src/app/models/llm.ts");
+        let marker = "export interface AnthropicModel {";
+        let idx = ts_src
+            .find(marker)
+            .expect("llm.ts must declare `export interface AnthropicModel`");
+        let body = ts_src[idx + marker.len()..]
+            .split('}')
+            .next()
+            .expect("the AnthropicModel interface must be closed");
+        let mut ts: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts.sort_unstable();
+
+        assert_eq!(
+            rust, ts,
+            "TS AnthropicModel must mirror AnthropicModelWire, minus pricing/pricing_1m"
         );
     }
 }

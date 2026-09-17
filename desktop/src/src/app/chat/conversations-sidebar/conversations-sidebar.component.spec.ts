@@ -52,10 +52,6 @@ const sample: readonly ConversationSummary[] = [
   { session_id: 's3', preview: '', timestamp: null, message_count: 0 },
 ];
 
-/**
- * Query the CDK overlay portal under document.body.
- * @param sel - CSS selector to locate the element under document.
- */
 function q(sel: string): HTMLElement | null {
   return document.querySelector(sel) as HTMLElement | null;
 }
@@ -71,7 +67,6 @@ describe('ConversationsSidebarComponent', () => {
   });
 
   afterEach(() => {
-    // Tear down the overlay so each test starts with a clean container.
     host.open = false;
     fixture.detectChanges();
     fixture.destroy();
@@ -92,7 +87,6 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('detaches the overlay when open transitions back to false', () => {
-      // Destroy the shared open=true fixture to avoid two drawers in the overlay.
       fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);
@@ -160,6 +154,30 @@ describe('ConversationsSidebarComponent', () => {
       const drawer = q('[data-testid="conversations-sidebar"]')!;
       expect(drawer.textContent).toContain('0 · —');
     });
+
+    it('falls back to "untitled" when the backend preview is a bare control-chip message', () => {
+      host.conversations = [
+        { session_id: 's4', preview: '/model claude-sonnet-5', timestamp: '2m', message_count: 3 },
+      ];
+      fixture.detectChanges();
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('untitled');
+      expect(drawer.textContent).not.toContain('/model claude-sonnet-5');
+    });
+
+    it('shows the real preview text when the first message is not a control chip', () => {
+      host.conversations = [
+        {
+          session_id: 's5',
+          preview: 'help me refactor this module',
+          timestamp: '2m',
+          message_count: 3,
+        },
+      ];
+      fixture.detectChanges();
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('help me refactor this module');
+    });
   });
 
   describe('active highlight', () => {
@@ -186,7 +204,6 @@ describe('ConversationsSidebarComponent', () => {
       fixture.detectChanges();
       const actives = document.querySelectorAll('[data-active="true"]');
       expect(actives.length).toBe(1);
-      // The data-active row is the one wrapping the active session's resume button.
       expect(actives[0].querySelector('[data-testid="conversation-resume-s3"]')).not.toBeNull();
     });
 

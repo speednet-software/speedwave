@@ -13,7 +13,6 @@ import {
   createCalendarTools,
 } from './calendar-tools.js';
 
-// Mock the platform runner
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));
@@ -110,7 +109,6 @@ describe('calendar-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
-      // Verify flat response — no wrapping under "event" key (wrapping removed to match outputSchema)
       expect((result.data as any).event).toBeUndefined();
       expect((result.data as any).id).toBe('e-1');
     });

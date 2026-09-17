@@ -1,5 +1,3 @@
-// Mirror of `mcp-servers/oauth/src/providers/registry.ts`. ADR-060.
-
 pub const MICROSOFT_PROVIDER_ID: &str = "microsoft";
 
 pub const SLACK_PROVIDER_ID: &str = "slack";

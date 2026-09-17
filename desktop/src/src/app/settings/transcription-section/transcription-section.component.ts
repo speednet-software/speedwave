@@ -253,7 +253,6 @@ export class TranscriptionSectionComponent implements OnInit {
         this.micStatus.set(await this.transcription.microphonePermissionStatus());
       }
     } catch {
-      // Permissions rows are informational — the section still works without them.
       this.isMacos.set(false);
     }
     this.cdr.markForCheck();
@@ -289,10 +288,8 @@ export class TranscriptionSectionComponent implements OnInit {
       const inFlight = this.modelRows().find((r) => r.entry.downloading);
       const tracked = this.transcription.downloadingModelKey();
       if (inFlight && tracked !== inFlight.entry.key) {
-        // Backend download survived a webview reload — reattach progress.
         await this.transcription.resumeDownloadTracking(inFlight.entry.key);
       } else if (!inFlight && tracked !== null) {
-        // Stale tracking for a download the backend already finished.
         this.transcription.clearDownloadTracking();
       }
       this.error.set('');

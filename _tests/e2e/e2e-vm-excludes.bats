@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Structural tests for e2e-vm.sh: shared rsync/tar exclude array and
-# PowerShell single-quote escaping of injected secrets (ps_squote).
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
 
@@ -43,7 +41,6 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
     [ "$(ps_squote "")" = "" ]
     [ "$(ps_squote "o'brien")" = "o''brien" ]
     [ "$(ps_squote "a'b'c")" = "a''b''c" ]
-    # Breakout attempt: '; calc; ' stays a single PS literal after doubling.
     [ "$(ps_squote "'; calc; '")" = "''; calc; ''" ]
 }
 

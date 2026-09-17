@@ -7,18 +7,11 @@ import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 import type { IntegrationStatusEntry } from '../models/integration';
+import { makeMockLogger } from '../testing/mock-logger';
 
 /** Mock LoggerService for unit tests (no Tauri context). */
-function makeMockLogger() {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
-}
-
 const MOCK_INTEGRATIONS = {
   services: [
     {
@@ -158,7 +151,6 @@ function setupMockTauri(mockTauri: MockTauriService): void {
       case 'get_selected_ide':
         return null;
       case 'validate_os_integrations_on_startup':
-        // Default: no auto-disabled integrations.
         return [];
       default:
         return undefined;
@@ -172,7 +164,6 @@ describe('IntegrationsComponent', () => {
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
-  // BetaService stub; defaults false to match production (tray toggles it).
   const betaEnabled = signal(false);
 
   beforeEach(async () => {
@@ -181,7 +172,6 @@ describe('IntegrationsComponent', () => {
     setupMockTauri(mockTauri);
     mockLogger = makeMockLogger();
 
-    // Reset the static validation map so each test observes a fresh validate flow.
     (
       IntegrationsComponent as unknown as { validationByProject: Map<string, Promise<void>> }
     ).validationByProject.clear();
@@ -197,7 +187,7 @@ describe('IntegrationsComponent', () => {
 
     projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject.set('test-project');
-    projectState.status.set('ready'); // toggles/saves happen on a ready project
+    projectState.status.set('ready');
 
     fixture = TestBed.createComponent(IntegrationsComponent);
     component = fixture.componentInstance;
@@ -214,7 +204,6 @@ describe('IntegrationsComponent', () => {
   it('should load active project and integrations on init', async () => {
     await component.ngOnInit();
     expect(component.activeProject).toBe('test-project');
-    // Only office is beta-gated; with beta off the mock's gitlab/redmine/github/sharepoint show.
     expect(component.services).toHaveLength(4);
     expect(component.osIntegrations).toHaveLength(1);
   });
@@ -290,7 +279,6 @@ describe('IntegrationsComponent', () => {
     const betaServices = ['office'] as const;
     const nonBetaServices = ['github', 'atlassian'] as const;
 
-    // Backend always returns every service; visibility is governed by the BetaService signal.
     function setupWithBetaServices(): void {
       const extra = [...betaServices, ...nonBetaServices].map((svc) => ({
         service: svc,
@@ -358,7 +346,6 @@ describe('IntegrationsComponent', () => {
       }
 
       betaEnabled.set(true);
-      // fakeAsync doesn't integrate with Angular Signals under Vitest — one macrotask lets the effect flush.
       await new Promise((resolve) => setTimeout(resolve, 0));
       fixture.detectChanges();
 
@@ -718,9 +705,7 @@ describe('IntegrationsComponent', () => {
       const target = { checked: true };
       const event = { target } as unknown as Event;
       await component.toggleService(component.services[1], event);
-      // Frontend no longer blocks — it calls the backend; the backend rejects
       expect(invokeSpy).toHaveBeenCalledWith('set_integration_enabled', expect.anything());
-      // Checkbox is reverted on error
       expect(target.checked).toBe(false);
       expect(component.error).toBe('Service not configured');
     });
@@ -802,14 +787,12 @@ describe('IntegrationsComponent', () => {
       await projectState.init();
       await component.ngOnInit();
 
-      // Verify the unsub function exists before destroy
       expect(
         (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).not.toBeNull();
 
       component.ngOnDestroy();
 
-      // Verify unsub was called and nulled
       expect(
         (component as unknown as { unsubProjectSettled: unknown })['unsubProjectSettled']
       ).toBeNull();
@@ -876,11 +859,9 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       fixture.changeDetectorRef.markForCheck();
       fixture.detectChanges();
-      // Counter was dropped; the table conveys per-row status.
       const count = fixture.nativeElement.querySelector('[data-testid="integrations-count"]');
       expect(count).toBeNull();
 
-      // Project pill is the shared <app-project-pill> component.
       const pill = fixture.nativeElement.querySelector('app-project-pill');
       expect(pill).not.toBeNull();
     });
@@ -893,7 +874,6 @@ describe('IntegrationsComponent', () => {
         '[data-testid="integrations-table-wrapper"]'
       );
       expect(wrapper).not.toBeNull();
-      // Scope to the table wrapper; `<app-ide-bridge>` also renders a tbody.
       const rows = wrapper.querySelectorAll('tbody tr');
       expect(rows.length).toBe(component.services.length);
     });
@@ -916,10 +896,8 @@ describe('IntegrationsComponent', () => {
       fixture.detectChanges();
       const before = component.services[0].enabled;
       const svc = component.services[0];
-      // Call the parent handler directly; JSDOM click() doesn't bubble reliably.
       await component.onRowToggle(svc, new MouseEvent('click'));
       expect(svc.enabled).toBe(!before);
-      // Row click must NOT expand because onRowToggle calls stopPropagation.
       expect(component.expandedService).toBeNull();
     });
 
@@ -947,8 +925,6 @@ describe('IntegrationsComponent', () => {
       expect(slot.querySelector('app-ide-bridge')).not.toBeNull();
     });
   });
-
-  // -- OAuth flow tests --
 
   describe('handleStartOAuth()', () => {
     it('saves non-oauth credentials first, then starts OAuth', async () => {
@@ -1079,7 +1055,6 @@ describe('IntegrationsComponent', () => {
         credentials: { client_id: '550e8400-e29b-41d4-a716-446655440000', tenant_id: 'common' },
       });
 
-      // Status is 'starting' when start_sharepoint_oauth is invoked.
       expect(statusDuringInvoke).toBe('starting');
     });
 
@@ -1104,7 +1079,6 @@ describe('IntegrationsComponent', () => {
         credentials: { client_id: '550e8400-e29b-41d4-a716-446655440000', tenant_id: 'common' },
       });
 
-      // oauthProjectAtStart is private, but we can verify the behavior via project_switched test
       expect(component.activeOAuthRequestId).toBe('rid');
     });
   });
@@ -1138,7 +1112,6 @@ describe('IntegrationsComponent', () => {
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_slack_oauth') {
-          // Loopback flow: request_id only, no user_code.
           return { request_id: 'sl-rid-1' };
         }
         if (cmd === 'list_projects') {
@@ -1152,14 +1125,12 @@ describe('IntegrationsComponent', () => {
 
       await component.handleStartOAuth({ svc: slackSvc(), credentials: {} });
 
-      // Slack uses the bundled client_id (consts.rs::SLACK_OAUTH_CLIENT_ID).
       expect(invokeSpy).toHaveBeenCalledWith('start_slack_oauth', {
         project: 'test-project',
       });
       expect(invokeSpy).not.toHaveBeenCalledWith('start_sharepoint_oauth', expect.anything());
       expect(component.oauthStatus).toBe('polling');
       expect(component.oauthService).toBe('slack');
-      // No device-code box for a loopback flow.
       expect(component.deviceCodeInfo).toBeNull();
       expect(component.activeOAuthRequestId).toBe('sl-rid-1');
     });
@@ -1261,11 +1232,9 @@ describe('IntegrationsComponent', () => {
 
       await component.handleStartOAuth({ svc: githubSvc, credentials: {} });
 
-      // GitHub uses bundled client_id (consts.rs::GITHUB_OAUTH_CLIENT_ID).
       expect(invokeSpy).toHaveBeenCalledWith('start_github_oauth', {
         project: 'test-project',
       });
-      // Crucially, GitHub flow must NOT dispatch to the SharePoint command.
       expect(invokeSpy).not.toHaveBeenCalledWith('start_sharepoint_oauth', expect.anything());
       expect(component.oauthStatus).toBe('polling');
       expect(component.oauthService).toBe('github');
@@ -1299,14 +1268,12 @@ describe('IntegrationsComponent', () => {
         request_id: 'gh-rid-3',
       };
 
-      // Dispatch directly to the listener registered in ngOnInit.
       mockTauri.dispatchEvent('github_oauth_progress', {
         status: 'success',
         message: 'Authentication successful',
         request_id: 'gh-rid-3',
       });
 
-      // The listener is async — wait one microtask flush for state updates.
       await Promise.resolve();
       await Promise.resolve();
 
@@ -1401,7 +1368,6 @@ describe('IntegrationsComponent', () => {
     it('success event triggers loadIntegrations and auto-enable', async () => {
       await component.ngOnInit();
       component.activeOAuthRequestId = 'rid-success';
-      // Set private oauthProjectAtStart to match activeProject
       (component as unknown as { oauthProjectAtStart: string | null }).oauthProjectAtStart =
         'test-project';
 
@@ -1448,7 +1414,6 @@ describe('IntegrationsComponent', () => {
       });
       await fixture.whenStable();
 
-      // Should NOT update status for stale event
       expect(component.oauthStatus).toBeNull();
     });
 
@@ -1513,10 +1478,9 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
 
-      // First flow fails
       component.oauthStatus = 'error';
       component.activeOAuthRequestId = null;
-      component.oauthStatus = null; // reset after error
+      component.oauthStatus = null;
 
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_sharepoint_oauth') {
@@ -1575,7 +1539,6 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
 
       const afterOAuth = cloneMockIntegrations();
-      // sharepoint still NOT configured (site_id missing)
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
           case 'list_projects':
@@ -1623,10 +1586,8 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
 
-      // Simulate cancel during the start_sharepoint_oauth invoke by bumping nonce
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_sharepoint_oauth') {
-          // Simulate a cancel happening during the await
           await component.handleCancelOAuth();
           return {
             user_code: 'STALE',
@@ -1643,7 +1604,6 @@ describe('IntegrationsComponent', () => {
         credentials: { client_id: '550e8400-e29b-41d4-a716-446655440000', tenant_id: 'common' },
       });
 
-      // Result should be discarded — nonce changed during await
       expect(component.deviceCodeInfo).toBeNull();
       expect(component.activeOAuthRequestId).toBeNull();
       expect(component.oauthStatus).toBeNull();
@@ -1655,13 +1615,9 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
 
-      // Start first flow — make it hang so status stays 'starting'
-      let resolveFirst: (v: unknown) => void;
-      const firstPromise = new Promise((r) => (resolveFirst = r));
+      const pendingFirstFlow = createDeferred<unknown>();
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'start_sharepoint_oauth') {
-          return firstPromise;
-        }
+        if (cmd === 'start_sharepoint_oauth') return pendingFirstFlow.promise;
         return undefined;
       };
 
@@ -1672,7 +1628,6 @@ describe('IntegrationsComponent', () => {
 
       expect(component.oauthStatus).toBe('starting');
 
-      // Second call while first is in-flight — should return immediately
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       invokeSpy.mockClear();
       await component.handleStartOAuth({
@@ -1682,8 +1637,7 @@ describe('IntegrationsComponent', () => {
 
       expect(invokeSpy).not.toHaveBeenCalledWith('start_sharepoint_oauth', expect.anything());
 
-      // Clean up first call
-      resolveFirst!({
+      pendingFirstFlow.resolve({
         user_code: 'CODE',
         verification_uri: 'https://example.com',
         expires_in: 900,
@@ -1716,7 +1670,6 @@ describe('IntegrationsComponent', () => {
 
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
-      // Project has changed (activeProject is 'test-project', flow started on 'original-project')
       mockTauri.dispatchEvent('sharepoint_oauth_progress', {
         status: 'success',
         message: 'Auth OK',
@@ -1724,12 +1677,10 @@ describe('IntegrationsComponent', () => {
       });
       await fixture.whenStable();
 
-      // Should NOT auto-enable because project changed
       expect(invokeSpy).not.toHaveBeenCalledWith(
         'set_integration_enabled',
         expect.objectContaining({ service: 'sharepoint' })
       );
-      // But status should still be updated and flow state cleared
       expect(component.oauthStatus).toBe('success');
       expect(component.deviceCodeInfo).toBeNull();
       expect(component.activeOAuthRequestId).toBeNull();
@@ -1784,12 +1735,10 @@ describe('IntegrationsComponent', () => {
 
       expect(component.osIntegrationsAutoDisabled.length).toBe(2);
       expect(component.osIntegrationsAutoDisabled[0].service).toBe('calendar');
-      // Calendar reason uses the Calendar TCC service, not Mail/AppleEvents.
       expect(component.osIntegrationsAutoDisabled[0].reason).toContain(
         'tccutil reset Calendar pl.speedwave.desktop.calendar'
       );
       expect(component.osIntegrationsAutoDisabled[1].service).toBe('mail');
-      // Mail reason must use AppleEvents service (kTCCServiceAppleEvents), not 'Mail'.
       expect(component.osIntegrationsAutoDisabled[1].reason).toContain(
         'tccutil reset AppleEvents pl.speedwave.desktop.mail'
       );
@@ -1833,7 +1782,6 @@ describe('IntegrationsComponent', () => {
     });
 
     it('does not render banner when no integrations were auto-disabled', async () => {
-      // Default mock returns empty list — banner must not appear.
       await component.ngOnInit();
       await component.runInitialOsValidation();
       fixture.detectChanges();
@@ -1882,7 +1830,6 @@ describe('IntegrationsComponent', () => {
     });
 
     it('handles validator errors non-fatally', async () => {
-      // Validator throws → component must continue loading integrations.
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'validate_os_integrations_on_startup') {
           throw new Error('boom');
@@ -1902,15 +1849,12 @@ describe('IntegrationsComponent', () => {
       await component.runInitialOsValidation();
 
       expect(component.osIntegrationsAutoDisabled).toEqual([]);
-      // Integrations loaded normally
       expect(component.services.length).toBeGreaterThan(0);
       expect(component.error).toBe('');
     });
   });
 
   describe('LoggerService — TCC validation + toggle observability', () => {
-    // These tests verify the logs ZIP contains enough breadcrumbs for support triage.
-
     it('logs info on validateOsIntegrations start', async () => {
       await component.ngOnInit();
       await component.runInitialOsValidation();
@@ -1921,14 +1865,12 @@ describe('IntegrationsComponent', () => {
     });
 
     it('logs info "no auto-disabled" when validator returns empty list', async () => {
-      // Default mock returns [] from validate_os_integrations_on_startup.
       await component.ngOnInit();
       await component.runInitialOsValidation();
 
       expect(mockLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('no auto-disabled services')
       );
-      // No warn/error in the happy path
       expect(mockLogger.warn).not.toHaveBeenCalled();
       expect(mockLogger.error).not.toHaveBeenCalled();
     });
@@ -1965,7 +1907,6 @@ describe('IntegrationsComponent', () => {
       await component.ngOnInit();
       await component.runInitialOsValidation();
 
-      // One warn line per auto-disabled service, each carrying recovery text.
       expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('os.calendar'));
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining('tccutil reset Calendar pl.speedwave.desktop.calendar')
@@ -1974,7 +1915,6 @@ describe('IntegrationsComponent', () => {
       expect(mockLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining('tccutil reset AppleEvents pl.speedwave.desktop.mail')
       );
-      // Plus a summary info line
       expect(mockLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('auto-disabled 2 service(s)')
       );
@@ -2015,7 +1955,7 @@ describe('IntegrationsComponent', () => {
 
       const fakeEvent = new Event('click');
       vi.spyOn(fakeEvent, 'stopPropagation');
-      mockLogger.info.mockClear(); // ignore validate-time info; assert only toggle-time
+      mockLogger.info.mockClear();
 
       await component.onOsToggleClick(calendarOs, fakeEvent);
 
@@ -2030,7 +1970,6 @@ describe('IntegrationsComponent', () => {
       await component.runInitialOsValidation();
       const osSvc = component.osIntegrations[0];
 
-      // Make set_os_integration_enabled throw a TCC-like error
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'set_os_integration_enabled') {
           throw new Error(
@@ -2053,7 +1992,6 @@ describe('IntegrationsComponent', () => {
     });
   });
 
-  // FIX-P1-4: re-consent banner when oauth_action_required === 'scope_mismatch'
   describe('SharePoint re-authorisation banner', () => {
     beforeEach(async () => {
       await component.ngOnInit();
@@ -2080,7 +2018,6 @@ describe('IntegrationsComponent', () => {
     });
 
     it('renders the banner even when sharepoint reads as NOT configured (stale providerData)', async () => {
-      // Banner must not hinge on `configured`: scope_mismatch alone shows it.
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
       sharepointSvc.configured = false;
       sharepointSvc.oauth_action_required = 'scope_mismatch';
@@ -2111,7 +2048,6 @@ describe('IntegrationsComponent', () => {
     });
 
     it('renders the banner for ANY service the backend flags (gate is flag-driven)', async () => {
-      // The template renders whatever oauth_action_required the backend flags.
       const gitlabSvc = component.services.find((s) => s.service === 'gitlab')!;
       gitlabSvc.configured = true;
       (gitlabSvc as { oauth_action_required?: string }).oauth_action_required = 'scope_mismatch';

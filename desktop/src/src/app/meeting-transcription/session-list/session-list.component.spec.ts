@@ -77,7 +77,7 @@ describe('SessionListComponent', () => {
     await component.remove('a');
     expect(svc.delete).toHaveBeenCalledWith('a');
     expect(component.selectedId()).toBeNull();
-    expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
+    expect(svc.list).toHaveBeenCalledTimes(2);
   });
 
   it('resumes a done session and selects it without re-subscribing the view', async () => {
@@ -88,9 +88,8 @@ describe('SessionListComponent', () => {
     await component.resume(s);
     expect(svc.resumeRecording).toHaveBeenCalledWith(s.id, true);
     expect(component.selectedId()).toBe(s.id);
-    // The service already activated the snapshot + listener — no opened round trip.
     expect(spy).not.toHaveBeenCalled();
-    expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
+    expect(svc.list).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces a resume failure without selecting the session', async () => {
@@ -108,11 +107,9 @@ describe('SessionListComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="resume-b"]')).not.toBeNull();
-    // A recording in flight hides every resume button.
     svc.recordingSessionId.set('b');
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="resume-b"]')).toBeNull();
-    // A non-done session offers no resume.
     svc.recordingSessionId.set(null);
     component.sessions.set([
       { ...session('c', '2026-05-13T00:00:00Z', true), status: { state: 'failed', reason: 'x' } },

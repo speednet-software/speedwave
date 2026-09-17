@@ -62,7 +62,6 @@ impl McpOsProcess {
     /// Test-only entry point; lets tests redirect lock + audit log to
     /// a temp directory without poking the global `data_dir()` OnceLock.
     pub(crate) fn spawn_with_data_dir(script_path: &str, data_dir: &Path) -> anyhow::Result<Self> {
-        // Idempotent migration: collapse legacy 3-file layout into `mcp-os.lock.json`.
         let _ = lock::migrate_legacy_with_target(
             data_dir,
             LockService::McpOs,
@@ -165,7 +164,6 @@ mod tests {
 
     #[test]
     fn pre_spawn_writes_token_mount_before_lock_json() {
-        // Token mount file must be on disk *before* lock.json.
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
         let log_path = tmp.path().join("log");
@@ -177,13 +175,11 @@ mod tests {
             auth_token: "fresh-token-uuid",
             data_dir: tmp.path(),
         };
-        // lock.json must not exist yet when pre_spawn runs.
         assert!(
             !lock_path.exists(),
             "lock.json must be absent before pre_spawn"
         );
         McpOsSpec.pre_spawn(&ctx).unwrap();
-        // Token file written with the new token, lock.json still absent.
         let written = std::fs::read_to_string(&token_path).unwrap();
         assert_eq!(written, "fresh-token-uuid");
         assert!(
@@ -234,6 +230,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_mcp_os_alive_in_true_when_pid_alive_and_port_listens() {
         use std::net::TcpListener;
         let tmp = tempfile::tempdir().unwrap();
@@ -255,6 +252,7 @@ mod tests {
     /// the replacement's freshly-written token mount.
     #[cfg(unix)]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     #[serial(env)]
     fn respawn_does_not_delete_new_token_mount() {
         let tmp = tempfile::tempdir().unwrap();
@@ -292,16 +290,15 @@ mod tests {
     /// when the singleton spawns.
     #[cfg(unix)]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     #[serial(env)]
     fn spawn_migrates_legacy_three_file_layout() {
         let tmp = tempfile::tempdir().unwrap();
-        // Legacy layout: three separate files.
         std::fs::write(tmp.path().join("mcp-os-port"), "54321").unwrap();
         std::fs::write(tmp.path().join("mcp-os-pid"), "1").unwrap();
         std::fs::write(tmp.path().join("mcp-os-auth-token"), "legacy-token").unwrap();
 
         let script = write_fake_worker(tmp.path(), "fake.js");
-        // `which node` — skip when node unavailable in test env.
         // SSOT-allow: test fixture spawn
         let node_ok = Command::new("node")
             .arg("--version")
@@ -316,13 +313,11 @@ mod tests {
 
         let res = McpOsProcess::spawn_with_data_dir(&script.to_string_lossy(), tmp.path());
         if let Ok(mut proc) = res {
-            // lock.json must be present and parseable for service McpOs.
             let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
             assert!(lock_path.exists(), "lock.json must exist after spawn");
             let lock = lock::read(&lock_path, LockService::McpOs)
                 .expect("lock.json must parse with service McpOs");
             assert!(lock.port > 0, "lock.json port must be assigned");
-            // Legacy files must have been cleaned up by migration.
             assert!(
                 !tmp.path().join("mcp-os-port").exists(),
                 "legacy port removed"
@@ -333,7 +328,6 @@ mod tests {
             );
             assert!(
                 !tmp.path().join("mcp-os-auth-token").exists()
-                    // Dual-write reuses the legacy name with the fresh token.
                     || std::fs::read_to_string(tmp.path().join("mcp-os-auth-token"))
                         .map(|s| s != "legacy-token")
                         .unwrap_or(true),
@@ -347,6 +341,7 @@ mod tests {
     /// Gated behind `mcp-os-bundle-e2e` (run via `make test-mcp-os-bundle`).
     #[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     #[serial(env)]
     fn upgrade_path_with_real_bundled_mcp_os() {
         let script = "../../desktop/src-tauri/mcp-os/os/dist/index.js";

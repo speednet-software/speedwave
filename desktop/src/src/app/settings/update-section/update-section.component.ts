@@ -113,9 +113,7 @@ export class UpdateSectionComponent implements OnInit {
   private async loadCurrentVersion(): Promise<void> {
     try {
       this.currentVersion = await this.tauri.getVersion();
-    } catch {
-      // Not running inside Tauri
-    }
+    } catch {}
     this.cdr.markForCheck();
   }
 
@@ -128,9 +126,7 @@ export class UpdateSectionComponent implements OnInit {
       if (needsRewrite) {
         await this.saveUpdateSettings();
       }
-    } catch {
-      // Not running inside Tauri
-    }
+    } catch {}
     this.cdr.markForCheck();
   }
 

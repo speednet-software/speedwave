@@ -19,25 +19,20 @@ describe('SessionStatsComponent', () => {
     return (fixture.nativeElement as HTMLElement).textContent ?? '';
   }
 
-  // ── null / empty stats ─────────────────────────────────────────────────
   describe('null stats', () => {
     it('renders the zero row when stats is null (one always-present row)', () => {
       fixture.componentRef.setInput('stats', null);
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
-      // One row, always present — new chat, resume, and live all share it.
       expect(el.querySelector('[data-testid="session-stats"]')).not.toBeNull();
       const txt = rootText();
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
-      // No stats → cost unpriced → "—", never a fabricated $0.0000.
       expect(txt).toContain('—');
-      // Window unknown (no stats) → ctx gauge hidden, not fabricated (ADR-041).
       expect(txt).not.toContain('ctx');
     });
 
     it('renders the zero row + ctx 0% for a seeded resume (known window, no usage)', () => {
-      // The exact shape seedSessionId produces before any Result arrives.
       fixture.componentRef.setInput('stats', {
         session_id: '11111111-1111-1111-1111-111111111111',
         total_cost: null,
@@ -46,18 +41,14 @@ describe('SessionStatsComponent', () => {
       });
       fixture.detectChanges();
       const txt = rootText();
-      // Must NOT collapse to an empty/invisible row — shows zeros like a new chat.
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
-      // Unpriced seed → "—" (not $0.0000).
       expect(txt).toContain('—');
-      // Known window → ctx shows 0% (not hidden).
       expect(txt).toContain('ctx');
       expect(txt).toContain('0%');
     });
   });
 
-  // ── happy path ─────────────────────────────────────────────────────────
   describe('happy path', () => {
     it('renders `in:` total at the start of the row', () => {
       fixture.componentRef.setInput('stats', {
@@ -80,7 +71,6 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      // No usage → zeros, never an empty/invisible row.
       const txt = rootText();
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
@@ -103,7 +93,6 @@ describe('SessionStatsComponent', () => {
       fixture.detectChanges();
       const txt = rootText();
       expect(txt).toContain('ctx');
-      // ~2% = 22,565 / 1,000,000
       expect(txt).toContain('2%');
     });
 
@@ -122,10 +111,9 @@ describe('SessionStatsComponent', () => {
       });
       fixture.detectChanges();
       const txt = rootText();
-      // in: = input_tokens only (new uncached input), NOT input + cache.
       expect(txt).toContain('in:');
       expect(txt).toContain('1,234');
-      expect(txt).not.toContain('23,871'); // 1234 + 22562 + 75 — the old (wrong) totalInput
+      expect(txt).not.toContain('23,871');
       expect(txt).toContain('out:');
       expect(txt).toContain('65');
     });
@@ -190,11 +178,8 @@ describe('SessionStatsComponent', () => {
     });
   });
 
-  // ── regression: ctx must ignore the per-turn `usage` sums ───────────────
   describe('turn-sum usage vs ctx separation (regression)', () => {
     it('one tool-heavy turn: turn-sum usage exceeds the window but ctx stays truthful', () => {
-      // Real capture: 1 user turn = 11 API calls; summed usage (474k) is over
-      // twice the 200k window, while the last call's context is ~74k (37%).
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.5,
@@ -215,9 +200,8 @@ describe('SessionStatsComponent', () => {
       });
       fixture.detectChanges();
       expect(component.ctxTotal()).toBe(71_766);
-      expect(component.ctxPct()).toBe(36); // never the clamped 100%
+      expect(component.ctxPct()).toBe(36);
       expect(component.ctxUsedMax()).toBe('72k/200k');
-      // `in:` keeps the per-turn fresh-input total.
       expect(component.inboundTokens()).toBe(4_864);
     });
 
@@ -243,7 +227,6 @@ describe('SessionStatsComponent', () => {
       expect(component.ctxPct()).toBe(9);
       set(181_000);
       fixture.detectChanges();
-      // Latest call → 181,200 / 1M = 18%. NOT the sum (~291k → 29%).
       expect(component.ctxTotal()).toBe(181_200);
       expect(component.ctxPct()).toBe(18);
     });
@@ -265,11 +248,10 @@ describe('SessionStatsComponent', () => {
       fixture.detectChanges();
       expect(component.inboundTokens()).toBe(4500);
       expect(component.ctxTotal()).toBe(4500);
-      expect(component.ctxPct()).toBe(14); // 4500 / 32768
+      expect(component.ctxPct()).toBe(14);
     });
 
     it('hides the ctx gauge for a local model with unknown window (ADR-041)', () => {
-      // No advertised window → ctxPct null → gauge hidden, never fabricated.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -284,10 +266,28 @@ describe('SessionStatsComponent', () => {
     });
   });
 
-  // ── edge cases ─────────────────────────────────────────────────────────
+  describe('context window sized by the conversation model', () => {
+    it('a 1M-window conversation model reports 65%, not a 200k subagent window clamped to 100%', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0.5,
+        context_usage: {
+          input_tokens: 100_000,
+          output_tokens: 1_000,
+          cache_read_tokens: 550_000,
+          cache_write_tokens: 0,
+        },
+        context_window_size: 1_000_000,
+        total_output_tokens: 1_000,
+      });
+      fixture.detectChanges();
+      expect(component.ctxTotal()).toBe(650_000);
+      expect(component.ctxUsedMax()).toBe('650k/1M');
+      expect(component.ctxPct()).toBe(65);
+    });
+  });
+
   describe('edge cases', () => {
-    // The strip is one fixed shape: every segment shows zeros until live data
-    // replaces them, so a new chat and a resumed one look identical.
     it('shows ctx at 0% when no usage', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
@@ -321,7 +321,6 @@ describe('SessionStatsComponent', () => {
       });
       fixture.detectChanges();
       expect(rootText()).toContain('chat:');
-      // A real 0 (free/local priced) shows $0.0000; only null/unpriced shows "—".
       expect(rootText()).toContain('$0.0000');
     });
 
@@ -339,8 +338,6 @@ describe('SessionStatsComponent', () => {
     });
 
     it('hides the limit gauge for a local model (unknown window), like ctx', () => {
-      // Regression: the rate-limit segment must not show a fabricated "limit 0%"
-      // when there is no rate-limit data and the window is unknown (local model).
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -365,7 +362,6 @@ describe('SessionStatsComponent', () => {
     });
 
     it('renders in/out without cr/cw breakdown when cache tokens are absent', () => {
-      // cr/cw collapse into the `in:` total, not surfaced as own segments.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.05,
@@ -397,13 +393,10 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      // ~20k / 1M = 2%
       expect(component.ctxPct()).toBe(2);
     });
 
     it('ignores the per-turn usage sums entirely — no context_usage means 0%', () => {
-      // The inflated turn-sum alone must not move the gauge (the 100%-after-
-      // one-query bug); only `context_usage` may.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -431,7 +424,6 @@ describe('SessionStatsComponent', () => {
     });
   });
 
-  // ── percentage bucket colors (state transitions) ───────────────────────
   describe('percentage bucket colors', () => {
     it('applies green for 0–49%', () => {
       fixture.componentRef.setInput('stats', {
@@ -443,7 +435,7 @@ describe('SessionStatsComponent', () => {
           cache_read_tokens: 0,
           cache_write_tokens: 0,
         },
-        context_window_size: 200000, // 10%
+        context_window_size: 200000,
         total_output_tokens: 0,
       });
       expect(component.ctxBarColor()).toBe('bg-[var(--green)]');
@@ -503,7 +495,7 @@ describe('SessionStatsComponent', () => {
           cache_read_tokens: 0,
           cache_write_tokens: 0,
         },
-        context_window_size: 200_000, // 30%
+        context_window_size: 200_000,
         total_output_tokens: 0,
       });
       expect(component.ctxPct()).toBe(30);
@@ -520,7 +512,7 @@ describe('SessionStatsComponent', () => {
           cache_read_tokens: 0,
           cache_write_tokens: 0,
         },
-        context_window_size: 200_000, // 80%
+        context_window_size: 200_000,
         total_output_tokens: 0,
       });
       expect(component.ctxPct()).toBe(80);
@@ -550,7 +542,6 @@ describe('SessionStatsComponent', () => {
     });
   });
 
-  // ── ARIA ───────────────────────────────────────────────────────────────
   describe('ARIA', () => {
     it('sets aria-label on ctx bar describing percentage', () => {
       fixture.componentRef.setInput('stats', {
@@ -583,7 +574,6 @@ describe('SessionStatsComponent', () => {
     });
   });
 
-  // ── cumulative output tokens ───────────────────────────────────────────
   describe('cumulative output tokens', () => {
     it('shows cumulative total_output_tokens (not per-step output)', () => {
       fixture.componentRef.setInput('stats', {
@@ -594,13 +584,11 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 500,
       });
       fixture.detectChanges();
-      // Out shows cumulative total, not per-step
       expect(rootText()).toContain('out:');
       expect(rootText()).toContain('500');
     });
   });
 
-  // ── git branch chip ────────────────────────────────────────────────────
   describe('git branch chip', () => {
     it('hides the chip when branch input is null', () => {
       fixture.componentRef.setInput('stats', {

@@ -1,8 +1,6 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// The `-sectcreate __TEXT __info_plist Resources/Info.plist` linker flags embed
-// Info.plist into the Mach-O so TCC reads the EventKit usage descriptions.
 let package = Package(
     name: "calendar-cli",
     platforms: [.macOS(.v13)],

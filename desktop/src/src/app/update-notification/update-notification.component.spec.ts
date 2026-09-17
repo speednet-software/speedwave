@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { UpdateNotificationComponent } from './update-notification.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 describe('UpdateNotificationComponent', () => {
   let component: UpdateNotificationComponent;
@@ -59,19 +60,13 @@ describe('UpdateNotificationComponent', () => {
     it('sets installing to true while invoking', async () => {
       component.updateInfo = { version: '1.0.0', body: null, date: null, is_critical: false };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      let resolveFn!: () => void;
+      const pendingInstall = createDeferred();
       mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<void>((resolve) => {
-          if (cmd === 'install_update_and_reconcile') {
-            resolveFn = resolve;
-          } else {
-            resolve();
-          }
-        });
+        cmd === 'install_update_and_reconcile' ? pendingInstall.promise : Promise.resolve();
 
       const promise = component.installAndRestart();
       expect(component.installing).toBe(true);
-      resolveFn();
+      pendingInstall.resolve();
       await promise;
       expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
         expectedVersion: '1.0.0',

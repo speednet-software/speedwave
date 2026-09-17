@@ -30,7 +30,6 @@ describe('withValidation', () => {
   });
 
   it('invokes the handler with the client and params and returns its result on success', async () => {
-    // `new GitLabClient` makes no network calls until a method is invoked, so it is safe to construct.
     const client = new GitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
     let seenClient: GitLabClient | undefined;
     let seenParams: { name: string } | undefined;
@@ -70,7 +69,6 @@ describe('withValidation', () => {
       content: [{ type: 'text', text: 'Error: boom from handler' }],
       isError: true,
     });
-    // A plain Error (name !== "Gitbeaker…") is a programming bug — it must be logged.
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining('Unexpected (non-GitBeaker) error'),
       expect.any(Error)

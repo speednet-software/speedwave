@@ -13,6 +13,10 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
+    selectable: true,
+    has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-sonnet-4-6',
@@ -20,6 +24,10 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: false,
+    selectable: true,
+    has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-haiku-4-5',
@@ -27,6 +35,10 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 200_000,
     latest: true,
     premium: false,
+    selectable: true,
+    has_1m: false,
+    effort_levels: [],
+    default_effort: null,
   },
   {
     id: 'claude-opus-4-7',
@@ -34,10 +46,13 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
+    selectable: false,
+    has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'xhigh',
   },
 ];
 
-// Payload carries pricing fields the `AnthropicModel` type omits (cast on assignment); rates off-catalog.
 const PRICED_FIXTURE = FIXTURE.map((m) => ({
   ...m,
   pricing: { input: 9, cachedInput: 0.9, cacheWrite: 11.25, output: 45 },
@@ -98,7 +113,6 @@ describe('AnthropicModelsService', () => {
       expect(a).toEqual(PRICED_FIXTURE);
       expect(b).toEqual(PRICED_FIXTURE);
       expect(c).toEqual(PRICED_FIXTURE);
-      // Only one backend invoke despite three concurrent callers.
       expect(invokeCount).toBe(1);
     });
 
@@ -113,7 +127,6 @@ describe('AnthropicModelsService', () => {
     });
 
     it('does NOT cache on failure — the next call retries the backend', async () => {
-      // Regression: a transient failure must not cache `[]`; cache stays null.
       let calls = 0;
       mockTauri.invokeHandler = async () => {
         calls++;
@@ -123,10 +136,10 @@ describe('AnthropicModelsService', () => {
       service.resetForTesting();
 
       const first = await service.list();
-      expect(first).toEqual([]); // failure → empty, not cached
+      expect(first).toEqual([]);
 
       const second = await service.list();
-      expect(second).toEqual(PRICED_FIXTURE); // retried and succeeded
+      expect(second).toEqual(PRICED_FIXTURE);
       expect(calls).toBe(2);
     });
 
@@ -185,7 +198,6 @@ describe('AnthropicModelsService', () => {
     });
 
     it('skips Fable (premium tier) when picking the everyday placeholder', async () => {
-      // Fable 5 leads the catalog but is premium — placeholder must pick Sonnet.
       const withFable = [
         {
           id: 'claude-fable-5',
@@ -216,6 +228,19 @@ describe('AnthropicModelsService', () => {
     });
   });
 
+  describe('selectableModels()', () => {
+    it('returns an empty list before the catalog has loaded', () => {
+      expect(service.selectableModels()).toEqual([]);
+    });
+
+    it('excludes legacy (non-selectable) entries once loaded', async () => {
+      await service.list();
+      const ids = service.selectableModels().map((m) => m.id);
+      expect(ids).toEqual(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+      expect(ids).not.toContain('claude-opus-4-7');
+    });
+  });
+
   describe('contextTokensFor()', () => {
     it('returns null before the catalog has loaded', () => {
       expect(service.contextTokensFor('claude-opus-4-7')).toBeNull();
@@ -229,7 +254,6 @@ describe('AnthropicModelsService', () => {
     });
 
     it('resolves the short alias Claude Code emits in session metadata', async () => {
-      // Alias `opus-4.7`: `.` becomes `-`, `claude-` re-prepended.
       await service.list();
       expect(service.contextTokensFor('opus-4.7')).toBe(1_000_000);
       expect(service.contextTokensFor('haiku-4.5')).toBe(200_000);
@@ -251,6 +275,24 @@ describe('AnthropicModelsService', () => {
     it('trims surrounding whitespace before lookup', async () => {
       await service.list();
       expect(service.contextTokensFor('  claude-opus-4-7  ')).toBe(1_000_000);
+    });
+  });
+
+  describe('familyLabelFor()', () => {
+    it('returns null before the catalog has loaded', () => {
+      expect(service.familyLabelFor('claude-opus-4-8')).toBeNull();
+    });
+
+    it('returns the catalog family label for a known id', async () => {
+      await service.list();
+      expect(service.familyLabelFor('claude-opus-4-8')).toBe('Opus 4.8');
+    });
+
+    it('returns null for unknown or empty ids', async () => {
+      await service.list();
+      expect(service.familyLabelFor('openrouter/anthropic/claude-sonnet-5')).toBeNull();
+      expect(service.familyLabelFor(null)).toBeNull();
+      expect(service.familyLabelFor('')).toBeNull();
     });
   });
 
@@ -276,6 +318,34 @@ describe('AnthropicModelsService', () => {
       service.resetForTesting();
       await service.list();
       expect(invokeCount).toBe(2);
+    });
+  });
+
+  describe('setProviderModel()', () => {
+    it('invokes set_provider_model with the given project, provider and model', async () => {
+      let received: unknown;
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        if (cmd === 'set_provider_model') {
+          received = args;
+          return undefined;
+        }
+        return undefined;
+      };
+      await service.setProviderModel('alpha', 'openrouter', 'anthropic/claude-opus-4-8');
+      expect(received).toEqual({
+        projectId: 'alpha',
+        providerId: 'openrouter',
+        model: 'anthropic/claude-opus-4-8',
+      });
+    });
+
+    it('propagates a backend rejection to the caller', async () => {
+      mockTauri.invokeHandler = async () => {
+        throw new Error("'anthropic' is Anthropic - model changes are session-only");
+      };
+      await expect(
+        service.setProviderModel('alpha', 'anthropic', 'claude-opus-4-8')
+      ).rejects.toThrow('session-only');
     });
   });
 });

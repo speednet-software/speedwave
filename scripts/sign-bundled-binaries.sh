@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Signs Mach-O binaries in Speedwave.app/Contents/Resources/ for Apple notarization.
-# Requires APPLE_SIGNING_IDENTITY env; no-op on Windows.
 
 set -euo pipefail
 
@@ -14,7 +12,6 @@ if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# SRC_TAURI is overridable by tests; defaults to desktop/src-tauri/.
 SRC_TAURI="${SRC_TAURI:-$REPO_ROOT/desktop/src-tauri}"
 NODE_ENTITLEMENTS="$SRC_TAURI/entitlements/node.plist"
 VIRTUALIZATION_ENTITLEMENTS="$SRC_TAURI/entitlements/virtualization.plist"
@@ -23,8 +20,6 @@ REMINDERS_ENTITLEMENTS="$SRC_TAURI/entitlements/reminders.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 AUDIO_CAPTURE_ENTITLEMENTS="$SRC_TAURI/entitlements/audio-capture.plist"
 
-# Paths tauri.macos.conf.json copies to .app/Contents/Resources/ (keep bundle.resources
-# in sync). Format: "<source-path>:<entitlements-path>" (entitlements optional; ADR-037).
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
   "$SRC_TAURI/reminders-cli:$REMINDERS_ENTITLEMENTS"
@@ -77,7 +72,6 @@ verify_macho() {
   local path="$1"
   local entitlements="$2"
 
-  # codesign -v --strict is the authoritative validator.
   if ! codesign -v --strict "$path"; then
     echo "ERROR: signature verification failed for $path" >&2
     exit 1
@@ -88,7 +82,6 @@ verify_macho() {
     return
   fi
 
-  # Cross-check plist keys against the binary's embedded entitlements.
   local key_count
   key_count="$(grep -c '<key>' "$entitlements")"
   if [[ "$key_count" -eq 0 ]]; then
@@ -121,8 +114,6 @@ verify_macho() {
   echo "  verified: signature valid, $key_count entitlement(s) present"
 }
 
-# Verifies the Mach-O's CFBundleIdentifier matches the __info_plist section.
-# Only for native macOS CLIs with TCC bindings (others use fixed or no identifiers).
 verify_identifier() {
   local path="$1"
   local expected="$2"
@@ -140,8 +131,6 @@ verify_identifier() {
   echo "  verified: identifier=$expected"
 }
 
-# Maps SRC_TAURI-relative basename to expected sub-identifier. Empty value
-# means no identifier check (e.g. speedwave, limactl, node).
 get_expected_identifier() {
   case "$(basename "$1")" in
     calendar-cli) echo "pl.speedwave.desktop.calendar" ;;

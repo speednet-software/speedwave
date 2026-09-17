@@ -14,7 +14,6 @@ describe('Container Health', function () {
 
     await waitForHealthy(E2E_PROJECT_NAME);
 
-    // Stabilized — assert individual properties for clear failure messages.
     const report = await getHealth(E2E_PROJECT_NAME);
     if ('error' in report) {
       throw new Error(`get_health failed after stabilization: ${report.error}`);
@@ -22,7 +21,6 @@ describe('Container Health', function () {
     expect(report.overall_healthy).toBe(true);
     expect(report.vm.running).toBe(true);
     expect(report.containers.length).toBeGreaterThanOrEqual(2);
-    // Compose-prefix stripped server-side (PR #730).
     expect(report.containers.some((c) => c.name === 'claude')).toBe(true);
     expect(report.containers.some((c) => c.name === 'mcp_hub')).toBe(true);
     for (const container of report.containers) {
@@ -35,7 +33,6 @@ describe('Container Health', function () {
       this.skip();
       return;
     }
-    // Without flock the payload no-ops fail-closed and Windows never self-heals.
     const out = execFileSync('wsl.exe', ['-d', 'Speedwave', '--', 'command', '-v', 'flock'], {
       encoding: 'utf8',
       env: { ...process.env, WSL_UTF8: '1' },

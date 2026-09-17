@@ -10,7 +10,6 @@ describe('site-client', () => {
   });
 
   it('GraphRequester interface accepts any object with getSiteId + graphRequest', async () => {
-    // Smoke: a minimal stub typechecks and can be used by domain clients.
     const stub: GraphRequester = {
       getSiteId: () => 'site-id',
       graphRequest: vi.fn().mockResolvedValue({ ok: true }),

@@ -470,7 +470,6 @@ mod tests {
 
     #[test]
     fn spec_setup_complete_with_update_keeps_install_and_beta() {
-        // ADR-058 regression: toggling beta must not drop "Install Update".
         let spec = tray_menu_spec(Some("1.2.3"), true, true);
         assert_eq!(
             spec,
@@ -489,7 +488,6 @@ mod tests {
 
     #[test]
     fn spec_setup_incomplete_hides_beta_even_with_update() {
-        // ADR-058 regression: beta toggle must not appear before setup.
         let spec = tray_menu_spec(Some("9.9.9"), true, false);
         assert!(
             !spec.iter().any(|i| matches!(i, TrayItemSpec::Beta { .. })),

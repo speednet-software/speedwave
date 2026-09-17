@@ -19,7 +19,6 @@ const parseBaseTimeout = (): number => {
 
   const parsed = parseInt(envValue, 10);
 
-  // Invalid: NaN, negative, or zero
   if (isNaN(parsed) || parsed <= 0) {
     console.warn(
       `${ts()} [timeouts] Invalid SPEEDWAVE_TIMEOUT_MS value: "${envValue}". Using default: ${DEFAULT_TIMEOUT}ms`

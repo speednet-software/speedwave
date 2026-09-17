@@ -69,7 +69,6 @@ describe('ProgressStepsComponent', () => {
     ]);
     fixture.detectChanges();
     const pills = fixture.nativeElement.querySelectorAll('[data-testid="step-pill"]');
-    // pending step has no pill
     expect(pills.length).toBe(3);
     expect(pills[0].textContent.trim()).toBe('done');
     expect(pills[1].textContent.trim()).toBe('running');
@@ -77,8 +76,6 @@ describe('ProgressStepsComponent', () => {
   });
 
   it('sizes the active-step spinner above the host default so its stroke is not razor-thin', () => {
-    // A bare <app-spin-icon> renders at the 14px host default, whose ~1.75px
-    // stroke shimmers on WKWebView; the active circle pins it to 16px (h-4 w-4).
     host.steps.set([makeStep('a', 'active')]);
     fixture.detectChanges();
     const spinner = fixture.nativeElement.querySelector('app-spin-icon');
@@ -88,7 +85,6 @@ describe('ProgressStepsComponent', () => {
   });
 
   it('colors the active-step circle with the brand accent to match primary buttons', () => {
-    // The spinner stroke is currentColor, inherited from the circle's color.
     host.steps.set([makeStep('a', 'active')]);
     fixture.detectChanges();
     const circle = fixture.nativeElement.querySelector('app-spin-icon').closest('div');
@@ -98,9 +94,9 @@ describe('ProgressStepsComponent', () => {
 
   it('renders the progress bar only for active steps with progress set', () => {
     host.steps.set([
-      makeStep('a', 'active'), // no progress → no bar
+      makeStep('a', 'active'),
       makeStep('b', 'active', { progress: 42 }),
-      makeStep('c', 'pending', { progress: 50 }), // pending → no bar
+      makeStep('c', 'pending', { progress: 50 }),
     ]);
     fixture.detectChanges();
     const all = fixture.nativeElement.querySelectorAll('[style]');

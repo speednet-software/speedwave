@@ -22,7 +22,6 @@ export function memoizedPromise<T>(opts: MemoizedPromiseOptions<T>): () => Promi
   return () => {
     if (cache) return cache;
     const underlying = opts.fetch().catch((err) => {
-      // Clear cache so the next call retries.
       cache = null;
       throw err;
     });

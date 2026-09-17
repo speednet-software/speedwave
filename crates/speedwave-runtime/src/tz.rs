@@ -28,7 +28,6 @@ fn detect_platform() -> Option<String> {
 fn detect_platform() -> Option<String> {
     use std::time::Duration;
 
-    // 5 s deadline; slow PowerShell startup (cold boot, AV scan) must not stall caller.
     let output = crate::binary::run_powershell_capture(
         &[
             "-NoProfile",
@@ -367,7 +366,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let regular = dir.path().join("localtime");
         std::fs::write(&regular, b"binary tzdata").unwrap();
-        // read_link on a regular file errors -> fall back to env
         assert_eq!(
             detect_unix(&regular, Some("Asia/Tokyo")),
             iana("Asia/Tokyo")
@@ -406,7 +404,6 @@ mod tests {
 
     #[test]
     fn detect_host_timezone_never_panics() {
-        // smoke test: must always return a non-empty string on any platform.
         let tz = detect_host_timezone();
         assert!(!tz.is_empty());
     }

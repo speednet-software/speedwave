@@ -12,8 +12,6 @@ import { ALLOWED_COMMANDS } from './tools/index.js';
 
 const execFileAsync = promisify(execFileCb);
 
-// ── Types ──────────────────────────────────────────────────────────────
-
 /** OS domain identifier for native CLI routing. */
 export type OsDomain = 'reminders' | 'calendar' | 'mail' | 'notes';
 
@@ -36,8 +34,6 @@ export interface PlatformPaths {
   /** Path to the notes CLI binary. */
   notes: string;
 }
-
-// ── Binary Resolution ──────────────────────────────────────────────────
 
 /** Detect whether we are running in dev mode or production (bundled). */
 function isDevMode(): boolean {
@@ -72,7 +68,6 @@ function resolveDarwinPaths(): PlatformPaths {
     };
   }
 
-  // Production: binaries bundled in Resources/ alongside the app
   const resourcesDir =
     process.env.SPEEDWAVE_RESOURCES_DIR || path.join(import.meta.dirname, '..', 'Resources');
   return {
@@ -110,8 +105,6 @@ export function resolvePaths(): PlatformPaths {
   }
   return resolveNativePaths();
 }
-
-// ── Execution ──────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -161,8 +154,6 @@ export async function runCommand(
     );
   }
 
-  // macOS: separate binaries with <command> [json-args]
-  // Windows: single binary with <domain>.<command> [json-args]
   const execArgs: string[] =
     process.platform === 'darwin'
       ? [command, JSON.stringify(args)]
@@ -171,7 +162,7 @@ export async function runCommand(
   try {
     const { stdout, stderr } = await execFileAsync(binaryPath, execArgs, {
       timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024, // 10MB
+      maxBuffer: 10 * 1024 * 1024,
       env: buildChildEnv(),
     });
 

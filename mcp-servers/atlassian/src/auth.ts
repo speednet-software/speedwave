@@ -77,8 +77,6 @@ export function normalizeSiteUrl(raw: string): string | null {
   if (url.protocol !== 'https:') return null;
   const host = url.hostname.toLowerCase();
   if (!host.endsWith('.atlassian.net')) return null;
-  // Reject embedded credentials / non-default ports / paths to avoid surprises.
-  // (The WHATWG URL parser always sets `pathname` to at least `/` for https:.)
   if (url.username || url.password || (url.port && url.port !== '443')) return null;
   if (url.pathname !== '/') return null;
   return `https://${host}`;

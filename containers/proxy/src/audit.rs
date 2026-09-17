@@ -13,7 +13,7 @@ const AUDIT_FILE_NAME: &str = "audit-proxy.jsonl";
 /// the fresh prompt from replayed history and file content, so every line carries one layer tag.
 const LAYER: &str = "llm-request";
 
-/// `source` value of rows produced from host NER detector spans (ADR-089).
+/// `source` value of rows produced from host NER detector spans (ADR-090).
 pub const NER_SOURCE: &str = "ner";
 
 /// Pseudo-category of the single `passed` row written when the detector could not be asked.
@@ -117,7 +117,6 @@ mod tests {
 
     #[test]
     fn no_op_when_audit_dir_is_none() {
-        // Must not panic and must not create anything. Nothing to check, just no crash.
         write_pii_audit(None, &[detection("EMAIL", DetectionAction::Tokenized, 1)]);
     }
 
@@ -202,7 +201,6 @@ mod tests {
 
     #[test]
     fn write_failure_is_swallowed_not_panicking() {
-        // A path that cannot be created (parent is a file, not a dir).
         let dir = tempfile::tempdir().unwrap();
         let blocked = dir.path().join("not-a-dir");
         std::fs::write(&blocked, b"x").unwrap();

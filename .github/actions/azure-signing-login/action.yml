@@ -53,11 +53,9 @@ runs:
         } >> "$GITHUB_ENV"
         echo "::notice::Windows code signing configured ($ACCOUNT/$PROFILE via $ENDPOINT)"
 
-    # Federated credential, no secret: the Entra app trusts only this repo's `release`
-    # environment subject, and its signer role is scoped to the signing account.
     - name: Log in to Azure (OIDC)
       if: inputs.client-id != ''
-      uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c  # v3.0.2
+      uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c
       with:
         client-id: ${{ inputs.client-id }}
         tenant-id: ${{ inputs.tenant-id }}

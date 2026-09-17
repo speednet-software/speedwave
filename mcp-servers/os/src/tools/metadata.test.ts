@@ -7,7 +7,6 @@ import { createCalendarTools } from './calendar-tools.js';
 import { createMailTools } from './mail-tools.js';
 import { createNoteTools } from './notes-tools.js';
 
-// Mock the platform runner (required by tool modules)
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));
@@ -20,8 +19,8 @@ const ALL_TOOLS = [
 ];
 
 describe('OS tool metadata', () => {
-  it('registers exactly 25 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(25);
+  it('registers exactly 26 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(26);
   });
 
   describe.each(ALL_TOOLS.map((td) => [td.tool.name, td] as const))('%s', (_name, td) => {
@@ -85,6 +84,7 @@ describe('OS tool metadata', () => {
   it('write/delete tools have appropriate categories', () => {
     const writeTools = [
       'createReminder',
+      'updateReminder',
       'completeReminder',
       'createEvent',
       'updateEvent',

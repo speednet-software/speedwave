@@ -53,7 +53,6 @@ describe('list-tools metadata', () => {
     ]);
   });
 
-  // SITE-POLICY-BY-OMISSION REGRESSION (ADR-060). Same invariant as page tools.
   it('NO list tool accepts site_id from the model', () => {
     for (const tool of LIST_TOOL_SCHEMAS) {
       const schema = tool.inputSchema as {
@@ -144,8 +143,6 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('createList returns empty strings (not undefined) when Graph response omits id/webUrl', async () => {
-    // Contract: always return a {listId, webUrl} pair; empty string is the
-    // fallback when Graph omits them (e.g. 204).
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -219,7 +216,7 @@ describe('list-tools handlers — happy paths', () => {
       });
     const [, , body] = graph.mock.calls[0] as [string, string, Record<string, unknown>];
     expect(body.text).toEqual({});
-    expect(body.displayName).toBe('Title'); // default to `name`
+    expect(body.displayName).toBe('Title');
   });
 
   it.each([
@@ -237,8 +234,6 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('addListColumn returns empty columnId when Graph response omits id', async () => {
-    // Contract: always return a {columnId} key; empty string when Graph omits
-    // the id (e.g. 204 / async create).
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -274,7 +269,6 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('listItems returns an empty items array when Graph response omits value', async () => {
-    // Contract: stable {items: []} shape when Graph omits value (e.g. {} or null).
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -319,7 +313,6 @@ describe('list-tools handlers — happy paths', () => {
   });
 
   it('createItem returns empty itemId when Graph response omits id', async () => {
-    // Stable {itemId} contract — empty string for non-echoing Graph paths.
     graph.mockResolvedValueOnce(undefined);
     const tools = createListTools(client);
     const out = parseContent(
@@ -383,7 +376,6 @@ describe('list-tools handlers — error paths', () => {
     expect(parsed.code).toBe('LIST_LISTS_FAILED');
   });
 
-  // One table-driven case per handler's XXX_FAILED code (each wrapErr path).
   it.each([
     ['getList', { listId: 'L1' }, 'GET_LIST_FAILED'],
     ['createList', { displayName: 'X', description: 'd', template: 't' }, 'CREATE_LIST_FAILED'],
@@ -442,7 +434,6 @@ describe('list-tools handlers — error paths', () => {
     expect(parsed.message).not.toContain('single-quoted string literals');
   });
 
-  // A double-quoted filter that fails with 401/403/429 (not 400) is not a syntax error.
   it.each([401, 403, 429] as const)(
     'listItems does not append the quote hint on a %s error even with a double-quoted filter',
     async (status) => {
@@ -459,7 +450,6 @@ describe('list-tools handlers — error paths', () => {
   );
 
   it('updateList errors when description is provided alone', async () => {
-    // Covers the description-only branch (displayName omitted).
     const graph = vi.fn().mockResolvedValueOnce(undefined);
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
     const tools = createListTools(client);
@@ -471,7 +461,6 @@ describe('list-tools handlers — error paths', () => {
   });
 
   it('createList omits description when not provided', async () => {
-    // Covers the `if (params.description) body.description = …` falsy branch.
     const graph = vi.fn().mockResolvedValueOnce({ id: 'L-new' });
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
     const tools = createListTools(client);
@@ -480,7 +469,6 @@ describe('list-tools handlers — error paths', () => {
     expect(body).not.toHaveProperty('description');
   });
 
-  // Per-tool listId / itemId / columnId validateGraphId rejections.
   it.each([
     ['getList', { listId: 'bad/../path' }],
     ['updateList', { listId: 'bad/../path', displayName: 'X' }],
@@ -516,7 +504,6 @@ describe('list-tools handlers — error paths', () => {
     expect(graph).not.toHaveBeenCalled();
   });
 
-  // A mis-wired sourceTool would point the model at the wrong follow-up tool.
   it.each([
     ['getList', { listId: 'bad/../path' }, 'listLists'],
     ['getItem', { listId: 'bad/../path', itemId: '1' }, 'listLists'],
@@ -535,7 +522,6 @@ describe('list-tools handlers — error paths', () => {
   );
 
   it('listItems passes through optional filter and top', async () => {
-    // Covers the filter and top branches in handleListItems.
     const graph = vi.fn().mockResolvedValueOnce({ value: [] });
     const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
     const tools = createListTools(client);

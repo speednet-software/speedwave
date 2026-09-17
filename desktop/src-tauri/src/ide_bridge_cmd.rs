@@ -1,5 +1,3 @@
-// IDE-bridge Tauri commands for IDE lock detection, connection, and config persistence.
-
 use crate::health;
 use crate::reconcile::SharedIdeBridge;
 use speedwave_runtime::config;
@@ -16,7 +14,6 @@ pub(crate) fn select_ide(
     state: tauri::State<SharedIdeBridge>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Validate against the raw live-port list (pre-dedupe).
     if !health::is_ide_port_alive(port) {
         log::warn!(
             target: "ide_bridge",
@@ -29,7 +26,6 @@ pub(crate) fn select_ide(
     }
     log::info!(target: "ide_bridge", "select_ide: connecting to {ide_name} on port {port}");
 
-    // Persist the selection to config.json
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         user_config.selected_ide = Some(speedwave_runtime::config::SelectedIde {
@@ -40,10 +36,8 @@ pub(crate) fn select_ide(
     })
     .map_err(|e| e.to_string())?;
 
-    // Start IDE Bridge on-demand if it wasn't started at startup.
     crate::ensure_ide_bridge_running(&state, &app);
 
-    // Update the live Bridge so new connections are proxied immediately
     let guard = state
         .lock()
         .map_err(|e| format!("Bridge mutex poisoned: {e}"))?;

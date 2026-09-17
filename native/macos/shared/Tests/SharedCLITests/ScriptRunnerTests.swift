@@ -3,7 +3,6 @@ import XCTest
 
 final class ScriptRunnerTests: XCTestCase {
 
-    // MARK: - AppleScript Escaping
 
     func testEscapeAppleScriptQuotes() {
         let result = escapeAppleScript("Hello \"World\"")
@@ -30,7 +29,6 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(result, "plain text")
     }
 
-    // MARK: - AppleScript Injection Prevention
 
     func testEscapeAppleScriptStripsNewline() {
         let result = escapeAppleScript("line1\nline2")
@@ -55,7 +53,6 @@ final class ScriptRunnerTests: XCTestCase {
     func testEscapeAppleScriptNeutralizesDoShellScript() {
         let payload = "harmless\"\ndo shell script \"rm -rf /\"\n\""
         let result = escapeAppleScript(payload)
-        // Newlines stripped, quotes escaped — no breakout possible.
         XCTAssertFalse(result.contains("\n"))
         XCTAssertTrue(result.contains("\\\""))
     }
@@ -100,7 +97,6 @@ final class ScriptRunnerTests: XCTestCase {
         }
     }
 
-    // MARK: - Boundary conditions for escapeAppleScript
 
     func testEscapeAppleScriptBoundaryC0() {
         for v: UInt32 in 0x00...0x1F {
@@ -116,13 +112,11 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x85)!)), "", "NEL U+0085 should be stripped")
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x2028)!)), "", "U+2028 should be stripped")
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x2029)!)), "", "U+2029 should be stripped")
-        // Adjacent scalars are preserved
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x86)!)), String(UnicodeScalar(0x86)!), "U+0086 should be preserved")
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x2027)!)), String(UnicodeScalar(0x2027)!), "U+2027 should be preserved")
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x202A)!)), String(UnicodeScalar(0x202A)!), "U+202A should be preserved")
     }
 
-    // MARK: - isAppleScriptNotFoundError
 
     func testIsAppleScriptNotFoundErrorMatchesCurlyApostropheWording() {
         XCTAssertTrue(isAppleScriptNotFoundError("Notes got an error: Can\u{2019}t get folder \"X\". (-1728)"))
@@ -140,7 +134,6 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertFalse(isAppleScriptNotFoundError(""))
     }
 
-    // MARK: - splitAddressList
 
     func testSplitAddressListSingle() {
         XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
@@ -184,8 +177,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testSplitAddressListUnbalancedQuoteFallsBackToNaiveSplit() {
-        // A single stray quote never closes; falls back to a plain comma split of the
-        // original input instead of swallowing every remaining recipient into one entry.
         XCTAssertEqual(
             splitAddressList("\"Smith, Jane <jane@x.com>, bob@x.com"),
             ["\"Smith", "Jane <jane@x.com>", "bob@x.com"]
@@ -193,7 +184,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testSplitAddressListOddQuoteCountAcrossMultipleEntriesFallsBackToNaiveSplit() {
-        // Three quotes total (odd) means the scan ends still "inside" a span.
         XCTAssertEqual(
             splitAddressList("\"Smith, Jane\" <jane@x.com>, \"bob@x.com"),
             ["\"Smith", "Jane\" <jane@x.com>", "\"bob@x.com"]
@@ -201,7 +191,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testSplitAddressListBalancedQuotesUnaffectedByFallback() {
-        // Even quote count must still take the quote-aware path, not the naive fallback.
         XCTAssertEqual(
             splitAddressList("\"Smith, Jane\" <jane@x.com>, bob@x.com"),
             ["\"Smith, Jane\" <jane@x.com>", "bob@x.com"]
@@ -215,7 +204,6 @@ final class ScriptRunnerTests: XCTestCase {
         )
     }
 
-    // MARK: - Parse Delimited
 
     func testParseDelimitedBasic4Field() {
         let output = "id1||Note One||2024-01-01||Notes\nid2||Note Two||2024-01-02||Work\n"
@@ -257,12 +245,10 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseDelimitedDropsRowsWithLiteralDelimiterInValue() {
-        // Rows whose field count after splitting on "||" mismatches fields are dropped.
         let result = parseDelimited("foo||bar||baz", fields: ["x", "y"])
         XCTAssertEqual(result.count, 0)
     }
 
-    // MARK: - Boundary conditions for parseDelimited
 
     func testParseDelimitedSingleRow() {
         let result = parseDelimited("a||b", fields: ["x", "y"])
@@ -280,7 +266,6 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(result.count, 0)
     }
 
-    // MARK: - parseEmailDetail (shared by AppleMailClient/OutlookClient getEmail)
 
     func testParseEmailDetailHappyPath() throws {
         let output = "Hello||alice@example.com||2024-01-01||true||bob@x.com,carol@y.com||Body text"
@@ -295,7 +280,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseEmailDetailBodyContainingDelimiter() throws {
-        // Body may itself contain "||" — fields 6+ must be re-joined verbatim.
         let output = "Subj||from@x||2024-01-01||false||to@x||line1 || line2 || line3"
         let dict = try parseEmailDetail(output, id: "id")
         XCTAssertEqual(dict["read"] as? Bool, false)
@@ -303,7 +287,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseEmailDetailEmptyToListFiltersToEmptyArray() throws {
-        // A trailing comma / empty to-field must yield [] not [""] .
         let output = "Subj||from@x||2024-01-01||true||||Body"
         let dict = try parseEmailDetail(output, id: "id")
         XCTAssertEqual(dict["to"] as? [String], [])
@@ -325,7 +308,6 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseEmailDetailThrowsOnTooFewFields() {
-        // Only 5 fields → must throw .scriptFailed("Unexpected email format").
         let output = "Subj||from@x||2024-01-01||true||to@x"
         XCTAssertThrowsError(try parseEmailDetail(output, id: "id")) { error in
             guard case ScriptError.scriptFailed(let msg) = error else {
@@ -336,13 +318,11 @@ final class ScriptRunnerTests: XCTestCase {
     }
 
     func testParseEmailDetailExactlySixFieldsHasEmptyBody() throws {
-        // Boundary: exactly 6 fields with an empty body field is valid.
         let output = "Subj||from@x||2024-01-01||true||to@x||"
         let dict = try parseEmailDetail(output, id: "id")
         XCTAssertEqual(dict["body"] as? String, "")
     }
 
-    // MARK: - ScriptError Descriptions
 
     func testScriptErrorFailedDescription() {
         let err = ScriptError.scriptFailed("x")
@@ -370,9 +350,7 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(err.errorDescription, "AppleScript timed out after 0s")
     }
 
-    // MARK: - Classifier Tests
 
-    // These fixtures verify the classifier's substring-match invariant, not production TCC stderr.
 
     func testClassifyFailureNotAllowed() {
         let err = ScriptRunner.classifyFailure(stderr: "osascript: not allowed to send Apple events")

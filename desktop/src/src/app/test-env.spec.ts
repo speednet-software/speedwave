@@ -1,6 +1,3 @@
-// Guards the test-environment contract from test-setup.ts: specs get a working Web Storage
-// regardless of whether the Node running vitest ships its own (unavailable) `localStorage` global.
-
 describe('unit-test environment', () => {
   for (const name of ['localStorage', 'sessionStorage'] as const) {
     describe(name, () => {

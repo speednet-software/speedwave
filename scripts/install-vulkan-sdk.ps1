@@ -1,10 +1,5 @@
-﻿# Installs the pinned LunarG Vulkan SDK + redistributable loader (ADR-085) — required to build
-# the Windows whisper Vulkan backend (headers + vulkan-1.lib + glslc) and to bundle vulkan-1.dll
-# next to the exe. Idempotent; needs elevation (HKLM env, VC redist), matching setup-dev-windows.
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
-# Version + artifact SHA256s are pinned like the nerdctl download pins (see alignments rules);
-# bumping the SDK = updating all four together ($RuntimeDllSha256 is read by the staging scripts).
 $Version = '1.4.357.0'
 $Sha256 = '81f474711e9042f4cd22b31b2f7a8870db2e428b21586fb43dd80150be97310d'
 $RuntimeSha256 = 'a14672efed15aafc7f5a16572d35cd3a3416eadf670aeee3cdf50ee32d5fbf83'
@@ -14,9 +9,6 @@ $Root = Join-Path 'C:\VulkanSDK' $Version
 function Get-Verified([string]$Path, [string]$Url, [string]$Expected, [string]$What) {
     if (-not (Test-Path $Path) -or (Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Expected) {
         Write-Output "Downloading $What..."
-        # System32 curl by absolute path: this script runs elevated and executes what it
-        # downloads — a PATH-planted curl.exe must not win (same rule as binary.rs).
-        # Bounded: a stalled CDN must fail the step, not hang it until the job timeout.
         & (Join-Path $env:SystemRoot 'System32\curl.exe') -fsSL --connect-timeout 30 --retry 3 --retry-all-errors --max-time 1800 -o $Path $Url
         if ($LASTEXITCODE -ne 0) { throw "$What download failed (exit $LASTEXITCODE)" }
     }
@@ -38,10 +30,6 @@ if (-not ((Test-Path (Join-Path $Root 'Lib\vulkan-1.lib')) -and (Test-Path (Join
     }
 }
 
-# The redistributable loader ships separately (vulkan-runtime-components); Speedwave bundles the
-# x64 DLL next to the exe because the ggml Vulkan backend is a load-time import (ADR-085).
-# A pre-existing DLL is re-fetched unless it matches the pin — the bundled loader gets signed
-# and shipped, so "some file already lies there" is not good enough.
 $runtimeDll = Join-Path $Root 'runtime\x64\vulkan-1.dll'
 if (-not (Test-Path $runtimeDll) -or (Get-FileHash -Algorithm SHA256 $runtimeDll).Hash -ne $RuntimeDllSha256) {
     $rtZip = Join-Path $env:TEMP "vulkan-runtime-$Version.zip"
@@ -62,7 +50,5 @@ if (-not (Test-Path $runtimeDll) -or (Get-FileHash -Algorithm SHA256 $runtimeDll
     }
 }
 
-# Persist for future shells; the current shell still needs `$env:VULKAN_SDK = ...`. Callers
-# parse the final VULKAN_SDK=... line, so it must stay the last output.
 [Environment]::SetEnvironmentVariable('VULKAN_SDK', $Root, 'Machine')
 Write-Output "VULKAN_SDK=$Root"

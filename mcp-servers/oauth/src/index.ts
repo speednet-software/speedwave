@@ -13,7 +13,6 @@ const SERVER_VERSION = '1.0.0';
 function resolvePort(): number {
   const port = Number.parseInt(process.env.PORT || '0', 10);
   if (Number.isNaN(port) || port < 0 || port > 65535) {
-    // Do not echo env-var value — operator could put any string there (CodeQL js/clear-text-logging).
     console.error(
       `${ts()} oauth FATAL: PORT must be a valid port number 0–65535 (got an invalid value)`
     );
@@ -40,17 +39,14 @@ async function main(): Promise<void> {
   const supervisorToken = requireEnv('OAUTH_SUPERVISOR_TOKEN');
   const tokensBase = requireEnv('OAUTH_TOKENS_BASE');
 
-  // Load consumer bearers — bearer → service id.
   const bearerMap = await loadBearerMap(stateDir);
 
-  // Refresh rate limit configurable via OAUTH_REFRESH_RATE_LIMIT_SECONDS (ADR-060).
   const rateLimitOverride = process.env.OAUTH_REFRESH_RATE_LIMIT_SECONDS;
   const rateLimitSeconds = rateLimitOverride ? Number.parseInt(rateLimitOverride, 10) : undefined;
   if (
     rateLimitOverride !== undefined &&
     (Number.isNaN(rateLimitSeconds!) || rateLimitSeconds! < 0)
   ) {
-    // Do not echo env-var value — operator could put any string there (CodeQL js/clear-text-logging).
     console.error(
       `${ts()} oauth FATAL: OAUTH_REFRESH_RATE_LIMIT_SECONDS must be a non-negative integer (got an invalid value)`
     );

@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# e2e-vm.sh — Orchestrates E2E testing across remote machines via SSH (Windows:
-# SPEEDWAVE_WINDOWS_HOST, macOS: SPEEDWAVE_MACOS_HOST). Usage: scripts/e2e-vm.sh [windows|macos|all]
 
 set -euo pipefail
 
-# --- Instance isolation --- SPEEDWAVE_DATA_DIR overrides ~/.speedwave (ADR-031); derive
-# instance name — MUST match Rust derive_instance_name_from() in consts.rs.
 SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 SPEEDWAVE_VM_NAME="$(basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//')"
 if ! echo "$SPEEDWAVE_VM_NAME" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
@@ -13,14 +9,11 @@ if ! echo "$SPEEDWAVE_VM_NAME" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
     exit 1
 fi
 
-# -- Configuration (shared) ----------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=e2e-common.sh
 source "${SCRIPT_DIR}/e2e-common.sh"
 
-# SSOT: exclude list for repo transfers to remote E2E machines, referenced by both
-# macos_rsync_to and windows_rsync_to. Each remote machine downloads its own platform assets.
 E2E_RSYNC_EXCLUDES=(
     node_modules target dist .e2e-artifacts .git build-context
     .angular .build
@@ -37,22 +30,14 @@ E2E_RSYNC_EXCLUDES=(
     'desktop/src-tauri/reminders-cli'
 )
 
-# Override SSH opts with keepalive for long-running test sessions.
 WINDOWS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $WINDOWS_SSH_PORT"
 MACOS_SSH_OPTS="$SSH_OPTS_BASE -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
 
-# Host repo path — resolved from git root of this script's location.
 HOST_REPO_DIR="${SPEEDWAVE_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-# No local staging dir: artifacts stay on each remote machine's ~/Desktop/ (survives
-# clean_state), avoiding 352 MB+ round-trip transfers over the network.
 
-# -- Auto-provisioning ---------------------------------------------------------
-# Check if remote machine has required tools; run setup if not.
 
 ensure_provisioned_windows() {
-    # Checks WSL2 distro exists and PowerShell finds node/cargo/cmake/libclang.dll
-    # (LIBCLANG_PATH from setup script; whisper-rs-sys/bindgen — ADR-056).
     local ok=1
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
@@ -76,36 +61,24 @@ ensure_provisioned_macos() {
     "${SCRIPT_DIR}/e2e-vm-setup.sh" macos
 }
 
-# ── Helper functions: SSH (Windows native OpenSSH → cmd.exe/powershell.exe/wsl.exe) ──
-# Staging dir NOT /tmp — WSL2 clears tmpfs on restart/idle.
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
-# Dedicated dir for the engine bats suites — other steps rm -rf the main staging dir.
 WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 
-# Shared by both Windows engine-bats invocations: ensures bats-core, then points
-# ENGINE_EXEC at a nested wsl.exe hop into the Speedwave distro; no `$`, so it splices safely into a double-quoted ssh string.
 WINDOWS_BATS_ENGINE_PREAMBLE="command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
 
-# Shared by both macOS engine-bats invocations: ensures bats-core, then restarts the Lima
-# VM via the bundled-limactl path — same literal as Makefile's ENGINE_CONTRACT_EXEC and engine.ts::engineExec (manual alignment; keep in sync).
 MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
 env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave'
 
-# Escapes a value for a PowerShell single-quoted literal (' doubled = literal ').
 ps_squote() {
     printf '%s' "$1" | sed "s/'/''/g"
 }
 
-# Runs a PowerShell script on the Windows host: writes it to a .ps1 temp file via sftp,
-# executes via -File — `-Command -` (stdin) ignores $ErrorActionPreference and drops exit codes.
 windows_ps() {
     local ps_script tmpname tmpfile_win tmpfile_local
     ps_script=$(cat)
     tmpname="e2e-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    # Inject vars so PS heredocs can reference them without unquoting
-    # (SSH does not forward local env vars to the remote shell).
     local ps_prefix
     ps_prefix="\$WINDOWS_WSL_DISTRO = '$(ps_squote "$WINDOWS_WSL_DISTRO")'
 \$env:OPENROUTER_API_KEY = '$(ps_squote "${OPENROUTER_API_KEY:-}")'
@@ -114,42 +87,29 @@ windows_ps() {
 \$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
 \$env:LOCAL_LLM_MODEL = '$(ps_squote "${LOCAL_LLM_MODEL:-}")'
 \$env:SPW_E2E_SPEC_PHASE = '$(ps_squote "${SPW_E2E_SPEC_PHASE:-}")'"
-    # UTF-8 BOM required — PowerShell falls back to the system locale (e.g. Windows-1252)
-    # reading a BOM-less .ps1, corrupting multi-byte characters.
     printf '\xEF\xBB\xBF%s\n%s\n' "$ps_prefix" "$ps_script" > "$tmpfile_local"
-    # Upload the script via scp (scp uses -P for port, not -p)
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         -P "$WINDOWS_SSH_PORT" "$tmpfile_local" "${WINDOWS_HOST}:C:\\Windows\\Temp\\${tmpname}"
     rm -f "$tmpfile_local"
-    # Execute the script via -File (proper error handling + exit code propagation)
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${tmpfile_win}\""
     local exit_code=$?
-    # Clean up temp file
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "del \"${tmpfile_win}\"" 2>/dev/null || true
     return $exit_code
 }
 
-# Run a bash script inside WSL2 on the Windows machine.
-# Reads a heredoc from stdin.
 windows_wsl() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -"
 }
 
-# Copies files to the Windows machine via tar-over-SSH into WSL2 where it's extracted.
-# Destination must be WINDOWS_WSL_STAGING (~/speedwave-e2e), NOT /tmp.
 windows_rsync_to() {
     local src="$1" dst="$2"
-    # --no-mac-metadata and --exclude='._*' prevent macOS resource forks (cause
-    # "not valid UTF-8" errors in Tauri builds).
     local -a tar_excludes=()
     for e in "${E2E_RSYNC_EXCLUDES[@]}"; do tar_excludes+=("--exclude=$e"); done
-    # Windows-specific extras (macOS resource forks)
     tar_excludes+=('--exclude=._*')
     local -a tar_flags=(--no-mac-metadata)
-    # wsl.exe may need time to restart after a --unregister of another distro shut down the VM.
     echo "  Waiting for WSL distro $WINDOWS_WSL_DISTRO..."
     local wsl_ready=0
     for i in $(seq 1 10); do
@@ -166,14 +126,10 @@ windows_rsync_to() {
         return 1
     fi
 
-    # Prepare the destination via separate SSH calls (avoids cmd.exe quoting issues).
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- rm -rf ${dst}"
-    # /home/<user>/ may not exist if the WSL distro was freshly installed.
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -c 'mkdir -p ${dst}'"
-    # Local tar archive, scp'd to Windows, then extracted inside WSL2 — piping tar
-    # directly through SSH → cmd.exe → wsl.exe is unreliable after WSL VM restarts.
     local tar_local
     tar_local=$(mktemp "${TMPDIR:-/tmp}/speedwave-e2e-XXXXXX.tar")
     echo "  tar: creating archive from $(dirname "$src")/$(basename "$src")..."
@@ -184,13 +140,11 @@ windows_rsync_to() {
         -P "$WINDOWS_SSH_PORT" "$tar_local" "${WINDOWS_HOST}:C:/Windows/Temp/speedwave-e2e.tar"
     rm -f "$tar_local"
 
-    # Extract inside WSL2 — read from the Windows-side temp file via /mnt/c/
     echo "  tar: extracting on WSL2..."
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" \
         "wsl.exe -d $WINDOWS_WSL_DISTRO -- tar -xf /mnt/c/Windows/Temp/speedwave-e2e.tar -C ${dst} --strip-components=1"
     local tar_exit=$?
-    # Clean up temp archive on Windows
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "del C:\\Windows\\Temp\\speedwave-e2e.tar" 2>/dev/null || true
 
@@ -201,16 +155,13 @@ windows_rsync_to() {
     echo "  tar: extraction complete"
 }
 
-# Copy a file from the Windows machine via scp.
 windows_scp_from() {
     local src="$1" dst="$2"
-    # Windows OpenSSH scp needs forward slashes (C:/foo), not backslashes
     src="${src//\\//}"
     scp -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         -P "$WINDOWS_SSH_PORT" "${WINDOWS_HOST}:${src}" "$dst"
 }
 
-# Wait for SSH to become available (machine may have just booted).
 windows_wait_ssh() {
     echo "[windows] Waiting for SSH on $WINDOWS_HOST (port $WINDOWS_SSH_PORT)..."
     for i in $(seq 1 30); do
@@ -221,7 +172,6 @@ windows_wait_ssh() {
     return 1
 }
 
-# Clean previous Speedwave state on the Windows machine.
 windows_clean_state() {
     echo "[windows] Cleaning previous state..."
     windows_ps <<'CLEAN'
@@ -297,9 +247,7 @@ Write-Host "Clean state ready"
 CLEAN
 }
 
-# -- Helper functions: SSH (macOS) ---------------------------------------------
 
-# Copy files to the macOS machine via rsync-over-ssh.
 macos_rsync_to() {
     local src="$1" dst="$2"
     local -a exclude_args=()
@@ -310,7 +258,6 @@ macos_rsync_to() {
         "$src" "${MACOS_HOST}:${dst}"
 }
 
-# Wait for SSH to become available (machine may have just booted).
 macos_wait_ssh() {
     echo "[macos] Waiting for SSH on $MACOS_HOST..."
     for i in $(seq 1 30); do
@@ -321,7 +268,6 @@ macos_wait_ssh() {
     return 1
 }
 
-# Clean previous Speedwave state on the macOS machine.
 macos_clean_state() {
     echo "[macos] Cleaning previous state..."
     macos_ssh bash <<'CLEAN'
@@ -364,16 +310,11 @@ run_windows() {
     windows_wait_ssh
     ensure_provisioned_windows
 
-    # ── Phase 1: Build NSIS installer ──
-    # Builds via PowerShell (native Rust/Node/MSVC); repo transfers tar-over-SSH into WSL2, then C:\
     echo "[windows] Phase 1: Building NSIS installer..."
     echo "[windows] Syncing repo to remote..."
     windows_rsync_to "$HOST_REPO_DIR/" "$WINDOWS_WSL_STAGING/"
 
-    # Copy WSL2 -> Windows filesystem, then build. Each phase is a separate windows_ps
-    # call to avoid SSH timeouts — long builds (cargo ~15 min) can exceed NAT idle timeouts.
 
-    # -- Step 1: Copy repo and install npm dependencies --
     echo "[windows] Step 1/5: Copy repo + npm install..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -409,7 +350,6 @@ Set-Location desktop\e2e; npm ci; Assert-ExitCode; Set-Location ..\..
 Write-Host "Step 1 DONE"
 SCRIPT
 
-    # -- Step 2: Build MCP + stage resources --
     echo "[windows] Step 2/5: Build MCP + stage resources..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -450,7 +390,6 @@ Assert-ExitCode
 Write-Host "Step 2 DONE"
 SCRIPT
 
-    # -- Step 3: Build CLI (cargo) --
     echo "[windows] Step 3/5: Build CLI..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -473,7 +412,6 @@ Copy-Item $env:CARGO_TARGET_DIR\release\speedwave.exe desktop\src-tauri\cli\spee
 Write-Host "Step 3 DONE"
 SCRIPT
 
-    # -- Step 4: Build Tauri + NSIS (longest step ~15 min) --
     echo "[windows] Step 4/5: Build Tauri + NSIS bundle..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -498,7 +436,6 @@ Set-Location ..\..
 Write-Host "Step 4 DONE"
 SCRIPT
 
-    # -- Step 5: Locate and stage installer --
     echo "[windows] Step 5/5: Locating installer..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -512,8 +449,6 @@ Copy-Item $installer.FullName "$env:USERPROFILE\Desktop\speedwave-setup.exe"
 Write-Host "Step 5 DONE"
 SCRIPT
 
-    # ── Phase 2: Install & test on clean system ──
-    # Simulates a real user download; ~/Desktop/speedwave-setup.exe survives clean_state.
     windows_clean_state
 
     echo "[windows] Phase 2: Installing app and running E2E tests (clean system)..."
@@ -531,11 +466,8 @@ if (Test-Path "C:\Speedwave\speedwave-desktop.exe") {
 }
 SCRIPT
 
-    # Engine-contract suite: rsynced into the STAGING distro only, bats runs there,
-    # and crosses into the tested Speedwave distro via WSL interop — never touched directly.
     windows_rsync_to "$HOST_REPO_DIR/_tests/e2e/" "$WINDOWS_CONTRACT_STAGING/"
 
-    # Copy E2E test suite to WSL2 then to Windows side
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -559,8 +491,6 @@ SCRIPT
         return "$exit_code"
     fi
 
-    # ── Phase 3: Second launch (clean system again) ──
-    # Verifies a second fresh install despite leftover state (WSL2 distros, registry).
     echo "[windows] Phase 3: Running E2E again (second install — clean system)..."
     windows_clean_state
 
@@ -573,7 +503,6 @@ Start-Process -Wait -FilePath "C:\speedwave-setup.exe" -ArgumentList "/S","/D=C:
 if (Test-Path "C:\Speedwave\speedwave-desktop.exe") { Write-Host "Install OK" } else { Write-Error "Install failed"; exit 1 }
 SCRIPT
 
-    # Re-copy E2E test suite (windows_clean_state removed C:\speedwave-e2e)
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
@@ -585,35 +514,24 @@ Set-Location C:\speedwave-e2e
 npm ci
 SCRIPT
 
-    # The bats suites need the provisioned engine + live 'e2e-test' project, which only
-    # exists between the pre-reset specs and 07-factory-reset.spec.ts — run pre-reset
-    # first, then the bats steps, then reset-only (factory reset still runs last).
     run_windows_e2e "pre-reset" || exit_code=$?
 
-    # Engine-contract suite needs the provisioned engine, which exists only after
-    # the app has run — the Speedwave WSL distro is created on first app start.
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
         # shellcheck disable=SC2086
         ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
     fi
 
-    # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
-    # the desktop suite just left behind — must run before the reset-only wdio run below.
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Resolving installed Windows CLI path via WSL interop..."
         local windows_cli_path
         # shellcheck disable=SC2086
-        # head runs HOST-side: cmd.exe ignores single quotes, so a remote-side pipe
-        # would be intercepted as cmd's own operator ('head' is not recognized).
         windows_cli_path=$(ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"ls /mnt/c/Users/*/.speedwave/bin/speedwave*.exe 2>/dev/null\"" | head -n1 | tr -d '\r') || windows_cli_path=""
         if [ -z "$windows_cli_path" ]; then
             echo "[windows] ERROR: installed speedwave CLI not found under /mnt/c/Users/*/.speedwave/bin" >&2
             exit_code=1
         else
             local windows_data_dir="${windows_cli_path%/bin/*}"
-            # SPEEDWAVE_DATA_DIR (WSL-shaped /mnt/c path) feeds only the bats PREFIX
-            # derivation; WSL interop never forwards it into speedwave.exe (no WSLENV).
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
             # shellcheck disable=SC2086
             ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
@@ -631,15 +549,12 @@ SCRIPT
     fi
     echo "[windows] Installer at: $WINDOWS_HOST:Desktop\\speedwave-setup.exe"
 
-    # -- Cleanup: leave the machine clean after tests ----------------------------
     echo "[windows] Cleaning up..."
     windows_clean_state
 
     return "$exit_code"
 }
 
-# Audio-transcription pipeline E2E on Windows-native (ADR-056/ADR-075): ensures `small`
-# Whisper model + runs `transcription_pipeline_e2e`. Native cargo (MSVC) — deps skip WSL.
 run_windows_audio() {
     windows_wait_ssh
     ensure_provisioned_windows
@@ -680,9 +595,6 @@ Write-Host "── Windows audio E2E OK"
 SCRIPT
 }
 
-# Runs the Speedwave desktop app and executes wdio tests on Windows via SSH.
-# Expects the app to be installed at C:\Speedwave and E2E suite at C:\speedwave-e2e.
-# $1 (optional): SPW_E2E_SPEC_PHASE value forwarded to wdio.conf.ts (default: unset = full suite).
 run_windows_e2e() {
     local SPW_E2E_SPEC_PHASE="${1:-}"
     windows_ps <<'SCRIPT'
@@ -757,14 +669,11 @@ exit $e2eExit
 SCRIPT
 }
 
-# -- Platform: macOS (SSH) -----------------------------------------------------
 
 run_macos() {
     macos_wait_ssh
     ensure_provisioned_macos
 
-    # -- Phase 1: Build .dmg package --------------------------------------------
-    # Copies repo to the macOS machine, produces a release .dmg — same as GitHub Actions CI.
     echo "[macos] Phase 1: Building .dmg package..."
     echo "[macos] Syncing repo to remote..."
     macos_ssh "rm -rf /tmp/speedwave-e2e" || true
@@ -785,8 +694,6 @@ echo "── Building full release (.dmg)..."
 make test-e2e-desktop-build
 SCRIPT
 
-    # Separate SSH call: the long build above can consume stdin (npm/cargo subprocesses),
-    # which would swallow subsequent commands in the same heredoc.
     echo "[macos] Locating .dmg artifact on remote..."
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
@@ -797,8 +704,6 @@ echo "── Copying .dmg to ~/Desktop/ for reuse across phases..."
 cp desktop/src-tauri/target/release/bundle/dmg/*.dmg ~/Desktop/speedwave.dmg
 SCRIPT
 
-    # ── Phase 2: Install & test on clean system ──
-    # Simulates a real user download; ~/Desktop/speedwave.dmg survives clean_state.
     macos_clean_state
 
     echo "[macos] Phase 2: Installing .dmg and running E2E tests (clean system)..."
@@ -813,7 +718,6 @@ hdiutil detach "/Volumes/Speedwave"
 echo "Install OK: $(ls -d /Applications/Speedwave.app)"
 SCRIPT
 
-    # Copy E2E test suite — only wdio specs and deps, not the full repo
     # shellcheck disable=SC2086
     rsync -az -e "ssh $MACOS_SSH_OPTS" \
         "$HOST_REPO_DIR/desktop/e2e/" "${MACOS_HOST}:/tmp/speedwave-e2e/"
@@ -836,8 +740,6 @@ SCRIPT
         return "$exit_code"
     fi
 
-    # ── Phase 3: Second launch (clean system again) ──
-    # Verifies a second fresh install despite leftover state (Lima cache, VM remnants).
     echo "[macos] Phase 3: Running E2E again (second install — clean system)..."
     macos_clean_state
 
@@ -852,8 +754,6 @@ hdiutil detach "/Volumes/Speedwave"
 echo "Install OK"
 SCRIPT
 
-    # Re-copy E2E test suite (macos_clean_state removed /tmp/speedwave-e2e).
-    # Also ships _tests/e2e/ flat into the same dir — no filename overlap.
     # shellcheck disable=SC2086
     rsync -az -e "ssh $MACOS_SSH_OPTS" \
         "$HOST_REPO_DIR/desktop/e2e/" "${MACOS_HOST}:/tmp/speedwave-e2e/"
@@ -867,13 +767,8 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 cd /tmp/speedwave-e2e && npm ci
 SCRIPT
 
-    # The bats suites need the provisioned engine + live 'e2e-test' project, which only
-    # exists between the pre-reset specs and 07-factory-reset.spec.ts — run pre-reset
-    # first, then the bats step, then reset-only (factory reset still runs last).
     run_macos_e2e "pre-reset" || exit_code=$?
 
-    # Engine-contract suite plants only spwcontract_-prefixed names and is
-    # teardown-reaped, so it is safe to run before update-dirty-state mutates state.
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running engine-contract suite (production-style install: LIMA_HOME + speedwave VM)..."
         {
@@ -916,20 +811,14 @@ SCRIPT_TAIL
     fi
     echo "[macos] .dmg at: $MACOS_HOST:~/Desktop/speedwave.dmg"
 
-    # -- Cleanup: leave the machine clean after tests ----------------------------
     echo "[macos] Cleaning up..."
     macos_clean_state
 
     return "$exit_code"
 }
 
-# Runs the Speedwave desktop app and executes wdio tests on macOS via SSH. Expects the .app
-# at /Applications/Speedwave.app and the E2E suite in /tmp/speedwave-e2e.
-# $1 (optional): SPW_E2E_SPEC_PHASE value forwarded to wdio.conf.ts (default: unset = full suite).
 run_macos_e2e() {
     local spec_phase="${1:-}"
-    # SSH does not forward local env vars — export the LLM test config via
-    # locally expanded prefix lines ahead of the quoted heredoc body.
     {
         printf 'export OPENROUTER_API_KEY=%q\n' "${OPENROUTER_API_KEY:-}"
         printf 'export OPENROUTER_MODEL=%q\n' "${OPENROUTER_MODEL:-}"
@@ -997,12 +886,10 @@ SCRIPT
     } | macos_ssh bash
 }
 
-# -- Preview mode: install & launch app for manual testing ---------------------
 
 preview_windows() {
     windows_wait_ssh
 
-    # Require a pre-built installer on the remote Desktop
     echo 'if (-not (Test-Path "$env:USERPROFILE\Desktop\speedwave-setup.exe")) { Write-Error "No installer at Desktop\speedwave-setup.exe -- run Phase 1 first: scripts/e2e-vm.sh windows"; exit 1 }' | windows_ps
 
     windows_clean_state
@@ -1027,7 +914,6 @@ SCRIPT
 preview_macos() {
     macos_wait_ssh
 
-    # Require a pre-built .dmg on the remote Desktop
     macos_ssh "test -f ~/Desktop/speedwave.dmg" || {
         echo "No .dmg at ~/Desktop/speedwave.dmg — run Phase 1 first: scripts/e2e-vm.sh macos"
         return 1
@@ -1053,7 +939,6 @@ SCRIPT
     echo "[macos] Stop:       ssh $MACOS_SSH_OPTS $MACOS_HOST pkill Speedwave"
 }
 
-# -- Main ----------------------------------------------------------------------
 
 TARGET="${1:-all}"
 

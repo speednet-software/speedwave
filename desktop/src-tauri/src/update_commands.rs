@@ -1,11 +1,7 @@
-// Tauri commands for app updates and bundle reconcile.
-
 use crate::reconcile;
 use crate::types::BundleReconcileStatus;
 use crate::updater;
 use speedwave_runtime::{bundle, config};
-
-// ── App update commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub(crate) async fn check_for_update(

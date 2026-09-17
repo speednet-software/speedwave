@@ -134,7 +134,6 @@ export async function refreshAccessToken(
         `bearer file ${bearerPath} is empty; oauth worker did not provision this consumer`
       );
     }
-    // Fail fast if the oauth worker hangs.
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.TOKEN_REFRESH_MS);
     let response: Response;
@@ -154,7 +153,6 @@ export async function refreshAccessToken(
         signal: controller.signal,
       });
     } catch (err) {
-      // Wrap fetch failures as typed errors; worker URL stays out of user-facing messages.
       if (err instanceof Error && err.name === 'AbortError') {
         console.warn(`oauth worker timeout at ${workerUrl}`);
         const secs = TIMEOUTS.TOKEN_REFRESH_MS / 1000;
@@ -210,7 +208,6 @@ export async function refreshAccessToken(
     throw new OAuthRefreshError('tool_error', text);
   }
 
-  // jsonResult shape: { content: [{type:'text', text: JSON.stringify(data)}] }
   let payload: { expiresIn?: unknown; grantedScopes?: unknown; rateLimited?: unknown };
   try {
     payload = JSON.parse(text) as { expiresIn?: unknown; grantedScopes?: unknown };
@@ -225,7 +222,6 @@ export async function refreshAccessToken(
   return {
     expiresIn,
     grantedScopes: grantedScopes.map((s) => String(s)),
-    // True when the worker skipped the IdP round-trip (token still valid, not rewritten).
     rateLimited: payload.rateLimited === true,
   };
 }

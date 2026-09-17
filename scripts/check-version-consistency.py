@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-# Verifies every version-bearing file listed in release-please-config.json
-# agrees with .release-please-manifest.json["."].
-#
-# Usage:
-#   python3 scripts/check-version-consistency.py             # checks repo root
-#   python3 scripts/check-version-consistency.py <path>      # checks a fixture tree
-#   REPO_ROOT_OVERRIDE=<path> python3 scripts/check-version-consistency.py
-#
-# Exits 0 on full match; non-zero on first drift. Drift lines go to stderr.
 import json
 import os
 import pathlib
@@ -61,8 +52,6 @@ def find_errors(root: pathlib.Path) -> list[str]:
                 except Exception as e:
                     errors.append(f"{toml_path}: read error: {e}")
                     continue
-                # Extract [package].version with regex — keeps support for
-                # Python < 3.11 (no tomllib).
                 pkg = re.search(r"\[package\](.*?)(?:\n\[|\Z)", content, re.DOTALL)
                 if not pkg:
                     errors.append(f"{toml_path}: no [package] section found")
@@ -82,9 +71,6 @@ def find_errors(root: pathlib.Path) -> list[str]:
                         f"{toml_path}: version '{actual}' != manifest '{expected}'"
                     )
         elif isinstance(entry, dict) and entry.get("type") == "generic":
-            # release-please's generic updater bumps every line carrying the
-            # `x-release-please-version` marker comment (e.g. Info.plist
-            # CFBundleShortVersionString). Verify each such line holds `expected`.
             path = root / entry["path"]
             try:
                 content = path.read_text()
@@ -101,10 +87,6 @@ def find_errors(root: pathlib.Path) -> list[str]:
                 )
                 continue
             for line in marked:
-                # Extract the exact value release-please bumps. Plist shape is
-                # `<string>VERSION</string> <!-- x-release-please-version -->`;
-                # compare the extracted token exactly (not substring, so e.g.
-                # 1.2.3 does not spuriously match 11.2.3).
                 m = re.search(r"<string>([^<]*)</string>", line)
                 if not m:
                     errors.append(

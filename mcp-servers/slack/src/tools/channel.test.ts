@@ -13,7 +13,6 @@ import {
 } from './channel-tools.js';
 import type { SlackClients } from '../client.js';
 
-// Mock the client module
 vi.mock('../client.js', async () => {
   const actual = await vi.importActual('../client.js');
   return {
@@ -29,7 +28,6 @@ vi.mock('../client.js', async () => {
   };
 });
 
-// Mock the user-directory boundary; its machinery has its own test file.
 vi.mock('../user-directory.js', () => ({
   enrichMessagesWithAuthors: vi.fn(async (_clients: unknown, msgs: unknown[]) => msgs),
 }));
@@ -220,7 +218,6 @@ describe('channel-tools', () => {
       expect(enrichMessagesWithAuthors).toHaveBeenCalledWith(mockClients, mockMessages);
       const data = result.data as { messages: { author?: string; user: string }[] };
       expect(data.messages[0].author).toBe('Paweł Kowalski');
-      // Unresolvable ID stays raw — the read still succeeds.
       expect(data.messages[1].author).toBeUndefined();
       expect(data.messages[1].user).toBe('UX');
     });
@@ -493,7 +490,6 @@ describe('channel-tools', () => {
         name: 'general',
         is_private: false,
       });
-      // Verify num_members is not included in the output
       expect(data?.channels[0]).not.toHaveProperty('num_members');
     });
 

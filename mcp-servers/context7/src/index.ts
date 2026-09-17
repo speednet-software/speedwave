@@ -14,7 +14,6 @@ async function loadOptionalApiKey(): Promise<string | undefined> {
     const key = await loadTokenFile('api_key');
     return key.length > 0 ? key : undefined;
   } catch (e) {
-    // fs errno is at `e.cause.code`; non-ENOENT propagates.
     const cause = (e as { cause?: NodeJS.ErrnoException }).cause;
     if (cause?.code === 'ENOENT') {
       return undefined;
@@ -23,7 +22,6 @@ async function loadOptionalApiKey(): Promise<string | undefined> {
   }
 }
 
-// Anonymous mode is valid; no healthCheck (would burn anonymous quota).
 bootWorker<Context7Client>({
   serverName: 'mcp-context7',
   version: '0.1.0',

@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Tests for the `guard-not-prod-data-dir` Makefile target (ADR-031 §4).
-# Must hard-refuse a production data dir (basename `.speedwave`).
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 
@@ -37,7 +35,6 @@ run_guard() {
 }
 
 @test "guard refuses an empty SPEEDWAVE_DATA_DIR" {
-    # Empty resolves to the production ~/.speedwave in consts::data_dir_from.
     run run_guard ""
     [ "$status" -ne 0 ]
     [[ "$output" == *"production data dir"* ]]

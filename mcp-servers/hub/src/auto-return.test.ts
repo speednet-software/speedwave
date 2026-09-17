@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { addAutoReturn } from './auto-return.js';
 
 describe('addAutoReturn (AST-based)', () => {
-  // Podstawowe przypadki
   it('adds return to simple expression', () => {
     expect(addAutoReturn('42').code).toBe('return 42');
   });
@@ -15,7 +14,6 @@ describe('addAutoReturn (AST-based)', () => {
     expect(addAutoReturn('42;').code).toBe('return 42');
   });
 
-  // Wieloliniowe
   it('handles multiline object literal', () => {
     const input = `({
   x: 1,
@@ -31,7 +29,6 @@ describe('addAutoReturn (AST-based)', () => {
     expect(addAutoReturn(input).code).toMatch(/^return await fn/);
   });
 
-  // Nie dodaje return
   it('preserves explicit return', () => {
     expect(addAutoReturn('return 42').code).toBe('return 42');
   });
@@ -66,13 +63,11 @@ describe('addAutoReturn (AST-based)', () => {
     expect(addAutoReturn(input).code).toBe(input);
   });
 
-  // Wiele statementów
   it('adds return only to last expression in multiple statements', () => {
     const input = 'const x = 1;\nx + 1';
     expect(addAutoReturn(input).code).toBe('const x = 1;\nreturn x + 1');
   });
 
-  // Edge cases
   it('handles empty code', () => {
     expect(addAutoReturn('').code).toBe('');
   });
@@ -82,12 +77,10 @@ describe('addAutoReturn (AST-based)', () => {
   });
 
   it('handles string with return keyword', () => {
-    // AST poprawnie rozpoznaje że "return" jest w stringu
     expect(addAutoReturn('"return value"').code).toBe('return "return value"');
   });
 
   it('handles string with parentheses', () => {
-    // AST poprawnie parsuje nawiasy w stringu
     expect(addAutoReturn('"test ({"').code).toBe('return "test ({"');
   });
 
@@ -96,7 +89,6 @@ describe('addAutoReturn (AST-based)', () => {
     expect(addAutoReturn(input).code).toBe('// comment\nreturn 42');
   });
 
-  // Dodatkowe edge cases
   it('handles template literal with return keyword', () => {
     expect(addAutoReturn('`return ${x}`').code).toBe('return `return ${x}`');
   });
@@ -131,7 +123,6 @@ describe('addAutoReturn (AST-based)', () => {
     expect(addAutoReturn('await fn().then(x => x)').code).toBe('return await fn().then(x => x)');
   });
 
-  // AST parse error recovery - now returns parseError
   it('should return original code and parseError on syntax error', () => {
     const result = addAutoReturn('const x = {');
     expect(result.code).toBe('const x = {');
@@ -145,14 +136,12 @@ describe('addAutoReturn (AST-based)', () => {
     expect(result.parseError).toBeDefined();
   });
 
-  // Success cases should NOT have parseError
   it('should not have parseError on success', () => {
     const result = addAutoReturn('42');
     expect(result.code).toBe('return 42');
     expect(result.parseError).toBeUndefined();
   });
 
-  // AST body length === 0: a comment-only string parses to an empty body
   it('returns original code unchanged when AST body is empty (comment only)', () => {
     const input = '/* just a comment */';
     const result = addAutoReturn(input);

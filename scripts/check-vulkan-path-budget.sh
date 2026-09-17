@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# check-vulkan-path-budget.sh — fails loud before the ggml-vulkan build dies on MAX_PATH:
-# cl.exe cannot open paths past it even with LongPathsEnabled (a cryptic C1083, ADR-085).
 
 set -euo pipefail
 
-# Deepest observed MSBuild-generator TryCompile scratch below the cargo target dir
-# (cmTC_*.tlog\ParallelCustomBuild.command.1.tlog — 248 chars measured live; ninja is shallower).
 SUFFIX_BUDGET=250
 MAX_PATH=259
 
@@ -14,7 +10,6 @@ crate_dir="$repo_root/desktop/src-tauri"
 
 target_dir="$(bash "$repo_root/scripts/cargo-target-dir.sh" "$crate_dir")" || exit 1
 
-# Windows-style length is what cl.exe sees.
 if command -v cygpath >/dev/null 2>&1; then
   win_target="$(cygpath -w "$target_dir" 2>/dev/null || echo "$target_dir")"
 else

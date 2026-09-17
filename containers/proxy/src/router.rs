@@ -1,15 +1,11 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// How authentication is applied when forwarding to a backend.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Auth {
-    /// A bare string: `"passthrough"` (forward the caller's key unchanged) or
-    /// `"none"` (drop inbound auth, inject nothing — local servers).
     #[serde(deserialize_with = "de_bare_auth")]
     Bare(BareAuth),
-    /// Replace the caller's key with the value of an env var.
     Swap {
         #[serde(rename = "swap_env")]
         env: String,
@@ -17,7 +13,6 @@ pub enum Auth {
     },
 }
 
-/// The two string-valued auth modes.
 #[derive(Debug, PartialEq)]
 pub enum BareAuth {
     Passthrough,
@@ -35,7 +30,6 @@ fn de_bare_auth<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BareAuth, D::E
     }
 }
 
-/// Authorization scheme used in the forwarded request.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Scheme {
@@ -43,52 +37,39 @@ pub enum Scheme {
     None,
 }
 
-/// One entry in the routing table.
 #[derive(Debug, Deserialize)]
 pub struct Route {
     pub prefix: String,
     pub base_url: String,
     pub auth: Auth,
-    /// Provider kind for host-side cost attribution (ADR-073). Never sniffed
-    /// in the proxy — the renderer writes it from the active provider.
     #[serde(default)]
     pub provider_kind: String,
     #[serde(default)]
     pub provider_id: String,
 }
 
-/// Top-level proxy routing config, deserialized from `/config/proxy.json`.
-/// `usage_path` is resolved once at startup from `SPW_USAGE_PATH`.
 #[derive(Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
-    /// Per-project caller secret only the `claude` container holds; the auth
-    /// middleware requires it on `/v1/*`. Absent ⇒ legacy config, checks skip.
     #[serde(default)]
     pub caller_token: Option<String>,
     #[serde(skip)]
     pub usage_path: PathBuf,
-    /// Shared outbound client (cloned per request — cheap, Arc-backed). Built
-    /// once with no-redirect (SSRF, ADR-041) and connection reuse.
     #[serde(skip, default = "build_forward_client")]
     pub client: reqwest::Client,
-    /// PII engine (policy + key), resolved once at startup — fail-closed (ADR-073 F4).
     #[serde(skip, default = "crate::pii::load_engine_state")]
     pub pii: std::sync::Arc<crate::pii::PiiEngineState>,
-    /// Resolved once at startup from `AUDIT_DIR`, like `usage_path` — no env read per request.
     #[serde(skip, default = "resolve_audit_dir")]
     pub audit_dir: Option<PathBuf>,
-    /// Host-side NER detector (ADR-089); present only when the renderer saw a live detector.
+    /// Host-side NER detector (ADR-090); present only when the renderer saw a live detector.
     #[serde(skip)]
     pub ner: Option<std::sync::Arc<crate::ner::NerClient>>,
 }
 
-/// Reads `AUDIT_DIR` once; `None` when unset (audit writer becomes a no-op).
 fn resolve_audit_dir() -> Option<PathBuf> {
     std::env::var("AUDIT_DIR").ok().map(PathBuf::from)
 }
 
-// Manual Debug: `caller_token` is a per-project secret and must never reach logs.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -103,8 +84,6 @@ impl std::fmt::Debug for Config {
     }
 }
 
-/// Outbound forwarding client: rustls TLS, no redirects (SSRF defence). Retries
-/// once without proxy env vars on build failure, then exits fatally.
 fn build_forward_client() -> reqwest::Client {
     let build = || {
         reqwest::Client::builder()
@@ -137,7 +116,6 @@ impl Default for Config {
     }
 }
 
-/// File-backed fields; `usage_path`/`client` come from env/default, not the file.
 #[derive(Deserialize)]
 struct RoutesFile {
     routes: Vec<Route>,
@@ -148,8 +126,6 @@ struct RoutesFile {
 }
 
 impl Config {
-    /// Load the routing table from `path`, resolving `usage_path` from
-    /// `SPW_USAGE_PATH`. Unreadable or malformed file is a fatal startup error.
     pub fn load_from(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -171,8 +147,6 @@ impl Config {
     }
 }
 
-/// Resolve a model string to its backend route by its prefix (before the first
-/// `/`); a bare model uses `"anthropic"`. `None` for empty/unknown prefix.
 pub fn resolve<'a>(cfg: &'a Config, model: &str) -> Option<&'a Route> {
     if model.is_empty() {
         return None;
@@ -278,13 +252,11 @@ mod tests {
 
     #[test]
     fn build_forward_client_succeeds_on_primary_path() {
-        // Reaching a Client proves the primary build() attempt succeeded.
         let _client = build_forward_client();
     }
 
     #[test]
     fn build_forward_client_no_proxy_fallback_chain_builds() {
-        // Same builder chain as the retry branch's no_proxy() fallback.
         let build = || {
             reqwest::Client::builder()
                 .use_rustls_tls()
@@ -296,6 +268,26 @@ mod tests {
             "no_proxy() fallback chain must build a client: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn resolve_matches_an_arbitrary_custom_prefix_not_just_known_provider_kinds() {
+        let cfg = Config {
+            routes: vec![Route {
+                prefix: "my-or".to_string(),
+                base_url: "https://openrouter.ai/api".to_string(),
+                auth: Auth::Swap {
+                    env: "SPW_KEY_MY_OR".to_string(),
+                    scheme: Scheme::Bearer,
+                },
+                provider_kind: "openrouter".to_string(),
+                provider_id: "my-or".to_string(),
+            }],
+            usage_path: PathBuf::from("/usage/usage.jsonl"),
+            ..Default::default()
+        };
+        let r = resolve(&cfg, "my-or/anthropic/claude-sonnet-5").unwrap();
+        assert!(matches!(&r.auth, Auth::Swap { env, .. } if env == "SPW_KEY_MY_OR"));
     }
 
     #[test]

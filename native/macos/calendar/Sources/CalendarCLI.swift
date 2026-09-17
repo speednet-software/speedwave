@@ -2,7 +2,6 @@ import EventKit
 import Foundation
 import SharedCLI
 
-// File-scope so tests can reach it via @testable import calendar_cli.
 struct EventStoreGate: PermissionGate {
     let store: EKEventStore
     func authorizationStatus() -> RawAuthorizationStatus {
@@ -17,7 +16,6 @@ struct EventStoreGate: PermissionGate {
     }
 }
 
-// MARK: - CLI Entry Point
 
 /// calendar-cli <command> [json-args]
 /// Commands: check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event
@@ -27,7 +25,6 @@ struct CalendarCLI {
         "check_permission, list_calendars, list_events, get_event, create_event, update_event, delete_event"
 
     static func main() {
-        // Shared store for access guard and handlers; check_permission uses its own gate.
         let store = EKEventStore()
         runCLI(
             cliName: "calendar-cli",
@@ -54,7 +51,6 @@ struct CalendarCLI {
     }
 }
 
-// MARK: - Permission Helpers
 
 /// Requests Calendar access from EventKit (macOS 14+ full-access API, falling back to legacy requestAccess(to:)).
 /// Optional timeout (default: unbounded) is a safety net for check_permission.
@@ -91,7 +87,6 @@ func requestCalendarAccess(store: EKEventStore, timeout: TimeInterval? = nil) ->
     return (accessGranted, accessError)
 }
 
-// MARK: - Commands
 
 func listCalendars(store: EKEventStore) throws -> [String: Any] {
     let calendars = store.calendars(for: .event)
@@ -266,7 +261,6 @@ func deleteEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
     return ["status": "deleted"]
 }
 
-// MARK: - Helpers
 
 func eventToDict(_ e: EKEvent) -> [String: Any] {
     var dict: [String: Any] = [

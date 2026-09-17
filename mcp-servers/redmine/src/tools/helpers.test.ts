@@ -6,8 +6,6 @@ import { describe, it, expect } from 'vitest';
 import { resolveParams, MappingError, MAPPABLE_FIELDS } from './helpers.js';
 import type { RedmineMappings } from '../client.js';
 
-// ── Fixture mappings used across tests ────────────────────────────────────────
-
 const fullMappings: RedmineMappings = {
   status_new: 1,
   status_in_progress: 2,
@@ -20,8 +18,6 @@ const fullMappings: RedmineMappings = {
   activity_development: 1,
   activity_testing: 2,
 };
-
-// ── MappingError ──────────────────────────────────────────────────────────────
 
 describe('MappingError', () => {
   it('constructs with correct name, field, value and availableValues', () => {
@@ -59,8 +55,6 @@ describe('MAPPABLE_FIELDS', () => {
     expect(MAPPABLE_FIELDS).toEqual(['status', 'priority', 'tracker', 'activity']);
   });
 });
-
-// ── resolveParams — happy paths ───────────────────────────────────────────────
 
 describe('resolveParams', () => {
   it('passes through params that have no friendly-name fields', () => {
@@ -154,8 +148,6 @@ describe('resolveParams', () => {
     expect(original).toEqual({ status: 'new', priority: 'high' });
   });
 
-  // ── error paths ──────────────────────────────────────────────────────────────
-
   it('throws MappingError for unknown status', () => {
     expect(() => resolveParams({ status: 'nonexistent' }, fullMappings)).toThrow(MappingError);
 
@@ -229,15 +221,12 @@ describe('resolveParams', () => {
     }
   });
 
-  // ── edge cases ───────────────────────────────────────────────────────────────
-
   it('handles empty params object', () => {
     const result = resolveParams({}, fullMappings);
     expect(result).toEqual({});
   });
 
   it('handles params with falsy status (empty string) — skips mapping', () => {
-    // Empty string is falsy, so the `if (resolved.status && ...)` guard skips it
     const result = resolveParams({ status: '' }, fullMappings);
     expect(result.status).toBe('');
     expect(result).not.toHaveProperty('status_id');

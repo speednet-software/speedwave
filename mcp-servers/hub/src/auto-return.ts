@@ -31,17 +31,14 @@ export function addAutoReturn(code: string): AutoReturnResult {
 
     const lastStatement = ast.body[ast.body.length - 1];
 
-    // Jeśli już jest ReturnStatement, nie zmieniaj
     if (lastStatement.type === 'ReturnStatement') {
       return { code };
     }
 
-    // Jeśli ostatni statement to ExpressionStatement, dodaj return
     if (lastStatement.type === 'ExpressionStatement') {
       const start = lastStatement.start;
       const end = lastStatement.end;
 
-      // Usuń trailing semicolon jeśli jest
       let endPos = end;
       if (trimmed[end - 1] === ';') {
         endPos = end - 1;
@@ -50,7 +47,6 @@ export function addAutoReturn(code: string): AutoReturnResult {
       return { code: trimmed.slice(0, start) + 'return ' + trimmed.slice(start, endPos) };
     }
 
-    // Inne typy (VariableDeclaration, IfStatement, etc.) - nie dodawaj return
     return { code };
   } catch (error) {
     /* c8 ignore next — acorn always throws Error instances; the String() fallback is defensive */

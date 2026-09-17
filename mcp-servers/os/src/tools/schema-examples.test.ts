@@ -19,14 +19,17 @@ const ALL_TOOLS = [
 ];
 
 interface JsonSchema {
-  type?: string;
+  type?: string | string[];
   properties?: Record<string, JsonSchema>;
   required?: string[];
   items?: JsonSchema;
 }
 
-function typeMatches(schemaType: string | undefined, value: unknown): boolean {
+function typeMatches(schemaType: string | string[] | undefined, value: unknown): boolean {
+  if (Array.isArray(schemaType)) return schemaType.some((t) => typeMatches(t, value));
   switch (schemaType) {
+    case 'null':
+      return value === null;
     case 'string':
       return typeof value === 'string';
     case 'number':

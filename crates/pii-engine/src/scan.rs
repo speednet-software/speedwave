@@ -286,8 +286,6 @@ fn tokenize_segment(
             candidates.push((m.start(), m.end(), value.to_string()));
         }
     }
-    // Earliest start first; at equal start, longest match first, so overlapping hits from a
-    // rule's other patterns never re-match text already claimed.
     candidates.sort_by_key(|(start, end, _)| (*start, std::cmp::Reverse(*end)));
 
     let mut hits: Vec<(usize, usize, String)> = Vec::new();
@@ -1216,8 +1214,6 @@ mod tests {
 
     #[test]
     fn multiple_patterns_in_one_rule_both_match_without_double_counting_overlap() {
-        // PHONE_PL matches once via its single pattern in FULL_POLICY; verify a rule with two
-        // overlapping patterns dedupes rather than double-counting the same span.
         let json = r#"{
             "version": 3,
             "source": { "policies": [], "forced": [] },
@@ -1243,8 +1239,6 @@ mod tests {
 
     #[test]
     fn phone_never_matches_inside_an_iban_shaped_value() {
-        // Regression: the pre-anchor PHONE_PL stole digits mid-value here, masking digits
-        // IBAN needed and leaving the leftovers in cleartext.
         let policy = full_policy();
         let key = test_key();
         let iban = format!("PL26ABCD48{}", ["123", "123", "123"].concat());
@@ -1309,7 +1303,6 @@ mod tests {
 
     #[test]
     fn phone_split_across_a_newline_is_not_matched() {
-        // Deliberate trade-off of `[ -]` over `[\s-]`: a line break never joins fragments.
         let policy = full_policy();
         let key = test_key();
         let text = format!("+48\n{} {} {}", "123", "123", "123");
@@ -1321,8 +1314,6 @@ mod tests {
 
     #[test]
     fn newline_separated_pesels_all_tokenize_with_no_cleartext_digits() {
-        // Regression: `[\s-]` in PHONE_PL matched `\n`, gluing two neighbouring PESELs into
-        // one bogus phone match and leaving their remaining digits in cleartext.
         let policy = full_policy();
         let key = test_key();
         let list = (0..10).map(generated_pesel).collect::<Vec<_>>().join("\n");
@@ -1363,20 +1354,16 @@ mod tests {
             .expect("scan succeeds")
             .text;
 
-        // Flip a bit inside the base64 payload (ASCII-safe swap keeps the buffer valid UTF-8).
         let pos = scanned.find("TOKEN_").expect("token present") + "TOKEN_".len();
         let mut bytes = scanned.into_bytes();
         bytes[pos] = if bytes[pos] == b'A' { b'B' } else { b'A' };
         let flipped = String::from_utf8(bytes).expect("still valid utf8");
         assert!(detokenize_text(&key, &flipped).is_err());
 
-        // Category in the span does not match the AAD the value was sealed under.
         let pesel_ct = siv_seal(&key, "PESEL", b"44051401359").expect("seal succeeds");
         let mismatched = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&pesel_ct));
         assert!(detokenize_text(&key, &mismatched).is_err());
 
-        // Payload has token-span-legal characters but an invalid base64url length (a single char
-        // cannot represent a full byte), so decoding itself fails before any SIV check runs.
         let non_base64 = "[EMAIL:TOKEN_A]";
         assert!(TOKEN_SPAN_REGEX
             .as_ref()
@@ -1458,8 +1445,6 @@ mod tests {
         assert!(result.is_err(), "should reject on second token corruption");
         assert_eq!(value, original, "input must remain unchanged after error");
     }
-
-    // ── detokenize_text_lossy: per-span presentation variant ──
 
     #[test]
     fn lossy_resolves_valid_spans_and_keeps_unresolvable_ones_verbatim() {
@@ -1544,8 +1529,6 @@ mod tests {
         assert_eq!(detokenize_text_lossy(&key, ""), "");
     }
 
-    // ── alias_text / unalias_text: keyword masking with case preservation ──
-
     #[test]
     fn alias_text_case_sensitive_replaces_exact_case_only() {
         assert_eq!(
@@ -1591,11 +1574,6 @@ mod tests {
 
     #[test]
     fn alias_and_unalias_roundtrip() {
-        // A single-word match/alias keeps every occurrence's case pattern within the
-        // lowercase/UPPERCASE/Title taxonomy, so round-tripping is exact; a multi-capital
-        // span like "Coca-Cola" detects as Mixed and is not guaranteed to round-trip (the
-        // alias itself may read as Title-shaped, e.g. "Brandex"), which is an accepted
-        // limitation of the four-bucket case model, not exercised here.
         let original = "acme signed with ACME and Acme twice";
         let masked = alias_text(original, "acme", "brandex", false);
         assert!(!masked.to_lowercase().contains("acme"));
@@ -1619,8 +1597,6 @@ mod tests {
         );
     }
 
-    // ── unalias_text_preserving_tokens: keyword unmask must skip PII token spans ──
-
     #[test]
     fn preserving_tokens_unmasks_plain_text_normally() {
         let result =
@@ -1631,10 +1607,6 @@ mod tests {
     #[test]
     fn preserving_tokens_never_touches_a_token_spans_ciphertext() {
         let key = test_key();
-        // An alias-shaped ciphertext substring is astronomically unlikely in practice, but
-        // the mechanism must still leave the whole span untouched byte-for-byte: build a
-        // real token and confirm it survives verbatim even when it appears next to the
-        // alias in plain text.
         let ciphertext = siv_seal(&key, "EMAIL", b"alias@example.com").expect("seal succeeds");
         let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
         let text = format!("Brandex sent from {token}");
@@ -1649,8 +1621,6 @@ mod tests {
             unalias_text_preserving_tokens("nothing to see here", "Coca-Cola", "Brandex", false);
         assert_eq!(result, "nothing to see here");
     }
-
-    // ── alias_json / unalias_json_preserving_tokens: JSON-tree keyword walk ──
 
     fn test_keyword(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledKeyword {
         CompiledKeyword {
@@ -1712,8 +1682,6 @@ mod tests {
         assert_eq!(value["n"], 42);
     }
 
-    // ── incomplete_token_span_start: viable-prefix detection for streaming holdback ──
-
     #[test]
     fn incomplete_span_start_finds_viable_prefixes() {
         for tail in [
@@ -1743,7 +1711,6 @@ mod tests {
         assert_eq!(incomplete_token_span_start("x] closing only"), None);
         assert_eq!(incomplete_token_span_start("[EMAIL:TOXIC"), None);
         assert_eq!(incomplete_token_span_start("[EMAIL:TOKEN_]"), None);
-        // A complete span is replaceable now, never held.
         assert_eq!(incomplete_token_span_start("[EMAIL:TOKEN_abc123]"), None);
     }
 
@@ -1762,8 +1729,6 @@ mod tests {
     fn incomplete_span_start_resumes_after_invalid_bracket() {
         assert_eq!(incomplete_token_span_start("[x [EMAIL:TOK"), Some(3));
     }
-
-    // ── render-hook variants: detokenize_text_with / unalias_text_preserving_tokens_with ──
 
     fn json_escape(s: &str) -> String {
         let quoted = serde_json::Value::String(s.to_string()).to_string();
@@ -1789,8 +1754,6 @@ mod tests {
 
     #[test]
     fn unalias_with_renders_after_case_pattern() {
-        // Case-insensitive alias hit: the replacement takes the match's case pattern FIRST,
-        // then is escaped, so the letter of an escape sequence is never case-folded.
         let result = unalias_text_preserving_tokens_with(
             "use Brandex here",
             "new\nline",

@@ -1,27 +1,18 @@
 #!/usr/bin/env bats
-# Pins the real-nerdctl semantics Speedwave's cleanup/heal relies on.
-# ENGINE_EXEC runs argv as root in the engine namespace (set by the make target).
 
-# 1935db59 = sha256("/run/containerd/containerd.sock")[0:8]; drift is caught by
-# the Rust pin `consts::tests::nerdctl_addr_hash_matches_default_socket_digest`.
 STORE=/var/lib/nerdctl/1935db59/names/default
 NAME=spwcontract_ghost
 DEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 
 setup_file() {
-  # A caller already inside the engine namespace may export an empty ENGINE_EXEC;
-  # the marker var distinguishes "unset" (config error) from "empty on purpose".
   [ "${ENGINE_EXEC+set}" = "set" ] || { echo "ENGINE_EXEC must be set (may be empty for in-namespace runs)" >&2; return 1; }
   $ENGINE_EXEC true || { echo "engine executor unreachable: '$ENGINE_EXEC'" >&2; return 1; }
-  # Deterministic image pick: a tagged Speedwave image, never <none>.
   IMG=$($ENGINE_EXEC nerdctl images --format '{{.Repository}}:{{.Tag}}' | grep '^speedwave-' | grep -v '<none>' | head -1)
   [ -n "$IMG" ] || { echo "no tagged speedwave-* image in engine — provision first" >&2; return 1; }
   export IMG
 }
 
 teardown() {
-  # Container first (a live spwcontract container must never be orphaned by
-  # deleting its reservation), the stray reservation second.
   $ENGINE_EXEC sh -c "nerdctl rm -f $NAME >/dev/null 2>&1; rm -f $STORE/$NAME; true"
 }
 
@@ -46,8 +37,6 @@ teardown() {
 }
 
 @test "flock on the names dir blocks nerdctl create (TOCTOU guard basis)" {
-  # Proves the holder owns the lock before timing; b64-wrapped (wrap_base64_sh shape)
-  # because the wsl.exe interop re-parse eats \$ constructs (WslRuntime::run_in_distro).
   script=$(cat <<EOF
 flock $STORE sleep 6 &
 i=0

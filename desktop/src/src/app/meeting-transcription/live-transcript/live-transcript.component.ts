@@ -194,7 +194,6 @@ export class LiveTranscriptComponent {
    * can append a mic segment after a later system one (or vice versa).
    */
   readonly lines = computed<TranscriptLine[]>(() => {
-    // Sort a copy: the stored order is append order, and sort() is stable.
     const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
@@ -241,9 +240,6 @@ export class LiveTranscriptComponent {
     const kind = this.session()?.audio_source.source.kind;
     const levels = this.transcription.audioLevels();
     if (!levels || levels.length === 0) {
-      // Recording but no level event yet (capture still spinning up): show the
-      // expected channels at 0% — a flat bar reads "silent", a missing meter
-      // reads "broken". Channel count comes from the source shape.
       if (this.status() !== 'recording' || !kind) return [];
       return kind === 'mixed'
         ? [
@@ -281,8 +277,6 @@ export class LiveTranscriptComponent {
 
   /** Wires the auto-scroll effects (constructor = injection context). */
   constructor() {
-    // A newly opened session starts pinned: live tail while recording, top when
-    // reading a finished transcript (never inherit the previous session's scroll).
     effect(() => {
       this.sessionId();
       this.stickToBottom.set(true);
@@ -292,7 +286,6 @@ export class LiveTranscriptComponent {
         this.scrollToTop();
       }
     });
-    // Follow the live tail while recording, unless the user scrolled up to read.
     effect(() => {
       this.lines();
       this.draft();

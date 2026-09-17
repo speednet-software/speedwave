@@ -34,8 +34,6 @@ pub(super) fn probe() -> GpuClass {
     use ash::vk;
     // SAFETY: Entry::load dynamically loads vulkan-1.dll; failure returns Err (no loader).
     let Ok(entry) = (unsafe { ash::Entry::load() }) else {
-        // The loader ships next to the exe — failing to load it means a broken install,
-        // not a GPU-less host; warn per logging.md (degradation), the probe still degrades.
         log::warn!(target: "transcription::gpu", "vulkan-1.dll not loadable — GPU acceleration disabled, falling back to CPU");
         return GpuClass::None;
     };
@@ -49,7 +47,6 @@ pub(super) fn probe() -> GpuClass {
     let devices = match unsafe { instance.enumerate_physical_devices() } {
         Ok(d) => d,
         Err(e) => {
-            // Distinguish "enumeration failed" from a genuine zero-device host in the logs.
             log::debug!(target: "transcription::gpu", "vkEnumeratePhysicalDevices failed: {e}");
             Vec::new()
         }
@@ -83,17 +80,13 @@ mod tests {
 
     #[test]
     fn classify_prefers_discrete_then_integrated_then_none() {
-        // Discrete wins whatever else is present (the common iGPU + dGPU laptop).
         assert_eq!(classify_device_types(&[1, 2]), GpuClass::Discrete);
         assert_eq!(classify_device_types(&[2]), GpuClass::Discrete);
-        // Integrated or virtual GPUs land in the middle tier.
         assert_eq!(classify_device_types(&[1]), GpuClass::Integrated);
         assert_eq!(classify_device_types(&[3]), GpuClass::Integrated);
-        // Software rasterizers (CPU type 4) and OTHER (0) give no speedup — treated as none.
         assert_eq!(classify_device_types(&[4]), GpuClass::None);
         assert_eq!(classify_device_types(&[0]), GpuClass::None);
         assert_eq!(classify_device_types(&[]), GpuClass::None);
-        // A software device never masks a real one.
         assert_eq!(classify_device_types(&[4, 1]), GpuClass::Integrated);
     }
 }

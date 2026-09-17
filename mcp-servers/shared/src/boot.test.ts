@@ -1,15 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock the server factory so bootWorker never opens a real socket. The mock
-// records the options passed so tests can assert the declarative wiring.
 const startMock = vi.fn(async () => 4321);
 const createMCPServerMock = vi.fn(() => ({ start: startMock }));
 vi.mock('./server.js', () => ({
   createMCPServer: (opts: unknown) => createMCPServerMock(opts),
 }));
 
-// Mock retryAsync to a single pass-through call — the real one sleeps for
-// seconds when initClient resolves null, which would hang these unit tests.
 vi.mock('./retry.js', () => ({
   retryAsync: (fn: () => Promise<unknown>) => fn(),
 }));
@@ -27,7 +23,6 @@ describe('bootWorker', () => {
   beforeEach(() => {
     createMCPServerMock.mockClear();
     startMock.mockClear();
-    // process.exit throws so the test can assert it short-circuits.
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`exit:${code}`);
     }) as never);
@@ -190,7 +185,6 @@ describe('bootWorker', () => {
       makeTools: () => [],
       makeHealthCheck,
     });
-    // non-null object but isConfigured=false → warn path, health receives configured=false
     expect(warnSpy.mock.calls.flat().join(' ')).toContain('Slack not configured');
     expect(makeHealthCheck).toHaveBeenCalledWith({ _tokensStatus: 'missing' }, false);
   });
@@ -203,7 +197,6 @@ describe('bootWorker', () => {
       makeTools,
     });
     expect(makeTools).toHaveBeenCalledWith(null);
-    // No "not configured" warning for a worker with no client.
     expect(warnSpy.mock.calls.flat().join(' ')).not.toContain('not configured');
   });
 

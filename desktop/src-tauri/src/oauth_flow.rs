@@ -1,5 +1,3 @@
-// Shared OAuth Device Flow scaffolding; per-provider `FlowRegistry` owns state + event name.
-
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::Emitter;
@@ -407,7 +405,6 @@ mod tests {
         assert!(reg.current_generation() > before);
     }
 
-    // A poisoned lock must not disable cancellation.
     #[test]
     #[serial]
     fn registry_methods_survive_poisoned_lock() {
@@ -470,7 +467,6 @@ mod tests {
         }
     }
 
-    // SSOT guard: TS OAuthProgressEvent['status'] == Rust statuses + 'starting'/'polling'.
     #[test]
     fn progress_statuses_match_ts_union() {
         let src = include_str!("../../src/src/app/models/integration.ts");
@@ -501,7 +497,6 @@ mod tests {
 
     #[test]
     fn device_code_expired_msg_is_reconciled_single_wording() {
-        // Both providers emit this exact string on expiry.
         assert_eq!(
             DEVICE_CODE_EXPIRED_MSG,
             "Device code expired — please try again."

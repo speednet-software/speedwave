@@ -17,8 +17,6 @@ import {
 import { MAPPABLE_FIELDS } from './tools/helpers.js';
 import { TOOL_NAMES } from './tool-names.js';
 
-// ── Axios Retry Config Extension ─────────────────────────────────────────────────────────────────
-
 /** Extended Axios request configuration with retry counter. */
 interface RetryConfig extends InternalAxiosRequestConfig {
   /** Number of retry attempts made for this request. */
@@ -88,12 +86,10 @@ export function isRetryable(error: AxiosError): boolean {
   }
   const status = error.response?.status;
   if (status === undefined) {
-    return true; // Network error / no response.
+    return true;
   }
   return status === 429 || (status >= 500 && status < 600);
 }
-
-// ── Types ────────────────────────────────────────────────────────────────────────────────────────
 
 /** Redmine client configuration. */
 export interface RedmineConfig {
@@ -546,8 +542,6 @@ export interface RedmineProject {
   time_entry_activities?: Array<{ id: number; name: string; is_default?: boolean }>;
 }
 
-// ── Payload Types for API requests ───────────────────────────────────────────────────────────────
-
 /**
  * Redmine relation type defining valid relationship kinds between issues.
  */
@@ -667,8 +661,6 @@ interface TimeEntryPayload {
   spent_on?: string;
 }
 
-// ── Token Loading ────────────────────────────────────────────────────────────────────────────────
-
 const REDMINE_STATUS_MAP: Record<string, number> = { active: 1, closed: 9, archived: 5 };
 
 /**
@@ -688,8 +680,6 @@ async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
     return null;
   }
 }
-
-// ── Input Validation ─────────────────────────────────────────────────────────────────────────────
 
 /** Tags whose entire content (opening tag + body + closing tag) must be removed */
 const DANGEROUS_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'applet'];
@@ -750,20 +740,15 @@ function sanitizeTextile(textile: string): string {
   let result = textile;
   let previous: string;
 
-  // Phase 1: iteratively strip dangerous tags with their content
   do {
     previous = result;
     for (const tag of DANGEROUS_TAGS) {
-      // Full tag with content: <script ...>...</script\t\n bar> (multiline, junk before >)
       result = result.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}[^>]*>`, 'gi'), '');
-      // Self-closing or orphaned opening tags: <script ...> or <script .../>
       result = result.replace(new RegExp(`<${tag}\\b[^>]*/?>`, 'gi'), '');
-      // Orphaned closing tags: </script> or </script\t\n bar>
       result = result.replace(new RegExp(`<\\/${tag}[^>]*>`, 'gi'), '');
     }
   } while (result !== previous);
 
-  // Phase 2: whitelist remaining tags — strip any tag not in the safe set
   do {
     previous = result;
     result = result.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/gi, (match, tag: string) => {
@@ -771,7 +756,6 @@ function sanitizeTextile(textile: string): string {
     });
   } while (result !== previous);
 
-  // Phase 3: strip event handlers and dangerous URI schemes from safe tags
   do {
     previous = result;
     result = result.replace(
@@ -783,7 +767,6 @@ function sanitizeTextile(textile: string): string {
     result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*data\s*:/gi, '$1');
   } while (result !== previous);
 
-  // Phase 4: globally strip dangerous URI schemes in plain text (Textile links)
   result = result.replace(/javascript\s*:/gi, '');
   result = result.replace(/vbscript\s*:/gi, '');
   result = result.replace(/data\s*:/gi, '');
@@ -869,8 +852,6 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
   return prefixed;
 }
 
-// ── Client Class ─────────────────────────────────────────────────────────────────────────────────
-
 /** Redmine API client for issues, time entries, journals, users, and projects. */
 export class RedmineClient {
   private client: AxiosInstance;
@@ -891,8 +872,6 @@ export class RedmineClient {
     this.client = axios.create({
       baseURL: config.url,
       timeout: TIMEOUTS.API_CALL_MS,
-      // No redirects: a malicious Redmine host could 3xx to another origin, and
-      // follow-redirects does not strip the X-Redmine-API-Key header cross-host.
       maxRedirects: 0,
       headers: {
         'X-Redmine-API-Key': config.apiKey,
@@ -900,12 +879,9 @@ export class RedmineClient {
       },
     });
 
-    // Retry only idempotent reads: replaying a POST/PUT/DELETE on a transient
-    // error can duplicate a mutation. 429/5xx/network retry for GET/HEAD only.
     this.client.interceptors.response.use(
       (response) => response,
       async (error: AxiosError) => {
-        // A redirect here means host_url is wrong: reject with the teaching fix, never retry.
         const redirect = redirectConfigError(error, this.config.url);
         if (redirect) {
           return Promise.reject(redirect);
@@ -967,8 +943,6 @@ export class RedmineClient {
       url: this.config.url,
     };
   }
-
-  // ── Project Scope Enforcement ──────────────────────────────────────────────────────────────────
 
   private _scopedProjectIdPromise: Promise<number> | null = null;
 
@@ -1036,8 +1010,6 @@ export class RedmineClient {
     }
   }
 
-  // ── Issue Operations ───────────────────────────────────────────────────────────────────────────
-
   /**
    * List issues from Redmine with optional filtering (project/assignee/status/parent); `limit` defaults to 25.
    * @param options - Filter and pagination options.
@@ -1089,7 +1061,6 @@ export class RedmineClient {
     const response = await this.client.get(`/issues/${issueId}.json`, { params });
     const issue = response.data.issue;
 
-    // Inline scope validation: compare issue.project.id against cached numeric project ID
     const scope = this.getProjectScope();
     if (scope) {
       const scopedNumericId = await this._resolveProjectNumericId(scope);
@@ -1212,9 +1183,7 @@ export class RedmineClient {
       notes?: string;
     }
   ): Promise<RedmineIssue> {
-    // Validate scope BEFORE the PUT — prevent modifying out-of-scope issues
     await this._ensureIssueInScope(issueId);
-    // Block moving issues out of scoped project
     if (options.project_id) {
       this._enforceProjectId(options.project_id);
     }
@@ -1236,7 +1205,6 @@ export class RedmineClient {
 
     await this.client.put(`/issues/${issueId}.json`, { issue });
 
-    // Return updated issue for verification.
     return this.showIssue(issueId);
   }
 
@@ -1251,8 +1219,6 @@ export class RedmineClient {
       issue: { notes: sanitizeTextile(comment) },
     });
   }
-
-  // ── Time Entry Operations ──────────────────────────────────────────────────────────────────────
 
   /**
    * List time entries with optional filtering (issue/project/user_id incl. 'me', YYYY-MM-DD range); `limit` defaults to 25.
@@ -1274,9 +1240,7 @@ export class RedmineClient {
       limit?: number;
     } = {}
   ): Promise<{ time_entries: RedmineTimeEntry[]; total_count: number }> {
-    // Always validate explicit project_id against scope
     const enforcedProjectId = this._enforceProjectId(options.project_id);
-    // If issue_id is present, validate it belongs to scoped project
     if (options.issue_id && this.getProjectScope()) {
       await this._ensureIssueInScope(options.issue_id);
     }
@@ -1286,7 +1250,6 @@ export class RedmineClient {
     };
 
     if (options.issue_id) params.issue_id = options.issue_id;
-    // Only inject project_id when issue_id is absent (issue_id filter is sufficient)
     if (!options.issue_id && enforcedProjectId) params.project_id = enforcedProjectId;
     if (options.user_id) params.user_id = options.user_id;
     if (options.from) params.from = options.from;
@@ -1314,9 +1277,7 @@ export class RedmineClient {
     comments?: string;
     spent_on?: string;
   }): Promise<RedmineTimeEntry> {
-    // Always validate explicit project_id against scope
     const enforcedProjectId = this._enforceProjectId(options.project_id);
-    // If issue_id is present, validate it belongs to scoped project
     if (options.issue_id && this.getProjectScope()) {
       await this._ensureIssueInScope(options.issue_id);
     }
@@ -1324,7 +1285,6 @@ export class RedmineClient {
     const time_entry: TimeEntryPayload = { hours: options.hours };
 
     if (options.issue_id) time_entry.issue_id = options.issue_id;
-    // Only inject project_id when issue_id is absent (Redmine derives project from issue)
     if (!options.issue_id && enforcedProjectId) time_entry.project_id = enforcedProjectId;
     if (options.activity_id) time_entry.activity_id = options.activity_id;
     if (options.comments) time_entry.comments = options.comments;
@@ -1350,7 +1310,6 @@ export class RedmineClient {
       comments?: string;
     }
   ): Promise<void> {
-    // Fetch-then-validate: check time entry belongs to scoped project before mutation
     const scope = this.getProjectScope();
     if (scope) {
       const response = await this.client.get(`/time_entries/${timeEntryId}.json`);
@@ -1370,14 +1329,11 @@ export class RedmineClient {
     await this.client.put(`/time_entries/${timeEntryId}.json`, { time_entry });
   }
 
-  // ── Journal Operations ─────────────────────────────────────────────────────────────────────────
-
   /**
    * List all journals (comments and change history) for an issue.
    * @param issueId - The issue ID.
    */
   async listJournals(issueId: number): Promise<RedmineJournal[]> {
-    // Scope enforcement via showIssue() — do not refactor to skip showIssue without adding explicit scope check
     const issue = await this.showIssue(issueId, { include: ['journals'] });
     return issue.journals || [];
   }
@@ -1405,8 +1361,6 @@ export class RedmineClient {
     await this.client.delete(`/issues/${issueId}/journals/${journalId}.json`);
   }
 
-  // ── User Operations ────────────────────────────────────────────────────────────────────────────
-
   /** Get the current authenticated user's profile. */
   async getCurrentUser(): Promise<RedmineUser> {
     const response = await this.client.get('/users/current.json');
@@ -1418,7 +1372,6 @@ export class RedmineClient {
    * @param projectId - Optional project ID to filter users by membership.
    */
   async listUsers(projectId?: string): Promise<RedmineUser[]> {
-    // When scoped, forces projectId = scope → always uses memberships endpoint
     const enforcedProjectId = this._enforceProjectId(projectId);
     if (enforcedProjectId) {
       const response = await this.client.get(`/projects/${enforcedProjectId}/memberships.json`);
@@ -1453,8 +1406,6 @@ export class RedmineClient {
     return null;
   }
 
-  // ── Project Operations ─────────────────────────────────────────────────────────────────────────
-
   /**
    * List projects with optional status filter; when scoped, returns only the configured project.
    * @param options - Filter and pagination options.
@@ -1472,7 +1423,6 @@ export class RedmineClient {
     const scope = this.getProjectScope();
 
     if (scope) {
-      // When scoped, return only the configured project (ignore limit/offset — single project)
       const project = await this.showProject(scope);
       if (options.status && options.status !== 'all') {
         const statusValue = REDMINE_STATUS_MAP[options.status];
@@ -1491,7 +1441,6 @@ export class RedmineClient {
     const response = await this.client.get('/projects.json', { params });
     let projects = response.data.projects as RedmineProject[];
 
-    // Filter by status (Redmine API doesn't support status parameter)
     if (options.status && options.status !== 'all') {
       const statusValue = REDMINE_STATUS_MAP[options.status];
       if (statusValue !== undefined) {
@@ -1523,7 +1472,6 @@ export class RedmineClient {
     const response = await this.client.get(`/projects/${projectId}.json`, { params });
     const project = response.data.project;
 
-    // Post-fetch scope validation via identifier or numeric id.
     const scope = this.getProjectScope();
     if (scope && project.identifier !== scope && project.id.toString() !== scope) {
       throw new ProjectScopeError(scope, project.identifier);
@@ -1551,7 +1499,6 @@ export class RedmineClient {
     const scope = this.getProjectScope();
 
     if (scope) {
-      // When scoped, only search within the configured project
       const project = await this.showProject(scope);
       const matches =
         project.name.toLowerCase().includes(queryLower) ||
@@ -1572,7 +1519,6 @@ export class RedmineClient {
 
     const allProjects = response.data.projects as RedmineProject[];
 
-    // Filter by name, identifier or description
     const matched = allProjects.filter(
       (p: RedmineProject) =>
         p.name.toLowerCase().includes(queryLower) ||
@@ -1591,8 +1537,6 @@ export class RedmineClient {
       total_count: matched.length,
     };
   }
-
-  // ── Relation Operations ────────────────────────────────────────────────────────────────────────
 
   /**
    * List all relations for a specific issue.
@@ -1618,7 +1562,6 @@ export class RedmineClient {
     relation_type?: RelationType;
     delay?: number;
   }): Promise<{ relation: IssueRelation }> {
-    // Validate both ends belong to scoped project
     await Promise.all([
       this._ensureIssueInScope(options.issue_id),
       this._ensureIssueInScope(options.issue_to_id),
@@ -1646,7 +1589,6 @@ export class RedmineClient {
    * @param relationId - The relation ID to delete.
    */
   async deleteRelation(relationId: number): Promise<void> {
-    // Fetch-then-validate: check relation's source issue belongs to scoped project
     const scope = this.getProjectScope();
     if (scope) {
       const response = await this.client.get(`/relations/${relationId}.json`);
@@ -1655,8 +1597,6 @@ export class RedmineClient {
     }
     await this.client.delete(`/relations/${relationId}.json`);
   }
-
-  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Format error objects (Axios errors by HTTP status) into user-friendly messages.
@@ -1694,8 +1634,6 @@ export class RedmineClient {
   }
 }
 
-// ── Client Factory ───────────────────────────────────────────────────────────────────────────────
-
 /**
  * Initialize the Redmine client; returns null (never throws) on config errors.
  * @returns Configured RedmineClient instance, or null if API key not found/invalid
@@ -1704,19 +1642,15 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
   try {
     const apiKey = await loadTokenFile('api_key');
 
-    // Validate API key is not empty (0-byte placeholder file)
     if (!apiKey) {
-      // Graceful degradation: log and return null.
       console.warn(`${ts()} ${withSetupGuidance('Redmine API key is empty.')}`);
       return null;
     }
 
     console.log(`${ts()} ✅ Redmine: API key loaded`);
 
-    // Load project config from /tokens/config.json
     const projectConfig = await loadRedmineConfig();
 
-    // Determine host URL: config.json > REDMINE_URL env > null (fail)
     let host: string | null = null;
     if (projectConfig?.host_url) {
       host = projectConfig.host_url;
@@ -1727,7 +1661,6 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
     }
 
     if (!host) {
-      // Graceful degradation: log and return null.
       console.warn(`${ts()} No Redmine URL found (config.json or REDMINE_URL env var)`);
       return null;
     }
@@ -1742,7 +1675,6 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
       projectConfig
     );
 
-    // Fire-and-forget project_name resolution to avoid startup delays.
     if (
       projectConfig != null &&
       projectConfig.project_id != null &&
@@ -1754,7 +1686,6 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
 
     return client;
   } catch (error) {
-    // Graceful degradation: log and return null.
     console.warn(
       `${ts()} Failed to initialize Redmine client: ${error instanceof Error ? error.message : 'Unknown error'}`
     );

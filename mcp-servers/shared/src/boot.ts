@@ -94,7 +94,6 @@ export async function bootWorker<C>(opts: BootWorkerOptions<C>): Promise<number>
       console.error(`${ts()} ❌ ${notConfiguredMessage(displayName)}`);
       process.exit(1);
     }
-    // The two-line "not configured" warning, formerly duplicated 18×.
     console.warn(`${ts()} ⚠️  ${notConfiguredMessage(displayName)}`);
     console.warn(`${ts()}    Server will start but tools will return errors until configured.`);
   } else if (initClient) {

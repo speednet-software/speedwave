@@ -1,12 +1,9 @@
 #!/usr/bin/env bats
-# Drift guard: every Windows-cfg-gated #[test] in desktop/src-tauri/src must be
-# named in test.yml's windows-only cargo invocation, or it silently never runs.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 DESKTOP_SRC="$REPO_ROOT/desktop/src-tauri/src"
 
-# Test names passed after `--` to the windows-only cargo test invocation.
 _workflow_windows_test_names() {
     awk '
         /cargo test speedwave-desktop \(windows-only\)/ { found=1 }
@@ -19,8 +16,6 @@ _workflow_windows_test_names() {
     ' "$WORKFLOW"
 }
 
-# #[test] fns excluded from non-Windows compilation: cfg directly on the fn,
-# or on an enclosing mod — never a cfg on an unrelated sibling item.
 _crate_windows_only_test_names() {
     python3 - "$DESKTOP_SRC" <<'PY'
 import re
@@ -89,7 +84,6 @@ PY
 @test "every Windows-cfg-gated test in desktop crate is named in the workflow's windows-only invocation" {
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"
 
-    # macOS ships bash 3.2 which lacks mapfile; while-read is the compatible equivalent.
     workflow_names=()
     while IFS= read -r _n; do workflow_names+=("$_n"); done < <(_workflow_windows_test_names)
     crate_names=()

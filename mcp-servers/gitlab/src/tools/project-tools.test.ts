@@ -9,7 +9,6 @@ import { createProjectTools } from './project-tools.js';
 import { GitLabClient } from '../client.js';
 import { expectEmittedKeysDeclared, type SchemaNode } from './test-helpers.js';
 
-// Mock client type with all required methods
 type MockClient = {
   listProjects: Mock;
   showProject: Mock;
@@ -129,7 +128,6 @@ describe('createProjectTools', () => {
           name: 'Awesome Project',
           description: 'Some description',
           created_at: '2024-01-01',
-          // ... many other fields
         },
       ];
       mockClient.listProjects.mockResolvedValue(mockProjects);

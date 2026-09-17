@@ -23,6 +23,7 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - `os.listReminders({ list_id?, limit?, show_completed? })`: list reminders, incomplete by default.
 - `os.getReminder({ id })`: fetch a single reminder by ID.
 - `os.createReminder({ name, list_id?, due_date?, priority?, notes?, tags? })`: create a reminder.
+- `os.updateReminder({ id, name?, list_id?, due_date?, priority?, notes?, tags?, completed? })`: change an existing reminder in place; only the fields you pass change.
 - `os.completeReminder({ id })`: mark a reminder as completed.
 
 ## Pitfalls
@@ -33,14 +34,15 @@ Always run steps 1–2 before guessing a tool name or parameter. The live schema
 - **`show_completed` defaults to `false`**: completed reminders are excluded unless explicitly requested.
 - **`priority` encoding:** 0 = none, 1-4 = high, 5 = medium, 6-9 = low (EventKit treats 1-9 as a gradient; any value in range is accepted).
 - **Tags are stored in the notes field** as `[#tag]` markers (EventKit has no native tag property). `listReminders` and `getReminder` extract them into a separate `tags` array; pass `tags: ["work"]` to `createReminder`. Do not embed `[#tag]` manually.
-- **Due dates must be ISO 8601** (e.g. `"2025-06-01T10:00:00Z"`). Relative phrases ("tomorrow") must be resolved to an absolute timestamp before passing.
+- **Due dates:** `"2026-06-15"` makes an all-day reminder; `"2026-06-15T09:30:00"` means 09:30 in the user's local time (an offset or `Z` is converted to local time). Responses use the same two shapes and add `all_day`. Relative phrases ("tomorrow") must be resolved to an absolute date first.
+- **`updateReminder` changes only the fields you pass.** `due_date: null` removes the due date (and any recurrence); `notes` alone keeps the tags, `tags` alone keeps the notes, `tags: []` clears them; `completed: false` reopens a completed reminder. Prefer it over "create a new one and complete the old one" when the user wants a correction.
 - **No recurrence-rule (RRULE) support** in the current API. If the user asks to create a repeating reminder, inform them this is not supported and offer to create a one-time reminder instead.
 - **iCloud-synced lists work** because the system sync layer handles it: the API sees all lists the device has, regardless of backend.
 - **macOS TCC permission is pre-validated by Speedwave Settings.** If this integration is enabled, assume access is granted; do not ask the user to check permissions.
 
 ## Confirmation rule
 
-Per `CLAUDE.md`: `createReminder` and `completeReminder` are write operations and require explicit user confirmation before execution. `listReminderLists`, `listReminders`, and `getReminder` are read-only and need no confirmation.
+Per `CLAUDE.md`: `createReminder`, `updateReminder` and `completeReminder` are write operations and require explicit user confirmation before execution. `listReminderLists`, `listReminders`, and `getReminder` are read-only and need no confirmation.
 
 ## When NOT to use
 

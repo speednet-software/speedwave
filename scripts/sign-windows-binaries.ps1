@@ -1,6 +1,4 @@
-﻿# Signs the Windows PE binaries Speedwave builds itself with Azure Artifact Signing (ADR-086).
-# Two callers: Tauri bundle.windows.signCommand (one file) and beforeBundleCommand (-Bundled).
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [string]$File = '',
@@ -8,19 +6,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# Pinned like the other CI-side installs (alignments rules); bump deliberately.
 $ModuleVersion = '0.1.17'
-# Artifact Signing certificates live three days: a signature stays valid only via this RFC3161 TSA.
 $TimestampServer = 'http://timestamp.acs.microsoft.com'
-# EKU every Artifact Signing certificate carries; proves the signature is ours, not a pre-existing one.
 $ArtifactSigningEku = '1.3.6.1.4.1.311.97.1.0'
 
-# SRC_TAURI is overridable by tests; defaults to desktop/src-tauri (mirrors sign-bundled-binaries.sh).
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcTauri = if ($env:SRC_TAURI) { $env:SRC_TAURI } else { Join-Path $RepoRoot 'desktop\src-tauri' }
 
-# PE files we build ourselves that ship via tauri.windows.conf.json bundle.resources (keep in sync).
-# Vendor-signed nodejs\node.exe and the hash-pinned vulkan-1.dll must never be re-signed.
 $SignTargets = @(
     'cli\speedwave.exe'
 )
@@ -38,8 +30,6 @@ if (-not ($Endpoint -and $Account -and $CertificateProfile)) {
     exit 0
 }
 
-# The ArtifactSigning module is published for PowerShell 7 only (PSEdition_Core); the hooks
-# launch Windows PowerShell because only it exists on every host, so the signing path re-execs.
 if ($PSVersionTable.PSEdition -ne 'Core') {
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
         throw 'pwsh (PowerShell 7) is required to sign; install it or unset AZURE_ARTIFACT_SIGNING_* for an unsigned build'
@@ -66,8 +56,6 @@ function Invoke-Sign([string]$Path) {
         throw "expected binary does not exist: $Path (if tauri.windows.conf.json added or renamed a resource, update `$SignTargets)"
     }
     Write-Output "  signing: $Path"
-    # Hosted runners have no managed identity and the interactive/IDE credentials only add probe
-    # latency; CI authenticates through azure/login, which the AzureCliCredential picks up.
     Invoke-ArtifactSigning -Endpoint $Endpoint -CodeSigningAccountName $Account -CertificateProfileName $CertificateProfile `
         -Files $Path -FileDigest SHA256 -TimestampRfc3161 $TimestampServer -TimestampDigest SHA256 `
         -ExcludeManagedIdentityCredential -ExcludeSharedTokenCacheCredential -ExcludeVisualStudioCredential `

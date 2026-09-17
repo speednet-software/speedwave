@@ -11,7 +11,6 @@ import * as path from 'node:path';
 
 let workspaceDir: string;
 
-// Make the Nth-from-now `lstat`/`lstatSync` call throw `err` (1 = the very next call).
 const lstatThrow = vi.hoisted(() => ({
   countdown: 0,
   err: null as NodeJS.ErrnoException | null,
@@ -31,7 +30,6 @@ const lstatThrow = vi.hoisted(() => ({
   },
 }));
 
-// Point WORKSPACE_ROOT / OUTPUT_DIR at a fresh temp dir for each test file run.
 vi.mock('./config.js', async () => {
   const realOs = await import('node:os');
   const realPath = await import('node:path');
@@ -78,7 +76,6 @@ import { WORKSPACE_ROOT, OUTPUT_DIR } from './config.js';
 beforeEach(async () => {
   workspaceDir = WORKSPACE_ROOT as unknown as string;
   await fsp.mkdir(workspaceDir, { recursive: true });
-  // Clean out anything from a previous test.
   for (const e of await fsp.readdir(workspaceDir)) {
     await fsp.rm(path.join(workspaceDir, e), { recursive: true, force: true });
   }
@@ -154,7 +151,6 @@ describe('resolveInputFile', () => {
   it('throws when a path component (not the leaf) is not a regular file', async () => {
     await fsp.mkdir(path.join(workspaceDir, 'sub'));
     await fsp.writeFile(path.join(workspaceDir, 'sub', 'f'), 'x');
-    // `sub/f` is a regular file; lstat of `sub/f/inner` fails → "not found".
     await expect(resolveInputFile('sub/f/inner')).rejects.toThrow(/not found/);
   });
 
@@ -166,14 +162,12 @@ describe('resolveInputFile', () => {
 
   it('rethrows a permission error from the symlink-component walk (not silently skipped)', async () => {
     await fsp.writeFile(path.join(workspaceDir, 'guarded.txt'), 'x');
-    // The symlink walk's first lstatSync (on `guarded.txt`) throws EACCES → rethrown, not skipped.
     lstatThrow.arm(0, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
     await expect(resolveInputFile('guarded.txt')).rejects.toThrow(/EACCES/);
   });
 
   it('reports the errno when the leaf lstat fails with a permission error', async () => {
     await fsp.writeFile(path.join(workspaceDir, 'guarded.txt'), 'x');
-    // Skip the walk's lstatSync (call 1); fail the leaf lstat (call 2) → "Cannot access … (EACCES)".
     lstatThrow.arm(1, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
     await expect(resolveInputFile('guarded.txt')).rejects.toThrow(
       /Cannot access input file \(EACCES\)/
@@ -217,7 +211,6 @@ describe('resolveOutputPath', () => {
   });
 
   it('propagates a permission error from the overwrite check (not treated as "free")', async () => {
-    // The overwrite check is the first lstat call in resolveOutputPath for a bare name.
     lstatThrow.arm(1, Object.assign(new Error('EACCES'), { code: 'EACCES' }));
     await expect(resolveOutputPath('guarded.pdf', 'x.pdf')).rejects.toThrow(/EACCES/);
   });
@@ -228,13 +221,11 @@ describe('atomicWrite / atomicMoveOnto', () => {
     const dest = path.join(workspaceDir, 'atomic.txt');
     await atomicWrite(dest, 'payload');
     expect(await fsp.readFile(dest, 'utf8')).toBe('payload');
-    // No stray temp files left behind.
     const leftover = (await fsp.readdir(workspaceDir)).filter((f) => f.includes('.tmp-'));
     expect(leftover).toHaveLength(0);
   });
 
   it('cleans up the temp file if the write fails', async () => {
-    // Destination directory does not exist → writeFile to the temp path fails.
     const dest = path.join(workspaceDir, 'no-such-dir', 'x.txt');
     await expect(atomicWrite(dest, 'payload')).rejects.toThrow();
   });
@@ -253,7 +244,6 @@ describe('atomicWrite / atomicMoveOnto', () => {
     await fsp.writeFile(src, 'data');
     const dest = path.join(workspaceDir, 'missing-dir', 'd.bin');
     await expect(atomicMoveOnto(src, dest)).rejects.toThrow();
-    // Source is removed in the finally block even on failure.
     expect(fs.existsSync(src)).toBe(false);
   });
 });

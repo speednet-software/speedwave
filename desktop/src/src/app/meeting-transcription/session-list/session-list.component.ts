@@ -126,7 +126,6 @@ export class SessionListComponent implements OnInit, OnDestroy {
   async refresh(): Promise<void> {
     try {
       const list = await this.transcription.list();
-      // Newest first by created_at (RFC 3339 sorts lexicographically).
       list.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
       this.sessions.set(list);
       this.error.set('');
@@ -136,8 +135,6 @@ export class SessionListComponent implements OnInit, OnDestroy {
       this.errorOccurred.emit(msg);
     }
     this.cdr.markForCheck();
-    // A session left mid-finalize only streams events to the active view, so
-    // poll the list until everything settles, then stop.
     const pending = this.sessions().some(
       (s) => s.status.state === 'recording' || s.status.state === 'finalizing'
     );
@@ -187,8 +184,6 @@ export class SessionListComponent implements OnInit, OnDestroy {
       this.cdr.markForCheck();
       return;
     }
-    // resumeRecording already activated the fresh snapshot and attached the live
-    // listener — re-emitting `opened` would re-subscribe and drop events in the gap.
     this.selectedId.set(s.id);
     await this.refresh();
   }

@@ -245,12 +245,8 @@ export class RecordingControlsComponent implements OnInit {
       this.sources.set(list);
       const inProgressSource = this.transcription.recordingSource();
       if (inProgressSource) {
-        // A recording started before this instance existed (remount) — restore its
-        // picker selection instead of showing the compile-time defaults.
         this.restoreFromInProgressRecording(list, inProgressSource);
       } else {
-        // Default to "Whole meeting" (mixed) if offered, else "System
-        // (everything)", else the first entry.
         const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
         const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
         this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
@@ -276,8 +272,6 @@ export class RecordingControlsComponent implements OnInit {
     if (idx >= 0) this.sourceIndex.set(idx);
     if (source.kind === 'mixed') this.micDevice.set(source.mic);
     else if (source.kind === 'microphone') this.micDevice.set(source.device);
-    // Show how this recording runs, not what the preference now asks for; stopping hands the
-    // toggle back to the preference.
     const live = this.transcription.recordingLive();
     if (live !== null) this.liveTranscript.set(live);
   }
@@ -292,17 +286,14 @@ export class RecordingControlsComponent implements OnInit {
       this.hasModel.set(ack.whisper.some((m) => m.downloaded));
       this.modelsKnown.set(true);
     } catch {
-      // Non-fatal — leave Start enabled and let start() surface any error.
       this.modelsKnown.set(false);
     }
     try {
-      // `finalize` is null when the live model serves both passes — nothing to warn about.
       const fin = (await this.transcription.recommendedModel()).finalize;
       this.missingFinalizeModel.set(
         fin && !fin.downloaded && !fin.downloading ? fin.display_name : null
       );
     } catch (e: unknown) {
-      // Non-fatal — no warning beats a wrong one — but the failure must be visible in logs.
       this.log.warn(`recommended-model check failed: ${e instanceof Error ? e.message : e}`);
       this.missingFinalizeModel.set(null);
     }
@@ -391,7 +382,6 @@ export class RecordingControlsComponent implements OnInit {
     const verdict = await this.transcription.requestMicrophonePermission();
     if (verdict === 'granted') return true;
     if (verdict === 'previously_denied') {
-      // Nothing to re-prompt — only the Settings pane can restore access.
       await this.transcription.openMicrophonePrivacyPane().catch(() => undefined);
     }
     const msg =
@@ -415,8 +405,6 @@ export class RecordingControlsComponent implements OnInit {
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
-    // The restore borrowed the session's mode; hand the toggle back to the preference even when
-    // the stop call rejected, since the service clears the session either way.
     this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
     this.busy.set(false);
     this.cdr.markForCheck();

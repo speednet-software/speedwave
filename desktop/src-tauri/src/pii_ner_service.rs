@@ -1,4 +1,4 @@
-//! In-process HTTP service exposing the PII NER detector to the proxy (ADR-089): binds the
+//! In-process HTTP service exposing the PII NER detector to the proxy (ADR-090): binds the
 //! host address, writes the `pii-ner` lock the compose renderer reads, answers `POST /v1/detect`.
 
 use std::path::{Path, PathBuf};

@@ -124,8 +124,6 @@ export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient 
         sprintId,
         typeof sprint.originBoardId === 'number' ? sprint.originBoardId : undefined
       );
-      // Each issue may belong to a different project than the sprint's board,
-      // so every issue is scope-checked before the call-size cap is applied.
       for (const ref of issueKeysOrIds) assertJiraIssueKeyAllowed(ref, client.jiraProjectKeys);
       if (issueKeysOrIds.length > MOVE_ISSUES_MAX) {
         throw new Error(

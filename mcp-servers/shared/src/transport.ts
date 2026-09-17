@@ -63,7 +63,6 @@ async function handleMCPPostInner(
   const body = req.body;
   const wantsSSE = req.headers.accept?.includes('text/event-stream') ?? false;
 
-  // Validate MCP-Protocol-Version header
   const protocolVersion = req.get('mcp-protocol-version');
   const isInitialize =
     !Array.isArray(body) &&
@@ -82,7 +81,6 @@ async function handleMCPPostInner(
     return;
   }
 
-  // Validate Accept header per MCP spec
   const acceptHeader = req.headers.accept;
   if (acceptHeader && !isInitialize) {
     const acceptsAll = acceptHeader.includes('*/*');
@@ -97,7 +95,6 @@ async function handleMCPPostInner(
     }
   }
 
-  // Batch request (JSON-RPC 2.0 section 6)
   if (Array.isArray(body)) {
     if (body.length === 0) {
       const errorResponse: JSONRPCResponse = {
@@ -122,13 +119,11 @@ async function handleMCPPostInner(
       )
     );
 
-    // Set session header if any result produced a sessionId (initialize in batch)
     const sessionResult = results.find((r) => r.sessionId);
     if (sessionResult?.sessionId) {
       res.setHeader('Mcp-Session-Id', sessionResult.sessionId);
     }
 
-    // Filter out null responses (notifications)
     const responses = results
       .map((r) => r.response)
       .filter((r): r is JSONRPCResponse => r !== null);
@@ -150,7 +145,6 @@ async function handleMCPPostInner(
     return;
   }
 
-  // Single request/notification
   const singleCaller = (res.locals as { caller?: unknown } | undefined)?.caller;
   const singleCtx = typeof singleCaller === 'string' ? { caller: singleCaller } : undefined;
   const result =
@@ -163,7 +157,6 @@ async function handleMCPPostInner(
   }
 
   if (result.response === null) {
-    // Notification - no response expected
     res.status(202).end();
     return;
   }

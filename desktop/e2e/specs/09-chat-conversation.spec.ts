@@ -25,9 +25,7 @@ describe('Chat Conversation (OpenRouter)', function () {
     this.timeout(180_000);
     await sendMessageAndWait(`${MEMORY_FACT} Just acknowledge in one short sentence.`);
 
-    const messages = await $$(
-      '[data-testid="chat-message"][data-role="assistant"]'
-    ).getElements();
+    const messages = await $$('[data-testid="chat-message"][data-role="assistant"]').getElements();
     expect(messages.length).toBeGreaterThan(0);
 
     const meta = await $('[data-testid="message-metadata"]');

@@ -208,8 +208,6 @@ describe('security', () => {
     });
 
     it('accepts response with result field but no id field (branch: id not in message)', () => {
-      // Covers the false branch of `if ('id' in message)` — a valid response with
-      // result/error but without an id property (unusual but valid per JSON-RPC)
       expect(
         validateJSONRPCMessage({
           jsonrpc: '2.0',
@@ -271,32 +269,32 @@ describe('security', () => {
 
     it('rejects invalid UUID format', () => {
       expect(validateSessionId('invalid-uuid')).toBe(false);
-      expect(validateSessionId('550e8400-e29b-31d4-a716-446655440000')).toBe(false); // v3 not v4
+      expect(validateSessionId('550e8400-e29b-31d4-a716-446655440000')).toBe(false);
       expect(validateSessionId('')).toBe(false);
-      expect(validateSessionId('550e8400e29b41d4a716446655440000')).toBe(false); // missing dashes
+      expect(validateSessionId('550e8400e29b41d4a716446655440000')).toBe(false);
     });
 
     it('rejects UUID with wrong segment lengths', () => {
-      expect(validateSessionId('550e840-e29b-41d4-a716-446655440000')).toBe(false); // first segment too short
-      expect(validateSessionId('550e84000-e29b-41d4-a716-446655440000')).toBe(false); // first segment too long
-      expect(validateSessionId('550e8400-e29-41d4-a716-446655440000')).toBe(false); // second segment too short
-      expect(validateSessionId('550e8400-e29b-41d-a716-446655440000')).toBe(false); // third segment too short
-      expect(validateSessionId('550e8400-e29b-41d4-a71-446655440000')).toBe(false); // fourth segment too short
-      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000')).toBe(false); // last segment too short
+      expect(validateSessionId('550e840-e29b-41d4-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e84000-e29b-41d4-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29-41d4-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-41d-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-41d4-a71-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000')).toBe(false);
     });
 
     it('rejects UUID with invalid characters', () => {
-      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000g')).toBe(false); // 'g' is invalid
-      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000!')).toBe(false); // special char
-      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000 ')).toBe(false); // trailing space
-      expect(validateSessionId(' 550e8400-e29b-41d4-a716-446655440000')).toBe(false); // leading space
+      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000g')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000!')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-41d4-a716-44665544000 ')).toBe(false);
+      expect(validateSessionId(' 550e8400-e29b-41d4-a716-446655440000')).toBe(false);
     });
 
     it('rejects non-v4 UUID versions', () => {
-      expect(validateSessionId('550e8400-e29b-11d4-a716-446655440000')).toBe(false); // v1
-      expect(validateSessionId('550e8400-e29b-21d4-a716-446655440000')).toBe(false); // v2
-      expect(validateSessionId('550e8400-e29b-31d4-a716-446655440000')).toBe(false); // v3
-      expect(validateSessionId('550e8400-e29b-51d4-a716-446655440000')).toBe(false); // v5
+      expect(validateSessionId('550e8400-e29b-11d4-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-21d4-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-31d4-a716-446655440000')).toBe(false);
+      expect(validateSessionId('550e8400-e29b-51d4-a716-446655440000')).toBe(false);
     });
 
     it('rejects null and undefined', () => {
@@ -311,10 +309,10 @@ describe('security', () => {
     });
 
     it('validates variant bits (8, 9, a, b)', () => {
-      expect(validateSessionId('550e8400-e29b-41d4-8716-446655440000')).toBe(true); // variant 8
-      expect(validateSessionId('550e8400-e29b-41d4-9716-446655440000')).toBe(true); // variant 9
-      expect(validateSessionId('550e8400-e29b-41d4-a716-446655440000')).toBe(true); // variant a
-      expect(validateSessionId('550e8400-e29b-41d4-b716-446655440000')).toBe(true); // variant b
+      expect(validateSessionId('550e8400-e29b-41d4-8716-446655440000')).toBe(true);
+      expect(validateSessionId('550e8400-e29b-41d4-9716-446655440000')).toBe(true);
+      expect(validateSessionId('550e8400-e29b-41d4-a716-446655440000')).toBe(true);
+      expect(validateSessionId('550e8400-e29b-41d4-b716-446655440000')).toBe(true);
     });
   });
 
@@ -331,11 +329,11 @@ describe('security', () => {
     });
 
     it('rejects names with special characters', () => {
-      expect(validateToolName('tool name')).toBe(false); // space
-      expect(validateToolName('tool.name')).toBe(false); // dot
-      expect(validateToolName('tool/name')).toBe(false); // slash
-      expect(validateToolName('tool;ls')).toBe(false); // semicolon (injection)
-      expect(validateToolName('tool$(cmd)')).toBe(false); // command substitution
+      expect(validateToolName('tool name')).toBe(false);
+      expect(validateToolName('tool.name')).toBe(false);
+      expect(validateToolName('tool/name')).toBe(false);
+      expect(validateToolName('tool;ls')).toBe(false);
+      expect(validateToolName('tool$(cmd)')).toBe(false);
     });
 
     it('rejects names over 100 characters', () => {
@@ -351,13 +349,11 @@ describe('security', () => {
 
   describe('validateWorkerUrl', () => {
     it('accepts core container worker URLs', () => {
-      // ADR-038: all workers share PORT_WORKER (3000) internally.
       expect(validateWorkerUrl('http://mcp-slack:3000')).toBe(true);
       expect(validateWorkerUrl('http://mcp-gitlab:3000')).toBe(true);
     });
 
     it('accepts plugin worker URLs', () => {
-      // Plugins also use PORT_WORKER; URLs differ only by DNS service name.
       expect(validateWorkerUrl('http://mcp-example-plugin:3000')).toBe(true);
       expect(validateWorkerUrl('http://mcp-my-addon:3000')).toBe(true);
     });
@@ -374,7 +370,6 @@ describe('security', () => {
       expect(validateWorkerUrl('http://host.docker.internal:4007')).toBe(true);
     });
 
-    // Regression negatives — deprecated aliases removed in the SSOT consolidation.
     it('rejects deprecated host.lima.internal', () => {
       expect(validateWorkerUrl('http://host.lima.internal:4007')).toBe(false);
     });
@@ -484,8 +479,6 @@ describe('security', () => {
     });
 
     it('rejects URL with password but no username (password !== ""  branch)', () => {
-      // Covers the second part of: parsed.username !== '' || parsed.password !== ''
-      // URL spec: `http://:password@mcp-slack:3000` sets empty username and non-empty password
       expect(validateWorkerUrl('http://:secret@mcp-slack:3000')).toBe(false);
     });
   });
@@ -555,8 +548,6 @@ describe('security', () => {
 
       const caught = await loadToken('/tokens/missing/token').catch((e: Error) => e);
       expect(caught.message).toBe('Token file not found: /tokens/missing/token');
-      // Cause-forwarding regression guard: mcp-context7's loadOptionalApiKey
-      // relies on `e.cause.code === 'ENOENT'` to fall back to anonymous mode.
       expect((caught.cause as NodeJS.ErrnoException).code).toBe('ENOENT');
     });
 
@@ -594,7 +585,6 @@ describe('security', () => {
 
     it('throws generic message for non-Error thrown values', async () => {
       const { default: fs } = await import('fs/promises');
-      // Non-Error object with no .code — goes to the catch-else branch and String() fallback
       vi.spyOn(fs, 'readFile').mockRejectedValue('raw string error');
 
       await expect(loadToken('/tokens/raw/token')).rejects.toThrow(

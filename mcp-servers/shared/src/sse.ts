@@ -77,7 +77,6 @@ export class SSEStream {
 
     if (event.data) {
       for (const line of String(event.data).split('\n')) {
-        // \r stripped inline (not via sanitizeSSEField) to preserve intentional \n-splitting
         message += `data: ${line.replace(/\r/g, '')}\n`;
       }
     }

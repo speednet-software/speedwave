@@ -1,6 +1,3 @@
-// Resolves microphone consent from the GUI app process so the TCC prompt can
-// fire and the grant lands under the app bundle id (spawned CLIs inherit it).
-
 use serde::Serialize;
 
 /// Outcome of a mic-consent resolution; mirrored by `models/transcript.ts`.
@@ -59,7 +56,6 @@ fn status_from_decision(d: StatusDecision) -> MicPermissionStatus {
 }
 
 #[cfg(target_os = "macos")]
-// FFI boundary — `unsafe_code` is allowed only here; each block carries SAFETY docs.
 #[expect(
     unsafe_code,
     reason = "AVFoundation FFI boundary; every block has a SAFETY comment"
@@ -105,7 +101,6 @@ mod imp {
     /// Shows the OS consent prompt and blocks until the user answers it.
     fn request_access_blocking() -> bool {
         let (tx, rx) = std::sync::mpsc::channel::<bool>();
-        // AVFoundation may invoke the handler on any queue — Mutex keeps it `Fn`+`Sync`.
         let tx = std::sync::Mutex::new(Some(tx));
         let handler = RcBlock::new(move |granted: Bool| {
             if let Some(sender) = tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -113,16 +108,12 @@ mod imp {
             }
         });
         // SAFETY: media type is a linked non-null constant; AVFoundation retains
-        // the handler block until it fires the async callback.
         unsafe {
             let Some(media) = AVMediaTypeAudio else {
                 return false;
             };
             AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler);
         }
-        // The user may ponder the prompt for minutes; the cap is only a hang guard.
-        // On timeout, re-query live status instead of assuming denial — a late
-        // completion callback would otherwise be silently lost on the dropped `rx`.
         rx.recv_timeout(std::time::Duration::from_secs(600))
             .unwrap_or_else(|_| status_decision() == Ok(StatusDecision::Granted))
     }
@@ -196,7 +187,6 @@ mod tests {
             StatusDecision::PreviouslyDenied
         );
         assert_eq!(classify_authorization_status(3), StatusDecision::Granted);
-        // Unknown future statuses fail closed: no prompt, reported as denied.
         assert_eq!(classify_authorization_status(4), StatusDecision::Denied);
         assert_eq!(classify_authorization_status(-1), StatusDecision::Denied);
     }
@@ -208,7 +198,6 @@ mod tests {
             MicPermission::Denied,
             MicPermission::PreviouslyDenied,
         ];
-        // Exhaustiveness gate: a new variant fails to compile until added above.
         for p in all {
             match p {
                 MicPermission::Granted
@@ -254,7 +243,6 @@ mod tests {
             MicPermissionStatus::Denied,
             MicPermissionStatus::Undetermined,
         ];
-        // Exhaustiveness gate: a new variant fails to compile until added above.
         for s in all {
             match s {
                 MicPermissionStatus::Granted
@@ -313,8 +301,6 @@ mod tests {
         );
     }
 
-    // Drift guard: a late completion callback past the recv_timeout hang guard must
-    // not be silently discarded as a false denial — re-query live status instead.
     #[test]
     fn request_access_blocking_reconciles_timeout_with_live_status() {
         let source = include_str!("mic_permission_cmd.rs");
@@ -341,7 +327,6 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn request_microphone_permission_reports_granted_off_macos() {
-        // Windows desktop apps get no per-app mic prompt — the command must not gate.
         assert_eq!(
             request_microphone_permission().await,
             Ok(MicPermission::Granted)
