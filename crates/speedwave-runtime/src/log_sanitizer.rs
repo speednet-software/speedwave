@@ -409,6 +409,36 @@ mod tests {
     }
 
     #[test]
+    fn test_worker_auth_token_in_nerdctl_argv_echo_redacted() {
+        let input = "time=\"2026-09-16T10:00:00+02:00\" level=info msg=\"Running [/usr/local/bin/nerdctl run -d --name speedwave_acme_mcp-context7 -e=MCP_CONTEXT7_AUTH_TOKEN=00000000-0000-4000-8000-000000000001 -e=MCP_MY_PLUGIN_AUTH_TOKEN=abc --label io.speedwave.project=acme]\"";
+        let output = sanitize(input);
+        assert!(
+            !output.contains("00000000-0000-4000-8000-000000000001"),
+            "worker token leaked: {output}"
+        );
+        assert!(
+            !output.contains("MCP_MY_PLUGIN_AUTH_TOKEN=abc"),
+            "plugin worker token leaked: {output}"
+        );
+        assert!(
+            output.contains(
+                "-e=MCP_CONTEXT7_AUTH_TOKEN=***REDACTED*** -e=MCP_MY_PLUGIN_AUTH_TOKEN=***REDACTED*** --label io.speedwave.project=acme]"
+            ),
+            "argv shape must survive around the redacted values: {output}"
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_token_file_env_not_redacted() {
+        let input = "-e=MCP_CONTEXT7_AUTH_TOKEN_FILE=/secrets/context7-auth-token -e=WORKER_CONTEXT7_URL=http://mcp-context7:4000";
+        assert_eq!(
+            sanitize(input),
+            input,
+            "non-secret worker env must pass through"
+        );
+    }
+
+    #[test]
     fn test_api_key_suffix_env_redaction() {
         let input = "OPENROUTER_API_KEY=opaque-value-xyz";
         let output = sanitize(input);

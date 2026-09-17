@@ -98,6 +98,16 @@ pub(crate) enum SwitchResult {
     },
 }
 
+impl SwitchResult {
+    pub(crate) fn failed(error: String, cleanup_error: Option<String>) -> Self {
+        Self::Failed {
+            error: speedwave_runtime::log_sanitizer::sanitize(&error),
+            cleanup_error: cleanup_error
+                .map(|cleanup| speedwave_runtime::log_sanitizer::sanitize(&cleanup)),
+        }
+    }
+}
+
 pub(crate) fn teardown_only(
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -236,19 +246,13 @@ pub(crate) fn switch_project_core(
     recreate_fn: &dyn Fn(&str, &speedwave_runtime::runtime::LockedRuntime) -> Result<(), String>,
 ) -> SwitchResult {
     if let Err(e) = rt.ensure_ready() {
-        return SwitchResult::Failed {
-            error: format!("Runtime not ready: {e}"),
-            cleanup_error: None,
-        };
+        return SwitchResult::failed(format!("Runtime not ready: {e}"), None);
     }
 
     wait_for_pending_teardown(new_project);
 
     if let Err(e) = recreate_fn(new_project, rt) {
-        return SwitchResult::Failed {
-            error: e,
-            cleanup_error: teardown_only(new_project, rt),
-        };
+        return SwitchResult::failed(e, teardown_only(new_project, rt));
     }
 
     SwitchResult::Succeeded {
@@ -493,10 +497,7 @@ pub async fn add_project(
     let new_clone = name.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = ensure_images_ready() {
-            return SwitchResult::Failed {
-                error: e,
-                cleanup_error: None,
-            };
+            return SwitchResult::failed(e, None);
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
@@ -604,8 +605,8 @@ pub async fn build_images() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
         log::info!("building images");
         setup_wizard::build_images().map_err(|e| {
-            log::error!("failed to build images: {e}");
-            e.to_string()
+            log::error!("failed to build images: {e:#}");
+            format!("{e:#}")
         })
     })
     .await
@@ -3657,6 +3658,99 @@ mod tests {
         _rt: &speedwave_runtime::runtime::LockedRuntime,
     ) -> Result<(), String> {
         Err("recreate failed".to_string())
+    }
+
+    const LEAKY_ENGINE_ERROR: &str = "limactl failed: time=\"2026-09-16T10:00:00+02:00\" level=fatal msg=\"failed to run [nerdctl run -e=MCP_X_AUTH_TOKEN=abc image]: exit status 1\"";
+
+    #[test]
+    fn switch_core_redacts_worker_auth_tokens_from_the_start_error() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let result = switch_project_core(&None, "new", &rt, &|_proj, _rt| {
+            Err(LEAKY_ENGINE_ERROR.to_string())
+        });
+        match result {
+            SwitchResult::Failed {
+                error,
+                cleanup_error,
+            } => {
+                assert!(!error.contains("MCP_X_AUTH_TOKEN=abc"), "leaked: {error}");
+                assert!(
+                    error.starts_with("limactl failed: time="),
+                    "engine detail must survive: {error}"
+                );
+                assert!(
+                    error.contains("MCP_X_AUTH_TOKEN=***REDACTED***"),
+                    "got: {error}"
+                );
+                assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
+            }
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
+        }
+        assert_eq!(handles.down_projects(), vec!["new"]);
+    }
+
+    #[test]
+    fn switch_core_redacts_worker_auth_tokens_from_the_runtime_not_ready_error() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_ensure_ready_error(LEAKY_ENGINE_ERROR)
+            .build();
+        let prev = Some("prev".to_string());
+        let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
+        match result {
+            SwitchResult::Failed {
+                error,
+                cleanup_error,
+            } => {
+                assert!(
+                    error.starts_with("Runtime not ready: limactl failed: "),
+                    "got: {error}"
+                );
+                assert!(!error.contains("MCP_X_AUTH_TOKEN=abc"), "leaked: {error}");
+                assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
+            }
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
+        }
+        assert!(handles.down_projects().is_empty());
+    }
+
+    #[test]
+    fn switch_result_failed_redacts_the_cleanup_error_too() {
+        let result = SwitchResult::failed(
+            "start failed".to_string(),
+            Some(format!("teardown of 'new' failed: {LEAKY_ENGINE_ERROR}")),
+        );
+        match result {
+            SwitchResult::Failed {
+                error,
+                cleanup_error,
+            } => {
+                assert_eq!(error, "start failed");
+                let cleanup = cleanup_error.expect("cleanup error must be kept");
+                assert!(
+                    cleanup.starts_with("teardown of 'new' failed: limactl failed: "),
+                    "got: {cleanup}"
+                );
+                assert!(
+                    !cleanup.contains("MCP_X_AUTH_TOKEN=abc"),
+                    "leaked: {cleanup}"
+                );
+            }
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
+        }
+    }
+
+    #[test]
+    fn switch_result_failed_keeps_a_missing_cleanup_error_absent() {
+        match SwitchResult::failed("plain".to_string(), None) {
+            SwitchResult::Failed {
+                error,
+                cleanup_error,
+            } => {
+                assert_eq!(error, "plain");
+                assert!(cleanup_error.is_none());
+            }
+            SwitchResult::Succeeded { .. } => panic!("expected Failed"),
+        }
     }
 
     #[test]

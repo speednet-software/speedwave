@@ -398,6 +398,8 @@ DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-bu
   _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
   _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
   _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+  _tests/desktop/main-app-entitlements.bats _tests/desktop/native-cli-info-plist.bats \
+  _tests/desktop/transcription-bundle.bats _tests/desktop/build-native-macos.bats \
   _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
   _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
 
@@ -543,13 +545,19 @@ test-ci:
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
-	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats
+	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
+	  _tests/ci/bats-suite-wiring.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
 	@$(REQUIRE_BATS)
-	bats $(DESKTOP_BUILD_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
+
+test-native-cli-plist:
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure _tests/desktop/native-cli-info-plist.bats
+	@echo "✅ Native CLI embedded-plist tests passed"
 
 test-desktop-config:
 	@$(REQUIRE_BATS)

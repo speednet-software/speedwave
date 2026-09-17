@@ -406,7 +406,7 @@ fn reconcile_id_changed(state: &bundle::BundleState, manifest: &bundle::BundleMa
 fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
     log::info!("loading current bundle manifest");
     let manifest = bundle::load_current_bundle_manifest().map_err(|e| {
-        let msg = format!("Failed to load bundle manifest: {e}");
+        let msg = format!("Failed to load bundle manifest: {e:#}");
         log::error!("{msg}");
         msg
     })?;

@@ -267,6 +267,10 @@ export class ChatStateService {
   }
   private _sessionGeneration = 0;
 
+  /** How the most recent session start ended; gates a waiting `sendMessage`'s resend. */
+  private _lastStartOutcome: StartOutcome | null = null;
+
+  /** Durable session id; survives a container restart that nulls live stats. */
   private _lastKnownSessionId: string | null = null;
   private _optimisticSessionId: string | null = null;
   private readonly resumeInProgressSignal = signal(false);
@@ -342,12 +346,14 @@ export class ChatStateService {
 
   /**
    * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
-   * bumps the generation to no-op in-flight starts. Returns a flag-clearing disposer.
+   * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
    */
-  beginStartingSession(): () => void {
+  beginStartingSession(): (outcome?: StartOutcome) => void {
     this.startingSession = true;
+    this._lastStartOutcome = null;
     this._sessionGeneration += 1;
-    return () => {
+    return (outcome: StartOutcome = 'started') => {
+      this._lastStartOutcome = outcome;
       this.startingSession = false;
     };
   }
@@ -448,32 +454,38 @@ export class ChatStateService {
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
+      this._lastStartOutcome = null;
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
+      let outcome: StartOutcome = 'failed';
       try {
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
-        return gen === this._sessionGeneration ? 'started' : 'skipped';
+        outcome = gen === this._sessionGeneration ? 'started' : 'skipped';
       } catch (err) {
         if (gen !== this._sessionGeneration) {
           this.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
-          return 'skipped';
-        }
-        const msg = String(err);
-        if (isNotAuthenticatedError(msg)) {
-          this.projectState.status.set('auth_required');
-          this.notifyChange();
-          return 'auth';
+          outcome = 'skipped';
         } else {
-          this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
-          this.projectState.status.set('error');
-          this.projectState.error = `Failed to start chat session: ${msg}`;
-          this.notifyChange();
+          const msg = String(err);
+          if (isNotAuthenticatedError(msg)) {
+            this.projectState.status.set('auth_required');
+            this.notifyChange();
+            outcome = 'auth';
+          } else {
+            this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
+            this.projectState.status.set('error');
+            this.projectState.error = `Failed to start chat session: ${msg}`;
+            this.notifyChange();
+          }
         }
-        return 'failed';
       } finally {
-        if (gen === this._sessionGeneration) this.startingSession = false;
+        if (gen === this._sessionGeneration) {
+          this.startingSession = false;
+          this._lastStartOutcome = outcome;
+        }
       }
+      return outcome;
     }
     return 'skipped';
   }
@@ -573,6 +585,11 @@ export class ChatStateService {
                   timestamp: Date.now(),
                 },
               ];
+              this.notifyChange();
+              return;
+            }
+            if (this._lastStartOutcome !== 'started') {
+              this.isStreaming = false;
               this.notifyChange();
               return;
             }
@@ -1272,6 +1289,7 @@ export class ChatStateService {
     this._optimisticSessionId = sessionId;
     this._lastKnownSessionId = sessionId;
 
+    let outcome: StartOutcome = 'started';
     try {
       const project = this.projectState.activeProject();
       if (!project) return;
@@ -1314,8 +1332,10 @@ export class ChatStateService {
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
       if (isNotAuthenticatedError(msg)) {
+        outcome = 'auth';
         await this.projectState.retryAuth();
       } else {
+        outcome = 'failed';
         this.loadMessages([
           ...this.messagesFromState(),
           {
@@ -1327,7 +1347,7 @@ export class ChatStateService {
       }
     } finally {
       this.endTranscriptLoad();
-      endStartingSession();
+      endStartingSession(outcome);
       this._resumeInProgress = false;
       if (gen !== this._sessionGeneration) {
         this._optimisticSessionId = null;

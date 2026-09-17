@@ -126,6 +126,15 @@ teardown() {
         echo "hash inputs unresolvable in the staged build-context:$missing"
         return 1
     fi
+    local -a input_paths=()
+    while IFS= read -r p; do input_paths+=("$p"); done <<< "$inputs"
+    local symlinks
+    symlinks="$(cd "$BATS_TEST_DIRNAME/../.." && git ls-files -s -- "${input_paths[@]}" containers/claude-resources | awk '$1 == "120000"')"
+    if [ -n "$symlinks" ]; then
+        echo "symlinks committed under image hash inputs (the digest rejects them):"
+        echo "$symlinks"
+        return 1
+    fi
 }
 
 @test "bundle script excludes host build outputs from containers/ at copy time (target, dist, node_modules)" {
@@ -160,6 +169,33 @@ teardown() {
     [ "$status" -eq 0 ]
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
     [ ! -e "$DEST/build-context/containers/proxy/target" ]
+}
+
+@test "bundle script copy survives a tar writer still flushing after the extractor reached end-of-archive" {
+    local stub_dir="$DEST/stub-bin" stub_log="$DEST/tar-stub.log" real_tar
+    real_tar="$(command -v tar)"
+    [ -x "$real_tar" ]
+    mkdir -p "$stub_dir"
+    cat >"$stub_dir/tar" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-cf" ]; then
+    "$REAL_TAR" "$@" || exit $?
+    echo intercepted >>"$TAR_STUB_LOG"
+    for _ in 1 2 3 4 5 6; do
+        sleep 0.5
+        head -c 512 /dev/zero || exit 1
+    done
+    exit 0
+fi
+exec "$REAL_TAR" "$@"
+EOF
+    chmod +x "$stub_dir/tar"
+
+    REAL_TAR="$real_tar" TAR_STUB_LOG="$stub_log" PATH="$stub_dir:$PATH" run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 2 ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
+    [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {

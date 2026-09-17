@@ -14,6 +14,30 @@
 > the active provider. The credential-lifecycle and clipboard-bridge decisions below
 > are unchanged.
 
+> **Update (2026-09-16):** Two corrections to the credential-lifecycle facts and one invariant.
+> (1) The one-year validity applies only to the token minted by `claude setup-token`[^1]; the
+> refresh token that `/login` writes to `.credentials.json` expired about 30 days after sign-in
+> in the project homes observed with Claude Code 2.1.267 (`refreshTokenExpiresAt`, not
+> documented upstream). (2) Claude Code refreshes an expired access token during the startup of
+> any CLI command, and a command that exits before the reply is saved (`claude plugin list --json`
+> exited at about 0.8 s) leaves the server-side rotated refresh token unsaved: the next Claude
+> Code process is rejected with "OAuth session expired and could not be refreshed" and the stored
+> sign-in is cleared while the file stays. Invariant: **short-lived Claude Code invocations
+> started by Speedwave run without a route to the OAuth endpoint.** The Desktop `auth status`
+> probe (`desktop/src-tauri/src/setup_wizard.rs::auth_status_exec_argv`) sets
+> `https_proxy`/`HTTPS_PROXY` to `consts::CLAUDE_OFFLINE_HTTPS_PROXY` (`http://127.0.0.1:1`, a
+> closed local port) and empties `NO_PROXY`/`no_proxy`, since Claude Code honors the standard
+> proxy variables[^8], on top of `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`[^9], whose
+> documented scope does not include the OAuth refresh (measured: the switch alone suppressed the
+> refresh only while `.claude.json` carried `migrationVersion`). The container entrypoint reads
+> Claude Code's install record `~/.claude/plugins/installed_plugins.json` instead of running
+> `claude plugin list` (ADR-077 amendment of the same date). Commands that wait for the reply
+> (`plugin install`, `plugin uninstall`, `plugin marketplace add`, slash discovery, the chat
+> session) keep their network route. `claude auth status` exits 0 when logged in and 1 when
+> not[^10]; that verdict, taken in the running container, is the sign-in state the Desktop shows
+> (`get_auth_status` in `desktop/src-tauri/src/auth_commands.rs`), and the credentials file is
+> evidence of a past sign-in only.
+
 > **Naming clarification:** an earlier draft called this "Speedwave-native OAuth login flow". That name is wrong and was deliberately dropped: Speedwave does **not** perform OAuth and does **not** handle Anthropic tokens — Claude Code's `/login` owns the entire credential lifecycle. A literally Speedwave-native flow (Speedwave opening `console.anthropic.com/oauth/authorize`, running its own loopback callback, capturing the token) would violate Anthropic's Consumer Terms, which reserve OAuth for Claude Code and Claude.ai (clarified Feb 2026 — see [^5]). This ADR is about a _launch surface_ + a _clipboard bridge_, nothing more.
 
 ## Context
@@ -98,7 +122,7 @@ Render the login flow as an in-app pseudo-terminal panel. **Rejected** — adds 
 ### Negative
 
 - ~~The user must type `/login` once at Claude's prompt — one extra keypress vs. a hypothetical "fully automatic" flow. Acceptable; the alternative was a brittle stdout parser.~~ Resolved by the 2026-06-30 update: `claude auth login` starts OAuth automatically, with no stdout parser.
-- Per-project credentials (one `CLAUDE_HOME` per project) means logging into project A does not authenticate project B. A user with N projects logs in N times. Acceptable: tokens are valid one year[^1], and project isolation is a load-bearing security property.
+- Per-project credentials (one `CLAUDE_HOME` per project) means logging into project A does not authenticate project B. A user with N projects logs in N times. Acceptable: the `claude setup-token` token is valid one year[^1] and the `/login` refresh token about 30 days (see the 2026-09-16 update), and project isolation is a load-bearing security property.
 
 ### Addendum: clipboard bridge for the "press `c` to copy URL" hint
 
@@ -178,3 +202,9 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 [^6]: Microsoft Learn, "File Permissions for WSL" - without the `metadata` mount option, DrvFs-mounted Windows drives do not track Linux file permissions and `chmod`/`chown` calls fail. <https://learn.microsoft.com/en-us/windows/wsl/file-permissions>
 
 [^7]: Microsoft Learn, "Advanced settings configuration in WSL" - the `[automount].options` `metadata` flag projects Linux permission bits onto DrvFs-mounted files, enabling `chmod`/`chown`. <https://learn.microsoft.com/en-us/windows/wsl/wsl-config>
+
+[^8]: Claude Code docs, "Network configuration", section "Proxy configuration" - Claude Code respects the standard `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables; lowercase `https_proxy`/`http_proxy` also work and are read before the uppercase forms. <https://code.claude.com/docs/en/network-config>
+
+[^9]: Claude Code docs, "Environment variables" - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` disables auto-updates, telemetry, error reporting, feedback, release notes, badge and availability checks and feature-flag fetching; the OAuth refresh is not in that list. <https://code.claude.com/docs/en/env-vars>
+
+[^10]: Claude Code docs, "CLI reference" - `claude auth status` prints the authentication status as JSON and exits with code 0 if logged in, 1 if not. <https://code.claude.com/docs/en/cli-reference>

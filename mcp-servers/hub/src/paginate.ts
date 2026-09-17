@@ -39,6 +39,7 @@ export interface PageResult<T> {
  * Common response shapes from MCP workers
  */
 type PaginatedResponse<T> = {
+  ids?: T[];
   /** Redmine issues */
   issues?: T[];
   /** Redmine time entries */
@@ -122,26 +123,27 @@ export async function* paginate<T>(
   }
 }
 
+export const ITEM_KEYS = [
+  'ids',
+  'issues',
+  'time_entries',
+  'projects',
+  'merge_requests',
+  'pipelines',
+  'messages',
+  'channels',
+  'files',
+  'results',
+  'items',
+] as const;
+
 /**
  * Extract the items array from various worker response shapes.
  * @param result - API response object
  * @returns Array of items extracted from response
  */
 function extractItems<T>(result: PaginatedResponse<T>): T[] {
-  const keys = [
-    'issues',
-    'time_entries',
-    'projects',
-    'merge_requests',
-    'pipelines',
-    'messages',
-    'channels',
-    'files',
-    'results',
-    'items',
-  ];
-
-  for (const key of keys) {
+  for (const key of ITEM_KEYS) {
     if (Array.isArray(result[key])) {
       return result[key] as T[];
     }
@@ -149,6 +151,14 @@ function extractItems<T>(result: PaginatedResponse<T>): T[] {
 
   if (Array.isArray(result)) {
     return result as T[];
+  }
+
+  const unrecognised = Object.keys(result).filter((key) => Array.isArray(result[key]));
+  if (unrecognised.length > 0) {
+    throw new Error(
+      `paginate(): page has arrays under unrecognised keys (${unrecognised.join(', ')}); ` +
+        `recognised keys: ${ITEM_KEYS.join(', ')}. Iterate the tool manually with offset/limit.`
+    );
   }
 
   return [];

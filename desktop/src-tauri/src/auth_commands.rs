@@ -1,6 +1,70 @@
-use crate::types::{check_project, AuthStatusResponse};
+use crate::types::{check_project, AuthStatusResponse, OauthSignIn};
 
 use super::{auth, setup_wizard};
+
+const SIGN_IN_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+type SignInVerdictEntry = (std::time::Instant, Option<bool>);
+
+static SIGN_IN_VERDICTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, SignInVerdictEntry>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+static SIGN_IN_PROBE_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn sign_in_probe_lock_for(project: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut locks = SIGN_IN_PROBE_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks
+        .entry(project.to_string())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
+fn cached_verdict_with(
+    project: &str,
+    ttl: std::time::Duration,
+    probe: impl FnOnce() -> Result<Option<bool>, String>,
+) -> Result<Option<bool>, String> {
+    let project_lock = sign_in_probe_lock_for(project);
+    let _project_guard = project_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    {
+        let verdicts = SIGN_IN_VERDICTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((fetched_at, verdict)) = verdicts.get(project) {
+            if fetched_at.elapsed() < ttl {
+                return Ok(*verdict);
+            }
+        }
+    }
+
+    let verdict = probe()?;
+    SIGN_IN_VERDICTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(project.to_string(), (std::time::Instant::now(), verdict));
+    Ok(verdict)
+}
+
+pub(crate) fn cached_sign_in_verdict(project: &str) -> Result<Option<bool>, String> {
+    cached_verdict_with(project, SIGN_IN_VERDICT_TTL, || {
+        setup_wizard::claude_sign_in_verdict(project).map_err(|e| e.to_string())
+    })
+}
+
+pub(crate) fn invalidate_sign_in_verdict(project: &str) {
+    SIGN_IN_VERDICTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(project);
+}
 
 #[tauri::command]
 pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
@@ -38,6 +102,7 @@ pub async fn anthropic_logout(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("logging out of Anthropic for project {project}");
+        invalidate_sign_in_verdict(&project);
         speedwave_runtime::claude_home::remove_claude_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
@@ -75,6 +140,21 @@ pub(crate) fn project_llm_configured_in(
     !migrated_llm_for(user_config, project, evidence).is_unconfigured()
 }
 
+pub(crate) fn oauth_sign_in_from(
+    needs_anthropic_auth: bool,
+    verdict: Option<bool>,
+    saved: bool,
+) -> OauthSignIn {
+    match (needs_anthropic_auth, verdict, saved) {
+        (true, Some(true), _) => OauthSignIn::Verified,
+        (true, Some(false), _) => OauthSignIn::None,
+        (true, None, true) => OauthSignIn::SavedUnverified,
+        (true, None, false) => OauthSignIn::None,
+        (false, _, true) => OauthSignIn::SavedUnverified,
+        (false, _, false) => OauthSignIn::None,
+    }
+}
+
 #[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
@@ -82,16 +162,22 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         crate::containers_cmd::ensure_images_ready()?;
         log::info!("resolving auth status for project {project}");
         let api_key_configured = auth::has_api_key(&project);
-        let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
+        let oauth_saved = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
         );
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        let verdict = if needs_anthropic_auth {
+            cached_sign_in_verdict(&project)?
+        } else {
+            None
+        };
+        let oauth_sign_in = oauth_sign_in_from(needs_anthropic_auth, verdict, oauth_saved);
         let evidence = if api_key_configured {
             speedwave_runtime::config::AnthropicEvidence::ApiKey
-        } else if oauth_authenticated {
+        } else if oauth_saved {
             speedwave_runtime::config::AnthropicEvidence::Oauth
         } else {
             speedwave_runtime::config::AnthropicEvidence::None
@@ -100,7 +186,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         let provider_configured = !migrated.is_unconfigured();
         Ok(AuthStatusResponse::from_flags(
             api_key_configured,
-            oauth_authenticated,
+            oauth_sign_in,
             needs_anthropic_auth,
             provider_configured,
         ))
@@ -257,6 +343,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_verdict_probes_once_within_the_ttl() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "cached_verdict_probes_once_within_the_ttl";
+        let ttl = std::time::Duration::from_secs(10);
+
+        let first = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        let second = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(first, Some(true));
+        assert_eq!(second, Some(true));
+    }
+
+    #[test]
+    fn cached_verdict_probes_again_after_the_ttl() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "cached_verdict_probes_again_after_the_ttl";
+        let ttl = std::time::Duration::from_millis(50);
+
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cached_verdict_does_not_cache_errors() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "cached_verdict_does_not_cache_errors";
+        let ttl = std::time::Duration::from_secs(10);
+
+        let first = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("boom".to_string())
+        });
+        let second = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(false))
+        })
+        .unwrap();
+
+        assert!(first.is_err());
+        assert_eq!(second, Some(false));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalidating_a_project_forces_the_next_probe() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "invalidating_a_project_forces_the_next_probe";
+        let ttl = std::time::Duration::from_secs(10);
+
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        invalidate_sign_in_verdict(project);
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn concurrent_callers_share_one_probe() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let project = "concurrent_callers_share_one_probe";
+        let ttl = std::time::Duration::from_secs(10);
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let calls = std::sync::Arc::clone(&calls);
+                std::thread::spawn(move || {
+                    cached_verdict_with(project, ttl, || {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        Ok(Some(true))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(results.iter().all(|r| *r == Some(true)));
+    }
+
+    #[test]
+    fn projects_have_independent_cache_entries() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let ttl = std::time::Duration::from_secs(10);
+
+        cached_verdict_with("projects_have_independent_cache_entries_a", ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        cached_verdict_with("projects_have_independent_cache_entries_b", ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(false))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn get_auth_status_waits_for_image_readiness() {
         let source = include_str!("auth_commands.rs");
         let fn_start = source
@@ -272,17 +488,17 @@ mod tests {
         let ensure_pos = fn_body
             .find("ensure_images_ready")
             .expect("get_auth_status must call ensure_images_ready");
-        let oauth_pos = fn_body
-            .find("has_anthropic_oauth_credentials")
-            .expect("get_auth_status must read real OAuth state via credentials presence");
+        let verdict_pos = fn_body
+            .find("cached_sign_in_verdict")
+            .expect("get_auth_status must resolve the container sign-in verdict");
         assert!(
-            ensure_pos < oauth_pos,
-            "ensure_images_ready must come BEFORE the OAuth state read"
+            ensure_pos < verdict_pos,
+            "ensure_images_ready must come BEFORE the container sign-in verdict"
         );
     }
 
     #[test]
-    fn get_auth_status_oauth_is_credentials_presence_not_check_claude_auth() {
+    fn get_auth_status_takes_the_container_verdict_not_the_provider_gated_probe() {
         let source = include_str!("auth_commands.rs");
         let fn_start = source.find("pub async fn get_auth_status(").unwrap();
         let fn_end = source[fn_start..]
@@ -291,8 +507,31 @@ mod tests {
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
+            fn_body.contains("cached_sign_in_verdict"),
+            "oauth_sign_in must be resolved from the container sign-in verdict"
+        );
+        assert!(
             !fn_body.contains("check_claude_auth"),
-            "oauth_authenticated must not come from the provider-gated check_claude_auth"
+            "oauth_sign_in must not come from the provider-gated check_claude_auth"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_takes_the_verdict_through_the_coalescing_cache() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source.find("pub async fn get_auth_status(").unwrap();
+        let fn_end = source[fn_start..]
+            .find("#[cfg(test)]")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("cached_sign_in_verdict("),
+            "get_auth_status must resolve the verdict through the coalescing cache"
+        );
+        assert!(
+            !fn_body.contains("claude_sign_in_verdict("),
+            "get_auth_status must not call the raw container probe directly"
         );
     }
 
@@ -342,6 +581,88 @@ mod tests {
             fn_body.contains("provider_configured,"),
             "get_auth_status must return the provider_configured field"
         );
+    }
+
+    #[test]
+    fn get_auth_status_feeds_from_flags_via_oauth_sign_in_from() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("oauth_sign_in_from("),
+            "get_auth_status must derive oauth_sign_in via oauth_sign_in_from"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_never_parses_the_credentials_file() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("has_anthropic_oauth_credentials"),
+            "get_auth_status must read the credentials-file evidence via the SSOT helper"
+        );
+        assert!(
+            !fn_body.contains(".credentials.json"),
+            "get_auth_status must never hand-parse the credentials file"
+        );
+        assert!(
+            !fn_body.contains("serde_json"),
+            "get_auth_status must never read the credentials file's contents"
+        );
+    }
+
+    #[test]
+    fn oauth_sign_in_from_covers_every_table_row() {
+        assert_eq!(
+            oauth_sign_in_from(true, Some(true), false),
+            OauthSignIn::Verified
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(true), true),
+            OauthSignIn::Verified
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(false), false),
+            OauthSignIn::None
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(false), true),
+            OauthSignIn::None
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, None, true),
+            OauthSignIn::SavedUnverified
+        );
+        assert_eq!(oauth_sign_in_from(true, None, false), OauthSignIn::None);
+
+        for verdict in [Some(true), Some(false), None] {
+            assert_eq!(
+                oauth_sign_in_from(false, verdict, true),
+                OauthSignIn::SavedUnverified,
+                "verdict={verdict:?}"
+            );
+            assert_eq!(
+                oauth_sign_in_from(false, verdict, false),
+                OauthSignIn::None,
+                "verdict={verdict:?}"
+            );
+        }
     }
 
     #[test]
@@ -550,6 +871,31 @@ mod tests {
         assert!(
             fn_body.contains("remove_claude_credentials"),
             "anthropic_logout must clear credentials via the runtime SSOT, not reimplement deletion"
+        );
+    }
+
+    #[test]
+    fn anthropic_logout_invalidates_the_cached_verdict() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn anthropic_logout(")
+            .expect("anthropic_logout Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        let invalidate_pos = fn_body
+            .find("invalidate_sign_in_verdict(")
+            .expect("anthropic_logout must invalidate the cached verdict");
+        let remove_pos = fn_body
+            .find("remove_claude_credentials")
+            .expect("anthropic_logout must remove credentials");
+        assert!(
+            invalidate_pos < remove_pos,
+            "invalidate_sign_in_verdict must run BEFORE remove_claude_credentials"
         );
     }
 
@@ -1106,10 +1452,16 @@ mod tests {
 
     #[test]
     fn auth_status_response_serializes_all_fields() {
-        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, false);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true, // api_key_configured
+            crate::types::OauthSignIn::None,
+            true,  // needs_anthropic_auth
+            false, // provider_configured
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
+        assert_eq!(json["oauth_sign_in"], "none");
         assert_eq!(json["needs_anthropic_auth"], true);
         assert_eq!(json["provider_configured"], false);
         assert_eq!(json["status"], "no_provider");
@@ -1117,14 +1469,24 @@ mod tests {
 
     #[test]
     fn auth_status_response_status_ready_wire_string() {
-        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, true);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true,
+            crate::types::OauthSignIn::None,
+            true,
+            true,
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "ready");
     }
 
     #[test]
     fn auth_status_response_status_auth_required_wire_string() {
-        let resp = crate::types::AuthStatusResponse::from_flags(false, false, true, true);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            false,
+            crate::types::OauthSignIn::None,
+            true,
+            true,
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "auth_required");
     }

@@ -47,12 +47,18 @@ export type ProjectStatus =
 /** Backend-derived auth readiness (Rust `AuthReadiness`, snake_case wire values). */
 export type AuthReadiness = 'no_provider' | 'ready' | 'auth_required';
 
+/** Claude Code's sign-in verdict (Rust `OauthSignIn`, snake_case wire values). */
+export type OauthSignIn = 'verified' | 'saved_unverified' | 'none';
+
 /** Backend response from the `get_auth_status` Tauri command. */
 export interface AuthStatusResponse {
   /** Backend-derived discriminant (SSOT: Rust `AuthReadiness::derive`). */
   status?: AuthReadiness;
   api_key_configured: boolean;
+  /** True only when Claude Code in the running container reports a sign-in. */
   oauth_authenticated: boolean;
+  /** Claude Code's sign-in verdict; absent in older payloads. */
+  oauth_sign_in?: OauthSignIn;
   /**
    * Whether the active provider needs Anthropic auth at all (R7); `false` for
    * non-anthropic providers, so the gate must not block on the credential flags.
@@ -413,6 +419,7 @@ export class ProjectStateService {
    * @param auth - The auth status response from the backend.
    */
   applyAuthStatus(auth: AuthStatusResponse): void {
+    if (auth.oauth_sign_in === 'saved_unverified') return;
     const next = authStatusToProjectStatus(auth);
     if (next === 'ready') {
       if (this.status() === 'auth_required' || this.status() === 'no_provider') {

@@ -19,7 +19,7 @@ import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { eventValue } from '../../shared/dom-event';
 import { AuthTerminalComponent } from '../auth-terminal.component';
-import { OauthCompletionWatcher } from './oauth-completion-watcher';
+import { OauthCompletionWatcher, type SignInDisplay } from './oauth-completion-watcher';
 import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
   DiscoveredModel,
@@ -169,6 +169,10 @@ function classifyDiscoveryFailure(msg: string): {
               <span class="pill green" data-testid="auth-status-method">{{
                 apiKeyConfigured() ? 'api key' : 'oauth'
               }}</span>
+            } @else if (oauthSignIn() === 'pending') {
+              <span class="pill" data-testid="auth-status-value">checking sign-in…</span>
+            } @else if (oauthSignIn() === 'saved_unverified') {
+              <span class="pill" data-testid="auth-status-value">saved sign-in · not verified</span>
             } @else {
               <span class="pill amber" data-testid="auth-status-value">not configured</span>
             }
@@ -258,7 +262,7 @@ function classifyDiscoveryFailure(msg: string): {
               </div>
             }
             @if (authMethod() === 'oauth' && activeProject(); as project) {
-              @if (oauthAuthenticated()) {
+              @if (anthropicSignInUsable()) {
                 <div class="mt-3 flex items-center gap-3">
                   <button
                     type="button"
@@ -273,7 +277,7 @@ function classifyDiscoveryFailure(msg: string): {
                     >Removes this project's Anthropic credentials.</span
                   >
                 </div>
-              } @else {
+              } @else if (oauthSignIn() !== 'pending') {
                 <div class="mt-3">
                   <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
                 </div>
@@ -570,6 +574,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   anthropicApiKeySaved = signal(false);
   apiKeyConfigured = signal(false);
   oauthAuthenticated = signal(false);
+  /** 'pending' until the first `get_auth_status` for the active project resolves. */
+  oauthSignIn = signal<SignInDisplay>('pending');
   loggingOut = signal(false);
 
   private readonly oauthWatcher = inject(OauthCompletionWatcher);
@@ -622,12 +628,15 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   constructor() {
     this.oauthWatcher.attach({
       activeProject: () => this.activeProject(),
-      isAuthenticated: () => this.oauthAuthenticated(),
+      lastKnown: () => this.oauthSignIn(),
       shouldProbe: () => this.effectiveTarget() === 'anthropic',
       onLoginDetected: () => this.onOAuthDone(true),
+      onVerdict: (project, status) => this.applyAuthStatusFor(project, status),
     });
     effect(() => {
       if (this.activeProject()) {
+        this.oauthSignIn.set('pending');
+        this.oauthAuthenticated.set(false);
         const isInitialLoad = !this.initialAuthStatusLoaded;
         void this.loadAuthStatus().then(() => {
           if (isInitialLoad) this.maybeSnapshotInitialLoad('authStatus');
@@ -959,11 +968,32 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (!project) return;
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
-      this.apiKeyConfigured.set(status.api_key_configured);
-      this.oauthAuthenticated.set(status.oauth_authenticated);
-      this.projectState.applyAuthStatus(status);
-    } catch {}
+      this.applyAuthStatusFor(project, status);
+    } catch (e) {
+      if (this.activeProject() === project && this.oauthSignIn() === 'pending') {
+        this.oauthSignIn.set('none');
+        this.log.debug(
+          `loadAuthStatus: get_auth_status failed for ${project}: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+    }
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Applies a loaded/probed auth status to the tile, dropping it when `project`
+   * is no longer the active one (a late response for a project the user left).
+   * @param project - the project this status was fetched for
+   * @param status - the backend auth-status payload
+   */
+  private applyAuthStatusFor(project: string, status: AuthStatusResponse): void {
+    if (this.activeProject() !== project) return;
+    this.apiKeyConfigured.set(status.api_key_configured);
+    this.oauthAuthenticated.set(status.oauth_authenticated);
+    this.oauthSignIn.set(
+      status.oauth_sign_in ?? (status.oauth_authenticated ? 'verified' : 'none')
+    );
+    this.projectState.applyAuthStatus(status);
   }
 
   /** Saves the Anthropic API key to the project's secrets directory. */
@@ -1007,16 +1037,25 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  private oauthDoneInFlight = false;
+
   /**
    * Auto-selects + saves Anthropic on OAuth success, unconditionally: the prior active provider may still be routing live, so saveConfig must run even if the card was already showing Anthropic.
+   * Single-flight: concurrent callers (poll tick, focus probe, terminal emit racing together) return immediately instead of each reloading status and saving again.
    * @param _success - unused; the handler re-checks auth status instead of trusting the caller's flag
    */
   async onOAuthDone(_success: boolean): Promise<void> {
-    await this.loadAuthStatus();
-    if (this.oauthAuthenticated()) {
-      this.selectedTarget.set('anthropic');
-      this.provider.set('anthropic');
-      await this.saveConfig(true);
+    if (this.oauthDoneInFlight) return;
+    this.oauthDoneInFlight = true;
+    try {
+      await this.loadAuthStatus();
+      if (this.oauthAuthenticated()) {
+        this.selectedTarget.set('anthropic');
+        this.provider.set('anthropic');
+        await this.saveConfig(true);
+      }
+    } finally {
+      this.oauthDoneInFlight = false;
     }
     this.cdr.markForCheck();
   }
@@ -1110,6 +1149,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       this.apiKeyConfigured(),
       this.model(),
       this.oauthAuthenticated(),
+      this.oauthSignIn(),
       this.baseUrl(),
       this.apiKeyTouched(),
       this.customHeadersTouched(),
@@ -1133,10 +1173,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
   );
 
+  /** A verified or saved sign-in lets the card be selected/saved; readiness re-verifies at start. */
+  protected readonly anthropicSignInUsable = computed(
+    () => this.oauthAuthenticated() || this.oauthSignIn() === 'saved_unverified'
+  );
+
+  /** Save is allowed only when the active non-anthropic provider has a model AND the user has actually changed something since load/last save. */
   protected readonly canSave = computed<boolean>(() => {
     if (!this.isDirty()) return false;
     const target = this.effectiveTarget();
-    if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
+    if (target === 'anthropic') return this.anthropicSignInUsable() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) return !!extra.model.trim() || extra.hasKey || !!extra.keyInput.trim();
     return this.localModelSatisfied();

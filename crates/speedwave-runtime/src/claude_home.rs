@@ -12,8 +12,8 @@ pub fn claude_home_dir(data_dir: &Path, project: &str) -> PathBuf {
         .join(project)
 }
 
-/// True when `.claude/.credentials.json` exists — a real "logged in to Claude
-/// Code" signal, independent of which provider is active.
+/// True when `.claude/.credentials.json` exists — evidence a sign-in happened, never a
+/// verdict: Claude Code keeps the file after clearing rejected or expired tokens.
 pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
     claude_home_dir(data_dir, project)
         .join(".claude")

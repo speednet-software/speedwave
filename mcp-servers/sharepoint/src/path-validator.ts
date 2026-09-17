@@ -79,6 +79,15 @@ export class PathValidator {
         });
         return false;
       }
+      if (/^[A-Za-z]:/.test(p)) {
+        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+          attemptedPath: pathStr,
+          decodedPath: p !== pathStr ? p : undefined,
+          attackType: 'absolute_path',
+          reason: 'Windows drive-letter paths are not allowed',
+        });
+        return false;
+      }
       if (p.indexOf('\0') !== -1) {
         console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
           attemptedPath: pathStr,
