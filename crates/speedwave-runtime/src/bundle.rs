@@ -704,7 +704,7 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
 
 /// Host build-output dir names that are never image content — skipped from digests here, skipped at
 /// copy time by bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
-pub const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
+pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
     dir: &Path,
@@ -738,10 +738,11 @@ fn collect_directory_entries(
 
     for child in children {
         if child.is_dir()
-            && child
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| HOST_BUILD_OUTPUT_DIRS.contains(&n))
+            && child.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                HOST_BUILD_OUTPUT_DIRS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(n))
+            })
         {
             continue;
         }
@@ -1020,7 +1021,7 @@ mod tests {
             let tokens: Vec<&str> = line.split_whitespace().collect();
             let mut names: Vec<&str> = tokens
                 .windows(2)
-                .filter(|w| w[0] == "-name")
+                .filter(|w| w[0] == "-iname")
                 .map(|w| w[1])
                 .collect();
             names.sort_unstable();
@@ -1030,10 +1031,10 @@ mod tests {
             );
         }
 
-        let ps1_lines: Vec<&str> = ps1.lines().filter(|l| l.contains(" -cin ")).collect();
+        let ps1_lines: Vec<&str> = ps1.lines().filter(|l| l.contains(" -in ")).collect();
         assert!(
             !ps1_lines.is_empty(),
-            "case-sensitive -cin exclusion line should exist in .ps1"
+            "case-insensitive -in exclusion line should exist in .ps1"
         );
         for line in ps1_lines {
             let mut names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
@@ -1043,21 +1044,23 @@ mod tests {
                 "bundle-build-context.ps1 exclusion must match HOST_BUILD_OUTPUT_DIRS: {line}"
             );
         }
-        let sh_body = script_block_body(&sh, "copy_tree() {");
+        let sh_body = script_block_body(&sh, "copy_tree() {").join("\n");
         assert!(
-            sh_body.iter().any(|l| l.contains("-prune"))
-                && !sh_body.iter().any(|l| l
+            ["-type l", "-iname", "-prune"]
+                .iter()
+                .all(|t| sh_body.contains(t))
+                && !sh_body
                     .split_whitespace()
-                    .any(|t| t == "rm" || t == "-exec" || t == "-delete")),
-            "copy_tree() in bundle-build-context.sh must skip build outputs, never remove them: {sh_body:?}"
+                    .any(|t| t == "rm" || t == "-exec" || t == "-delete"),
+            "copy_tree() in bundle-build-context.sh must skip build-output dirs and links case-insensitively, never remove them:\n{sh_body}"
         );
-        let ps1_body = script_block_body(&ps1, "function Copy-Tree {");
+        let ps1_body = script_block_body(&ps1, "function Copy-Tree {").join("\n");
         assert!(
-            ps1_body.iter().any(|l| l.contains(" -cin "))
-                && !ps1_body
+            [" -in ", "ReparsePoint"].iter().all(|t| ps1_body.contains(t))
+                && !["Remove-Item", "-Recurse"]
                     .iter()
-                    .any(|l| l.contains("Remove-Item") || l.contains("-Recurse")),
-            "Copy-Tree in bundle-build-context.ps1 must skip build outputs, never copy recursively or remove: {ps1_body:?}"
+                    .any(|t| ps1_body.contains(t)),
+            "Copy-Tree in bundle-build-context.ps1 must skip build-output dirs and reparse points, never copy recursively or remove:\n{ps1_body}"
         );
         let sh_sources = copy_sources(&sh, "copy_tree ");
         let ps1_sources = copy_sources(&ps1, "Copy-Tree ");
@@ -1153,6 +1156,22 @@ mod tests {
                 .any(|r| r.contains("target") || r.contains("dist")),
             "target/ and dist/ must be excluded: {rels:?}"
         );
+    }
+
+    #[test]
+    fn collect_directory_entries_skips_build_output_directories_in_any_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("svc");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "real").unwrap();
+        for (parent, name) in [("a", "Target"), ("b", "DIST"), ("c", "Node_Modules")] {
+            std::fs::create_dir_all(dir.join(parent).join(name)).unwrap();
+            std::fs::write(dir.join(parent).join(name).join("blob"), "junk").unwrap();
+        }
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(rels, ["p/src/main.rs"]);
     }
 
     #[test]

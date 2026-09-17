@@ -152,12 +152,15 @@ teardown() {
             [ ! -r "$blob" ]
         done
     done
-    mkdir -p "$marker/distribution" "$marker/links" "$DEST/cargo-cache"
+    mkdir -p "$marker/distribution" "$marker/links" "$marker/upper/Target/sub" "$DEST/cargo-cache"
+    echo x > "$marker/upper/Target/sub/blob"
+    chmod 000 "$marker/upper/Target/sub/blob"
+    [ ! -r "$marker/upper/Target/sub/blob" ]
     echo x > "$marker/distribution/keep.txt"
     echo x > "$marker/nested/dist"
     echo x > "$DEST/cargo-cache/blob"
     ln -s "$DEST/cargo-cache" "$marker/links/target"
-    [ "$(find "$marker" -type f -name blob | wc -l)" -eq 6 ]
+    [ "$(find "$marker" -type f -name blob | wc -l)" -eq 7 ]
     [ -L "$marker/links/target" ]
 
     BUNDLE_CONTAINERS_DIR="$copy" run "$SCRIPT"
@@ -167,7 +170,7 @@ teardown() {
     [ -f "$staged/nested/deeper/src/keep.txt" ]
     [ -f "$staged/distribution/keep.txt" ]
     [ -f "$staged/nested/dist" ]
-    [ -z "$(find "$DEST/build-context/containers" \( -type d -o -type l \) \( -name target -o -name dist -o -name node_modules \))" ]
+    [ -z "$(find "$DEST/build-context/containers" \( -type d -o -type l \) \( -iname target -o -iname dist -o -iname node_modules \))" ]
 }
 
 @test "bundle script never enumerates containers/proxy/target: an unreadable transient rustc deps file cannot break the copy" {

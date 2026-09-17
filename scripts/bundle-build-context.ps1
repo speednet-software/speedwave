@@ -80,7 +80,7 @@ function Copy-Tree {
     New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     foreach ($item in Get-ChildItem -LiteralPath $src -Force) {
         $isLink = [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
-        if (($item.PSIsContainer -or $isLink) -and $item.Name -cin 'target', 'dist', 'node_modules') { continue }
+        if (($item.PSIsContainer -or $isLink) -and $item.Name -in 'target', 'dist', 'node_modules') { continue }
         if ($item.PSIsContainer) {
             Copy-Tree $item.FullName (Join-Path $destDir $item.Name)
         } else {

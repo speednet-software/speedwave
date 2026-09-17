@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use speedwave_runtime::bundle::HOST_BUILD_OUTPUT_DIRS;
+use speedwave_runtime::bundle_test_support::HOST_BUILD_OUTPUT_DIRS;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,7 +25,11 @@ fn collect_image_files(root: &Path, out: &mut Vec<PathBuf>) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if path.is_dir() {
-            if name.starts_with('.') || HOST_BUILD_OUTPUT_DIRS.contains(&&*name) {
+            if name.starts_with('.')
+                || HOST_BUILD_OUTPUT_DIRS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(&name))
+            {
                 continue;
             }
             collect_image_files(&path, out);
@@ -115,6 +119,16 @@ fn collect_image_files_skips_host_build_output_dirs() {
         std::fs::create_dir_all(svc.join(dir)).expect("create build-output dir");
         std::fs::write(svc.join(dir).join("Containerfile"), "FROM x").expect("plant Containerfile");
     }
+    std::fs::create_dir_all(tmp.path().join("upper").join("TARGET"))
+        .expect("create case-variant dir");
+    std::fs::write(
+        tmp.path()
+            .join("upper")
+            .join("TARGET")
+            .join("Containerfile"),
+        "FROM x",
+    )
+    .expect("plant case-variant Containerfile");
     std::fs::write(svc.join("Containerfile"), "FROM x").expect("write Containerfile");
     let mut files = Vec::new();
     collect_image_files(tmp.path(), &mut files);
