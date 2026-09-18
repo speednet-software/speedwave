@@ -49,24 +49,12 @@ export class ComposerDraftService implements OnDestroy {
 
   private seq = 0;
   private generation = 0;
-
-  /** Read-only signal carrying the unsent prompt text; the composer's FormControl mirrors into it. */
   readonly text: Signal<string> = this.textSignal.asReadonly();
-
-  /** Read-only signal reflecting plan mode; neither submit nor clear resets it. */
   readonly planMode: Signal<boolean> = this.planModeSignal.asReadonly();
-
-  /** Read-only signal carrying the staged images in insertion order. */
   readonly attachments: Signal<ReadonlyArray<AttachmentRecord>> =
     this.attachmentsSignal.asReadonly();
-
-  /** Read-only signal carrying the last ingest failure; cleared by the next success or by a clear. */
   readonly attachmentError: Signal<string> = this.attachmentErrorSignal.asReadonly();
-
-  /** Read-only signal feeding the composer's polite live region after an attach or a remove. */
   readonly attachmentAnnouncement: Signal<string> = this.attachmentAnnouncementSignal.asReadonly();
-
-  /** True while any staged image is still resampling; blocks submit. */
   readonly anyPreprocessing = computed<boolean>(() =>
     this.attachmentsSignal().some((a) => a.preprocessed === null)
   );
