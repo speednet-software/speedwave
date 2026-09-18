@@ -140,11 +140,11 @@ jobs:
       - name: Proxy tests
         run: make test-proxy
 
-      - name: pii-ner converter tests
-        run: make test-pii-ner-tools
-
       - name: pii-ner model e2e (CPU)
         run: make test-pii-ner-model
+
+      - name: pii-ner converter tests
+        run: make test-pii-ner-tools
 
       - name: MCP tests + coverage
         run: make coverage-mcp
@@ -319,14 +319,14 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
       - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --features speedwave-runtime/test-support
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --features speedwave-runtime/test-support
 
-      - name: pii-ner converter tests and model e2e (CPU)
+      - name: pii-ner model e2e and converter tests (CPU)
         run: |
           PY=$(command -v python3 || command -v python)
-          "$PY" -m unittest discover -s crates/pii-ner/tools -p 'test_*.py'
           "$PY" crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner --verify
           SPEEDWAVE_PII_NER_ARTIFACT="$GITHUB_WORKSPACE/desktop/src-tauri/pii-ner" cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e
+          "$PY" -m unittest discover -s crates/pii-ner/tools -p 'test_*.py'
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash

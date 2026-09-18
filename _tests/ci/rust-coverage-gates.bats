@@ -35,6 +35,73 @@ _makefile_check_clippy_cargo_lines() {
     ' "$MAKEFILE"
 }
 
+_makefile_var() {
+    awk -v name="$1" '
+        $1 == name && ($2 == ":=" || $2 == "=") {
+            $1 = ""; $2 = ""
+            sub(/^[[:space:]]+/, "")
+            print
+            exit
+        }
+    ' "$MAKEFILE"
+}
+
+_workflow_runtime_windows_pii_ner_step() {
+    awk '
+        /^  runtime-windows:/ { in_job=1 }
+        in_job && /^      - name: pii-ner/ { in_step=1; next }
+        in_step && /^      - name: / { exit }
+        in_step { print }
+    ' "$WORKFLOW"
+}
+
+_line_of() {
+    grep -n -F -- "$2" <<< "$1" | head -1 | cut -d: -f1
+}
+
+@test "runtime-windows runs the same pii-ner commands as the make targets" {
+    tools_dir="$(_makefile_var PII_NER_TOOLS)"
+    artifact_dir="$(_makefile_var PII_NER_ARTIFACT_DIR)"
+    [ -n "$tools_dir" ]
+    [ -n "$artifact_dir" ]
+
+    step="$(_workflow_runtime_windows_pii_ner_step)"
+    [ -n "$step" ]
+
+    for fragment in \
+        "unittest discover -s $tools_dir -p 'test_*.py'" \
+        "$tools_dir/fetch_and_convert.py --out $artifact_dir --verify" \
+        "cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e"; do
+        if ! grep -qF -- "$fragment" <<< "$step"; then
+            echo "runtime-windows is missing: $fragment"
+            echo "It hand-writes what the pii-ner make targets run; keep both in sync."
+            return 1
+        fi
+    done
+}
+
+@test "both CI legs fetch the pii-ner model before the converter tests run" {
+    mac_model="$(grep -n 'run: make test-pii-ner-model' "$WORKFLOW" | head -1 | cut -d: -f1)"
+    mac_tools="$(grep -n 'run: make test-pii-ner-tools' "$WORKFLOW" | head -1 | cut -d: -f1)"
+    [ -n "$mac_model" ]
+    [ -n "$mac_tools" ]
+    if [ "$mac_model" -gt "$mac_tools" ]; then
+        echo "make test-pii-ner-model must run before make test-pii-ner-tools."
+        echo "The converter's real-model test skips itself unless the pinned tflite is already cached."
+        return 1
+    fi
+
+    step="$(_workflow_runtime_windows_pii_ner_step)"
+    fetch_line="$(_line_of "$step" "fetch_and_convert.py")"
+    unittest_line="$(_line_of "$step" "unittest discover")"
+    [ -n "$fetch_line" ]
+    [ -n "$unittest_line" ]
+    if [ "$fetch_line" -gt "$unittest_line" ]; then
+        echo "runtime-windows must fetch the model before running the converter tests."
+        return 1
+    fi
+}
+
 @test "runtime-windows runs exactly the cargo test invocation of make test-rust" {
     makefile_line="$(_makefile_test_rust_cargo_line)"
     [ -n "$makefile_line" ]
