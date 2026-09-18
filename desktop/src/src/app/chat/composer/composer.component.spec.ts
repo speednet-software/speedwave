@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { By } from '@angular/platform-browser';
@@ -10,9 +10,55 @@ import { LoggerService } from '../../services/logger.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { makeMockLogger } from '../../testing/mock-logger';
 import { SlashService } from '../slash/slash.service';
+import { ComposerDraftService } from '../../services/composer-draft.service';
+import {
+  ImagePreprocessorService,
+  type PreprocessedImage,
+} from '../../services/image-preprocessor.service';
 
 class ProjectStateStub {
   readonly activeProject = signal<string | null>(null);
+}
+
+class PreprocessorStub {
+  output: PreprocessedImage = {
+    attachment: {
+      filename: 'img.png',
+      mediaType: 'image/png',
+      containerPath: '/workspace/.speedwave/pastes/img.png',
+      hostPath: '/tmp/img.png',
+    },
+    previewUrl: 'blob:out',
+    width: 1,
+    height: 1,
+    sizeBytes: 1,
+  };
+  preprocess = vi.fn(async () => this.output);
+}
+
+function pngFile(): File {
+  return new File([new Uint8Array([1])], 'img.png', { type: 'image/png' });
+}
+
+function installBlobUrlStubs(): () => void {
+  const create = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+  const revoke = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+  Object.defineProperty(URL, 'createObjectURL', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(() => 'blob:tmp'),
+  });
+  Object.defineProperty(URL, 'revokeObjectURL', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  });
+  return () => {
+    if (create) Object.defineProperty(URL, 'createObjectURL', create);
+    else Reflect.deleteProperty(URL, 'createObjectURL');
+    if (revoke) Object.defineProperty(URL, 'revokeObjectURL', revoke);
+    else Reflect.deleteProperty(URL, 'revokeObjectURL');
+  };
 }
 
 class SlashServiceStub {
@@ -32,21 +78,38 @@ describe('ComposerComponent', () => {
   let fixture: ComponentFixture<ComposerComponent>;
   let component: ComposerComponent;
   let rootEl: HTMLElement;
+  let draft: ComposerDraftService;
+  let projectState: ProjectStateStub;
+  let restoreBlobUrls: () => void;
 
   beforeEach(async () => {
+    restoreBlobUrls = installBlobUrlStubs();
     await TestBed.configureTestingModule({
       imports: [ComposerComponent],
       providers: [
         { provide: ProjectStateService, useClass: ProjectStateStub },
         { provide: SlashService, useClass: SlashServiceStub },
+        { provide: ImagePreprocessorService, useClass: PreprocessorStub },
       ],
     }).compileComponents();
 
+    projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+    draft = TestBed.inject(ComposerDraftService);
     fixture = TestBed.createComponent(ComposerComponent);
     component = fixture.componentInstance;
     rootEl = fixture.nativeElement as HTMLElement;
     fixture.detectChanges();
   });
+
+  afterEach(() => {
+    restoreBlobUrls();
+  });
+
+  async function attachImage(): Promise<void> {
+    projectState.activeProject.set('demo');
+    await draft.ingest([pngFile()], '');
+    fixture.detectChanges();
+  }
 
   function textarea(): HTMLTextAreaElement {
     const el = rootEl.querySelector<HTMLTextAreaElement>('[data-testid="chat-input"]');
@@ -190,28 +253,9 @@ describe('ComposerComponent', () => {
       expect(emitted).toEqual(['/code-review']);
     });
 
-    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', () => {
+    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', async () => {
       component.text.setValue('/');
-      component.attachments.set([
-        {
-          id: 'a1',
-          filename: 'img.png',
-          previewUrl: 'blob:x',
-          preprocessed: {
-            attachment: {
-              filename: 'img.png',
-              mediaType: 'image/png',
-              containerPath: '/workspace/.speedwave/pastes/img.png',
-              hostPath: '/tmp/img.png',
-            },
-            previewUrl: 'blob:x',
-            width: 1,
-            height: 1,
-            sizeBytes: 1,
-          },
-        },
-      ]);
-      fixture.detectChanges();
+      await attachImage();
       expect(component.canSubmit()).toBe(true);
     });
   });
@@ -769,6 +813,208 @@ describe('ComposerComponent', () => {
       expect(attachmentErrorEl()?.textContent?.trim()).toBe(
         'Select a project before attaching an image.'
       );
+    });
+  });
+  describe('draft persistence across remounts (SPEED-557)', () => {
+    function remount(): void {
+      fixture.destroy();
+      fixture = TestBed.createComponent(ComposerComponent);
+      component = fixture.componentInstance;
+      rootEl = fixture.nativeElement as HTMLElement;
+      fixture.detectChanges();
+    }
+
+    it('restores the typed text into a freshly mounted composer', () => {
+      component.text.setValue('half-written thought');
+      fixture.detectChanges();
+
+      remount();
+
+      expect(component.text.value).toBe('half-written thought');
+      expect(textarea().value).toBe('half-written thought');
+    });
+
+    it('restores the derived text signal, so send is enabled without a keystroke', () => {
+      component.text.setValue('ready to go');
+      fixture.detectChanges();
+
+      remount();
+
+      expect(component.textValue()).toBe('ready to go');
+      expect(component.canSubmit()).toBe(true);
+      expect(sendButton().disabled).toBe(false);
+    });
+
+    it('restores plan mode', () => {
+      component.togglePlanMode();
+      fixture.detectChanges();
+
+      remount();
+
+      expect(component.planMode()).toBe(true);
+      const toggle = rootEl.querySelector('[data-testid="composer-plan-toggle"]');
+      expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+      expect(toggle?.textContent?.trim()).toBe('plan');
+    });
+
+    it('restores staged attachments', async () => {
+      await attachImage();
+      expect(component.attachments()).toHaveLength(1);
+
+      remount();
+
+      expect(component.attachments()).toHaveLength(1);
+      expect(component.attachmentViewModels()[0].filename).toBe('img.png');
+    });
+
+    it('leaves the field empty after a submit, because the draft was consumed', () => {
+      component.text.setValue('sent already');
+      fixture.detectChanges();
+      component.submit();
+
+      remount();
+
+      expect(component.text.value).toBe('');
+      expect(textarea().value).toBe('');
+    });
+
+    it('restores the value even when the composer mounts disabled', () => {
+      component.text.setValue('typed while enabled');
+      fixture.detectChanges();
+
+      fixture.destroy();
+      fixture = TestBed.createComponent(ComposerComponent);
+      component = fixture.componentInstance;
+      rootEl = fixture.nativeElement as HTMLElement;
+      fixture.componentRef.setInput('disabled', true);
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('typed while enabled');
+      expect(textarea().disabled).toBe(true);
+      expect(component.canSubmit()).toBe(false);
+    });
+
+    it('lets a staged transcription draft overwrite the restored text', () => {
+      component.text.setValue('my own words');
+      fixture.detectChanges();
+
+      fixture.destroy();
+      fixture = TestBed.createComponent(ComposerComponent);
+      component = fixture.componentInstance;
+      rootEl = fixture.nativeElement as HTMLElement;
+      const applied: number[] = [];
+      component.draftApplied.subscribe(() => applied.push(1));
+      fixture.componentRef.setInput('draftText', 'summarise the meeting');
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('summarise the meeting');
+      expect(applied).toHaveLength(1);
+    });
+
+    it('parks the caret at the end of a restored multi-line draft', async () => {
+      const value = 'first line\nsecond line\nthird line';
+      component.text.setValue(value);
+      fixture.detectChanges();
+
+      remount();
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      expect(textarea().selectionStart).toBe(value.length);
+      expect(textarea().selectionEnd).toBe(value.length);
+    });
+  });
+
+  describe('clear()', () => {
+    it('wipes text and attachments but leaves plan mode on', async () => {
+      component.togglePlanMode();
+      component.text.setValue('scrap this');
+      await attachImage();
+
+      component.clear();
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('');
+      expect(draft.text()).toBe('');
+      expect(component.attachments()).toEqual([]);
+      expect(component.planMode()).toBe(true);
+    });
+
+    it('clears whitespace-only text that send would reject', () => {
+      component.text.setValue('   ');
+      fixture.detectChanges();
+
+      component.clear();
+
+      expect(component.text.value).toBe('');
+      expect(draft.text()).toBe('');
+    });
+
+    it('is a harmless no-op on an already empty composer', () => {
+      component.clear();
+
+      expect(component.text.value).toBe('');
+      expect(component.attachments()).toEqual([]);
+    });
+
+    it('emits neither submitted nor queueRequested', () => {
+      const submitted: string[] = [];
+      const queued: string[] = [];
+      component.submitted.subscribe((v) => submitted.push(v.payload));
+      component.queueRequested.subscribe((v) => queued.push(v));
+      component.text.setValue('do not send me');
+      fixture.detectChanges();
+
+      component.clear();
+
+      expect(submitted).toEqual([]);
+      expect(queued).toEqual([]);
+    });
+
+    it('clears without queueing while streaming', () => {
+      const queued: string[] = [];
+      component.queueRequested.subscribe((v) => queued.push(v));
+      fixture.componentRef.setInput('streaming', true);
+      component.text.setValue('next turn');
+      fixture.detectChanges();
+
+      component.clear();
+      fixture.detectChanges();
+
+      expect(component.text.value).toBe('');
+      expect(queued).toEqual([]);
+    });
+
+    it('returns focus to the textarea', async () => {
+      component.text.setValue('focus me back');
+      fixture.detectChanges();
+
+      component.clear();
+      fixture.detectChanges();
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+
+      expect(document.activeElement).toBe(textarea());
+    });
+
+    it('does not latch the slash menu shut', () => {
+      const ta = textarea();
+      ta.value = '/';
+      ta.setSelectionRange(1, 1);
+      component.text.setValue('/');
+      ta.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+      expect(component.slashOpen()).toBe(true);
+
+      component.clear();
+      fixture.detectChanges();
+      expect(component.slashOpen()).toBe(false);
+
+      ta.value = '/';
+      ta.setSelectionRange(1, 1);
+      component.text.setValue('/');
+      ta.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+
+      expect(component.slashOpen()).toBe(true);
     });
   });
 });

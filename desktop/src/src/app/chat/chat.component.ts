@@ -73,7 +73,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly contextOverflowOpen = signal(false);
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
-  @ViewChild('composer') private composer?: { focusInput: () => void };
+  @ViewChild('composer') private composer?: { focusInput: () => void; clear: () => void };
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
@@ -333,14 +333,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
+  /** Clears all chat + drawer state, drops the unsent draft, and re-runs the chat session bootstrap. */
   async newConversation(): Promise<void> {
     this.ui.closeSidebar();
     this.ui.closeMemory();
     this.chat.resetForNewConversation();
+    this.composer?.clear();
     this.cdr.markForCheck();
     await this.chat.init();
-    this.composer?.focusInput();
   }
 
   /** Flips the memory signal; data load is driven by the constructor effect. */

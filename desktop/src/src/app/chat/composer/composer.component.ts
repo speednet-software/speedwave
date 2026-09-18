@@ -11,7 +11,7 @@ import {
   output,
   signal,
 } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
+import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import {
@@ -30,22 +30,10 @@ import {
   ModelSelectorComponent,
   type ModelSelection,
 } from './model-selector/model-selector.component';
-import {
-  ImagePreprocessorService,
-  ERROR_UNSUPPORTED_TYPE,
-  type ModelClass,
-  type PreprocessedImage,
-} from '../../services/image-preprocessor.service';
+import { ComposerDraftService } from '../../services/composer-draft.service';
 import type { ChatAttachment } from '../../models/chat';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
-
-interface AttachmentRecord {
-  id: string;
-  filename: string;
-  previewUrl: string;
-  preprocessed: PreprocessedImage | null;
-}
 
 const MIN_COMPOSER_HEIGHT_PX = 56;
 
@@ -353,22 +341,24 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly slashService = inject(SlashService);
   protected readonly projectState = inject(ProjectStateService);
-  private readonly preprocessor = inject(ImagePreprocessorService);
+  private readonly draft = inject(ComposerDraftService);
 
   readonly text = new FormControl<string>('', { nonNullable: true });
 
   readonly slashOpen = signal<boolean>(false);
   readonly slashQuery = signal<string>('');
 
-  readonly planMode = signal<boolean>(false);
+  /** Plan-mode flag; owned by {@link ComposerDraftService} so it survives navigation. */
+  readonly planMode = this.draft.planMode;
 
-  readonly attachments = signal<ReadonlyArray<AttachmentRecord>>([]);
+  /** Staged images; owned by {@link ComposerDraftService} so they survive navigation. */
+  readonly attachments = this.draft.attachments;
 
-  private attachmentSeq = 0;
+  /** Last ingest failure, surfaced above the field. */
+  readonly attachmentError = this.draft.attachmentError;
 
-  readonly attachmentError = signal<string>('');
-
-  readonly attachmentAnnouncement = signal<string>('');
+  /** Polite live-region text announcing the last attach or remove. */
+  readonly attachmentAnnouncement = this.draft.attachmentAnnouncement;
 
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
 
@@ -401,23 +391,22 @@ export class ComposerComponent implements AfterViewInit {
 
   private slashSuppressedByUser = false;
 
-  /** Syncs the field with the `disabled` and `draftText` inputs and revokes removed attachment previews. */
+  /**
+   * Hydrates the field from the draft service, mirrors every later edit back into it, and syncs
+   * the `disabled` and `draftText` inputs. Order matters: `textValue` subscribes in a field
+   * initializer, so restoring here (not there) keeps the derived signal in step.
+   */
   constructor() {
+    const restored = this.draft.text();
+    if (restored) this.text.setValue(restored);
+    this.text.valueChanges
+      .pipe(takeUntilDestroyed())
+      .subscribe((value) => this.draft.setText(value));
+
     effect(() => {
       const value = this.disabled();
       if (value) this.text.disable({ emitEvent: false });
       else this.text.enable({ emitEvent: false });
-    });
-    let previous: ReadonlyArray<AttachmentRecord> = [];
-    effect((onCleanup) => {
-      const current = this.attachments();
-      for (const r of previous.filter((p) => !current.some((c) => c.id === p.id))) {
-        URL.revokeObjectURL(r.previewUrl);
-      }
-      previous = current;
-      onCleanup(() => {
-        for (const r of current) URL.revokeObjectURL(r.previewUrl);
-      });
     });
     effect(() => {
       const draft = this.draftText();
@@ -427,9 +416,13 @@ export class ComposerComponent implements AfterViewInit {
     });
   }
 
-  /** Auto-focus the textarea on mount so the user can start typing immediately. */
+  /** Auto-focus the textarea on mount, sizing it and parking the caret when a draft was restored. */
   ngAfterViewInit(): void {
     this.focusInput();
+    const length = this.text.value.length;
+    if (length === 0) return;
+    this.autosize?.resizeToFitContent(true);
+    queueMicrotask(() => this.textareaRef?.nativeElement?.setSelectionRange(length, length));
   }
 
   /**
@@ -518,12 +511,24 @@ export class ComposerComponent implements AfterViewInit {
   /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
   canSubmit(): boolean {
     if (this.disabled()) return false;
-    if (this.anyAttachmentPreprocessing()) return false;
+    if (this.draft.anyPreprocessing()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
     const hasAttachments = this.attachments().length > 0;
     if (!hasText && !hasAttachments) return false;
     return !(hasAttachments && this.streaming());
+  }
+
+  /**
+   * Drops the unsent prompt and every staged image, then refocuses the field. Plan mode stays on,
+   * mirroring submit. Public so the parent can reset the draft on "new conversation".
+   */
+  clear(): void {
+    this.text.reset('');
+    this.restoreAutoSize();
+    this.draft.clearAttachments();
+    this.closeSlash();
+    this.focusInput();
   }
 
   /** Truncated preview of the queued slot (single-line, max 80 chars). */
@@ -557,7 +562,7 @@ export class ComposerComponent implements AfterViewInit {
     if (!this.canSubmit()) return;
     const text = this.textValue().trim();
     const payload = this.planMode() ? `${PLAN_MODE_PREFIX}${text}` : text;
-    const attachments = this.readyChatAttachments();
+    const attachments = this.draft.readyChatAttachments();
     if (this.streaming()) {
       if (attachments.length > 0) return;
       this.queueRequested.emit(payload);
@@ -566,7 +571,7 @@ export class ComposerComponent implements AfterViewInit {
     }
     this.text.reset('');
     this.restoreAutoSize();
-    this.clearAttachments();
+    this.draft.clearAttachments();
     this.closeSlash();
   }
 
@@ -588,7 +593,7 @@ export class ComposerComponent implements AfterViewInit {
     }
     if (files.length === 0) return;
     event.preventDefault();
-    void this.ingest(files);
+    void this.draft.ingest(files, this.model());
   }
 
   /**
@@ -596,7 +601,7 @@ export class ComposerComponent implements AfterViewInit {
    * @param files - Dropped files (any MIME).
    */
   onFilesDropped(files: File[]): void {
-    void this.ingest(files);
+    void this.draft.ingest(files, this.model());
   }
 
   /**
@@ -604,17 +609,7 @@ export class ComposerComponent implements AfterViewInit {
    * @param id - Attachment id from the view-model.
    */
   removeAttachment(id: string): void {
-    const removed = this.attachments().find((a) => a.id === id);
-    this.attachments.update((list) => list.filter((a) => a.id !== id));
-    if (removed) {
-      this.attachmentAnnouncement.set(`Image removed: ${removed.filename}`);
-    }
-  }
-
-  /** Clears every attachment (post-submit and on session reset). */
-  clearAttachments(): void {
-    this.attachments.set([]);
-    this.attachmentError.set('');
+    this.draft.removeAttachment(id);
   }
 
   readonly attachmentViewModels = computed<ReadonlyArray<AttachmentViewModel>>(() =>
@@ -627,77 +622,9 @@ export class ComposerComponent implements AfterViewInit {
     }))
   );
 
-  readonly anyAttachmentPreprocessing = computed<boolean>(() =>
-    this.attachments().some((a) => a.preprocessed === null)
-  );
-
-  readonly submitBlockedReason = computed<string>(() => {
-    if (this.disabled()) return '';
-    if (this.anyAttachmentPreprocessing()) return 'Preparing image…';
-    if (this.attachments().length > 0 && this.streaming()) {
-      return 'Wait for the response to finish before sending an image.';
-    }
-    return '';
-  });
-
-  private async ingest(files: File[]): Promise<void> {
-    const images = files.filter((f) => f.type.startsWith('image/'));
-    if (images.length === 0) {
-      return;
-    }
-    const project = this.projectState.activeProject();
-    if (!project) {
-      this.attachmentError.set('Select a project before attaching an image.');
-      return;
-    }
-
-    const modelClass = this.modelClass();
-    for (const file of images) {
-      const id = `att-${++this.attachmentSeq}`;
-      const previewUrl = URL.createObjectURL(file);
-      this.attachments.update((list) => [
-        ...list,
-        { id, filename: file.name || 'image', previewUrl, preprocessed: null },
-      ]);
-      try {
-        const out = await this.preprocessor.preprocess(file, modelClass, project);
-        URL.revokeObjectURL(previewUrl);
-        this.attachments.update((list) =>
-          list.map((a) =>
-            a.id === id ? { ...a, previewUrl: out.previewUrl, preprocessed: out } : a
-          )
-        );
-        this.attachmentError.set('');
-        this.attachmentAnnouncement.set(`Image attached: ${out.attachment.filename}`);
-      } catch (err) {
-        this.attachments.update((list) => list.filter((a) => a.id !== id));
-        URL.revokeObjectURL(previewUrl);
-        this.attachmentError.set(err instanceof Error ? err.message : ERROR_UNSUPPORTED_TYPE);
-      }
-    }
-  }
-
-  private modelClass(): ModelClass {
-    const id = this.model();
-    if (!id) return 'sonnet';
-    if (id.includes('opus')) return 'opus';
-    if (id.includes('haiku')) return 'haiku';
-    return 'sonnet';
-  }
-
-  private readyAttachments(): PreprocessedImage[] {
-    return this.attachments()
-      .map((a) => a.preprocessed)
-      .filter((p): p is PreprocessedImage => p !== null);
-  }
-
-  private readyChatAttachments(): ChatAttachment[] {
-    return this.readyAttachments().map((p) => p.attachment);
-  }
-
   /** Toggles plan mode on/off. Persists across messages until toggled again. */
   togglePlanMode(): void {
-    this.planMode.update((v) => !v);
+    this.draft.togglePlanMode();
   }
 
   /**

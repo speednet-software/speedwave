@@ -9,6 +9,7 @@ import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { ComposerDraftService } from '../services/composer-draft.service';
 import { LoggerService } from '../services/logger.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -720,6 +721,53 @@ describe('ChatComponent', () => {
       expect(chatState.currentBlocks).toEqual([]);
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
+    });
+
+    it('drops the unsent composer draft (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const draft = TestBed.inject(ComposerDraftService);
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+      composer.togglePlanMode();
+      composer.text.setValue('half-written thought');
+      fixture.detectChanges();
+      expect(draft.text()).toBe('half-written thought');
+
+      await component.newConversation();
+
+      expect(draft.text()).toBe('');
+      expect(composer.text.value).toBe('');
+      expect(draft.attachments()).toEqual([]);
+      expect(draft.planMode()).toBe(true);
+    });
+
+    it('clears the draft before awaiting chat.init(), so a keystroke during init survives (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const draft = TestBed.inject(ComposerDraftService);
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+      composer.text.setValue('half-written thought');
+      fixture.detectChanges();
+
+      const pendingInit = createDeferred();
+      vi.spyOn(chatState, 'init').mockReturnValue(pendingInit.promise);
+
+      const newConversationPromise = component.newConversation();
+      await Promise.resolve();
+      expect(draft.text()).toBe('');
+
+      composer.text.setValue('typed while init is pending');
+      fixture.detectChanges();
+
+      pendingInit.resolve();
+      await newConversationPromise;
+
+      expect(draft.text()).toBe('typed while init is pending');
+      expect(composer.text.value).toBe('typed while init is pending');
     });
   });
 
