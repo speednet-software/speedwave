@@ -349,6 +349,11 @@ export class ChatStateService {
     });
   }
 
+  /** Re-reads the plan limits and the context usage on demand (the usage popover opened). */
+  refreshUsage(): Promise<void> {
+    return this.refreshControlData();
+  }
+
   private async refreshControlData(): Promise<void> {
     if (this._activeKind === null) await this.refreshLlmConfigCache();
     const project = this.projectState.activeProject();

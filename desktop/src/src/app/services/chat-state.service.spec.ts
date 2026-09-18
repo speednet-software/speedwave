@@ -4516,14 +4516,14 @@ describe('ChatStateService', () => {
       total_tokens: 46_567,
       max_tokens: 1_000_000,
       percentage: 5,
-      categories: [{ name: 'System prompt', tokens: 3_902 }],
+      categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
     };
     const SNAPSHOT_HAIKU = {
       model: 'claude-haiku-4-5',
       total_tokens: 62_767,
       max_tokens: 200_000,
       percentage: 31,
-      categories: [{ name: 'System prompt', tokens: 8_257 }],
+      categories: [{ name: 'System prompt', tokens: 8_257, is_deferred: false }],
     };
     let snapshot: unknown;
     let contextCalls: number;

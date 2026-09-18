@@ -76,6 +76,7 @@ export interface ClaudePlanUsage {
 export interface ClaudeContextCategory {
   name: string;
   tokens: number;
+  is_deferred: boolean;
 }
 
 /** Typed `get_context_usage` response. Mirror of Rust `control_channel::ContextUsage`. */

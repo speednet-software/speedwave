@@ -44,7 +44,7 @@ const CONTEXT: ClaudeContextUsage = {
   total_tokens: 46_567,
   max_tokens: 1_000_000,
   percentage: 5,
-  categories: [{ name: 'System prompt', tokens: 3_902 }],
+  categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
 };
 
 describe('ClaudeControlService', () => {

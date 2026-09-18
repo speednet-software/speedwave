@@ -30,6 +30,61 @@ export function parseResetTime(iso: string | null): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+const UI_LOCALE = 'en-US';
+const HOUR_MS = 3_600_000;
+const MINUTE_MS = 60_000;
+
+/**
+ * Row label of a plan window: `5-hour limit`, `Weekly · all models`, `Weekly · <model>`.
+ * @param window - Window as `planLimitsFrom` reports it.
+ */
+export function planWindowLabel(window: PlanLimitWindow): string {
+  switch (window.key) {
+    case 'five_hour':
+      return '5-hour limit';
+    case 'seven_day':
+      return 'Weekly · all models';
+    case 'seven_day_opus':
+      return 'Weekly · Opus';
+    case 'seven_day_sonnet':
+      return 'Weekly · Sonnet';
+    case 'model_scoped':
+      return `Weekly · ${window.model ?? 'model'}`;
+  }
+}
+
+/**
+ * Reset time for a plan window: relative under 24 hours (`Resets in 4 hr 7 min`), weekday plus
+ * local time otherwise (`Resets Tue 11:00 PM`); empty when unknown or already past.
+ * @param resetsAtMs - Reset time in epoch milliseconds, or `null` when Claude Code sent none.
+ * @param nowMs - Current time in epoch milliseconds.
+ * @param viewer - Locale and IANA zone of the weekday form.
+ * @param viewer.locale - BCP 47 locale; the app's `en-US` when omitted.
+ * @param viewer.timeZone - IANA time zone; the viewer's own when omitted.
+ */
+export function formatResetTime(
+  resetsAtMs: number | null,
+  nowMs: number,
+  viewer: { locale?: string; timeZone?: string } = {}
+): string {
+  if (resetsAtMs === null || resetsAtMs <= nowMs) return '';
+  const remaining = resetsAtMs - nowMs;
+  if (remaining < 24 * HOUR_MS) {
+    const hours = Math.floor(remaining / HOUR_MS);
+    const minutes = Math.floor((remaining % HOUR_MS) / MINUTE_MS);
+    if (hours === 0 && minutes === 0) return 'Resets in under a minute';
+    const parts = [hours > 0 ? `${hours} hr` : '', minutes > 0 ? `${minutes} min` : ''];
+    return `Resets in ${parts.filter(Boolean).join(' ')}`;
+  }
+  const when = new Intl.DateTimeFormat(viewer.locale ?? UI_LOCALE, {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: viewer.timeZone,
+  }).format(new Date(resetsAtMs));
+  return `Resets ${when}`;
+}
+
 function windowOf(
   key: PlanLimitWindowKey,
   model: string | null,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseResetTime, planLimitsFrom } from './plan-limits';
+import { formatResetTime, parseResetTime, planLimitsFrom, planWindowLabel } from './plan-limits';
 import type { ClaudePlanUsage, ClaudeRateLimits } from './claude-control';
 
 const NOW = Date.parse('2026-09-18T10:00:00Z');
@@ -48,6 +48,67 @@ describe('parseResetTime', () => {
     expect(parseResetTime(null)).toBeNull();
     expect(parseResetTime('')).toBeNull();
     expect(parseResetTime('soon')).toBeNull();
+  });
+});
+
+describe('formatResetTime', () => {
+  const HOUR = 3_600_000;
+  const MINUTE = 60_000;
+
+  it('is relative under 24 hours', () => {
+    expect(formatResetTime(NOW + 4 * HOUR + 7 * MINUTE + 30_000, NOW)).toBe('Resets in 4 hr 7 min');
+  });
+
+  it('drops the zero part of a relative time', () => {
+    expect(formatResetTime(NOW + 3 * HOUR, NOW)).toBe('Resets in 3 hr');
+    expect(formatResetTime(NOW + 12 * MINUTE, NOW)).toBe('Resets in 12 min');
+  });
+
+  it('says so when less than a minute remains', () => {
+    expect(formatResetTime(NOW + 20_000, NOW)).toBe('Resets in under a minute');
+  });
+
+  it('stays relative one minute short of a day and switches to the weekday at 24 hours', () => {
+    expect(formatResetTime(NOW + 24 * HOUR - MINUTE, NOW)).toBe('Resets in 23 hr 59 min');
+    expect(formatResetTime(NOW + 24 * HOUR, NOW, { locale: 'en-US', timeZone: 'UTC' })).toBe(
+      'Resets Sat 10:00 AM'
+    );
+  });
+
+  it('names the weekday and the local time beyond a day', () => {
+    const tuesdayNight = Date.parse('2026-09-22T21:00:00Z');
+
+    expect(formatResetTime(tuesdayNight, NOW, { locale: 'en-US', timeZone: 'UTC' })).toBe(
+      'Resets Tue 9:00 PM'
+    );
+    expect(formatResetTime(tuesdayNight, NOW, { locale: 'en-US', timeZone: 'Europe/Warsaw' })).toBe(
+      'Resets Tue 11:00 PM'
+    );
+    expect(
+      formatResetTime(tuesdayNight, NOW, { locale: 'pl-PL', timeZone: 'Europe/Warsaw' })
+    ).toMatch(/^Resets wt\.?,? 23:00$/);
+  });
+
+  it('is empty for an unknown or past reset time', () => {
+    expect(formatResetTime(null, NOW)).toBe('');
+    expect(formatResetTime(NOW, NOW)).toBe('');
+    expect(formatResetTime(NOW - HOUR, NOW)).toBe('');
+  });
+});
+
+describe('planWindowLabel', () => {
+  it('labels every window the way the popover lists it', () => {
+    const label = (
+      key: Parameters<typeof planWindowLabel>[0]['key'],
+      model: string | null = null
+    ) => planWindowLabel({ key, model, utilization: 1, resets_at: null });
+
+    expect(label('five_hour')).toBe('5-hour limit');
+    expect(label('seven_day')).toBe('Weekly · all models');
+    expect(label('seven_day_opus')).toBe('Weekly · Opus');
+    expect(label('seven_day_sonnet')).toBe('Weekly · Sonnet');
+    expect(label('model_scoped', 'Fable')).toBe('Weekly · Fable');
+    expect(label('model_scoped')).toBe('Weekly · model');
   });
 });
 

@@ -340,6 +340,8 @@ pub(crate) struct PlanUsage {
 pub(crate) struct ContextCategory {
     pub(crate) name: String,
     pub(crate) tokens: u64,
+    #[serde(default, rename(deserialize = "isDeferred"))]
+    pub(crate) is_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -950,6 +952,20 @@ mod tests {
     }
 
     #[test]
+    fn context_usage_reads_the_deferred_flag_of_a_category() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 10, "maxTokens": 100, "percentage": 10,
+            "categories": [
+                { "name": "System tools", "tokens": 10, "color": "inactive" },
+                { "name": "MCP tools (deferred)", "tokens": 900, "color": "inactive", "isDeferred": true }
+            ]
+        }))
+        .unwrap();
+        assert!(!usage.categories[0].is_deferred);
+        assert!(usage.categories[1].is_deferred);
+    }
+
+    #[test]
     fn context_usage_without_a_free_space_category_is_left_alone() {
         let usage = ContextUsage {
             model: "m".to_string(),
@@ -959,6 +975,7 @@ mod tests {
             categories: vec![ContextCategory {
                 name: "Messages".to_string(),
                 tokens: 1,
+                is_deferred: false,
             }],
         };
         assert_eq!(usage.clone().without_free_space(), usage);

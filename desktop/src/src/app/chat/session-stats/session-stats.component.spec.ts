@@ -19,6 +19,23 @@ describe('SessionStatsComponent', () => {
     return (fixture.nativeElement as HTMLElement).textContent ?? '';
   }
 
+  function ring(): HTMLButtonElement | null {
+    return (fixture.nativeElement as HTMLElement).querySelector('[data-testid="usage-ring"]');
+  }
+
+  function ringFill(): string | null {
+    fixture.detectChanges();
+    return (
+      (fixture.nativeElement as HTMLElement)
+        .querySelector('[data-testid="usage-ring-fill"]')
+        ?.getAttribute('stroke-dasharray') ?? null
+    );
+  }
+
+  function popover(): HTMLElement | null {
+    return (fixture.nativeElement as HTMLElement).querySelector('[data-testid="usage-popover"]');
+  }
+
   describe('null stats', () => {
     it('renders the zero row when stats is null (one always-present row)', () => {
       fixture.componentRef.setInput('stats', null);
@@ -29,10 +46,10 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
       expect(txt).toContain('—');
-      expect(txt).not.toContain('ctx');
+      expect(ring()).toBeNull();
     });
 
-    it('renders the zero row + ctx 0% for a seeded resume (known window, no usage)', () => {
+    it('renders the zero row + an empty ring for a seeded resume (known window, no usage)', () => {
       fixture.componentRef.setInput('stats', {
         session_id: '11111111-1111-1111-1111-111111111111',
         total_cost: null,
@@ -44,8 +61,7 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('in:');
       expect(txt).toContain('out:');
       expect(txt).toContain('—');
-      expect(txt).toContain('ctx');
-      expect(txt).toContain('0%');
+      expect(ringFill()).toBe('0 100');
     });
   });
 
@@ -76,7 +92,7 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('out:');
     });
 
-    it('renders ctx bar from the last API call usage', () => {
+    it('fills the ring from the last API call usage', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.05,
@@ -91,9 +107,7 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 65,
       });
       fixture.detectChanges();
-      const txt = rootText();
-      expect(txt).toContain('ctx');
-      expect(txt).toContain('2%');
+      expect(ringFill()).toBe('2 100');
     });
 
     it('renders in/out from usage in mockup-shaped form', () => {
@@ -144,7 +158,7 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('67,890');
     });
 
-    it('renders compact used/max label next to ctx bar', () => {
+    it('names used/max in the ring label', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -158,7 +172,7 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      expect(rootText()).toContain('116k/200k');
+      expect(ring()?.getAttribute('aria-label')).toBe('Context window 58% used (116k/200k)');
     });
   });
 
@@ -172,7 +186,7 @@ describe('SessionStatsComponent', () => {
           total_tokens: 46_567,
           max_tokens: 1_000_000,
           percentage: 5,
-          categories: [{ name: 'System prompt', tokens: 3_902 }],
+          categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
         },
         context_window_size: 1_000_000,
         total_output_tokens: 0,
@@ -226,7 +240,7 @@ describe('SessionStatsComponent', () => {
 
       expect(component.ctxPct()).toBeNull();
       expect(component.ctxUsedMax()).toBe('');
-      expect(rootText()).not.toContain('ctx');
+      expect(ring()).toBeNull();
     });
   });
 
@@ -340,7 +354,7 @@ describe('SessionStatsComponent', () => {
   });
 
   describe('edge cases', () => {
-    it('shows ctx at 0% when no usage', () => {
+    it('shows an empty ring when no usage', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -348,9 +362,7 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      const txt = rootText();
-      expect(txt).toContain('ctx');
-      expect(txt).toContain('0%');
+      expect(ringFill()).toBe('0 100');
     });
 
     it('shows chat cost as $0.0000 when total_cost is a real 0 (free/local)', () => {
@@ -455,7 +467,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxBarColor()).toBe('bg-[var(--green)]');
+      expect(component.ringColor()).toBe('text-[var(--green)]');
     });
 
     it('applies amber for 50–76%', () => {
@@ -471,7 +483,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxBarColor()).toBe('bg-[var(--amber)]');
+      expect(component.ringColor()).toBe('text-[var(--amber)]');
     });
 
     it('applies amber at boundary 50', () => {
@@ -487,7 +499,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxBarColor()).toBe('bg-[var(--amber)]');
+      expect(component.ringColor()).toBe('text-[var(--amber)]');
     });
 
     it('applies red-500 for ≥77%', () => {
@@ -503,7 +515,7 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxBarColor()).toBe('bg-red-500');
+      expect(component.ringColor()).toBe('text-red-500');
     });
 
     it('applies red-500 at boundary 77', () => {
@@ -519,10 +531,10 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxBarColor()).toBe('bg-red-500');
+      expect(component.ringColor()).toBe('text-red-500');
     });
 
-    it('rounds 30% → 2 filled (out of 5)', () => {
+    it('fills 30% of the ring at 30%', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -536,10 +548,10 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       expect(component.ctxPct()).toBe(30);
-      expect(component.ctxFilled()).toBe(2);
+      expect(ringFill()).toBe('30 100');
     });
 
-    it('rounds 80% → 4 filled (out of 5)', () => {
+    it('fills 80% of the ring at 80%', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -553,10 +565,10 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       expect(component.ctxPct()).toBe(80);
-      expect(component.ctxFilled()).toBe(4);
+      expect(ringFill()).toBe('80 100');
     });
 
-    it('fills 5 segments at 100%', () => {
+    it('fills the whole ring at 100%', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -569,10 +581,10 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxFilled()).toBe(5);
+      expect(ringFill()).toBe('100 100');
     });
 
-    it('fills 0 segments at 0%', () => {
+    it('leaves the ring empty at 0%', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -585,12 +597,192 @@ describe('SessionStatsComponent', () => {
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.ctxFilled()).toBe(0);
+      expect(ringFill()).toBe('0 100');
+    });
+  });
+
+  describe('usage ring and popover', () => {
+    const NOW = Date.parse('2026-09-18T10:00:00Z');
+    const STATS = {
+      session_id: 'abc',
+      total_cost: null,
+      usage: { input_tokens: 1200, output_tokens: 300 },
+      context: {
+        model: 'claude-opus-5[1m]',
+        total_tokens: 46_567,
+        max_tokens: 1_000_000,
+        percentage: 5,
+        categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
+      },
+      context_window_size: 1_000_000,
+      total_output_tokens: 300,
+    };
+    const LIMITS = {
+      subscription_type: 'max',
+      windows: [
+        { key: 'five_hour', model: null, utilization: 15, resets_at: NOW + 9_600_000 },
+        { key: 'seven_day', model: null, utilization: 70, resets_at: NOW + 400_000_000 },
+      ],
+      extra_usage: null,
+    };
+    const WARNING = {
+      status: 'allowed_warning',
+      rate_limit_type: 'five_hour',
+      utilization_percent: 60,
+      resets_at: NOW / 1000 + 3600,
+      overage_status: null,
+      is_using_overage: false,
+    };
+
+    beforeEach(() => {
+      fixture.componentRef.setInput('stats', STATS);
+      fixture.componentRef.setInput('now', NOW);
+      fixture.componentRef.setInput('branch', 'main');
+      fixture.detectChanges();
+    });
+
+    it('replaces the ctx and limit bars; in, out, branch and cost stay', () => {
+      const txt = rootText();
+      expect(txt).not.toMatch(/\bctx\b/);
+      expect(txt).not.toMatch(/\blimit\b/);
+      expect(txt).toContain('in: 1,200');
+      expect(txt).toContain('out: 300');
+      expect(txt).toContain('main');
+      expect(txt).toContain('chat: —');
+      expect(ring()).not.toBeNull();
+    });
+
+    it('fills the ring with the context percentage', () => {
+      expect(ringFill()).toBe('5 100');
+    });
+
+    it('is closed until the ring is clicked', () => {
+      expect(popover()).toBeNull();
+    });
+
+    it('opens the popover on click and asks the owner to re-read the limits', () => {
+      let opened = 0;
+      component.usageOpened.subscribe(() => (opened += 1));
+
+      ring()?.click();
+      fixture.detectChanges();
+
+      expect(opened).toBe(1);
+      expect(ring()?.getAttribute('aria-expanded')).toBe('true');
+      expect(popover()?.getAttribute('role')).toBe('dialog');
+      expect(popover()?.getAttribute('aria-label')).toBe('Context window and plan usage limits');
+      expect(popover()?.textContent).toContain('47k / 1M · 5%');
+    });
+
+    it('moves focus into the popover and back to the ring when Escape closes it', () => {
+      document.body.appendChild(fixture.nativeElement);
+      ring()?.click();
+      fixture.detectChanges();
+      TestBed.tick();
+      expect(document.activeElement).toBe(popover());
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      fixture.detectChanges();
+
+      expect(popover()).toBeNull();
+      expect(document.activeElement).toBe(ring());
+      fixture.nativeElement.remove();
+    });
+
+    it('closes on a backdrop click and on a second ring click without re-announcing', () => {
+      let opened = 0;
+      component.usageOpened.subscribe(() => (opened += 1));
+      ring()?.click();
+      fixture.detectChanges();
+
+      (fixture.nativeElement as HTMLElement)
+        .querySelector<HTMLButtonElement>('[data-testid="usage-popover-backdrop"]')
+        ?.click();
+      fixture.detectChanges();
+      expect(popover()).toBeNull();
+
+      ring()?.click();
+      fixture.detectChanges();
+      ring()?.click();
+      fixture.detectChanges();
+      expect(popover()).toBeNull();
+      expect(opened).toBe(2);
+    });
+
+    it('lists the plan windows of an OAuth account', () => {
+      fixture.componentRef.setInput('limits', LIMITS);
+      ring()?.click();
+      fixture.detectChanges();
+
+      const rows = popover()?.querySelectorAll('[data-testid="usage-plan-row"]') ?? [];
+      expect(Array.from(rows).map((r) => r.getAttribute('data-window'))).toEqual([
+        'five_hour',
+        'seven_day',
+      ]);
+    });
+
+    it('shows only the context section with an API key', () => {
+      fixture.componentRef.setInput('limits', null);
+      ring()?.click();
+      fixture.detectChanges();
+
+      expect(popover()?.querySelector('[data-testid="usage-context"]')).not.toBeNull();
+      expect(popover()?.querySelector('[data-testid="usage-plan"]')).toBeNull();
+    });
+
+    it('marks the ring amber on a warning and red once a limit is reached', () => {
+      const marker = (): HTMLElement | null =>
+        (fixture.nativeElement as HTMLElement).querySelector('[data-testid="usage-ring-warning"]');
+      expect(marker()).toBeNull();
+
+      fixture.componentRef.setInput('limitSignal', WARNING);
+      fixture.detectChanges();
+      expect(marker()?.getAttribute('data-status')).toBe('allowed_warning');
+      expect(marker()?.className).toContain('bg-[var(--amber)]');
+      expect(ring()?.getAttribute('aria-label')).toContain('Plan usage limit warning');
+
+      fixture.componentRef.setInput('limitSignal', { ...WARNING, status: 'rejected' });
+      fixture.detectChanges();
+      expect(marker()?.className).toContain('bg-red-500');
+      expect(ring()?.getAttribute('aria-label')).toContain('Plan usage limit reached');
+    });
+
+    it('leaves the ring unmarked for an allowed status and once the signalled window has reset', () => {
+      const marker = (): HTMLElement | null =>
+        (fixture.nativeElement as HTMLElement).querySelector('[data-testid="usage-ring-warning"]');
+
+      fixture.componentRef.setInput('limitSignal', { ...WARNING, status: 'allowed' });
+      fixture.detectChanges();
+      expect(marker()).toBeNull();
+
+      fixture.componentRef.setInput('limitSignal', { ...WARNING, resets_at: NOW / 1000 - 60 });
+      fixture.detectChanges();
+      expect(marker()).toBeNull();
+    });
+
+    it('keeps the marker for a warning without a reset time', () => {
+      fixture.componentRef.setInput('limitSignal', { ...WARNING, resets_at: null });
+      fixture.detectChanges();
+
+      expect(
+        (fixture.nativeElement as HTMLElement).querySelector('[data-testid="usage-ring-warning"]')
+      ).not.toBeNull();
+    });
+
+    it('hides the ring, and with it the popover, while the window is unknown', () => {
+      fixture.componentRef.setInput('stats', {
+        ...STATS,
+        context: undefined,
+        context_window_size: null,
+      });
+      fixture.detectChanges();
+
+      expect(ring()).toBeNull();
     });
   });
 
   describe('ARIA', () => {
-    it('sets aria-label on ctx bar describing percentage', () => {
+    it('names the ring by the context percentage', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
@@ -599,10 +791,9 @@ describe('SessionStatsComponent', () => {
         total_output_tokens: 0,
       });
       fixture.detectChanges();
-      const el = fixture.nativeElement as HTMLElement;
-      const bars = el.querySelectorAll('[aria-label^="Context:"]');
-      expect(bars.length).toBe(1);
-      expect(bars[0].getAttribute('aria-label')).toMatch(/Context: \d+% used/);
+      expect(ring()?.getAttribute('aria-label')).toMatch(/^Context window \d+% used/);
+      expect(ring()?.getAttribute('aria-haspopup')).toBe('dialog');
+      expect(ring()?.getAttribute('aria-expanded')).toBe('false');
     });
   });
 
