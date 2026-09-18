@@ -4,8 +4,8 @@ use crate::types::check_project;
 use serde::Serialize;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
-    anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicPlan, OneMillionContext,
-    ANTHROPIC_MODELS,
+    anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
+    OneMillionContext, ANTHROPIC_MODELS, EFFORT_LEVELS,
 };
 use std::path::Path;
 
@@ -24,12 +24,15 @@ pub(crate) struct PickerRow {
     pub(crate) wire_id: String,
     pub(crate) is_default: bool,
     pub(crate) display_name: Option<String>,
+    pub(crate) effort_levels: Vec<String>,
+    pub(crate) default_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ModelPicker {
     pub(crate) source: PickerSource,
     pub(crate) rows: Vec<PickerRow>,
+    pub(crate) effort_order: Vec<String>,
 }
 
 pub(crate) fn plan_for(kind: LlmProviderKind, info: Option<&SessionInfo>) -> AnthropicPlan {
@@ -43,8 +46,64 @@ fn row_model(row: &ModelRow) -> &str {
     row.resolved_model.as_deref().unwrap_or(&row.value)
 }
 
-fn in_catalog(id: &str) -> bool {
-    ANTHROPIC_MODELS.iter().any(|m| m.id == id)
+fn catalog_entry(id: &str) -> Option<&'static AnthropicModelInfo> {
+    ANTHROPIC_MODELS.iter().find(|m| m.id == id)
+}
+
+fn effort_order() -> Vec<String> {
+    EFFORT_LEVELS.iter().map(|l| (*l).to_string()).collect()
+}
+
+fn listed_effort_levels(listed: &ModelRow) -> Vec<String> {
+    if !listed.supports_effort {
+        return Vec::new();
+    }
+    EFFORT_LEVELS
+        .iter()
+        .filter(|level| listed.supported_effort_levels.iter().any(|l| l == *level))
+        .map(|level| (*level).to_string())
+        .collect()
+}
+
+fn catalog_default_effort(id: &str, levels: &[String]) -> Option<String> {
+    catalog_entry(id)
+        .and_then(|m| m.default_effort)
+        .filter(|default| levels.iter().any(|l| l == default))
+        .map(str::to_string)
+}
+
+fn catalog_row(model: &AnthropicModelInfo, plan: AnthropicPlan) -> PickerRow {
+    let effort_levels: Vec<String> = model
+        .effort_levels
+        .iter()
+        .map(|l| (*l).to_string())
+        .collect();
+    PickerRow {
+        id: model.id.to_string(),
+        wire_id: anthropic_wire_model_id(model.id, plan),
+        is_default: false,
+        display_name: None,
+        default_effort: catalog_default_effort(model.id, &effort_levels),
+        effort_levels,
+    }
+}
+
+fn group_of<'a>(id: &str, info: &'a SessionInfo) -> Vec<&'a ModelRow> {
+    let group: Vec<&ModelRow> = info
+        .models
+        .iter()
+        .filter(|m| canonical_anthropic_model_id(row_model(m)) == id)
+        .collect();
+    let named: Vec<&ModelRow> = group
+        .iter()
+        .copied()
+        .filter(|m| m.value != DEFAULT_ROW_VALUE)
+        .collect();
+    if named.is_empty() {
+        group
+    } else {
+        named
+    }
 }
 
 fn strip_one_million_decoration(name: &str) -> String {
@@ -69,23 +128,28 @@ fn strip_one_million_decoration(name: &str) -> String {
         .join(" ")
 }
 
-fn unlisted_in_catalog_row(id: &str, info: &SessionInfo, is_default: bool) -> PickerRow {
-    let group: Vec<&ModelRow> = info
-        .models
-        .iter()
-        .filter(|m| canonical_anthropic_model_id(row_model(m)) == id)
-        .collect();
-    let named: Vec<&ModelRow> = group
-        .iter()
-        .copied()
-        .filter(|m| m.value != DEFAULT_ROW_VALUE)
-        .collect();
-    let candidates = if named.is_empty() { &group } else { &named };
-    let chosen = candidates
+fn listed_row(id: &str, info: &SessionInfo, plan: AnthropicPlan, is_default: bool) -> PickerRow {
+    let group = group_of(id, info);
+    let effort_levels = group
+        .first()
+        .map(|m| listed_effort_levels(m))
+        .unwrap_or_default();
+    let default_effort = catalog_default_effort(id, &effort_levels);
+    if catalog_entry(id).is_some() {
+        return PickerRow {
+            id: id.to_string(),
+            wire_id: anthropic_wire_model_id(id, plan),
+            is_default,
+            display_name: None,
+            effort_levels,
+            default_effort,
+        };
+    }
+    let chosen = group
         .iter()
         .copied()
         .find(|m| !row_model(m).ends_with("[1m]"))
-        .or_else(|| candidates.first().copied());
+        .or_else(|| group.first().copied());
     PickerRow {
         id: id.to_string(),
         wire_id: chosen.map_or_else(|| id.to_string(), |m| row_model(m).to_string()),
@@ -93,6 +157,8 @@ fn unlisted_in_catalog_row(id: &str, info: &SessionInfo, is_default: bool) -> Pi
         display_name: chosen
             .map(|m| strip_one_million_decoration(&m.display_name))
             .filter(|name| !name.is_empty()),
+        effort_levels,
+        default_effort,
     }
 }
 
@@ -101,13 +167,9 @@ fn catalog_picker(plan: AnthropicPlan) -> ModelPicker {
         source: PickerSource::Catalog,
         rows: ANTHROPIC_MODELS
             .iter()
-            .map(|m| PickerRow {
-                id: m.id.to_string(),
-                wire_id: anthropic_wire_model_id(m.id, plan),
-                is_default: false,
-                display_name: None,
-            })
+            .map(|m| catalog_row(m, plan))
             .collect(),
+        effort_order: effort_order(),
     }
 }
 
@@ -128,30 +190,17 @@ pub(crate) fn build_picker(info: Option<&SessionInfo>, plan: AnthropicPlan) -> M
             continue;
         }
         let is_default = default_id.as_deref() == Some(id);
-        rows.push(if in_catalog(id) {
-            PickerRow {
-                id: id.to_string(),
-                wire_id: anthropic_wire_model_id(id, plan),
-                is_default,
-                display_name: None,
-            }
-        } else {
-            unlisted_in_catalog_row(id, info, is_default)
-        });
+        rows.push(listed_row(id, info, plan, is_default));
     }
     for legacy in ANTHROPIC_MODELS.iter().filter(|m| !m.latest) {
         if !rows.iter().any(|r| r.id == legacy.id) {
-            rows.push(PickerRow {
-                id: legacy.id.to_string(),
-                wire_id: anthropic_wire_model_id(legacy.id, plan),
-                is_default: false,
-                display_name: None,
-            });
+            rows.push(catalog_row(legacy, plan));
         }
     }
     ModelPicker {
         source: PickerSource::ClaudeCode,
         rows,
+        effort_order: effort_order(),
     }
 }
 
@@ -244,6 +293,143 @@ mod tests {
             description: String::new(),
             supports_effort: false,
             supported_effort_levels: Vec::new(),
+        }
+    }
+
+    fn listed_with_effort(value: &str, resolved: &str, levels: &[&str]) -> ModelRow {
+        ModelRow {
+            supports_effort: true,
+            supported_effort_levels: levels.iter().map(|l| (*l).to_string()).collect(),
+            ..listed(value, Some(resolved), value)
+        }
+    }
+
+    fn effort_of<'a>(picker: &'a ModelPicker, id: &str) -> (&'a [String], Option<&'a str>) {
+        let row = picker
+            .rows
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap_or_else(|| panic!("no row for {id}"));
+        (&row.effort_levels, row.default_effort.as_deref())
+    }
+
+    #[test]
+    fn listed_model_takes_its_effort_stops_from_claude_code_not_the_catalog() {
+        let info = info_of(
+            vec![listed_with_effort(
+                "sonnet",
+                "claude-sonnet-5[1m]",
+                &["low", "medium", "high"],
+            )],
+            Some("Claude Max"),
+        );
+        let picker = build_picker(Some(&info), AnthropicPlan::Max);
+        let (levels, default) = effort_of(&picker, "claude-sonnet-5");
+        assert_eq!(levels, ["low", "medium", "high"]);
+        assert_eq!(default, Some("high"));
+    }
+
+    #[test]
+    fn listed_model_without_supports_effort_offers_no_stops() {
+        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        let (levels, default) = effort_of(&picker, "claude-haiku-4-5");
+        assert!(levels.is_empty());
+        assert_eq!(default, None);
+    }
+
+    #[test]
+    fn listed_model_with_levels_but_no_supports_effort_flag_offers_no_stops() {
+        let mut row = listed_with_effort("opus", "claude-opus-5", &["low", "high"]);
+        row.supports_effort = false;
+        let picker = build_picker(Some(&info_of(vec![row], None)), AnthropicPlan::Unknown);
+        assert!(effort_of(&picker, "claude-opus-5").0.is_empty());
+    }
+
+    #[test]
+    fn captured_max_account_reports_all_five_stops_for_every_listed_effort_model() {
+        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        for id in ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5"] {
+            let (levels, default) = effort_of(&picker, id);
+            assert_eq!(levels, EFFORT_LEVELS, "{id}");
+            assert_eq!(default, Some("high"), "{id}");
+        }
+    }
+
+    #[test]
+    fn legacy_rows_keep_the_catalog_effort_table() {
+        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        let (levels, default) = effort_of(&picker, "claude-opus-4-6");
+        assert_eq!(levels, ["low", "medium", "high", "max"]);
+        assert_eq!(default, Some("high"));
+        let (levels, default) = effort_of(&picker, "claude-opus-4-7");
+        assert_eq!(levels, EFFORT_LEVELS);
+        assert_eq!(default, Some("xhigh"));
+    }
+
+    #[test]
+    fn catalog_fallback_keeps_the_catalog_effort_table_for_every_row() {
+        let picker = build_picker(None, AnthropicPlan::Unknown);
+        for model in ANTHROPIC_MODELS {
+            let (levels, default) = effort_of(&picker, model.id);
+            assert_eq!(levels, model.effort_levels, "{}", model.id);
+            assert_eq!(default, model.default_effort, "{}", model.id);
+        }
+    }
+
+    #[test]
+    fn effort_stops_follow_the_slider_order_and_drop_levels_speedwave_cannot_pin() {
+        let info = info_of(
+            vec![listed_with_effort(
+                "opus",
+                "claude-opus-5",
+                &["max", "ultra", "low", "high"],
+            )],
+            None,
+        );
+        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        assert_eq!(
+            effort_of(&picker, "claude-opus-5").0,
+            ["low", "high", "max"]
+        );
+    }
+
+    #[test]
+    fn catalog_default_effort_outside_the_reported_stops_is_not_offered() {
+        let info = info_of(
+            vec![listed_with_effort(
+                "claude-opus-4-7",
+                "claude-opus-4-7",
+                &["low", "medium"],
+            )],
+            None,
+        );
+        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        assert_eq!(effort_of(&picker, "claude-opus-4-7").1, None);
+    }
+
+    #[test]
+    fn model_unknown_to_the_catalog_has_stops_but_no_default() {
+        let info = info_of(
+            vec![listed_with_effort(
+                "claude-nova-1",
+                "claude-nova-1",
+                &["low", "high"],
+            )],
+            None,
+        );
+        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        let (levels, default) = effort_of(&picker, "claude-nova-1");
+        assert_eq!(levels, ["low", "high"]);
+        assert_eq!(default, None);
+    }
+
+    #[test]
+    fn picker_carries_the_effort_order_from_the_ssot() {
+        for picker in [
+            build_picker(None, AnthropicPlan::Unknown),
+            build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max),
+        ] {
+            assert_eq!(picker.effort_order, EFFORT_LEVELS);
         }
     }
 
@@ -640,6 +826,18 @@ mod tests {
             Some("claude-opus-5[1m]"),
             "an unknown plan must not downgrade a plan-dependent pin"
         );
+    }
+
+    #[test]
+    fn model_selector_takes_the_slider_order_from_the_picker_not_from_a_level_count() {
+        let ts = include_str!(
+            "../../src/src/app/chat/composer/model-selector/model-selector.component.ts"
+        );
+        assert!(
+            !ts.contains("length === 5"),
+            "the slider order comes from EFFORT_LEVELS via the picker's effort_order"
+        );
+        assert!(ts.contains("effort_order"));
     }
 
     #[test]

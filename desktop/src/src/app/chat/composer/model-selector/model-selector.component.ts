@@ -17,7 +17,7 @@ import { ModelPickerService } from '../../../services/model-picker.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
-import { canonicalModelId, type ModelPicker } from '../../../models/model-picker';
+import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
@@ -226,7 +226,6 @@ export class ModelSelectorComponent {
 
   private discoverCache: { key: string; options: ModelOption[] } | null = null;
 
-  private readonly anthropicCatalog = signal<AnthropicModel[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
 
@@ -250,32 +249,31 @@ export class ModelSelectorComponent {
     return this.pickerPending() ? 'Loading models...' : 'Change model';
   });
 
-  protected readonly activeOptionId = computed<string | null>(() =>
-    this.showEffortControl()
-      ? (this.picker.rowFor(this.projectId(), this.displayModel())?.id ?? null)
-      : null
+  protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
+
+  private readonly activeRow = computed<ModelPickerRow | null>(() =>
+    this.showEffortControl() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
   );
 
-  private readonly currentModelEntry = computed<AnthropicModel | null>(() => {
-    const id = canonicalModelId(this.activeOptionId() ?? this.displayModel());
-    return this.anthropicCatalog().find((m) => m.id === id) ?? null;
-  });
-
-  private readonly fullLevelEntry = computed<AnthropicModel | null>(
-    () => this.anthropicCatalog().find((m) => m.effort_levels.length === 5) ?? null
-  );
-
-  protected readonly effortStops = computed<string[]>(
-    () => this.currentModelEntry()?.effort_levels ?? this.fullLevelEntry()?.effort_levels ?? []
-  );
-
-  private readonly catalogDefaultEffort = computed<string | null>(
-    () => this.currentModelEntry()?.default_effort ?? this.fullLevelEntry()?.default_effort ?? null
+  private readonly currentModelEntry = computed<AnthropicModel | null>(() =>
+    this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
   );
 
   private readonly canonicalOrder = computed<string[]>(
-    () => this.fullLevelEntry()?.effort_levels ?? []
+    () => this.picker.picker(this.projectId())?.effort_order ?? []
   );
+
+  protected readonly effortStops = computed<string[]>(
+    () =>
+      this.activeRow()?.effort_levels ??
+      this.currentModelEntry()?.effort_levels ??
+      this.canonicalOrder()
+  );
+
+  private readonly catalogDefaultEffort = computed<string | null>(() => {
+    const row = this.activeRow();
+    return row ? row.default_effort : (this.currentModelEntry()?.default_effort ?? null);
+  });
 
   protected readonly showEffortSegment = computed(
     () => this.showEffortControl() && this.effortStops().length > 0
@@ -289,6 +287,7 @@ export class ModelSelectorComponent {
     if (stops.includes(pin)) return pin;
     const order = this.canonicalOrder();
     const idx = order.indexOf(pin);
+    if (idx === -1) return this.catalogDefaultEffort() ?? stops[0];
     for (let i = idx - 1; i >= 0; i--) {
       if (stops.includes(order[i])) return order[i];
     }
@@ -321,7 +320,7 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.loadAnthropicCatalog();
+      if (this.showEffortControl() && id) void this.anthropicModels.list();
     });
     effect(() => {
       const id = this.projectId();
@@ -536,11 +535,6 @@ export class ModelSelectorComponent {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: effort pin load failed: ${msg}`);
     }
-  }
-
-  private async loadAnthropicCatalog(): Promise<void> {
-    const list = await this.anthropicModels.list();
-    this.anthropicCatalog.set(list);
   }
 
   protected toggleEffortPopover(): void {

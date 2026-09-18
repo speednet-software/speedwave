@@ -5,7 +5,7 @@ import { ModelSelectorComponent, type ModelSelection } from './model-selector.co
 import { TauriService } from '../../../services/tauri.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
 import type { ActiveProviderSummary, AnthropicModel } from '../../../models/llm';
-import type { ModelPicker } from '../../../models/model-picker';
+import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 
 describe('ActiveProviderSummary', () => {
   it('shape matches the Rust mirror fields, including base_url', () => {
@@ -53,14 +53,24 @@ describe('ModelSelectorComponent', () => {
 
   const picker: ModelPicker = {
     source: 'claude_code',
+    effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
     rows: [
       {
         id: 'claude-sonnet-5',
         wire_id: 'claude-sonnet-5[1m]',
         is_default: true,
         display_name: null,
+        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
       },
-      { id: 'claude-opus-4-1', wire_id: 'claude-opus-4-1', is_default: false, display_name: null },
+      {
+        id: 'claude-opus-4-1',
+        wire_id: 'claude-opus-4-1',
+        is_default: false,
+        display_name: null,
+        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
+      },
     ],
   };
 
@@ -167,12 +177,15 @@ describe('ModelSelectorComponent', () => {
       if (cmd === 'list_model_picker')
         return Promise.resolve({
           source: 'claude_code',
+          effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
           rows: [
             {
               id: 'claude-nova-1',
               wire_id: 'claude-nova-1[1m]',
               is_default: false,
               display_name: 'Nova 1',
+              effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+              default_effort: 'high',
             },
           ],
         });
@@ -837,12 +850,15 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     modelHint = null;
     pickerRows = {
       source: 'catalog',
+      effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
       rows: [
         {
           id: 'claude-fable-5',
           wire_id: 'claude-fable-5[1m]',
           is_default: false,
           display_name: null,
+          effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          default_effort: 'high',
         },
       ],
     };
@@ -908,12 +924,15 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
   it('shows the plan default by name once Claude Code reports the default row', async () => {
     pickerRows = {
       source: 'claude_code',
+      effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
       rows: [
         {
           id: 'claude-fable-5',
           wire_id: 'claude-fable-5[1m]',
           is_default: true,
           display_name: null,
+          effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          default_effort: 'high',
         },
       ],
     };
@@ -1054,11 +1073,25 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
     } as AnthropicModel,
   ];
 
+  const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+  function rowsFromCatalog(): ModelPickerRow[] {
+    return catalog.map((m) => ({
+      id: m.id,
+      wire_id: m.id,
+      is_default: false,
+      display_name: null,
+      effort_levels: m.effort_levels,
+      default_effort: m.default_effort,
+    }));
+  }
+
   function setSummaryAndPin(
     fixt: ComponentFixture<ModelSelectorComponent>,
     invoke: ReturnType<typeof vi.fn>,
     model: string,
-    pin: string | null
+    pin: string | null,
+    rows: ModelPickerRow[] | null = rowsFromCatalog()
   ): void {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary')
@@ -1070,8 +1103,16 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
         });
       if (cmd === 'list_anthropic_models') return Promise.resolve(catalog);
       if (cmd === 'get_effort_pin') return Promise.resolve(pin);
+      if (cmd === 'list_model_picker' && rows)
+        return Promise.resolve({ source: 'claude_code', rows, effort_order: EFFORT_ORDER });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
+  }
+
+  function renderedStops(fixt: ComponentFixture<ModelSelectorComponent>): string[] {
+    return fixt.debugElement
+      .queryAll(By.css('[data-testid^="effort-stop-"]'))
+      .map((s) => s.nativeElement.getAttribute('data-testid').replace('effort-stop-', ''));
   }
 
   async function flush(fixt: ComponentFixture<ModelSelectorComponent>): Promise<void> {
@@ -1109,6 +1150,57 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       ).toBeTruthy();
     }
     expect(fixture.debugElement.query(By.css('[data-testid="effort-stop-xhigh"]'))).toBeFalsy();
+  });
+
+  it('shows exactly the stops Claude Code reports for the model, even where the catalog lists more', async () => {
+    const rows = rowsFromCatalog().map((r) =>
+      r.id === 'claude-sonnet-5' ? { ...r, effort_levels: ['low', 'medium', 'high'] } : r
+    );
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'medium', rows);
+    fixture.componentRef.setInput('projectId', 'proj-reported-stops');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    expect(renderedStops(fixture)).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('hides the effort control for a model Claude Code lists without effort support, whatever the catalog says', async () => {
+    const rows = rowsFromCatalog().map((r) =>
+      r.id === 'claude-sonnet-5' ? { ...r, effort_levels: [], default_effort: null } : r
+    );
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'high', rows);
+    fixture.componentRef.setInput('projectId', 'proj-no-effort-row');
+    fixture.detectChanges();
+    await flush(fixture);
+
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
+  });
+
+  it('shows the catalog stops of a legacy row', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', null);
+    fixture.componentRef.setInput('projectId', 'proj-legacy-row');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    expect(renderedStops(fixture)).toEqual(['low', 'medium', 'high', 'max']);
+  });
+
+  it('falls back to the catalog stops when the picker rows are unavailable', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', 'high', null);
+    fixture.componentRef.setInput('projectId', 'proj-no-rows');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    expect(renderedStops(fixture)).toEqual(['low', 'medium', 'high', 'max']);
+  });
+
+  it('shows the model default for an unsupported pin while the slider order is unknown', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', 'xhigh', null);
+    fixture.componentRef.setInput('projectId', 'proj-no-order');
+    await flush(fixture);
+
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+    expect(segment.nativeElement.textContent.trim()).toBe('High');
   });
 
   it('hides the effort segment entirely for a model without effort support (Haiku 4.5)', async () => {

@@ -23,13 +23,23 @@ const CATALOG: AnthropicModel[] = [
 
 const PICKER: ModelPicker = {
   source: 'claude_code',
+  effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
   rows: [
-    { id: 'claude-opus-5', wire_id: 'claude-opus-5[1m]', is_default: true, display_name: null },
+    {
+      id: 'claude-opus-5',
+      wire_id: 'claude-opus-5[1m]',
+      is_default: true,
+      display_name: null,
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'high',
+    },
     {
       id: 'claude-nova-1',
       wire_id: 'claude-nova-1[1m]',
       is_default: false,
       display_name: 'Nova 1',
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'high',
     },
   ],
 };
