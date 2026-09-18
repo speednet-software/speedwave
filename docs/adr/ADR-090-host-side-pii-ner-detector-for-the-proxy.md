@@ -14,7 +14,7 @@ HTTP rather than a `HostBridge`: the bridge skeleton is WebSocket-only and the e
 
 ### Discovery through the lock schema the renderer already trusts
 
-The service writes `<data_dir>/pii-ner.lock.json` in the host worker lock schema (`host_mcp_process::lock`, `LockService::PiiNer`) with its PID, port and token, and keeps it alive with a watchdog; the token persists in `<data_dir>/pii-ner-auth-token`, so a rendered config only changes when the port does. `compose::pii_ner::live_service_in` reads the lock and requires a live PID. `write_proxy_config_in` adds a `ner` section to `proxy.json` only then:
+The service writes `<data_dir>/pii-ner.lock.json` in the host worker lock schema (`host_mcp_process::lock`, `LockService::PiiNer`) with its PID, port and token, and keeps it alive with a watchdog; the token persists in `<data_dir>/pii-ner-auth-token`, so a rendered config only changes when the port does. `compose::pii_ner::live_service_in` reads the lock and requires a live PID. `write_proxy_config_in` adds a `ner` section to `proxy.json` only then, and only when the project's switch (below) is on:
 
 ```json
 "ner": {"url": "http://host.docker.internal:<port>", "token": "...", "min_confidence": 0.6, "labels": [...], "required": false}
@@ -43,6 +43,12 @@ Three filters sit in front of the round trip; all keep one slot per leaf, so the
 - Leaves that are not prose are blanked: `type`, `id`, `tool_use_id`, `media_type`, `data`, `signature`, `url`, `file_id` (`pii::NON_PROSE_LEAF_KEYS`). The rule engine still scans them. Without this an attached image sends megabytes of base64 through the model — thousands of windows, or the 4 MiB cap, which would drop the whole request to rules only.
 - Spans already detected for a text are cached in the proxy for the process lifetime, keyed by the text's length and two per-process randomly seeded hashes, so the cache holds offsets and never request text. Two generations bound it (2048 entries each, a hit promotes the entry back into the young one). A continued conversation therefore pays for its new leaves only, and a client that retries the same body — Claude Code backs off and retries through upstream 429s, dozens of times — pays once.
 - One detector call at a time per proxy (`NerClient::gate`): the host serializes inference anyway, and the caller that waits usually finds its leaves already cached by the call ahead of it. The cache is re-read after the gate for exactly that reason.
+
+### The switch, and who holds it
+
+The detector is off until someone turns it on. Settings, Security carries one checkbox per project next to the policy list (`projects[].policy.ner` in the user config); an absent value is off, so an upgrade never starts sending conversation text to a host process on its own. The whole PII feature gate (ADR-058 beta, or any MDM-forced policy) still sits above it: with PII off, the switch resolves off.
+
+An organization sets `pii_policy.ner_enabled` in `managed-config.json`. Presence is the lock, as everywhere in that file: `true` forces the detector on and enables the PII feature the way a forced policy id does, `false` is a kill-switch for an organization that does not want conversation text leaving the container at all, and an absent key leaves the choice with the user. The resolved pair (`pii_policy::resolve_pii_ner`) drives three things: the checkbox and its lock in Settings, the `ner` section of `proxy.json`, and whether the Desktop runs the detector service at all. The last one matters because loading the model costs memory and a GPU init: `apply_desired_state` starts the service when a project asks for it and stops it when the last one stops, at boot and on every Settings save. `reconcile_compose_port` reads the same resolved switch, so a project with the detector off reconciles against no detector instead of treating the live lock as a stale render.
 
 ### Security gates
 

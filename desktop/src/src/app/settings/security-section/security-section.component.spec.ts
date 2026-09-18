@@ -72,6 +72,8 @@ function baseResponse(overrides: Partial<SecurityPolicyResponse> = {}): Security
     forced_policies: [],
     effective_rules: effectiveRulesFrom(allCategories()),
     custom_policies: [],
+    ner_enabled: false,
+    ner_forced: false,
     ...overrides,
   };
 }
@@ -159,6 +161,53 @@ describe('SecuritySectionComponent', () => {
     expect(
       fixture.nativeElement.querySelector(`[data-testid="security-custom-${key}"]`)
     ).not.toBeNull();
+  });
+
+  describe('on-device detector switch', () => {
+    it('renders the backend state and sends the user selection on save', async () => {
+      setup(baseResponse({ ner_enabled: true }));
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const checkbox = fixture.nativeElement.querySelector(
+        '[data-testid="security-ner-enabled"]'
+      ) as HTMLInputElement;
+      expect(checkbox.checked).toBe(true);
+      expect(checkbox.disabled).toBe(false);
+      expect(fixture.nativeElement.querySelector('[data-testid="security-ner-forced"]')).toBeNull();
+
+      component.toggleNer(checkboxEvent(false));
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await component.save();
+      const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
+      const update = (call?.[1] as { update: SecurityPolicyUpdate }).update;
+      expect(update.ner_enabled).toBe(false);
+    });
+
+    it('an MDM-set switch is locked, badged, and never sent back', async () => {
+      setup(baseResponse({ ner_enabled: true, ner_forced: true }));
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const checkbox = fixture.nativeElement.querySelector(
+        '[data-testid="security-ner-enabled"]'
+      ) as HTMLInputElement;
+      expect(checkbox.checked).toBe(true);
+      expect(checkbox.disabled).toBe(true);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="security-ner-forced"]')
+      ).not.toBeNull();
+
+      component.toggleNer(checkboxEvent(false));
+      expect(component.nerEnabled()).toBe(true);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await component.save();
+      const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
+      const update = (call?.[1] as { update: SecurityPolicyUpdate }).update;
+      expect(update.ner_enabled).toBe(false);
+    });
   });
 
   describe('forced (MDM) policies', () => {

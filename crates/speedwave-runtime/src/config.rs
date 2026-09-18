@@ -856,6 +856,9 @@ pub struct PiiPolicyUserConfig {
     pub policies: Vec<String>,
     /// User-defined policy definitions (selectable via `policies`).
     pub custom_policies: Vec<PiiPolicyDefinition>,
+    /// Neural detector opt-in for this project; absent means off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ner: Option<bool>,
 }
 
 /// A user-defined policy: same shape as a builtin template, defined in config.
@@ -884,6 +887,9 @@ pub struct ManagedPiiPolicyConfig {
     /// Policy ids forced on regardless of the user's own selection.
     #[serde(default)]
     pub forced_policies: Vec<String>,
+    /// Forces the neural detector on or off; presence locks the setting in the UI.
+    #[serde(default)]
+    pub ner_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -948,6 +954,7 @@ struct LegacyCustomPiiPattern {
 struct PiiPolicyUserConfigShape {
     policies: Option<Vec<String>>,
     custom_policies: Option<Vec<PiiPolicyDefinition>>,
+    ner: Option<bool>,
     template_id: Option<String>,
     categories: Option<LegacyCategoryFlags>,
     custom_patterns: Option<Vec<LegacyCustomPiiPattern>>,
@@ -959,7 +966,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
     type Error = String;
 
     fn try_from(raw: PiiPolicyUserConfigShape) -> Result<Self, String> {
-        let is_v2 = raw.policies.is_some() || raw.custom_policies.is_some();
+        let is_v2 = raw.policies.is_some() || raw.custom_policies.is_some() || raw.ner.is_some();
         let has_v1_custom = raw.categories.is_some()
             || raw.custom_patterns.is_some()
             || raw.sensitive_keys.is_some();
@@ -977,6 +984,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
             return Ok(Self {
                 policies: raw.policies.unwrap_or_default(),
                 custom_policies: raw.custom_policies.unwrap_or_default(),
+                ner: raw.ner,
             });
         }
 
@@ -1006,6 +1014,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
                     rules,
                     keywords: Vec::new(),
                 }],
+                ner: None,
             });
         }
 
@@ -1013,6 +1022,7 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
             return Ok(Self {
                 policies: vec![id],
                 custom_policies: Vec::new(),
+                ner: None,
             });
         }
 
@@ -1460,6 +1470,8 @@ pub struct ResolvedClaudeConfig {
     /// per-project (unlike the global telemetry policy), so `render_compose`
     /// propagates the error via `?` in addition to the global boot check.
     pub pii_policy: Result<crate::pii_policy::ResolvedPiiPolicy, String>,
+    /// Whether this project's proxy gets the host PII NER detector (ADR-090).
+    pub pii_ner_enabled: bool,
 }
 
 impl Default for ResolvedClaudeConfig {
@@ -1470,6 +1482,7 @@ impl Default for ResolvedClaudeConfig {
             llm: LlmConfig::default(),
             telemetry: ResolvedTelemetry::default(),
             pii_policy: Ok(crate::pii_policy::ResolvedPiiPolicy::default()),
+            pii_ner_enabled: false,
         }
     }
 }
@@ -1648,17 +1661,19 @@ pub(crate) fn resolve_project_config_in_with_managed(
 
     let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
-    let pii_policy =
-        if crate::pii_policy::pii_feature_enabled(user_config.beta_enabled(), managed_pii_policy) {
-            crate::pii_policy::resolve_pii_policy(
-                user_config
-                    .find_project(project_name)
-                    .and_then(|p| p.policy.as_ref()),
-                managed_pii_policy,
-            )
-        } else {
-            Ok(crate::pii_policy::disabled_policy())
-        };
+    let project_policy = user_config
+        .find_project(project_name)
+        .and_then(|p| p.policy.as_ref());
+    let pii_feature_enabled =
+        crate::pii_policy::pii_feature_enabled(user_config.beta_enabled(), managed_pii_policy);
+    let pii_policy = if pii_feature_enabled {
+        crate::pii_policy::resolve_pii_policy(project_policy, managed_pii_policy)
+    } else {
+        Ok(crate::pii_policy::disabled_policy())
+    };
+    let pii_ner_enabled =
+        crate::pii_policy::resolve_pii_ner(pii_feature_enabled, project_policy, managed_pii_policy)
+            .enabled;
 
     let claude = ResolvedClaudeConfig {
         env,
@@ -1666,6 +1681,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
         llm,
         telemetry,
         pii_policy,
+        pii_ner_enabled,
     };
     (claude, integrations)
 }
@@ -5644,6 +5660,53 @@ mod tests {
     }
 
     #[test]
+    fn detector_switch_round_trips_and_is_absent_when_unset() {
+        let cfg: PiiPolicyUserConfig =
+            serde_json::from_str(r#"{"policies":["gdpr-art32"],"ner":true}"#).unwrap();
+        assert_eq!(cfg.ner, Some(true));
+        assert_eq!(
+            serde_json::to_string(&cfg).unwrap(),
+            r#"{"policies":["gdpr-art32"],"custom_policies":[],"ner":true}"#
+        );
+
+        let off: PiiPolicyUserConfig = serde_json::from_str(r#"{"ner":false}"#).unwrap();
+        assert_eq!(off.ner, Some(false));
+        assert!(off.policies.is_empty());
+
+        let unset: PiiPolicyUserConfig =
+            serde_json::from_str(r#"{"policies":["gdpr-art32"]}"#).unwrap();
+        assert_eq!(unset.ner, None);
+        assert_eq!(
+            serde_json::to_string(&unset).unwrap(),
+            r#"{"policies":["gdpr-art32"],"custom_policies":[]}"#
+        );
+    }
+
+    #[test]
+    fn detector_switch_is_a_v2_field_and_v1_configs_leave_it_unset() {
+        let migrated: PiiPolicyUserConfig =
+            serde_json::from_str(r#"{"template_id":"gdpr-art32"}"#).unwrap();
+        assert_eq!(migrated.ner, None);
+
+        let mixed = serde_json::from_str::<PiiPolicyUserConfig>(
+            r#"{"template_id":"gdpr-art32","ner":true}"#,
+        );
+        assert!(mixed.is_err());
+    }
+
+    #[test]
+    fn managed_pii_policy_reads_the_detector_switch() {
+        let forced: ManagedPiiPolicyConfig =
+            serde_json::from_str(r#"{"ner_enabled":false}"#).unwrap();
+        assert_eq!(forced.ner_enabled, Some(false));
+        assert!(forced.forced_policies.is_empty());
+
+        let absent: ManagedPiiPolicyConfig =
+            serde_json::from_str(r#"{"forced_policies":["strict"]}"#).unwrap();
+        assert_eq!(absent.ner_enabled, None);
+    }
+
+    #[test]
     fn migrates_v1_template_id_only_to_a_single_policy_id() {
         let cfg: PiiPolicyUserConfig =
             serde_json::from_str(r#"{"template_id": "gdpr-art32"}"#).unwrap();
@@ -5858,6 +5921,7 @@ mod tests {
         };
         let managed = ManagedPiiPolicyConfig {
             forced_policies: vec!["gdpr-art32".to_string()],
+            ner_enabled: None,
         };
         let (claude, _) = resolve_project_config_in_with_managed(
             tmp.path(),
@@ -5902,6 +5966,7 @@ mod tests {
         };
         let managed = ManagedPiiPolicyConfig {
             forced_policies: vec!["not-a-real-policy".to_string()],
+            ner_enabled: None,
         };
         let (claude, _) = resolve_project_config_in_with_managed(
             tmp.path(),

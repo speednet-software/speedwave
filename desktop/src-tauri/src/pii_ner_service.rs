@@ -363,6 +363,44 @@ impl PiiNerService {
     }
 }
 
+/// Starts or stops the detector so the running state matches what the projects
+/// and the MDM policy ask for; logs and leaves the state alone on failure.
+pub(crate) fn apply_desired_state(shared: &SharedPiiNer, data_dir: &Path) {
+    apply_state(
+        shared,
+        data_dir,
+        speedwave_runtime::pii_policy::pii_ner_wanted_on_this_host(),
+        production_loader,
+    );
+}
+
+fn apply_state(shared: &SharedPiiNer, data_dir: &Path, wanted: bool, loader: fn() -> Loader) {
+    let mut guard = match shared.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            log::warn!("pii-ner service state is poisoned, leaving the service untouched: {e}");
+            return;
+        }
+    };
+    match (wanted, guard.is_some()) {
+        (true, false) => match PiiNerService::start(data_dir, loader()) {
+            Ok(service) => {
+                log::info!(
+                    "PII NER detector service listening on port {}",
+                    service.port()
+                );
+                *guard = Some(service);
+            }
+            Err(e) => log::error!("PII NER detector service failed to start: {e}"),
+        },
+        (false, true) => {
+            *guard = None;
+            log::info!("PII NER detector service stopped: no project enables it");
+        }
+        _ => {}
+    }
+}
+
 impl Drop for PiiNerService {
     fn drop(&mut self) {
         if let Err(e) = self.stop() {
@@ -538,6 +576,34 @@ mod tests {
         assert!(!lock_path.exists());
         assert!(tmp.path().join(consts::PII_NER_AUTH_TOKEN_FILE).exists());
         service.stop().unwrap();
+    }
+
+    #[test]
+    fn apply_state_starts_when_wanted_and_stops_when_no_project_wants_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loader =
+            || -> Loader { Box::new(|| Ok(Arc::new(FakeDetector) as Arc<dyn SpanDetector>)) };
+        let shared: SharedPiiNer = SharedPiiNer::default();
+        let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
+
+        apply_state(&shared, tmp.path(), false, loader);
+        assert!(shared.lock().unwrap().is_none());
+        assert!(!lock_path.exists());
+
+        apply_state(&shared, tmp.path(), true, loader);
+        let port = shared.lock().unwrap().as_ref().unwrap().port();
+        assert!(lock_path.exists());
+
+        apply_state(&shared, tmp.path(), true, loader);
+        assert_eq!(
+            shared.lock().unwrap().as_ref().unwrap().port(),
+            port,
+            "a second apply must not restart a running service"
+        );
+
+        apply_state(&shared, tmp.path(), false, loader);
+        assert!(shared.lock().unwrap().is_none());
+        assert!(!lock_path.exists());
     }
 
     #[test]

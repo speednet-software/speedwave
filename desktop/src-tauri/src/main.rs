@@ -903,18 +903,10 @@ fn main() {
                     app.handle(),
                 );
 
-                match pii_ner_service::PiiNerService::start(
+                pii_ner_service::apply_desired_state(
+                    &pii_ner,
                     speedwave_runtime::consts::data_dir(),
-                    pii_ner_service::production_loader(),
-                ) {
-                    Ok(service) => {
-                        log::info!("PII NER detector service listening on port {}", service.port());
-                        if let Ok(mut guard) = pii_ner.lock() {
-                            *guard = Some(service);
-                        }
-                    }
-                    Err(e) => log::error!("PII NER detector service failed to start: {e}"),
-                }
+                );
 
                 let script = speedwave_runtime::build::resolve_mcp_os_script();
                 if let Some(script_path) = script {

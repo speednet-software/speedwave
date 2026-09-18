@@ -1,6 +1,6 @@
 # Managed (MDM/org) Policy Config
 
-Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry; the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
+Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`) and the PII policy (`pii_policy`: `forced_policies` for policy ids, `ner_enabled` for the on-device NER detector); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
 
 ## Where the policy lives
 

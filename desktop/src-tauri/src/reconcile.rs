@@ -803,7 +803,9 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             speedwave_runtime::host_mcp_process::lock::LockService::McpOs,
         )
         .map(|lock| lock.port);
-        let ner_port = live_pii_ner_service_in(data_dir).map(|live| live.port);
+        let ner_port = speedwave_runtime::pii_policy::pii_ner_enabled_for_project(&project)
+            .then(|| live_pii_ner_service_in(data_dir).map(|live| live.port))
+            .flatten();
 
         let compose_dir = data_dir.join("compose").join(&project);
         let compose_path = compose_dir.join("compose.yml");

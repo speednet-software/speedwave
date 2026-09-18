@@ -291,7 +291,12 @@ pub fn render_compose_in(
     })?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
-    proxy::write_proxy_config_in(data_dir, project_name, &resolved_config.llm)?;
+    proxy::write_proxy_config_in(
+        data_dir,
+        project_name,
+        &resolved_config.llm,
+        resolved_config.pii_ner_enabled,
+    )?;
     let proxy_config_dir = proxy::proxy_config_dir_in(data_dir, project_name);
     std::fs::create_dir_all(&proxy_config_dir)?;
     let proxy_usage_dir = data_dir.join("usage").join(project_name).join("proxy");
