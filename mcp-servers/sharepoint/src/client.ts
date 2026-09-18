@@ -281,7 +281,7 @@ export class SharePointClient {
     }
 
     if (message.includes('security check failed') || message.includes('traversal')) {
-      return 'Invalid path: security check failed (path traversal not allowed).';
+      return 'Invalid path: security check failed. Use a path relative to the drive root, as listed by listFileIds, with no ".." segment, leading slash or backslash, colon, null byte, or malformed URL encoding.';
     }
 
     if (message.includes('refresh') || message.includes('token')) {

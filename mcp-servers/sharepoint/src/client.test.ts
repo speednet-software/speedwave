@@ -287,6 +287,12 @@ describe('SharePointClient', () => {
       );
     });
 
+    it('names every path rule and listFileIds as the source of a valid path', () => {
+      expect(SharePointClient.formatError(new Error('Invalid path (security check failed)'))).toBe(
+        'Invalid path: security check failed. Use a path relative to the drive root, as listed by listFileIds, with no ".." segment, leading slash or backslash, colon, null byte, or malformed URL encoding.'
+      );
+    });
+
     it('passes other messages through verbatim', () => {
       expect(SharePointClient.formatError(new Error('something else'))).toBe('something else');
     });
