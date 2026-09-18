@@ -46,8 +46,8 @@ fi
 copy_tree() {
   local src="$1" dest="$2"
   mkdir -p "$dest"
-  (cd "$src" && find . -type d \
-      \( -name target -o -name dist -o -name node_modules \) -prune -o ! -type d -print0 |
+  (cd "$src" && find . \( -type d -o -type l \) \
+      \( -iname target -o -iname dist -o -iname node_modules \) -prune -o ! -type d -print0 |
     tar -cf - --null -T -) | { tar -xpmf - -C "$dest" && cat >/dev/null; }
 }
 
