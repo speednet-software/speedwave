@@ -1,10 +1,20 @@
-import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
+import {
+  Injectable,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+  type Signal,
+} from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
+import { ClaudeControlService } from './claude-control.service';
+import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
@@ -12,6 +22,7 @@ import {
   isLocalProvider,
   isTerminalCostSource,
   type LlmConfigResponse,
+  type LlmProviderKind,
   type ResponseUsage,
 } from '../models/llm';
 import {
@@ -250,11 +261,11 @@ export class ChatStateService {
   }
 
   private _model = '';
-  private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
   private _lastContextTokens: number | null = null;
   private _contextWindowSize: number | null = null;
   private _currentProvider: string | null = null;
+  private _activeKind: LlmProviderKind | null = null;
 
   private _persistedContextTokens: number | null = null;
 
@@ -317,12 +328,38 @@ export class ChatStateService {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
+  private control = inject(ClaudeControlService);
+  private planUsage = inject(PlanUsageService);
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
 
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
+
+  /** Reads Claude Code's control data as soon as a session answers `initialize`. */
+  constructor() {
+    effect(() => {
+      const project = this.projectState.activeProject();
+      if (!project || this.control.sessionInfoState(project).state !== 'ready') return;
+      untracked(() => void this.refreshControlData());
+    });
+  }
+
+  private async refreshControlData(): Promise<void> {
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    const project = this.projectState.activeProject();
+    if (!project) return;
+    if (this._activeKind === 'anthropic_oauth') void this.planUsage.refresh(project);
+  }
+
+  private async recordRateLimit(info: RateLimitInfo): Promise<void> {
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    const project = this.projectState.activeProject();
+    if (project && this._activeKind === 'anthropic_oauth') {
+      this.planUsage.recordSignal(project, info);
+    }
+  }
 
   readonly messagesFromState: Signal<readonly ChatMessage[]> = computed(() =>
     stateEntriesToChatMessages(this._state().entries)
@@ -893,17 +930,7 @@ export class ChatStateService {
       }
 
       case 'RateLimit':
-        if (chunk.data.utilization !== null) {
-          this._rateLimit = {
-            status: chunk.data.status,
-            utilization: chunk.data.utilization,
-            resets_at: chunk.data.resets_at,
-          };
-          const cur = this._sessionStats();
-          if (cur) {
-            this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
-          }
-        }
+        void this.recordRateLimit(chunk.data);
         break;
 
       case 'Result': {
@@ -958,7 +985,6 @@ export class ChatStateService {
           usage: chunk.data.usage,
           context_usage: contextUsage,
           model: resolvedModel,
-          rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
@@ -971,6 +997,7 @@ export class ChatStateService {
           this._lastContextTokens = contextTokensFrom(contextUsage);
         }
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
+        void this.refreshControlData();
         break;
       }
 
@@ -1012,6 +1039,7 @@ export class ChatStateService {
         ];
         this._currentBlocks = [];
         this.isStreaming = false;
+        void this.refreshControlData();
         break;
       }
 
@@ -1046,7 +1074,6 @@ export class ChatStateService {
     this.isStreaming = false;
     this._sessionStats.set(null);
     this._model = '';
-    this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._contextWindowSize = null;
   }
@@ -1230,10 +1257,16 @@ export class ChatStateService {
 
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
+      const status = this.projectState.status();
+      const project = this.projectState.activeProject();
+      if (project && (status === 'no_provider' || status === 'auth_required')) {
+        this.planUsage.drop(project);
+      }
       if (this.projectState.status() === 'switching') {
         this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
+        this._activeKind = null;
         this.clearSessionTracking();
         this._pendingModelOverride.set(null);
         this._pendingEffortOverride.set(null);
@@ -1454,6 +1487,12 @@ export class ChatStateService {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
+      const kind = config.providers?.find((p) => p.id === config.active?.provider_id)?.kind ?? null;
+      const project = this.projectState.activeProject();
+      if (project && this._activeKind === 'anthropic_oauth' && kind !== 'anthropic_oauth') {
+        this.planUsage.drop(project);
+      }
+      this._activeKind = kind;
       if (this._persistedContextTokens && !this._sessionStats()?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }

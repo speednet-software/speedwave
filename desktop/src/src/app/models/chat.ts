@@ -40,7 +40,7 @@ export type StreamChunk =
     }
   | {
       chunk_type: 'RateLimit';
-      data: { status: string; utilization: number | null; resets_at: number | null };
+      data: RateLimitInfo;
     }
   | {
       chunk_type: 'UserMessageCommit';
@@ -238,11 +238,17 @@ export interface ChatMessage {
   edited_at?: number;
 }
 
-/** Rate limit info from rate_limit_event. */
+/**
+ * A `rate_limit_event` as the backend parses it: a status signal, never the limits themselves.
+ * `utilization_percent` is 0-100 and absent on most events; `resets_at` is epoch seconds.
+ */
 export interface RateLimitInfo {
   status: string;
-  utilization: number;
+  rate_limit_type: string | null;
+  utilization_percent: number | null;
   resets_at: number | null;
+  overage_status: string | null;
+  is_using_overage: boolean | null;
 }
 
 /** Session cost/usage stats */
@@ -252,7 +258,6 @@ export interface SessionStats {
   usage?: UsageInfo;
   context_usage?: TurnUsage;
   model?: string;
-  rate_limit?: RateLimitInfo;
   context_window_size: number | null;
   total_output_tokens: number;
 }

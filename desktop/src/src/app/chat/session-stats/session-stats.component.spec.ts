@@ -144,22 +144,6 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('67,890');
     });
 
-    it('renders rate-limit block when rate_limit is set, including reset time', () => {
-      const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
-      fixture.componentRef.setInput('stats', {
-        session_id: 'abc',
-        total_cost: 0,
-        rate_limit: { status: 'allowed_warning', utilization: 65, resets_at: resetEpoch },
-        context_window_size: 200000,
-        total_output_tokens: 0,
-      });
-      fixture.detectChanges();
-      const txt = rootText();
-      expect(txt).toContain('limit');
-      expect(txt).toContain('65%');
-      expect(txt).toContain('resets');
-    });
-
     it('renders compact used/max label next to ctx bar', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
@@ -301,17 +285,6 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('0%');
     });
 
-    it('shows rate-limit at 0% when rate_limit is absent', () => {
-      fixture.componentRef.setInput('stats', {
-        session_id: 'abc',
-        total_cost: 0,
-        context_window_size: 200000,
-        total_output_tokens: 0,
-      });
-      fixture.detectChanges();
-      expect(rootText()).toContain('limit');
-    });
-
     it('shows chat cost as $0.0000 when total_cost is a real 0 (free/local)', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
@@ -335,30 +308,6 @@ describe('SessionStatsComponent', () => {
       expect(rootText()).toContain('chat:');
       expect(rootText()).toContain('—');
       expect(rootText()).not.toContain('$0.0000');
-    });
-
-    it('hides the limit gauge for a local model (unknown window), like ctx', () => {
-      fixture.componentRef.setInput('stats', {
-        session_id: 'abc',
-        total_cost: 0,
-        usage: { input_tokens: 10, output_tokens: 5 },
-        context_window_size: null,
-        total_output_tokens: 5,
-      });
-      fixture.detectChanges();
-      expect(rootText()).not.toContain('limit');
-      expect(rootText()).not.toContain('ctx');
-    });
-
-    it('shows the limit gauge for a cloud session (known window) even with no rate-limit data', () => {
-      fixture.componentRef.setInput('stats', {
-        session_id: 'abc',
-        total_cost: 0,
-        context_window_size: 200000,
-        total_output_tokens: 0,
-      });
-      fixture.detectChanges();
-      expect(rootText()).toContain('limit');
     });
 
     it('renders in/out without cr/cw breakdown when cache tokens are absent', () => {
@@ -445,44 +394,64 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        rate_limit: { status: 'allowed', utilization: 60, resets_at: null },
+        context_usage: {
+          input_tokens: 120000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.rlBarColor()).toBe('bg-[var(--amber)]');
+      expect(component.ctxBarColor()).toBe('bg-[var(--amber)]');
     });
 
     it('applies amber at boundary 50', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        rate_limit: { status: 'allowed', utilization: 50, resets_at: null },
+        context_usage: {
+          input_tokens: 100000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.rlBarColor()).toBe('bg-[var(--amber)]');
+      expect(component.ctxBarColor()).toBe('bg-[var(--amber)]');
     });
 
     it('applies red-500 for ≥77%', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        rate_limit: { status: 'rejected', utilization: 90, resets_at: null },
+        context_usage: {
+          input_tokens: 180000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.rlBarColor()).toBe('bg-red-500');
+      expect(component.ctxBarColor()).toBe('bg-red-500');
     });
 
     it('applies red-500 at boundary 77', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        rate_limit: { status: 'rejected', utilization: 77, resets_at: null },
+        context_usage: {
+          input_tokens: 154000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.rlBarColor()).toBe('bg-red-500');
+      expect(component.ctxBarColor()).toBe('bg-red-500');
     });
 
     it('rounds 30% → 2 filled (out of 5)', () => {
@@ -523,22 +492,32 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        rate_limit: { status: 'rejected', utilization: 100, resets_at: null },
+        context_usage: {
+          input_tokens: 200000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.rlFilled()).toBe(5);
+      expect(component.ctxFilled()).toBe(5);
     });
 
     it('fills 0 segments at 0%', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        rate_limit: { status: 'allowed', utilization: 0, resets_at: null },
+        context_usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000,
         total_output_tokens: 0,
       });
-      expect(component.rlFilled()).toBe(0);
+      expect(component.ctxFilled()).toBe(0);
     });
   });
 
@@ -556,21 +535,6 @@ describe('SessionStatsComponent', () => {
       const bars = el.querySelectorAll('[aria-label^="Context:"]');
       expect(bars.length).toBe(1);
       expect(bars[0].getAttribute('aria-label')).toMatch(/Context: \d+% used/);
-    });
-
-    it('sets aria-label on rate-limit bar describing percentage', () => {
-      fixture.componentRef.setInput('stats', {
-        session_id: 'abc',
-        total_cost: 0,
-        rate_limit: { status: 'allowed', utilization: 42, resets_at: null },
-        context_window_size: 200000,
-        total_output_tokens: 0,
-      });
-      fixture.detectChanges();
-      const el = fixture.nativeElement as HTMLElement;
-      const bars = el.querySelectorAll('[aria-label^="Rate limit:"]');
-      expect(bars.length).toBe(1);
-      expect(bars[0].getAttribute('aria-label')).toBe('Rate limit: 42% used');
     });
   });
 

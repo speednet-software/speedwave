@@ -19,6 +19,7 @@ import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
+import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
@@ -1218,7 +1219,6 @@ describe('ChatStateService', () => {
         total_output_tokens: 50,
         context_window_size: 200000,
         model: undefined,
-        rate_limit: undefined,
       });
     });
 
@@ -2330,57 +2330,183 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('RateLimit chunk handling', () => {
-    it('RateLimit with utilization updates sessionStats immediately if present', () => {
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-      service.handleStreamChunk({
-        chunk_type: 'Result',
-        data: { session_id: 'abc', total_cost: 0.05 },
-      });
-      expect(service.sessionStats?.rate_limit).toBeUndefined();
+  describe('plan usage limits (get_usage) and the rate_limit_event signal', () => {
+    const NOW = Date.parse('2026-09-18T10:00:00Z');
+    const WARNING = {
+      status: 'allowed_warning',
+      rate_limit_type: 'five_hour',
+      utilization_percent: 60,
+      resets_at: 1738425600,
+      overage_status: null,
+      is_using_overage: false,
+    };
+    let usageCalls: number;
 
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed_warning', utilization: 65, resets_at: 1738425600 },
-      });
+    function useProvider(kind: string): void {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) => {
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: kind.startsWith('anthropic') ? 'anthropic' : 'local',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [{ id: 'active', kind }],
+            active: { provider_id: 'active' },
+          };
+        }
+        if (cmd === 'get_plan_usage') {
+          usageCalls += 1;
+          return {
+            subscription_type: 'max',
+            rate_limits_available: true,
+            rate_limits: {
+              five_hour: { utilization: 15, resets_at: '2026-09-18T12:40:00.744446+00:00' },
+              seven_day: { utilization: 70, resets_at: '2026-09-22T21:00:00.744471+00:00' },
+              seven_day_opus: null,
+              seven_day_sonnet: null,
+              model_scoped: [],
+              extra_usage: null,
+            },
+          };
+        }
+        return base(cmd, args);
+      };
+    }
 
-      expect(service.sessionStats?.rate_limit).toEqual({
-        status: 'allowed_warning',
-        utilization: 65,
-        resets_at: 1738425600,
-      });
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    }
+
+    beforeEach(() => {
+      usageCalls = 0;
+      TestBed.inject(ProjectStateService).activeProject.set('test');
     });
 
-    it('RateLimit before Result is included when Result arrives', () => {
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed', utilization: 30, resets_at: null },
-      });
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-      service.handleStreamChunk({
-        chunk_type: 'Result',
-        data: { session_id: 'abc', total_cost: 0.05 },
-      });
+    it('reads the limits as soon as the session answers initialize', async () => {
+      useProvider('anthropic_oauth');
 
-      expect(service.sessionStats?.rate_limit).toEqual({
-        status: 'allowed',
-        utilization: 30,
-        resets_at: null,
+      mockTauri.dispatchEvent('chat_session_info', {
+        project: 'test',
+        status: { state: 'ready', info: { models: [], account: {} } },
       });
+      TestBed.tick();
+      await settle();
+
+      expect(usageCalls).toBe(1);
+      const windows = TestBed.inject(PlanUsageService).limits('test', NOW)?.windows ?? [];
+      expect(windows.map((w) => [w.key, w.utilization])).toEqual([
+        ['five_hour', 15],
+        ['seven_day', 70],
+      ]);
     });
 
-    it('RateLimit with null utilization does not store rate limit', () => {
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed', utilization: null, resets_at: null },
-      });
+    it('re-reads the limits after every completed turn', async () => {
+      useProvider('anthropic_oauth');
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: { session_id: 'abc', total_cost: 0.05 },
       });
+      await settle();
 
-      expect(service.sessionStats?.rate_limit).toBeUndefined();
+      expect(usageCalls).toBe(1);
+    });
+
+    it('re-reads the limits after a turn that ended in an error', async () => {
+      useProvider('anthropic_oauth');
+
+      service.handleStreamChunk({ chunk_type: 'Error', data: { content: 'boom' } });
+      await settle();
+
+      expect(usageCalls).toBe(1);
+    });
+
+    it('stores a 60% warning as the status signal and triggers a refresh', async () => {
+      useProvider('anthropic_oauth');
+
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(WARNING);
+      expect(usageCalls).toBe(1);
+    });
+
+    it('keeps the status and reset time of an event that carries no utilization', async () => {
+      useProvider('anthropic_oauth');
+      const allowed = { ...WARNING, status: 'allowed', utilization_percent: null };
+
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: allowed });
+      await settle();
+
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(allowed);
+      expect(usageCalls).toBe(1);
+    });
+
+    it('keeps the limits across a new conversation', async () => {
+      useProvider('anthropic_oauth');
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+
+      service.resetForNewConversation();
+
+      const planUsage = TestBed.inject(PlanUsageService);
+      expect(planUsage.limits('test', NOW)?.windows.length).toBe(2);
+      expect(planUsage.lastSignal('test')).toEqual(WARNING);
+    });
+
+    it('never asks for plan limits with an API key: there are none', async () => {
+      useProvider('anthropic_api_key');
+
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      await settle();
+
+      expect(usageCalls).toBe(0);
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).toBeNull();
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toBeNull();
+    });
+
+    it('never sends a control request for a proxy-routed provider', async () => {
+      useProvider('local');
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      await settle();
+
+      expect(usageCalls).toBe(0);
+    });
+
+    it('drops the limits on logout', async () => {
+      useProvider('anthropic_oauth');
+      const projectState = TestBed.inject(ProjectStateService);
+      await service.init();
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).not.toBeNull();
+
+      projectState.forceUnconfigured();
+
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).toBeNull();
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toBeNull();
+    });
+
+    it('drops the limits when the provider stops being an Anthropic sign-in', async () => {
+      useProvider('anthropic_oauth');
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).not.toBeNull();
+
+      useProvider('local');
+      await service.refreshLlmConfigCache();
+
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).toBeNull();
     });
 
     it('output tokens accumulate across turns', () => {
@@ -2405,22 +2531,6 @@ describe('ChatStateService', () => {
         },
       });
       expect(service.sessionStats?.total_output_tokens).toBe(153);
-    });
-
-    it('resetForNewConversation clears rate limit', () => {
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed', utilization: 50, resets_at: 123 },
-      });
-      service.resetForNewConversation();
-
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-      service.handleStreamChunk({
-        chunk_type: 'Result',
-        data: { session_id: 'abc', total_cost: 0.05 },
-      });
-
-      expect(service.sessionStats?.rate_limit).toBeUndefined();
     });
   });
 
@@ -3105,9 +3215,23 @@ describe('ChatStateService', () => {
       expect(lateText).toBe(false);
     });
 
-    it('RateLimit chunk dispatched after Result still updates sessionStats.rate_limit', async () => {
+    it('RateLimit chunk dispatched between turns still reaches the plan usage signal', async () => {
       mockTauri.isRunningInTauri = () => true;
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'get_llm_config'
+          ? {
+              provider: 'anthropic',
+              model: null,
+              base_url: null,
+              default_base_url: null,
+              providers: [{ id: 'anthropic', kind: 'anthropic_oauth' }],
+              active: { provider_id: 'anthropic' },
+            }
+          : base(cmd, args);
+      TestBed.inject(ProjectStateService).activeProject.set('test');
       await service.init();
+      await service.refreshLlmConfigCache();
       service.isStreaming = true;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Result',
@@ -3121,17 +3245,18 @@ describe('ChatStateService', () => {
       });
       expect(service.isStreaming).toBe(false);
       expect(service.sessionStats).not.toBeNull();
-      const before = service.sessionStats;
-      mockTauri.dispatchEvent('chat_stream', {
-        chunk_type: 'RateLimit',
-        data: { status: 'ok', utilization: 0.42, resets_at: '2026-04-18T12:00:00Z' },
-      });
-      expect(service.sessionStats).not.toBe(before);
-      expect(service.sessionStats?.rate_limit).toEqual({
-        status: 'ok',
-        utilization: 0.42,
-        resets_at: '2026-04-18T12:00:00Z',
-      });
+      const signal = {
+        status: 'rejected',
+        rate_limit_type: 'five_hour',
+        utilization_percent: 100,
+        resets_at: 1776513600,
+        overage_status: 'rejected',
+        is_using_overage: false,
+      };
+      mockTauri.dispatchEvent('chat_stream', { chunk_type: 'RateLimit', data: signal });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(signal);
     });
 
     it('SystemInit chunk dispatched between turns updates the model', async () => {
@@ -3432,7 +3557,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3467,7 +3591,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3496,7 +3619,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3586,7 +3708,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3626,7 +3747,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3659,7 +3779,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3692,7 +3811,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3700,7 +3818,14 @@ describe('ChatStateService', () => {
       service.isStreaming = false;
       service.handleStreamChunk({
         chunk_type: 'RateLimit',
-        data: { status: 'ok', utilization: null, resets_at: null },
+        data: {
+          status: 'allowed',
+          rate_limit_type: null,
+          utilization_percent: null,
+          resets_at: null,
+          overage_status: null,
+          is_using_overage: null,
+        },
       });
 
       expect(service.retryEnabled()).toBe(false);
@@ -3736,7 +3861,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3744,7 +3868,14 @@ describe('ChatStateService', () => {
       service.isStreaming = false;
       service.handleStreamChunk({
         chunk_type: 'RateLimit',
-        data: { status: 'ok', utilization: null, resets_at: null },
+        data: {
+          status: 'allowed',
+          rate_limit_type: null,
+          utilization_percent: null,
+          resets_at: null,
+          overage_status: null,
+          is_using_overage: null,
+        },
       });
 
       expect(service.retryEnabled()).toBe(true);
@@ -3902,7 +4033,6 @@ describe('ChatStateService', () => {
           context_used: 0,
           total_output_tokens: 0,
           context_window_size: 200_000,
-          rate_limit: null,
         } as never,
       });
     }

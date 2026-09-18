@@ -37,8 +37,6 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
         <span class="text-[var(--accent)]">{{ formatNum(stats()?.total_output_tokens ?? 0) }}</span>
       </span>
 
-      <!-- ctx + limit are cloud-session meters: shown (at 0% until data arrives)
-           when the context window is known, hidden for local models (ADR-041). -->
       @if (hasKnownWindow()) {
         <span
           class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
@@ -62,30 +60,6 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
           <span class="text-[var(--ink-dim)]">{{ ctxPct() }}%</span>
           @if (ctxUsedMax(); as um) {
             <span>· {{ um }}</span>
-          }
-        </span>
-        <span
-          class="hidden items-center gap-1.5 whitespace-nowrap md:inline-flex"
-          [appTooltip]="
-            'Rate limit: ' +
-            rlPct() +
-            '% used' +
-            (rlResetTime() ? ' · resets ' + rlResetTime() : '')
-          "
-          placement="top"
-        >
-          limit
-          <span class="flex gap-px" [attr.aria-label]="'Rate limit: ' + rlPct() + '% used'">
-            @for (i of barIndices; track i) {
-              <span
-                class="inline-block h-1.5 w-1.5"
-                [class]="i < rlFilled() ? rlBarColor() : 'bg-[var(--line-strong)]'"
-              ></span>
-            }
-          </span>
-          <span class="text-[var(--ink-dim)]">{{ rlPct() }}%</span>
-          @if (rlResetTime()) {
-            <span>· resets {{ rlResetTime() }}</span>
           }
         </span>
       }
@@ -154,10 +128,7 @@ export class SessionStatsComponent {
     return Math.min(100, Math.round((total / windowSize) * 100));
   });
 
-  /**
-   * True for a cloud session (context window known) — gates the ctx + limit
-   * meters, which are meaningless for a local model with an unknown window.
-   */
+  /** True when the context window is known; the ctx meter is meaningless without one. */
   readonly hasKnownWindow = computed<boolean>(() => {
     const windowSize = this.stats()?.context_window_size;
     return !!windowSize && windowSize > 0;
@@ -175,26 +146,6 @@ export class SessionStatsComponent {
     const windowSize = this.stats()?.context_window_size;
     if (total <= 0 || !windowSize || windowSize <= 0) return '';
     return `${formatContextLabel(total)}/${formatContextLabel(windowSize)}`;
-  });
-
-  /** Rate-limit utilisation as an integer percentage (0–100). */
-  readonly rlPct = computed<number>(() => {
-    const stats = this.stats();
-    return Math.round(stats?.rate_limit?.utilization ?? 0);
-  });
-
-  /** Filled segments (0–5) for the rate-limit bar. */
-  readonly rlFilled = computed<number>(() => bucketFilled(this.rlPct()));
-
-  /** Tailwind class for filled rate-limit-bar segments. */
-  readonly rlBarColor = computed<string>(() => barColor(this.rlPct()));
-
-  /** Reset time for rate limit formatted as HH:MM (local), or empty string. */
-  readonly rlResetTime = computed<string>(() => {
-    const epoch = this.stats()?.rate_limit?.resets_at;
-    if (!epoch) return '';
-    const d = new Date(epoch * 1000);
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
   });
 
   /**

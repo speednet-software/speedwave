@@ -75,8 +75,11 @@ pub enum StreamChunk {
     },
     RateLimit {
         status: String,
-        utilization: Option<f64>,
+        rate_limit_type: Option<String>,
+        utilization_percent: Option<f64>,
         resets_at: Option<u64>,
+        overage_status: Option<String>,
+        is_using_overage: Option<bool>,
     },
     UserMessageCommit {
         uuid: String,
@@ -972,25 +975,35 @@ impl StreamParser {
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
-        let utilization = info["utilization"].as_f64();
+        let rate_limit_type = info["rateLimitType"].as_str().map(str::to_string);
+        let utilization_percent = info["utilization"]
+            .as_f64()
+            .and_then(utilization_fraction_to_percent);
         let resets_at = info["resetsAt"]
             .as_u64()
             .or_else(|| info["resets_at"].as_u64());
+        let overage_status = info["overageStatus"].as_str().map(str::to_string);
+        let is_using_overage = info["isUsingOverage"].as_bool();
 
         let log_entry = Some(LogEntry {
             prefix: "RATE_LIMIT",
             message: format!(
-                "status={status} utilization={} resets_at={}",
-                utilization.map_or("none".to_string(), |v| format!("{v:.1}")),
+                "status={status} type={} utilization={} resets_at={} overage={}",
+                rate_limit_type.as_deref().unwrap_or("none"),
+                utilization_percent.map_or("none".to_string(), |v| format!("{v:.0}%")),
                 resets_at.map_or("none".to_string(), |v| v.to_string()),
+                overage_status.as_deref().unwrap_or("none"),
             ),
         });
 
         (
             Some(StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
+                overage_status,
+                is_using_overage,
             }),
             log_entry,
         )
@@ -1073,6 +1086,15 @@ impl StreamParser {
         } else {
             (None, log_entry)
         }
+    }
+}
+
+fn utilization_fraction_to_percent(fraction: f64) -> Option<f64> {
+    if (0.0..=1.0).contains(&fraction) {
+        Some(fraction * 100.0)
+    } else {
+        log::debug!("ignored a rate_limit_event utilization outside the 0-1 fraction: {fraction}");
+        None
     }
 }
 
@@ -4916,28 +4938,77 @@ mod tests {
         assert_eq!(entry.message, "init: model=claude-opus-4-6");
     }
 
-    #[test]
-    fn parse_rate_limit_event_extracts_fields() {
+    fn parse_rate_limit(line: &str) -> (StreamChunk, LogEntry) {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, log_entry) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+        (
+            chunks.into_iter().next().expect("a RateLimit chunk"),
+            log_entry.expect("a RATE_LIMIT log entry"),
+        )
+    }
+
+    #[test]
+    fn parse_rate_limit_event_stores_a_warning_fraction_as_percent() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1738425600,"rateLimitType":"five_hour","utilization":0.6,"overageStatus":"rejected","isUsingOverage":false},"uuid":"u","session_id":"s"}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                overage_status,
+                is_using_overage,
+            } => {
                 assert_eq!(status, "allowed_warning");
-                assert!((utilization.unwrap() - 73.5).abs() < f64::EPSILON);
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert!((utilization_percent.unwrap() - 60.0).abs() < 1e-9);
                 assert_eq!(resets_at, Some(1738425600));
+                assert_eq!(overage_status.as_deref(), Some("rejected"));
+                assert_eq!(is_using_overage, Some(false));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
-        let entry = log_entry.unwrap();
         assert_eq!(entry.prefix, "RATE_LIMIT");
-        assert!(entry.message.contains("73.5"));
+        assert!(
+            entry.message.contains("utilization=60%"),
+            "{}",
+            entry.message
+        );
+        assert!(
+            entry.message.contains("type=five_hour"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_ignores_a_utilization_that_is_not_a_fraction() {
+        for raw in ["73.5", "1.01", "-0.1"] {
+            let line = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed_warning","utilization":{raw}}}}}"#
+            );
+            match parse_rate_limit(&line).0 {
+                StreamChunk::RateLimit {
+                    utilization_percent,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(utilization_percent, None, "{raw}");
+                    assert_eq!(status, "allowed_warning");
+                }
+                other => panic!("expected RateLimit, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn utilization_fraction_bounds_map_to_zero_and_one_hundred_percent() {
+        assert_eq!(utilization_fraction_to_percent(0.0), Some(0.0));
+        assert_eq!(utilization_fraction_to_percent(1.0), Some(100.0));
+        assert_eq!(utilization_fraction_to_percent(f64::NAN), None);
     }
 
     #[test]
@@ -4955,41 +5026,76 @@ mod tests {
     }
 
     #[test]
-    fn parse_rate_limit_event_without_utilization() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+    fn parse_rate_limit_event_without_utilization_keeps_status_type_and_reset_time() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1738425600,"rateLimitType":"seven_day","overageStatus":"rejected","isUsingOverage":false}}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                ..
+            } => {
                 assert_eq!(status, "allowed");
-                assert!(utilization.is_none());
-                assert!(resets_at.is_none());
+                assert_eq!(rate_limit_type.as_deref(), Some("seven_day"));
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        assert!(
+            entry.message.contains("utilization=none"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_with_only_a_status_leaves_every_other_field_absent() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
+                status,
+                rate_limit_type,
+                utilization_percent,
+                resets_at,
+                overage_status,
+                is_using_overage,
+            } => {
+                assert_eq!(status, "allowed");
+                assert_eq!(rate_limit_type, None);
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, None);
+                assert_eq!(overage_status, None);
+                assert_eq!(is_using_overage, None);
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_rate_limit_event_rejected() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resetsAt":1738430000}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
-        match chunk {
-            Some(StreamChunk::RateLimit {
+    fn parse_rate_limit_event_rejected_at_the_limit() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1738430000,"rateLimitType":"five_hour","utilization":1.0,"overageStatus":"allowed","isUsingOverage":true}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
+                is_using_overage,
+                overage_status,
                 ..
-            }) => {
+            } => {
                 assert_eq!(status, "rejected");
-                assert!((utilization.unwrap() - 100.0).abs() < f64::EPSILON);
+                assert!((utilization_percent.unwrap() - 100.0).abs() < 1e-9);
+                assert_eq!(overage_status.as_deref(), Some("allowed"));
+                assert_eq!(is_using_overage, Some(true));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
@@ -4998,24 +5104,89 @@ mod tests {
     #[test]
     fn stream_chunk_rate_limit_round_trips() {
         let chunk = StreamChunk::RateLimit {
-            status: "allowed".to_string(),
-            utilization: Some(42.5),
+            status: "allowed_warning".to_string(),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization_percent: Some(42.0),
             resets_at: Some(1738425600),
+            overage_status: None,
+            is_using_overage: Some(false),
         };
-        let json = serde_json::to_string(&chunk).unwrap();
-        let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["chunk_type"], "RateLimit");
+        let mut keys: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "is_using_overage",
+                "overage_status",
+                "rate_limit_type",
+                "resets_at",
+                "status",
+                "utilization_percent"
+            ]
+        );
+        let deserialized: StreamChunk = serde_json::from_value(json).unwrap();
         match deserialized {
             StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
                 resets_at,
+                ..
             } => {
-                assert_eq!(status, "allowed");
-                assert!((utilization.unwrap() - 42.5).abs() < f64::EPSILON);
+                assert_eq!(status, "allowed_warning");
+                assert!((utilization_percent.unwrap() - 42.0).abs() < f64::EPSILON);
                 assert_eq!(resets_at, Some(1738425600));
             }
             other => panic!("expected RateLimit after round-trip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limit_chunk_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "export interface RateLimitInfo {";
+        let idx = ts
+            .find(marker)
+            .expect("chat.ts must declare `export interface RateLimitInfo`");
+        let body = ts[idx + marker.len()..]
+            .split("\n}")
+            .next()
+            .expect("RateLimitInfo must close");
+        let mut ts_fields: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts_fields.sort_unstable();
+        let chunk = StreamChunk::RateLimit {
+            status: "allowed".to_string(),
+            rate_limit_type: None,
+            utilization_percent: None,
+            resets_at: None,
+            overage_status: None,
+            is_using_overage: None,
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        let mut rust_fields: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust_fields.sort_unstable();
+        assert_eq!(rust_fields, ts_fields);
+        let compact: String = ts.split_whitespace().collect();
+        assert!(
+            compact.contains("chunk_type:'RateLimit';data:RateLimitInfo"),
+            "the RateLimit chunk must carry RateLimitInfo"
+        );
     }
 
     #[test]
