@@ -1217,7 +1217,7 @@ describe('ChatStateService', () => {
         total_cost: 0.05,
         usage: { input_tokens: 100, output_tokens: 50 },
         total_output_tokens: 50,
-        context_window_size: 200000,
+        context_window_size: null,
         model: undefined,
       });
     });
@@ -4393,58 +4393,64 @@ describe('ChatStateService', () => {
 
   describe('resolveContextWindow priority chain', () => {
     type Internal = {
-      resolveContextWindow: (live: number | undefined, model: string | undefined) => number;
+      resolveContextWindow: (live: number | undefined) => number | null;
       _persistedContextTokens: number | null;
-      _contextWindowSize: number;
+      _contextWindowSize: number | null;
+      _currentProvider: string | null;
+      _contextSnapshot: { max_tokens: number } | null;
     };
 
-    it('prefers the live stream value over every fallback', () => {
+    it('prefers the live stream value over every fallback for a routed provider', () => {
       const internal = service as unknown as Internal;
+      internal._currentProvider = 'openrouter';
       internal._persistedContextTokens = 16_384;
       internal._contextWindowSize = 8_192;
-      expect(internal.resolveContextWindow(500_000, 'claude-opus-4-7')).toBe(500_000);
+      expect(internal.resolveContextWindow(500_000)).toBe(500_000);
     });
 
-    it('falls back to the Anthropic SSOT when no live value is available', async () => {
-      const anthropic = TestBed.inject(AnthropicModelsService);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_anthropic_models') {
-          return [
-            {
-              id: 'claude-opus-4-7',
-              family: 'Opus 4.7',
-              context_tokens: 1_000_000,
-              latest: true,
-              premium: true,
-            },
-          ];
-        }
-        return undefined;
-      };
-      await anthropic.list();
+    it('falls back to persisted context_tokens when the live value is absent', () => {
       const internal = service as unknown as Internal;
-      expect(internal.resolveContextWindow(undefined, 'claude-opus-4-7')).toBe(1_000_000);
-    });
-
-    it('falls back to persisted context_tokens when SSOT and live are absent', () => {
-      const internal = service as unknown as Internal;
+      internal._currentProvider = 'local';
       internal._persistedContextTokens = 32_768;
       internal._contextWindowSize = 8_192;
-      expect(internal.resolveContextWindow(undefined, 'unknown-model')).toBe(32_768);
+      expect(internal.resolveContextWindow(undefined)).toBe(32_768);
     });
 
     it('falls back to previous _contextWindowSize when persisted is also absent', () => {
       const internal = service as unknown as Internal;
+      internal._currentProvider = 'openrouter';
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 65_536;
-      expect(internal.resolveContextWindow(undefined, 'unknown-model')).toBe(65_536);
+      expect(internal.resolveContextWindow(undefined)).toBe(65_536);
     });
 
-    it('falls back to DEFAULT_CONTEXT_TOKENS as the last resort', () => {
+    it('falls back to DEFAULT_CONTEXT_TOKENS as the last resort for OpenRouter only', () => {
       const internal = service as unknown as Internal;
+      internal._currentProvider = 'openrouter';
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 0;
-      expect(internal.resolveContextWindow(undefined, undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+      expect(internal.resolveContextWindow(undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+
+    it('never invents a window for a local model or before the provider is known', () => {
+      const internal = service as unknown as Internal;
+      internal._persistedContextTokens = null;
+      internal._contextWindowSize = null;
+      internal._currentProvider = 'local';
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+      internal._currentProvider = null;
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+    });
+
+    it("Anthropic: Claude Code's maxTokens wins over the result stream and no default exists", () => {
+      const internal = service as unknown as Internal;
+      internal._currentProvider = 'anthropic';
+      internal._persistedContextTokens = 32_768;
+      internal._contextWindowSize = null;
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+      expect(internal.resolveContextWindow(1_000_000)).toBe(1_000_000);
+      internal._contextSnapshot = { max_tokens: 200_000 };
+      expect(internal.resolveContextWindow(1_000_000)).toBe(200_000);
     });
   });
 
@@ -4476,23 +4482,19 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.model).toBe('claude-fable-5');
     });
 
-    it('falls back to the Anthropic SSOT window when context_window_size is absent', async () => {
-      const anthropic = TestBed.inject(AnthropicModelsService);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_anthropic_models') {
-          return [
-            {
-              id: 'claude-fable-5',
-              family: 'Fable 5',
-              context_tokens: 1_000_000,
-              latest: false,
-              premium: true,
-            },
-          ];
-        }
-        return undefined;
-      };
-      await anthropic.list();
+    it('Anthropic: a result without a window shows no max instead of the catalog window or 200k', async () => {
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_llm_config'
+          ? {
+              provider: 'anthropic',
+              model: null,
+              base_url: null,
+              default_base_url: null,
+              providers: [{ id: 'anthropic', kind: 'anthropic_oauth' }],
+              active: { provider_id: 'anthropic' },
+            }
+          : undefined;
+      await service.refreshLlmConfigCache();
 
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -4504,8 +4506,237 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', total_cost: 0.5, model: 'claude-fable-5' },
       });
 
+      expect(service.sessionStats?.context_window_size).toBeNull();
+    });
+  });
+
+  describe('context usage from get_context_usage (Anthropic)', () => {
+    const SNAPSHOT_1M = {
+      model: 'claude-opus-5[1m]',
+      total_tokens: 46_567,
+      max_tokens: 1_000_000,
+      percentage: 5,
+      categories: [{ name: 'System prompt', tokens: 3_902 }],
+    };
+    const SNAPSHOT_HAIKU = {
+      model: 'claude-haiku-4-5',
+      total_tokens: 62_767,
+      max_tokens: 200_000,
+      percentage: 31,
+      categories: [{ name: 'System prompt', tokens: 8_257 }],
+    };
+    let snapshot: unknown;
+    let contextCalls: number;
+
+    function useKind(kind: string): void {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: kind.startsWith('anthropic') ? 'anthropic' : 'openrouter',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [{ id: 'active', kind }],
+            active: { provider_id: 'active' },
+          };
+        }
+        if (cmd === 'get_context_usage') {
+          contextCalls += 1;
+          if (snapshot instanceof Error) throw snapshot;
+          return snapshot;
+        }
+        return undefined;
+      };
+    }
+
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    }
+
+    function sessionReady(): void {
+      mockTauri.dispatchEvent('chat_session_info', {
+        project: 'test',
+        status: { state: 'ready', info: { models: [], account: {} } },
+      });
+      TestBed.tick();
+    }
+
+    beforeEach(() => {
+      snapshot = SNAPSHOT_1M;
+      contextCalls = 0;
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+    });
+
+    it('shows used and max before the first turn of a fresh session', async () => {
+      useKind('anthropic_oauth');
+
+      sessionReady();
+      await settle();
+
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
       expect(service.sessionStats?.context_window_size).toBe(1_000_000);
-      expect(service.sessionStats?.context_window_size).not.toBe(DEFAULT_CONTEXT_TOKENS);
+      expect(service.sessionStats?.session_id).toBe('');
+    });
+
+    it('also serves an API-key session: the context is not a plan limit', async () => {
+      useKind('anthropic_api_key');
+
+      sessionReady();
+      await settle();
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('keeps the seeded window when SystemInit later brings the session id', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-5[1m]', session_id: 'sess-1' },
+      });
+
+      expect(service.sessionStats?.session_id).toBe('sess-1');
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('re-reads the context after every completed turn and keeps it in the new stats', async () => {
+      useKind('anthropic_oauth');
+      await service.refreshLlmConfigCache();
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05, context_window_size: 1_000_000 },
+      });
+      await settle();
+
+      expect(contextCalls).toBe(1);
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
+      expect(service.sessionStats?.session_id).toBe('abc');
+    });
+
+    it('after a switch from a 1M model to Haiku the window is 200k before the next turn ends', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-haiku-4-5' },
+      });
+      expect(service.sessionStats?.context_window_size).toBeNull();
+      expect(service.sessionStats?.context).toBeUndefined();
+
+      snapshot = SNAPSHOT_HAIKU;
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0 },
+      });
+      await settle();
+
+      expect(service.sessionStats?.context_window_size).toBe(200_000);
+      expect(service.sessionStats?.context?.total_tokens).toBe(62_767);
+    });
+
+    it('an effort chip leaves the window alone', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'effort', argument: 'high' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('with get_context_usage failing the window comes from the result, and none is shown before it', async () => {
+      useKind('anthropic_oauth');
+      snapshot = new Error("control request 'get_context_usage' got no response within 5000 ms");
+
+      sessionReady();
+      await settle();
+      expect(service.sessionStats).toBeNull();
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0, context_window_size: 1_000_000 },
+      });
+      await settle();
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+      expect(service.sessionStats?.context).toBeUndefined();
+    });
+
+    it('drops a stale snapshot when a later read fails, so the result stream feeds the meter', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
+
+      snapshot = new Error('chat session is busy');
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0, context_window_size: 1_000_000 },
+      });
+      await settle();
+
+      expect(service.sessionStats?.context).toBeUndefined();
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('ignores an answer that arrives after a new conversation started', async () => {
+      useKind('anthropic_oauth');
+      await service.refreshLlmConfigCache();
+      let release!: (v: unknown) => void;
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'get_context_usage' ? new Promise((r) => (release = r)) : base(cmd, args);
+
+      sessionReady();
+      await settle();
+      service.resetForNewConversation();
+      release(SNAPSHOT_1M);
+      await settle();
+
+      expect(service.sessionStats).toBeNull();
+    });
+
+    it('a proxy-routed provider never asks Claude Code for its context', async () => {
+      useKind('open_router');
+      await service.refreshLlmConfigCache();
+
+      sessionReady();
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0 },
+      });
+      await settle();
+
+      expect(contextCalls).toBe(0);
+      expect(service.sessionStats?.context_window_size).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+
+    it('a model chip on a routed provider keeps the window it had', async () => {
+      useKind('open_router');
+      await service.refreshLlmConfigCache();
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0, context_window_size: 128_000 },
+      });
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'openrouter/x-ai/grok-4.3' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(128_000);
     });
   });
 

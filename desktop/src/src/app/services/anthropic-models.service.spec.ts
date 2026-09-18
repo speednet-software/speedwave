@@ -5,7 +5,7 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import { DEFAULT_CONTEXT_TOKENS, type AnthropicModel } from '../models/llm';
+import type { AnthropicModel } from '../models/llm';
 
 const FIXTURE: AnthropicModel[] = [
   {
@@ -252,43 +252,6 @@ describe('AnthropicModelsService', () => {
     });
   });
 
-  describe('contextTokensFor()', () => {
-    it('returns null before the catalog has loaded', () => {
-      expect(service.contextTokensFor('claude-opus-4-7')).toBeNull();
-    });
-
-    it('returns the exact context window for a known full id', async () => {
-      await service.list();
-      expect(service.contextTokensFor('claude-opus-4-8')).toBe(1_000_000);
-      expect(service.contextTokensFor('claude-opus-4-7')).toBe(1_000_000);
-      expect(service.contextTokensFor('claude-haiku-4-5')).toBe(200_000);
-    });
-
-    it('resolves the short alias Claude Code emits in session metadata', async () => {
-      await service.list();
-      expect(service.contextTokensFor('opus-4.7')).toBe(1_000_000);
-      expect(service.contextTokensFor('haiku-4.5')).toBe(200_000);
-    });
-
-    it('returns null for an unrecognised id', async () => {
-      await service.list();
-      expect(service.contextTokensFor('claude-unknown-9-9')).toBeNull();
-    });
-
-    it('returns null for null / undefined / empty / whitespace-only input', async () => {
-      await service.list();
-      expect(service.contextTokensFor(null)).toBeNull();
-      expect(service.contextTokensFor(undefined)).toBeNull();
-      expect(service.contextTokensFor('')).toBeNull();
-      expect(service.contextTokensFor('   ')).toBeNull();
-    });
-
-    it('trims surrounding whitespace before lookup', async () => {
-      await service.list();
-      expect(service.contextTokensFor('  claude-opus-4-7  ')).toBe(1_000_000);
-    });
-  });
-
   describe('familyLabelFor()', () => {
     it('returns null before the catalog has loaded', () => {
       expect(service.familyLabelFor('claude-opus-4-8')).toBeNull();
@@ -319,22 +282,6 @@ describe('AnthropicModelsService', () => {
       expect(service.familyLabelFor('openrouter/anthropic/claude-sonnet-5')).toBeNull();
       expect(service.familyLabelFor(null)).toBeNull();
       expect(service.familyLabelFor('')).toBeNull();
-    });
-  });
-
-  describe('contextTokensOrDefault()', () => {
-    it('falls back to DEFAULT_CONTEXT_TOKENS when the model is unknown', async () => {
-      await service.list();
-      expect(service.contextTokensOrDefault('claude-unknown-9-9')).toBe(DEFAULT_CONTEXT_TOKENS);
-    });
-
-    it('falls back to DEFAULT_CONTEXT_TOKENS before the catalog has loaded', () => {
-      expect(service.contextTokensOrDefault('claude-opus-4-7')).toBe(DEFAULT_CONTEXT_TOKENS);
-    });
-
-    it('returns the exact context window when the model is recognised', async () => {
-      await service.list();
-      expect(service.contextTokensOrDefault('claude-haiku-4-5')).toBe(200_000);
     });
   });
 

@@ -112,8 +112,9 @@ export class SessionStatsComponent {
    * sums cache reads across calls and must never feed this meter (exceeds the window on tool-use turns).
    */
   readonly ctxTotal = computed<number>(() => {
-    const usage = this.stats()?.context_usage;
-    return usage ? contextTokensFrom(usage) : 0;
+    const stats = this.stats();
+    if (stats?.context) return stats.context.total_tokens;
+    return stats?.context_usage ? contextTokensFrom(stats.context_usage) : 0;
   });
 
   /**

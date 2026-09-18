@@ -354,6 +354,15 @@ pub(crate) struct ContextUsage {
     pub(crate) categories: Vec<ContextCategory>,
 }
 
+const FREE_SPACE_CATEGORY: &str = "Free space";
+
+impl ContextUsage {
+    pub(crate) fn without_free_space(mut self) -> Self {
+        self.categories.retain(|c| c.name != FREE_SPACE_CATEGORY);
+        self
+    }
+}
+
 fn parse_payload<T: serde::de::DeserializeOwned>(
     subtype: &'static str,
     value: &serde_json::Value,
@@ -916,6 +925,43 @@ mod tests {
                 assert_eq!(usage.max_tokens, expected, "{run} {key} -> {}", usage.model);
             }
         }
+    }
+
+    #[test]
+    fn context_usage_for_display_drops_free_space_and_keeps_every_used_category() {
+        let raw =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5"]).unwrap();
+        let total = raw.total_tokens;
+        let shown = raw.without_free_space();
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "System prompt",
+                "System tools",
+                "Custom agents",
+                "Memory files",
+                "Skills",
+                "Autocompact buffer"
+            ]
+        );
+        assert_eq!(shown.total_tokens, total);
+        assert_eq!(shown.max_tokens, 200_000);
+    }
+
+    #[test]
+    fn context_usage_without_a_free_space_category_is_left_alone() {
+        let usage = ContextUsage {
+            model: "m".to_string(),
+            total_tokens: 1,
+            max_tokens: 2,
+            percentage: 50.0,
+            categories: vec![ContextCategory {
+                name: "Messages".to_string(),
+                tokens: 1,
+            }],
+        };
+        assert_eq!(usage.clone().without_free_space(), usage);
     }
 
     #[test]

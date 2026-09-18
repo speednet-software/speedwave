@@ -256,6 +256,7 @@ pub(crate) async fn get_context_usage(
             ControlQuery::ContextUsage,
             control_channel::parse_context_usage,
         )
+        .map(ContextUsage::without_free_space)
     })
     .await
     .map_err(|e| e.to_string())?

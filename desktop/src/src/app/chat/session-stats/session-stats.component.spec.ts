@@ -162,6 +162,74 @@ describe('SessionStatsComponent', () => {
     });
   });
 
+  describe("Claude Code's own context usage", () => {
+    it('feeds the ctx meter before the first turn, from used and max alone', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: '',
+        total_cost: null,
+        context: {
+          model: 'claude-opus-5[1m]',
+          total_tokens: 46_567,
+          max_tokens: 1_000_000,
+          percentage: 5,
+          categories: [{ name: 'System prompt', tokens: 3_902 }],
+        },
+        context_window_size: 1_000_000,
+        total_output_tokens: 0,
+      });
+      fixture.detectChanges();
+
+      expect(component.ctxTotal()).toBe(46_567);
+      expect(component.ctxPct()).toBe(5);
+      expect(component.ctxUsedMax()).toBe('47k/1M');
+    });
+
+    it('wins over the usage of the last API call', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: null,
+        context_usage: {
+          input_tokens: 190_000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+        context: {
+          model: 'claude-haiku-4-5',
+          total_tokens: 62_767,
+          max_tokens: 200_000,
+          percentage: 31,
+          categories: [],
+        },
+        context_window_size: 200_000,
+        total_output_tokens: 0,
+      });
+
+      expect(component.ctxTotal()).toBe(62_767);
+      expect(component.ctxPct()).toBe(31);
+    });
+
+    it('hides the meter while the window is unknown instead of assuming one', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: null,
+        context_usage: {
+          input_tokens: 50_000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+        context_window_size: null,
+        total_output_tokens: 0,
+      });
+      fixture.detectChanges();
+
+      expect(component.ctxPct()).toBeNull();
+      expect(component.ctxUsedMax()).toBe('');
+      expect(rootText()).not.toContain('ctx');
+    });
+  });
+
   describe('turn-sum usage vs ctx separation (regression)', () => {
     it('one tool-heavy turn: turn-sum usage exceeds the window but ctx stays truthful', () => {
       fixture.componentRef.setInput('stats', {

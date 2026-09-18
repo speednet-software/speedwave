@@ -1,7 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
-import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
+import { AnthropicModel } from '../models/llm';
 import { canonicalModelId } from '../models/model-picker';
 
 /**
@@ -50,33 +50,6 @@ export class AnthropicModelsService {
       }
     })();
     return this.inflight;
-  }
-
-  /**
-   * Context-window lookup for a given model id (exact API id or alias, e.g. `claude-opus-4-7` /
-   * `opus-4.7`). Returns `null` when the catalog hasn't loaded or the id isn't recognised.
-   * @param modelId - Exact API id or alias.
-   */
-  contextTokensFor(modelId: string | null | undefined): number | null {
-    if (!this.cache || !modelId) return null;
-    const trimmed = modelId.trim();
-    if (!trimmed) return null;
-    const direct = this.cache.find((m) => m.id === trimmed);
-    if (direct) return direct.context_tokens;
-    const candidate = trimmed.startsWith('claude-')
-      ? trimmed
-      : `claude-${trimmed.replace('.', '-')}`;
-    const fuzzy = this.cache.find((m) => m.id === candidate);
-    return fuzzy?.context_tokens ?? null;
-  }
-
-  /**
-   * Synchronous variant of {@link contextTokensFor}, always returning a usable number — falls back
-   * to {@link DEFAULT_CONTEXT_TOKENS} when unknown/not-yet-loaded (for computed signals).
-   * @param modelId - Same id as accepted by {@link contextTokensFor}.
-   */
-  contextTokensOrDefault(modelId: string | null | undefined): number {
-    return this.contextTokensFor(modelId) ?? DEFAULT_CONTEXT_TOKENS;
   }
 
   /**

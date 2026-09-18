@@ -16,9 +16,11 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
+import type { ClaudeContextUsage } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
+  isAnthropicKind,
   isLocalProvider,
   isTerminalCostSource,
   type LlmConfigResponse,
@@ -264,6 +266,7 @@ export class ChatStateService {
   private _totalOutputTokens = 0;
   private _lastContextTokens: number | null = null;
   private _contextWindowSize: number | null = null;
+  private _contextSnapshot: ClaudeContextUsage | null = null;
   private _currentProvider: string | null = null;
   private _activeKind: LlmProviderKind | null = null;
 
@@ -351,6 +354,36 @@ export class ChatStateService {
     const project = this.projectState.activeProject();
     if (!project) return;
     if (this._activeKind === 'anthropic_oauth') void this.planUsage.refresh(project);
+    if (this._activeKind && isAnthropicKind(this._activeKind)) {
+      void this.refreshContextUsage(project);
+    }
+  }
+
+  private async refreshContextUsage(project: string): Promise<void> {
+    const generation = this._sessionGeneration;
+    const usage = await this.control.contextUsage(project);
+    if (generation !== this._sessionGeneration) return;
+    if (project !== this.projectState.activeProject()) return;
+    this._contextSnapshot = usage;
+    if (usage) this._contextWindowSize = usage.max_tokens;
+    const cur = this._sessionStats();
+    if (!cur && !usage) return;
+    this._sessionStats.set({
+      session_id: this._lastKnownSessionId ?? '',
+      total_cost: null,
+      total_output_tokens: 0,
+      ...cur,
+      context: usage ?? undefined,
+      context_window_size: this._contextWindowSize,
+    });
+    this.notifyChange();
+  }
+
+  private usesAnthropic(): boolean {
+    return (
+      this._currentProvider === 'anthropic' ||
+      (this._activeKind !== null && isAnthropicKind(this._activeKind))
+    );
   }
 
   private async recordRateLimit(info: RateLimitInfo): Promise<void> {
@@ -917,6 +950,7 @@ export class ChatStateService {
 
       case 'ControlChip': {
         const { command, argument, uuid } = chunk.data;
+        if (command === 'model' && this.usesAnthropic()) this.forgetContextWindow();
         this._messages = [
           ...this._messages,
           {
@@ -968,10 +1002,7 @@ export class ChatStateService {
         if (chunk.data.usage) {
           this._totalOutputTokens += chunk.data.usage.output_tokens;
         }
-        this._contextWindowSize = this.resolveContextWindow(
-          chunk.data.context_window_size,
-          resolvedModel
-        );
+        this._contextWindowSize = this.resolveContextWindow(chunk.data.context_window_size);
         const livePreviewCost =
           !isLocalProvider(this._currentProvider) &&
           typeof chunk.data.total_cost === 'number' &&
@@ -985,6 +1016,7 @@ export class ChatStateService {
           usage: chunk.data.usage,
           context_usage: contextUsage,
           model: resolvedModel,
+          context: this._contextSnapshot ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
@@ -1076,6 +1108,14 @@ export class ChatStateService {
     this._model = '';
     this._totalOutputTokens = 0;
     this._contextWindowSize = null;
+    this._contextSnapshot = null;
+  }
+
+  private forgetContextWindow(): void {
+    this._contextWindowSize = null;
+    this._contextSnapshot = null;
+    const cur = this._sessionStats();
+    if (cur) this._sessionStats.set({ ...cur, context: undefined, context_window_size: null });
   }
 
   /** Clears all chat state to start a fresh conversation. */
@@ -1116,7 +1156,7 @@ export class ChatStateService {
     this._lastKnownSessionId = sessionId;
     const cur = this._sessionStats();
     if (cur?.session_id === sessionId) return;
-    const seeded = this.resolveContextWindow(undefined, cur?.model);
+    const seeded = this.resolveContextWindow(undefined);
     this._sessionStats.set({
       total_cost: null,
       context_window_size: seeded,
@@ -1469,16 +1509,15 @@ export class ChatStateService {
     }
   }
 
-  private resolveContextWindow(
-    liveValue: number | undefined,
-    model: string | undefined
-  ): number | null {
+  private resolveContextWindow(liveValue: number | undefined): number | null {
+    if (this.usesAnthropic()) {
+      return this._contextSnapshot?.max_tokens ?? liveValue ?? this._contextWindowSize;
+    }
     if (liveValue) return liveValue;
-    const fromSsot = this.anthropicModels.contextTokensFor(model);
-    if (fromSsot) return fromSsot;
     if (this._persistedContextTokens) return this._persistedContextTokens;
     if (this._contextWindowSize) return this._contextWindowSize;
-    return isLocalProvider(this._currentProvider) ? null : DEFAULT_CONTEXT_TOKENS;
+    if (this._currentProvider === null || isLocalProvider(this._currentProvider)) return null;
+    return DEFAULT_CONTEXT_TOKENS;
   }
 
   /** Re-reads `get_llm_config()` and updates the chat fallback-chain cache. */
@@ -1767,7 +1806,7 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
     turn_count: src.messages.filter((m) => m.role === 'assistant').length,
   };
   return {
-    session_id: src.sessionStats?.session_id ?? null,
+    session_id: src.sessionStats?.session_id || null,
     entries,
     session_totals: totals,
     pending_queue: src.pendingQueue,

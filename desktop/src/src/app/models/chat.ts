@@ -1,3 +1,5 @@
+import type { ClaudeContextUsage } from './claude-control';
+
 /** Tagged union matching Rust StreamChunk enum (serde tagged) */
 export type StreamChunk =
   | { chunk_type: 'Text'; data: { content: string } }
@@ -258,6 +260,8 @@ export interface SessionStats {
   usage?: UsageInfo;
   context_usage?: TurnUsage;
   model?: string;
+  /** Claude Code's own `get_context_usage` answer (Anthropic sessions); wins over `context_usage`. */
+  context?: ClaudeContextUsage;
   context_window_size: number | null;
   total_output_tokens: number;
 }
