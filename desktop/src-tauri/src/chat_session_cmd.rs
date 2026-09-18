@@ -1,4 +1,7 @@
 use crate::chat::{self, ChatSession, SharedChatSession};
+use crate::control_channel::{
+    self, ContextUsage, ControlHandle, ControlQuery, PlanUsage, SessionInfoState,
+};
 use crate::reconcile::SharedOauth;
 use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
@@ -172,6 +175,89 @@ pub(crate) async fn resume_conversation(
     .map_err(|e| e.to_string())?
 }
 
+const MSG_SESSION_BUSY: &str = "chat session is busy";
+const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
+
+fn session_info_state_inner(session_arc: &SharedChatSession, project: &str) -> SessionInfoState {
+    match session_arc.try_lock() {
+        Ok(session) if session.project_name() == project => session.session_info_state(),
+        _ => SessionInfoState::Unavailable,
+    }
+}
+
+fn control_handle_for(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> Result<ControlHandle, String> {
+    let session = session_arc
+        .try_lock()
+        .map_err(|_| MSG_SESSION_BUSY.to_string())?;
+    if session.project_name() != project {
+        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+    }
+    session.control_handle().map_err(|e| e.to_string())
+}
+
+fn control_query_inner<T>(
+    session_arc: &SharedChatSession,
+    project: &str,
+    query: ControlQuery,
+    parse: fn(&serde_json::Value) -> Result<T, control_channel::ControlError>,
+) -> Result<T, String> {
+    let handle = control_handle_for(session_arc, project)?;
+    handle
+        .query(query)
+        .and_then(|value| parse(&value))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn get_chat_session_info(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<SessionInfoState, String> {
+    check_project(&project)?;
+    Ok(session_info_state_inner(state.inner(), &project))
+}
+
+#[tauri::command]
+pub(crate) async fn get_plan_usage(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<PlanUsage, String> {
+    check_project(&project)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        control_query_inner(
+            &session_arc,
+            &project,
+            ControlQuery::Usage,
+            control_channel::parse_plan_usage,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn get_context_usage(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<ContextUsage, String> {
+    check_project(&project)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        control_query_inner(
+            &session_arc,
+            &project,
+            ControlQuery::ContextUsage,
+            control_channel::parse_context_usage,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -181,6 +267,86 @@ pub(crate) async fn resume_conversation(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn session_info_is_unavailable_without_a_live_session() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        assert_eq!(
+            session_info_state_inner(&session_arc, "acme"),
+            SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn session_info_is_unavailable_for_another_project_and_while_the_session_is_locked() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        assert_eq!(
+            session_info_state_inner(&session_arc, "other"),
+            SessionInfoState::Unavailable
+        );
+        let _held = session_arc.lock().unwrap();
+        assert_eq!(
+            session_info_state_inner(&session_arc, "acme"),
+            SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn control_query_without_a_live_session_errors_instead_of_waiting() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let err = control_query_inner(
+            &session_arc,
+            "acme",
+            ControlQuery::Usage,
+            control_channel::parse_plan_usage,
+        )
+        .unwrap_err();
+        assert_eq!(err, "no active session");
+    }
+
+    #[test]
+    fn control_query_rejects_a_project_the_session_does_not_belong_to() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let err = control_query_inner(
+            &session_arc,
+            "other",
+            ControlQuery::ContextUsage,
+            control_channel::parse_context_usage,
+        )
+        .unwrap_err();
+        assert_eq!(err, MSG_NO_SESSION_FOR_PROJECT);
+    }
+
+    #[test]
+    fn control_query_never_waits_for_a_session_that_is_being_started() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let _held = session_arc.lock().unwrap();
+        let err = control_query_inner(
+            &session_arc,
+            "acme",
+            ControlQuery::Usage,
+            control_channel::parse_plan_usage,
+        )
+        .unwrap_err();
+        assert_eq!(err, MSG_SESSION_BUSY);
+    }
+
+    #[test]
+    fn control_commands_release_the_session_lock_before_waiting_for_the_response() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn control_query_inner<T>(");
+        let handle_pos = body
+            .find("control_handle_for")
+            .expect("control_query_inner must take a handle");
+        let query_pos = body
+            .find(".query(")
+            .expect("control_query_inner must query");
+        assert!(handle_pos < query_pos);
+        assert!(
+            !body.contains(".lock()"),
+            "the session mutex must not be held while the control request waits"
+        );
+    }
 
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source

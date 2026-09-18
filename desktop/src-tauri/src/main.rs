@@ -13,6 +13,7 @@ mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
+mod control_channel;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
@@ -1182,6 +1183,9 @@ fn main() {
             paste_cmd::save_pasted_image,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
+            chat_session_cmd::get_chat_session_info,
+            chat_session_cmd::get_plan_usage,
+            chat_session_cmd::get_context_usage,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
