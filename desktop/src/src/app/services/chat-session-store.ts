@@ -863,6 +863,8 @@ export class ChatSessionStore {
   readonly composerDraft = signal('');
   /** Per-tab scroll offset restored when a background tab is reactivated (phase 3). */
   scrollPosition: number | null = null;
+  /** Per-tab plan-mode flag restored when a background tab is reactivated, or on a nav-rail remount. */
+  readonly composerPlanMode = signal(false);
   /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
   readonly composerAttachments = new ComposerAttachments();
 

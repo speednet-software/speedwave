@@ -551,6 +551,13 @@ describe('ComposerComponent', () => {
       expect(component.planMode()).toBe(false);
     });
 
+    it('setPlanMode sets an explicit value (tab restore)', () => {
+      component.setPlanMode(true);
+      expect(component.planMode()).toBe(true);
+      component.setPlanMode(false);
+      expect(component.planMode()).toBe(false);
+    });
+
     it('emits the raw text in act mode', () => {
       const emitted: string[] = [];
       component.submitted.subscribe((v) => emitted.push(v.payload));
