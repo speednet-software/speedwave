@@ -445,6 +445,28 @@ once a pin exists it outranks both the organization default and the
 account-type default at every subsequent spawn, exactly as the precedence
 order already stated in this decision predicts.
 
+**Amendment (SPEED-648: the `opus` alias is no longer pinned for Anthropic
+kinds).** `defaults.rs::anthropic_default_models_env` pinned
+`ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5[1m]` next to the SONNET and
+HAIKU pins. That pin is plan-dependent: Claude Code's model configuration
+page lists Opus with 1M context as "Included with subscription" on Max, Team
+and Enterprise, as "Requires usage credits" on Pro, and as "Full access" on
+API and pay-as-you-go, and states that with the `[1m]` suffix "the 1M context
+window applies to all usage of the pinned alias, including the plan-mode Opus
+phase of `opusplan` and subagents whose `model` frontmatter names the
+alias"[^1]. On a Pro account the pin therefore forced every `opus` alias
+resolution onto a window that needs usage credits. A capture of the pinned
+Claude Code 2.1.267 on a Max account
+(`desktop/src-tauri/tests/fixtures/cc-2.1.267-control-responses.sanitized.json`,
+`run_A` with the pins, `run_B` without) shows what the pins change: without
+them `default` still resolves to `claude-opus-5[1m]`, `opus` and `sonnet`
+resolve to the bare 200k ids, and `haiku` resolves to the dated
+`claude-haiku-4-5-20251001`. The OPUS entry is removed; SONNET keeps `[1m]`
+(the same page states that Sonnet 5 needs "no usage credits required on any
+plan"[^1]) and HAIKU keeps the undated catalog id. The non-Anthropic
+routed-alias remap in `compose/llm.rs` is unchanged and still covers all four
+aliases.
+
 ### 8. Auto-default rules for fresh non-Anthropic setups
 
 To keep the "model required for non-Anthropic providers" invariant from

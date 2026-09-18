@@ -306,11 +306,11 @@ pub fn base_env() -> HashMap<String, String> {
 /// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
 pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
-/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from the
-/// `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable omitted — resolves natively.
+/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{SONNET,HAIKU}_MODEL` from the `ANTHROPIC_MODELS`
+/// SSOT (`[1m]` where supported). Opus is plan-dependent and Fable resolves natively: both omitted.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
-    for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
+    for (alias, family_prefix) in [("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
         let Some(latest) = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.family.starts_with(family_prefix) && m.latest)
@@ -528,7 +528,6 @@ mod tests {
                 .and_then(|s| s.strip_suffix("_MODEL"))
                 .expect("var must follow ANTHROPIC_DEFAULT_<ALIAS>_MODEL");
             let prefix = match alias {
-                "OPUS" => "Opus",
                 "SONNET" => "Sonnet",
                 "HAIKU" => "Haiku",
                 other => panic!("unexpected alias {other}"),
@@ -557,7 +556,7 @@ mod tests {
     #[test]
     fn anthropic_default_models_env_covers_every_latest_family() {
         let env = anthropic_default_models_env();
-        for prefix in ["Opus", "Sonnet", "Haiku"] {
+        for prefix in ["Sonnet", "Haiku"] {
             let has_latest = ANTHROPIC_MODELS
                 .iter()
                 .any(|m| m.family.starts_with(prefix) && m.latest);
@@ -569,6 +568,24 @@ mod tests {
                 "{var} presence must mirror SSOT having a `latest: true` {prefix} entry"
             );
         }
+    }
+
+    #[test]
+    fn anthropic_default_models_env_omits_the_plan_dependent_opus_alias() {
+        let env = anthropic_default_models_env();
+        assert!(
+            !env.keys().any(|k| k.contains("OPUS")),
+            "a pinned `opus[1m]` alias forces a Pro account onto a 1M window that needs usage credits"
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("claude-sonnet-5[1m]")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").map(String::as_str),
+            Some("claude-haiku-4-5")
+        );
     }
 
     #[test]
@@ -667,10 +684,6 @@ mod tests {
         assert_eq!(opus_5.context_tokens, 1_000_000);
         assert_eq!(opus_5.pricing.input, 5.0);
         assert_eq!(opus_5.pricing.output, 25.0);
-        assert_eq!(
-            anthropic_default_models_env().get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
-            Some(&"claude-opus-5[1m]".to_string())
-        );
     }
 
     #[test]
