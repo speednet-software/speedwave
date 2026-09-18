@@ -36,7 +36,7 @@ export const ERROR_UNSUPPORTED_TYPE = 'Supported image formats: JPEG, PNG, GIF, 
 /** Result of preprocessing — saved to disk and ready to ship as `ChatAttachment`. */
 export interface PreprocessedImage {
   attachment: ChatAttachment;
-  /** Blob URL for thumbnail; composer revokes on cleanup. */
+  /** Blob URL for thumbnail; `ComposerDraftService` owns revocation. */
   previewUrl: string;
   width: number;
   height: number;
