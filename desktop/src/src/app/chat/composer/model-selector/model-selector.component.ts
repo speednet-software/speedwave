@@ -12,15 +12,20 @@ import { FormsModule } from '@angular/forms';
 import { TooltipDirective } from '../../../shared/tooltip.directive';
 import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
+import { ClaudeControlService } from '../../../services/claude-control.service';
+import { ModelPickerService } from '../../../services/model-picker.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
+import { canonicalModelId, type ModelPicker } from '../../../models/model-picker';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
 interface ModelOption {
   id: string;
   label: string;
+  wireId: string;
+  isDefault: boolean;
   contextTokens: number | null;
   promptPrice?: number;
   completionPrice?: number;
@@ -32,6 +37,7 @@ export interface ModelSelection {
   wireId: string;
   providerId: string;
   kind: string;
+  isDefault: boolean;
 }
 
 /**
@@ -51,8 +57,8 @@ export interface ModelSelection {
         type="button"
         data-testid="composer-model-badge"
         class="hidden text-[var(--teal)] hover:underline md:inline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
-        [disabled]="streaming()"
-        [attr.title]="streaming() ? 'Model locked while a turn is streaming' : 'Change model'"
+        [disabled]="streaming() || pickerPending()"
+        [attr.title]="badgeTitle()"
         (click)="openCombobox()"
       >
         {{ displayModelLabel() }}
@@ -134,9 +140,26 @@ export interface ModelSelection {
                   type="button"
                   [attr.data-testid]="'model-selector-option-' + opt.id"
                   class="mono hover-bg flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
+                  [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
                   (click)="select(opt)"
                 >
-                  <span>{{ opt.label }}</span>
+                  <span class="flex items-center gap-2">
+                    @if (showEffortControl()) {
+                      <span class="inline-block w-3 text-[var(--teal)]" aria-hidden="true">
+                        @if (opt.id === activeOptionId()) {
+                          <span data-testid="model-selector-active-mark">&#x2713;</span>
+                        }
+                      </span>
+                    }
+                    <span>{{ opt.label }}</span>
+                    @if (opt.isDefault) {
+                      <span
+                        data-testid="model-selector-default-badge"
+                        class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
+                        >Default</span
+                      >
+                    }
+                  </span>
                   @if (opt.promptPrice !== undefined) {
                     <span class="text-[var(--ink-mute)]"
                       >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
@@ -176,6 +199,8 @@ export interface ModelSelection {
 export class ModelSelectorComponent {
   private readonly tauri = inject(TauriService);
   private readonly anthropicModels = inject(AnthropicModelsService);
+  private readonly control = inject(ClaudeControlService);
+  private readonly picker = inject(ModelPickerService);
   private readonly log = inject(LoggerService);
 
   readonly projectId = input.required<string>();
@@ -214,9 +239,26 @@ export class ModelSelectorComponent {
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
+  protected readonly pickerPending = computed(
+    () =>
+      this.showEffortControl() &&
+      this.control.sessionInfoState(this.projectId()).state === 'pending'
+  );
+
+  protected readonly badgeTitle = computed<string>(() => {
+    if (this.streaming()) return 'Model locked while a turn is streaming';
+    return this.pickerPending() ? 'Loading models...' : 'Change model';
+  });
+
+  protected readonly activeOptionId = computed<string | null>(() =>
+    this.showEffortControl()
+      ? (this.picker.rowFor(this.projectId(), this.displayModel())?.id ?? null)
+      : null
+  );
+
   private readonly currentModelEntry = computed<AnthropicModel | null>(() => {
-    const bare = this.displayModel().replace(/(\[1m\])+$/, '');
-    return this.anthropicCatalog().find((m) => m.id === bare) ?? null;
+    const id = canonicalModelId(this.activeOptionId() ?? this.displayModel());
+    return this.anthropicCatalog().find((m) => m.id === id) ?? null;
   });
 
   private readonly fullLevelEntry = computed<AnthropicModel | null>(
@@ -259,12 +301,9 @@ export class ModelSelectorComponent {
     return level ? capitalizeLevel(level) : 'Default';
   });
 
-  protected readonly displayModelLabel = computed<string>(() => {
-    const id = this.displayModel();
-    const entry = this.currentModelEntry();
-    if (!entry) return id;
-    return id.endsWith('[1m]') ? `${entry.family} [1m]` : entry.family;
-  });
+  protected readonly displayModelLabel = computed<string>(() =>
+    this.picker.label(this.displayModel(), this.projectId())
+  );
 
   private lastSessionModel = '';
 
@@ -283,6 +322,15 @@ export class ModelSelectorComponent {
     effect(() => {
       const id = this.projectId();
       if (this.showEffortControl() && id) void this.loadAnthropicCatalog();
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (this.showEffortControl() && id) void this.control.refreshSessionInfo(id);
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (!this.showEffortControl() || !id) return;
+      if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
     });
     effect(() => {
       const live = this.sessionModel();
@@ -357,20 +405,14 @@ export class ModelSelectorComponent {
     this.query.set(value);
   }
 
-  private anthropicOptionsFrom(list: AnthropicModel[]): ModelOption[] {
-    const rows: ModelOption[] = [];
-    for (const m of list) {
-      if (!m.selectable) continue;
-      rows.push({ id: m.id, label: m.family, contextTokens: m.context_tokens });
-      if (m.has_1m) {
-        rows.push({
-          id: `${m.id}[1m]`,
-          label: `${m.family} (1M)`,
-          contextTokens: m.context_tokens,
-        });
-      }
-    }
-    return rows;
+  private anthropicOptionsFrom(picker: ModelPicker, projectId: string): ModelOption[] {
+    return picker.rows.map((row) => ({
+      id: row.id,
+      label: this.picker.label(row.id, projectId),
+      wireId: row.wire_id,
+      isDefault: row.is_default,
+      contextTokens: null,
+    }));
   }
 
   private async fetchDiscoverOptions(provider: string, baseUrl: string): Promise<ModelOption[]> {
@@ -380,6 +422,8 @@ export class ModelSelectorComponent {
     return (res?.models ?? []).map((m) => ({
       id: m.id,
       label: m.id,
+      wireId: m.id,
+      isDefault: false,
       contextTokens: m.context_tokens ?? null,
     }));
   }
@@ -397,8 +441,11 @@ export class ModelSelectorComponent {
     this.error.set('');
     try {
       if (isAnthropicKind(summary.kind)) {
-        const list = await this.anthropicModels.list();
-        this.options.set(this.anthropicOptionsFrom(list));
+        const projectId = this.projectId();
+        await this.anthropicModels.list();
+        const picker = (await this.picker.refresh(projectId)) ?? this.picker.picker(projectId);
+        if (!picker) throw new Error('model picker rows unavailable');
+        this.options.set(this.anthropicOptionsFrom(picker, projectId));
       } else {
         const isOpenRouter = summary.kind === 'open_router';
         if (!isOpenRouter && !summary.base_url) {
@@ -432,12 +479,15 @@ export class ModelSelectorComponent {
   select(opt: ModelOption): void {
     const summary = this.summary();
     if (!summary) return;
-    const wireId = wireModelId(summary.kind, summary.provider_id, opt.id);
+    const wireId = isAnthropicKind(summary.kind)
+      ? opt.wireId
+      : wireModelId(summary.kind, summary.provider_id, opt.id);
     this.modelSelected.emit({
       catalogId: opt.id,
       wireId,
       providerId: summary.provider_id,
       kind: summary.kind,
+      isDefault: opt.isDefault,
     });
     if (isAnthropicKind(summary.kind)) this.lastPicked.set(opt.id);
     this.open.set(false);

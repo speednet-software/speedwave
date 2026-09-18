@@ -1530,7 +1530,8 @@ impl ChatSession {
             }
         };
 
-        let asks_claude_code_for_session_info = soft_impose_cfg.kind.is_anthropic();
+        let provider_kind = soft_impose_cfg.kind;
+        let asks_claude_code_for_session_info = provider_kind.is_anthropic();
 
         let mut cmd = rt.container_exec_piped(
             &container,
@@ -1875,6 +1876,16 @@ impl ChatSession {
                 let status =
                     probe_session_info(|| handle.query(ControlQuery::Initialize), &slot, &stopping);
                 if let Some(status) = status {
+                    let info = match &status {
+                        SessionInfoState::Ready { info } => Some(info),
+                        SessionInfoState::Pending | SessionInfoState::Unavailable => None,
+                    };
+                    crate::model_picker::normalize_pin_for_session(
+                        consts::data_dir(),
+                        &project,
+                        provider_kind,
+                        info,
+                    );
                     emit_session_info(&probe_app_handle, &project, status);
                 }
             });
@@ -6015,7 +6026,7 @@ mod tests {
     #[test]
     fn prepare_args_never_appends_a_model_flag_even_with_a_model_pin_file() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
         let user_config = single_project_user_config();
         let (args, _) =
             ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();

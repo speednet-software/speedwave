@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { computed } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { TauriService } from './tauri.service';
@@ -13,8 +14,6 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
-    selectable: true,
-    has_1m: true,
     effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
     default_effort: 'high',
   },
@@ -24,8 +23,6 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: false,
-    selectable: true,
-    has_1m: true,
     effort_levels: ['low', 'medium', 'high', 'max'],
     default_effort: 'high',
   },
@@ -35,8 +32,6 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 200_000,
     latest: true,
     premium: false,
-    selectable: true,
-    has_1m: false,
     effort_levels: [],
     default_effort: null,
   },
@@ -46,8 +41,6 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
-    selectable: false,
-    has_1m: true,
     effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
     default_effort: 'xhigh',
   },
@@ -228,16 +221,34 @@ describe('AnthropicModelsService', () => {
     });
   });
 
-  describe('selectableModels()', () => {
-    it('returns an empty list before the catalog has loaded', () => {
-      expect(service.selectableModels()).toEqual([]);
+  describe('entryFor()', () => {
+    it('returns null before the catalog has loaded', () => {
+      expect(service.entryFor('claude-opus-4-8')).toBeNull();
     });
 
-    it('excludes legacy (non-selectable) entries once loaded', async () => {
+    it('resolves the bare, the 1M and the snapshot-dated spelling to one entry', async () => {
       await service.list();
-      const ids = service.selectableModels().map((m) => m.id);
-      expect(ids).toEqual(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
-      expect(ids).not.toContain('claude-opus-4-7');
+      for (const id of [
+        'claude-haiku-4-5',
+        'claude-haiku-4-5[1m]',
+        'claude-haiku-4-5-20251001',
+        ' claude-haiku-4-5 ',
+      ]) {
+        expect(service.entryFor(id)?.id).toBe('claude-haiku-4-5');
+      }
+    });
+
+    it('resolves a legacy entry', async () => {
+      await service.list();
+      expect(service.entryFor('claude-opus-4-7[1m]')?.family).toBe('Opus 4.7');
+    });
+
+    it('returns null for ids outside the catalog and for empty input', async () => {
+      await service.list();
+      expect(service.entryFor('opus')).toBeNull();
+      expect(service.entryFor('local/qwen3')).toBeNull();
+      expect(service.entryFor('')).toBeNull();
+      expect(service.entryFor(undefined)).toBeNull();
     });
   });
 
@@ -286,6 +297,21 @@ describe('AnthropicModelsService', () => {
     it('returns the catalog family label for a known id', async () => {
       await service.list();
       expect(service.familyLabelFor('claude-opus-4-8')).toBe('Opus 4.8');
+    });
+
+    it('gives the 1M and the bare spelling the same label', async () => {
+      await service.list();
+      expect(service.familyLabelFor('claude-opus-4-8[1m]')).toBe('Opus 4.8');
+      expect(service.familyLabelFor('claude-opus-4-8[1m][1m]')).toBe('Opus 4.8');
+    });
+
+    it('re-evaluates a computed label once the catalog arrives', async () => {
+      const label = TestBed.runInInjectionContext(() =>
+        computed(() => service.familyLabelFor('claude-opus-4-8'))
+      );
+      expect(label()).toBeNull();
+      await service.list();
+      expect(label()).toBe('Opus 4.8');
     });
 
     it('returns null for unknown or empty ids', async () => {

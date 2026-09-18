@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::chat::SharedChatSession;
 use crate::types::check_project;
 use speedwave_runtime::config;
 
@@ -101,14 +102,41 @@ fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
     })
 }
 
-#[tauri::command]
-pub(crate) fn set_model_pin(project_id: String, model: String) -> Result<(), String> {
-    let project_name = resolve_project_name(&project_id)?;
+fn picker_wire_ids(session_arc: &SharedChatSession, project_name: &str) -> Vec<String> {
+    config::load_user_config()
+        .map_err(|e| e.to_string())
+        .and_then(|cfg| crate::model_picker::picker_for(&cfg, session_arc, project_name))
+        .map(|picker| picker.rows.into_iter().map(|r| r.wire_id).collect())
+        .unwrap_or_default()
+}
+
+fn set_model_pin_inner(
+    project_id: &str,
+    model: &str,
+    session_arc: &SharedChatSession,
+) -> Result<(), String> {
+    let project_name = resolve_project_name(project_id)?;
     crate::claude_settings::set_model_pin(
         speedwave_runtime::consts::data_dir(),
         &project_name,
-        &model,
+        model,
+        &picker_wire_ids(session_arc, &project_name),
     )
+}
+
+#[tauri::command]
+pub(crate) fn set_model_pin(
+    project_id: String,
+    model: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<(), String> {
+    set_model_pin_inner(&project_id, &model, state.inner())
+}
+
+#[tauri::command]
+pub(crate) fn clear_model_pin(project_id: String) -> Result<(), String> {
+    let project_name = resolve_project_name(&project_id)?;
+    crate::claude_settings::clear_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
 }
 
 #[cfg(test)]
@@ -200,15 +228,28 @@ mod tests {
         assert_eq!(get_err, resolve_project_name("").unwrap_err());
     }
 
+    fn no_session() -> SharedChatSession {
+        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new("proj")))
+    }
+
     #[test]
     fn set_model_pin_rejects_invalid_project() {
-        let res = set_model_pin(String::new(), "claude-sonnet-5".to_string());
+        let res = set_model_pin_inner("", "claude-sonnet-5", &no_session());
         assert!(res.is_err());
     }
 
     #[test]
+    fn clear_model_pin_rejects_invalid_project() {
+        assert_eq!(
+            clear_model_pin(String::new()).unwrap_err(),
+            resolve_project_name("").unwrap_err()
+        );
+        assert!(clear_model_pin("../escape".to_string()).is_err());
+    }
+
+    #[test]
     fn set_model_pin_shares_the_same_resolution_error_as_the_effort_commands() {
-        let model_err = set_model_pin(String::new(), "claude-sonnet-5".to_string()).unwrap_err();
+        let model_err = set_model_pin_inner("", "claude-sonnet-5", &no_session()).unwrap_err();
         let effort_err = set_effort_pin(String::new(), "low".to_string()).unwrap_err();
         assert_eq!(model_err, effort_err);
         assert_eq!(model_err, resolve_project_name("").unwrap_err());

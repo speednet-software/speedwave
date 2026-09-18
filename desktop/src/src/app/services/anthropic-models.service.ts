@@ -1,7 +1,8 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
+import { canonicalModelId } from '../models/model-picker';
 
 /**
  * Frontend cache of the SSOT Anthropic model catalog served by the Rust
@@ -11,8 +12,16 @@ import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 export class AnthropicModelsService {
   private readonly tauri = inject(TauriService);
   private readonly logger = inject(LoggerService);
-  private cache: AnthropicModel[] | null = null;
+  private readonly catalog = signal<AnthropicModel[] | null>(null);
   private inflight: Promise<AnthropicModel[]> | null = null;
+
+  private get cache(): AnthropicModel[] | null {
+    return this.catalog();
+  }
+
+  private set cache(value: AnthropicModel[] | null) {
+    this.catalog.set(value);
+  }
 
   /**
    * Returns the model catalog, caching the first successful fetch. On failure
@@ -71,23 +80,22 @@ export class AnthropicModelsService {
   }
 
   /**
-   * Catalog family display label (e.g. "Opus 4.8") for a model id.
-   * @param modelId - CC-selectable id; `[1m]` suffix tolerated.
-   * @returns Label or `null` when the id is not in the catalog.
+   * Catalog entry a wire, pinned or observed model id stands for (signal read).
+   * @param modelId - Any spelling of the id: bare, 1M-suffixed or snapshot-dated.
    */
-  familyLabelFor(modelId: string | null | undefined): string | null {
+  entryFor(modelId: string | null | undefined): AnthropicModel | null {
     if (!this.cache || !modelId) return null;
-    const bare = modelId.replace(/(\[1m\])+$/, '');
-    const hit = this.cache.find((m) => m.id === bare || m.id === modelId);
-    return hit?.family ?? null;
+    const id = canonicalModelId(modelId);
+    return this.cache.find((m) => m.id === id) ?? null;
   }
 
   /**
-   * The catalog entries offered by the composer selector — legacy (non-`selectable`)
-   * entries stay in the full catalog for pricing history but are excluded here.
+   * Catalog family display label (e.g. "Opus 4.8") for a model id (signal read).
+   * @param modelId - Any spelling of the id: bare, 1M-suffixed or snapshot-dated.
+   * @returns Label or `null` when the id is not in the catalog.
    */
-  selectableModels(): AnthropicModel[] {
-    return (this.cache ?? []).filter((m) => m.selectable);
+  familyLabelFor(modelId: string | null | undefined): string | null {
+    return this.entryFor(modelId)?.family ?? null;
   }
 
   /**

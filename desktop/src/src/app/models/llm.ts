@@ -8,8 +8,6 @@ export interface AnthropicModel {
   context_tokens: number;
   latest: boolean;
   premium: boolean;
-  selectable: boolean;
-  has_1m: boolean;
   effort_levels: string[];
   default_effort: string | null;
 }

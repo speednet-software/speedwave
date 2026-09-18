@@ -41,13 +41,6 @@ pub(crate) struct LlmConfigResponse {
     pub(crate) default_base_url: Option<String>,
 }
 
-#[derive(Serialize)]
-pub(crate) struct AnthropicModelWire {
-    #[serde(flatten)]
-    pub(crate) info: speedwave_runtime::defaults::AnthropicModelInfo,
-    pub(crate) has_1m: bool,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AuthReadiness {
@@ -803,16 +796,12 @@ mod tests {
 
     #[test]
     fn anthropic_model_wire_fields_match_ts_mirror() {
-        const UNMIRRORED: &[&str] = &["pricing", "pricing_1m"];
+        const UNMIRRORED: &[&str] = &["pricing", "pricing_1m", "one_million_context"];
 
         let sample = speedwave_runtime::defaults::ANTHROPIC_MODELS
             .first()
             .expect("catalog must not be empty");
-        let wire = AnthropicModelWire {
-            info: sample.clone(),
-            has_1m: sample.has_1m(),
-        };
-        let json = serde_json::to_value(&wire).expect("AnthropicModelWire must serialize");
+        let json = serde_json::to_value(sample).expect("AnthropicModelInfo must serialize");
         let mut rust: Vec<&str> = json
             .as_object()
             .expect("wire serializes as an object")
@@ -841,7 +830,7 @@ mod tests {
 
         assert_eq!(
             rust, ts,
-            "TS AnthropicModel must mirror AnthropicModelWire, minus pricing/pricing_1m"
+            "TS AnthropicModel must mirror AnthropicModelInfo, minus pricing and the 1M policy"
         );
     }
 }

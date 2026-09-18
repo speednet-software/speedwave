@@ -34,6 +34,7 @@ mod llm_cmd;
 mod logging_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
+mod model_picker;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -1158,6 +1159,8 @@ fn main() {
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
             pin_cmd::set_model_pin,
+            pin_cmd::clear_model_pin,
+            model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,

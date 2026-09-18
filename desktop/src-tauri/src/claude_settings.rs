@@ -39,30 +39,90 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
     .map_err(|e| e.to_string())
 }
 
-pub fn set_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
-    if !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
+const MODEL_KEY: &str = "model";
+
+pub fn set_model_pin(
+    data_dir: &Path,
+    project: &str,
+    model: &str,
+    listed_by_claude_code: &[String],
+) -> Result<(), String> {
+    let listed = model.starts_with("claude-") && listed_by_claude_code.iter().any(|m| m == model);
+    if !listed && !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
         return Err(format!("unknown Anthropic model: {model}"));
     }
     let path = settings_path(data_dir, project);
     if let Some(parent) = path.parent() {
         fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
     }
+    edit_settings(data_dir, project, true, |obj| {
+        obj.insert(
+            MODEL_KEY.to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+        true
+    })
+    .map(|_| ())
+}
+
+pub fn clear_model_pin(data_dir: &Path, project: &str) -> Result<(), String> {
+    edit_settings(data_dir, project, false, |obj| {
+        obj.remove(MODEL_KEY).is_some()
+    })
+    .map(|_| ())
+}
+
+pub fn normalize_model_pin(
+    data_dir: &Path,
+    project: &str,
+    normalized: impl FnOnce(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    let mut rewritten = None;
+    edit_settings(data_dir, project, false, |obj| {
+        let Some(next) = obj
+            .get(MODEL_KEY)
+            .and_then(serde_json::Value::as_str)
+            .and_then(normalized)
+        else {
+            return false;
+        };
+        obj.insert(
+            MODEL_KEY.to_string(),
+            serde_json::Value::String(next.clone()),
+        );
+        rewritten = Some(next);
+        true
+    })?;
+    Ok(rewritten)
+}
+
+fn edit_settings(
+    data_dir: &Path,
+    project: &str,
+    create_if_missing: bool,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> bool,
+) -> Result<bool, String> {
+    let path = settings_path(data_dir, project);
+    if !create_if_missing && !path.exists() {
+        return Ok(false);
+    }
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
         let existing = fs_perms::read_regular_file_no_follow(&path).map_err(anyhow::Error::msg)?;
         let mut value: serde_json::Value = match existing {
             Some(contents) => serde_json::from_str(&contents)
                 .map_err(|e| anyhow::anyhow!("malformed settings.json: {e}"))?,
-            None => serde_json::json!({}),
+            None if create_if_missing => serde_json::json!({}),
+            None => return Ok(false),
         };
         let obj = value
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("settings.json root is not an object"))?;
-        obj.insert(
-            "model".to_string(),
-            serde_json::Value::String(model.to_string()),
-        );
+        if !edit(obj) {
+            return Ok(false);
+        }
         let rendered = serde_json::to_string_pretty(&value)?;
-        fs_perms::write_shared_file_atomic(&path, &rendered)
+        fs_perms::write_shared_file_atomic(&path, &rendered)?;
+        Ok(true)
     })
     .map_err(|e| e.to_string())
 }
@@ -202,7 +262,7 @@ mod tests {
     #[test]
     fn set_model_pin_writes_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
         assert_eq!(
             get_model_pin(tmp.path(), "proj"),
             Some("claude-sonnet-5".to_string())
@@ -212,7 +272,7 @@ mod tests {
     #[test]
     fn set_model_pin_accepts_the_1m_alias_when_priced() {
         let tmp = tempfile::tempdir().unwrap();
-        set_model_pin(tmp.path(), "proj", "claude-sonnet-5[1m]").unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5[1m]", &[]).unwrap();
         assert_eq!(
             get_model_pin(tmp.path(), "proj"),
             Some("claude-sonnet-5[1m]".to_string())
@@ -227,7 +287,7 @@ mod tests {
             "proj",
             r#"{"effortLevel":"high","hooks":{"PreToolUse":[]}}"#,
         );
-        set_model_pin(tmp.path(), "proj", "claude-opus-5").unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-opus-5", &[]).unwrap();
         let path = settings_path(tmp.path(), "proj");
         let raw = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -240,16 +300,142 @@ mod tests {
     fn set_model_pin_rejects_ids_outside_the_anthropic_catalog() {
         let tmp = tempfile::tempdir().unwrap();
         for bad in ["gpt-4o", "openrouter/anthropic/claude-sonnet-5", ""] {
-            let err = set_model_pin(tmp.path(), "proj", bad).unwrap_err();
+            let err = set_model_pin(tmp.path(), "proj", bad, &[]).unwrap_err();
             assert!(err.contains("unknown Anthropic model"), "id: {bad}");
         }
         assert_eq!(get_model_pin(tmp.path(), "proj"), None);
     }
 
     #[test]
+    fn set_model_pin_accepts_the_legacy_catalog_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        for id in [
+            "claude-opus-4-8[1m]",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ] {
+            set_model_pin(tmp.path(), "proj", id, &[]).unwrap();
+            assert_eq!(get_model_pin(tmp.path(), "proj").as_deref(), Some(id));
+        }
+    }
+
+    #[test]
+    fn set_model_pin_accepts_a_claude_id_the_live_session_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listed = vec!["claude-opus-9[1m]".to_string(), "opus".to_string()];
+        set_model_pin(tmp.path(), "proj", "claude-opus-9[1m]", &listed).unwrap();
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj").as_deref(),
+            Some("claude-opus-9[1m]")
+        );
+    }
+
+    #[test]
+    fn set_model_pin_rejects_listed_values_that_are_not_claude_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listed = vec!["opus".to_string(), "local/qwen3".to_string()];
+        for bad in ["opus", "local/qwen3", "claude-opus-9"] {
+            let err = set_model_pin(tmp.path(), "proj", bad, &listed).unwrap_err();
+            assert!(err.contains("unknown Anthropic model"), "id: {bad}");
+        }
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn clear_model_pin_removes_only_the_model_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"claude-opus-5[1m]","outputStyle":"Speedwave"}"#,
+        );
+        clear_model_pin(tmp.path(), "proj").unwrap();
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["outputStyle"], "Speedwave");
+        assert!(value.get("model").is_none());
+    }
+
+    #[test]
+    fn clear_model_pin_without_a_pin_or_a_file_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        clear_model_pin(tmp.path(), "proj").unwrap();
+        assert!(!settings_path(tmp.path(), "proj").exists());
+
+        write_settings(tmp.path(), "proj", r#"{"outputStyle":"Speedwave"}"#);
+        let before = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        clear_model_pin(tmp.path(), "proj").unwrap();
+        let after = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn clear_model_pin_rejects_malformed_json_and_leaves_the_file_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", "{not json");
+        let err = clear_model_pin(tmp.path(), "proj").unwrap_err();
+        assert!(err.contains("malformed settings.json"), "{err}");
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        assert_eq!(raw, "{not json");
+    }
+
+    #[test]
+    fn normalize_model_pin_rewrites_the_pin_the_closure_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"claude-sonnet-5","outputStyle":"Speedwave"}"#,
+        );
+        let rewritten = normalize_model_pin(tmp.path(), "proj", |pin| {
+            assert_eq!(pin, "claude-sonnet-5");
+            Some("claude-sonnet-5[1m]".to_string())
+        })
+        .unwrap();
+        assert_eq!(rewritten.as_deref(), Some("claude-sonnet-5[1m]"));
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj").as_deref(),
+            Some("claude-sonnet-5[1m]")
+        );
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["outputStyle"], "Speedwave");
+    }
+
+    #[test]
+    fn normalize_model_pin_leaves_the_file_alone_when_nothing_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-opus-5[1m]"}"#);
+        let before = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        assert_eq!(
+            normalize_model_pin(tmp.path(), "proj", |_| None).unwrap(),
+            None
+        );
+        let after = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn normalize_model_pin_never_asks_about_a_missing_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let never = |_: &str| -> Option<String> { panic!("no pin to normalize") };
+        assert_eq!(
+            normalize_model_pin(tmp.path(), "proj", never).unwrap(),
+            None
+        );
+        write_settings(tmp.path(), "proj", r#"{"model":7}"#);
+        let never = |_: &str| -> Option<String> { panic!("a non-string pin is not a pin") };
+        assert_eq!(
+            normalize_model_pin(tmp.path(), "proj", never).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn set_model_pin_rejects_the_1m_alias_for_a_model_without_1m_pricing() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = set_model_pin(tmp.path(), "proj", "claude-haiku-4-5[1m]").unwrap_err();
+        let err = set_model_pin(tmp.path(), "proj", "claude-haiku-4-5[1m]", &[]).unwrap_err();
         assert!(err.contains("unknown Anthropic model"));
         assert_eq!(get_model_pin(tmp.path(), "proj"), None);
     }
@@ -258,7 +444,7 @@ mod tests {
     fn set_model_pin_rejects_malformed_json_and_leaves_the_file_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(tmp.path(), "proj", "not json");
-        let err = set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap_err();
+        let err = set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap_err();
         assert!(err.contains("malformed settings.json"));
         let path = settings_path(tmp.path(), "proj");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
@@ -268,7 +454,7 @@ mod tests {
     fn set_model_pin_rejects_non_object_root_and_leaves_the_file_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(tmp.path(), "proj", "[]");
-        let err = set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap_err();
+        let err = set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap_err();
         assert!(err.contains("not an object"));
         let path = settings_path(tmp.path(), "proj");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
@@ -277,8 +463,8 @@ mod tests {
     #[test]
     fn set_model_pin_overwrites_previous_pin() {
         let tmp = tempfile::tempdir().unwrap();
-        set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
-        set_model_pin(tmp.path(), "proj", "claude-opus-5").unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-opus-5", &[]).unwrap();
         assert_eq!(
             get_model_pin(tmp.path(), "proj"),
             Some("claude-opus-5".to_string())
@@ -296,12 +482,12 @@ mod tests {
         let d2 = data_dir.clone();
         let t1 = std::thread::spawn(move || {
             for _ in 0..iterations {
-                set_model_pin(&d1, "proj", "claude-sonnet-5").unwrap();
+                set_model_pin(&d1, "proj", "claude-sonnet-5", &[]).unwrap();
             }
         });
         let t2 = std::thread::spawn(move || {
             for _ in 0..iterations {
-                set_model_pin(&d2, "proj", "claude-opus-5").unwrap();
+                set_model_pin(&d2, "proj", "claude-opus-5", &[]).unwrap();
             }
         });
         t1.join().unwrap();
@@ -328,7 +514,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
         let lock_path = settings_lock_path(tmp.path(), "proj");
         let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

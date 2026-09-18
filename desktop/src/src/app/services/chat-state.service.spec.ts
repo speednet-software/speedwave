@@ -1824,6 +1824,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -1892,6 +1893,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -2076,6 +2078,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
@@ -2097,6 +2100,93 @@ describe('ChatStateService', () => {
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
     });
 
+    it('picking the Default row clears the pin and switches the live session to the account default', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
+      expect(commands).toContain('clear_model_pin');
+      expect(commands).not.toContain('set_model_pin');
+      expect(commands.indexOf('clear_model_pin')).toBeLessThan(commands.indexOf('send_message'));
+      const sent = invokeSpy.mock.calls.find(([cmd]) => cmd === 'send_message');
+      expect(JSON.stringify(sent?.[1])).toContain('/model default');
+      expect(JSON.stringify(sent?.[1])).not.toContain('[1m]');
+    });
+
+    it('picking the Default row mid-stream queues the default alias, never the 1M wire id', async () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      expect(service.pendingModelOverride()).toBe('default');
+    });
+
+    it('a Default flag on a proxy-routed pick is ignored: the provider model is still written', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'qwen3',
+        wireId: 'local/qwen3',
+        providerId: 'local',
+        kind: 'local',
+        isDefault: true,
+      });
+
+      const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
+      expect(commands).toContain('set_provider_model');
+      expect(commands).not.toContain('clear_model_pin');
+    });
+
+    it('a failed pin clear surfaces the error and never touches the live session', async () => {
+      const original = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) => {
+        if (cmd === 'clear_model_pin') throw new Error('malformed settings.json');
+        return original(cmd, args);
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      expect(service.modelSelectionError()).toBe('malformed settings.json');
+      expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'send_message')).toBe(false);
+    });
+
     it('applyModelSelection during a streaming turn queues the switch instead of silently dropping it', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
@@ -2112,6 +2202,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       const modelSend = invokeSpy.mock.calls.find(
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
@@ -2133,6 +2224,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -2171,6 +2263,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
       service.isStreaming = false;
@@ -2214,6 +2307,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8[1m]',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-opus-4-8[1m]');
       service.isStreaming = false;
@@ -5120,6 +5214,7 @@ describe('ChatStateService', () => {
         wireId: 'my-or/anthropic/claude-haiku-4-5',
         providerId: 'my-or',
         kind: 'open_router',
+        isDefault: false,
       });
       expect(calls).toEqual(['setProviderModel-start']);
       resolveSet();
@@ -5140,6 +5235,7 @@ describe('ChatStateService', () => {
         wireId: 'my-or/anthropic/claude-haiku-4-5',
         providerId: 'my-or',
         kind: 'open_router',
+        isDefault: false,
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -5177,6 +5273,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(calls).toEqual(['set_model_pin-start']);
       resolvePin();
@@ -5202,6 +5299,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -5218,6 +5316,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
@@ -5243,6 +5342,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -5271,6 +5371,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
@@ -5299,6 +5400,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(service.modelSelectionError()).toContain('locked settings.json');
@@ -5321,6 +5423,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
         projectId: expect.any(String),
@@ -5360,6 +5463,7 @@ describe('ChatStateService', () => {
         wireId: 'my-ollama/llama4',
         providerId: 'my-ollama',
         kind: 'local',
+        isDefault: false,
       });
 
       expect(setProviderModelSpy).toHaveBeenCalledWith(expect.any(String), 'my-ollama', 'llama4');

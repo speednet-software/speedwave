@@ -4,8 +4,6 @@ export interface AnthropicCatalogEntry {
   context_tokens: number;
   latest: boolean;
   premium: boolean;
-  selectable: boolean;
-  has_1m: boolean;
   effort_levels: string[];
   default_effort: string | null;
 }
@@ -32,6 +30,7 @@ export function catalogEntryForBadgeLabel(
   catalog: AnthropicCatalogEntry[],
   label: string
 ): AnthropicCatalogEntry | null {
-  const bare = label.replace(/ \[1m\]$/, '').trim();
-  return catalog.find((m) => m.family === bare) ?? null;
+  return catalog.find((m) => m.family === label.trim()) ?? null;
 }
+
+export const ONE_MILLION_MARKER = /\[1m\]|\(1M\)/i;

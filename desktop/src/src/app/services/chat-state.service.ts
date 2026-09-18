@@ -110,7 +110,10 @@ export interface ModelSelectionInput {
   wireId: string;
   providerId: string;
   kind: string;
+  isDefault: boolean;
 }
+
+const DEFAULT_MODEL_ALIAS = 'default';
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
@@ -195,8 +198,14 @@ export class ChatStateService {
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     this._modelSelectionError.set('');
     const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
+    const clearsPin = isAnthropic && sel.isDefault;
+    const wireId = clearsPin ? DEFAULT_MODEL_ALIAS : sel.wireId;
     try {
-      if (isAnthropic) {
+      if (clearsPin) {
+        await this.tauri.invoke('clear_model_pin', {
+          projectId: this.projectState.activeProject() ?? '',
+        });
+      } else if (isAnthropic) {
         await this.tauri.invoke('set_model_pin', {
           projectId: this.projectState.activeProject() ?? '',
           model: sel.wireId,
@@ -215,8 +224,8 @@ export class ChatStateService {
       return;
     }
     if (this.hasLiveSession()) {
-      if (this.isStreaming) this._pendingModelOverride.set(sel.wireId);
-      else await this.sendMessage(`/model ${sel.wireId}`);
+      if (this.isStreaming) this._pendingModelOverride.set(wireId);
+      else await this.sendMessage(`/model ${wireId}`);
     } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
       this.resetForNewConversation();
       this.initialized = true;

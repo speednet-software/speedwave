@@ -178,7 +178,10 @@ pub(crate) async fn resume_conversation(
 const MSG_SESSION_BUSY: &str = "chat session is busy";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
 
-fn session_info_state_inner(session_arc: &SharedChatSession, project: &str) -> SessionInfoState {
+pub(crate) fn session_info_state_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> SessionInfoState {
     match session_arc.try_lock() {
         Ok(session) if session.project_name() == project => session.session_info_state(),
         _ => SessionInfoState::Unavailable,

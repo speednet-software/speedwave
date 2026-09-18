@@ -8,6 +8,8 @@ import {
   anthropicCatalog,
   latestAnthropicModelIds,
   catalogEntryForBadgeLabel,
+  ONE_MILLION_MARKER,
+  type AnthropicCatalogEntry,
 } from '../helpers/anthropic-catalog';
 import {
   openSettings,
@@ -65,6 +67,35 @@ async function pickModelOption(catalogId: string): Promise<void> {
   const option = await $(`[data-testid="model-selector-option-${catalogId}"]`);
   await option.waitForExist({ timeout: 10_000, timeoutMsg: `option ${catalogId} never appeared` });
   await option.click();
+}
+
+async function listedModelIds(): Promise<string[]> {
+  await browser.waitUntil(
+    async () => (await $$('[data-testid^="model-selector-option-"]').getElements()).length > 1,
+    { timeout: 30_000, timeoutMsg: 'model selector never listed more than one option' }
+  );
+  const ids: string[] = [];
+  for (const opt of await $$('[data-testid^="model-selector-option-"]').getElements()) {
+    const testid = (await opt.getAttribute('data-testid')) ?? '';
+    ids.push(testid.replace('model-selector-option-', ''));
+  }
+  return ids;
+}
+
+function firstListedAlternative(
+  catalog: AnthropicCatalogEntry[],
+  listed: string[],
+  currentId: string | undefined,
+  needsEffort: boolean
+): AnthropicCatalogEntry {
+  const target = listed
+    .map((id) => catalog.find((m) => m.id === id))
+    .find(
+      (m): m is AnthropicCatalogEntry =>
+        !!m && m.id !== currentId && (!needsEffort || m.effort_levels.length > 0)
+    );
+  if (!target) throw new Error('the model selector offers no alternative Anthropic model');
+  return target;
 }
 
 describe('Slash Popover + Model/Effort Selector', function () {
@@ -231,11 +262,37 @@ describe('Slash Popover + Model/Effort Selector', function () {
       const catalog = await anthropicCatalog();
       const latestIds = await latestAnthropicModelIds();
       const badgeLabel = (await (await $('[data-testid="composer-model-badge"]')).getText()).trim();
+      expect(badgeLabel).not.toMatch(ONE_MILLION_MARKER);
       const entry = catalogEntryForBadgeLabel(catalog, badgeLabel);
       if (!entry) {
         throw new Error(`composer-model-badge showed an unrecognized label "${badgeLabel}"`);
       }
       expect(latestIds).toContain(entry.id);
+    });
+
+    it('(a2) the picker lists one clean row per model, marks the active one and badges the plan default', async function () {
+      this.timeout(120_000);
+      await openModelSelector();
+      const ids = await listedModelIds();
+
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const id of ids) {
+        expect(id).not.toMatch(ONE_MILLION_MARKER);
+      }
+      for (const opt of await $$('[data-testid^="model-selector-option-"]').getElements()) {
+        expect(await opt.getText()).not.toMatch(ONE_MILLION_MARKER);
+      }
+      expect(
+        (await $$('[data-testid="model-selector-default-badge"]').getElements()).length
+      ).toBe(1);
+      expect((await $$('[data-testid="model-selector-active-mark"]').getElements()).length).toBe(
+        1
+      );
+      const catalog = await anthropicCatalog();
+      for (const legacy of catalog.filter((m) => !m.latest)) {
+        expect(ids).toContain(legacy.id);
+      }
+      await browser.keys('Escape');
     });
 
     it('(b)+(c) a composer pick of a model and an effort level persists across "+" and a real app restart', async function () {
@@ -245,19 +302,22 @@ describe('Slash Popover + Model/Effort Selector', function () {
         await (await $('[data-testid="composer-model-badge"]')).getText()
       ).trim();
       const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
-      const targetModel = catalog.find(
-        (m) => m.selectable && m.effort_levels.length > 0 && m.id !== currentEntry?.id
-      );
-      if (!targetModel) {
-        throw new Error('no alternative selectable Anthropic model with effort support found');
-      }
 
       await openModelSelector();
+      const targetModel = firstListedAlternative(
+        catalog,
+        await listedModelIds(),
+        currentEntry?.id,
+        true
+      );
       await pickModelOption(targetModel.id);
       await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
         timeout: 30_000,
         timeoutMsg: `model control-chip never rendered after picking ${targetModel.id}`,
       });
+      expect(
+        await (await $('[data-testid="control-chip"][data-command="model"]')).getText()
+      ).not.toMatch(ONE_MILLION_MARKER);
 
       await sendMessageAndWait('Say hi in one word.');
       await browser.waitUntil(
@@ -318,13 +378,13 @@ describe('Slash Popover + Model/Effort Selector', function () {
         await (await $('[data-testid="composer-model-badge"]')).getText()
       ).trim();
       const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
-      const targetModel = catalog.find((m) => m.selectable && m.id !== currentEntry?.id);
-      if (!targetModel) throw new Error('no alternative selectable Anthropic model found');
 
       await openModelSelector();
-      await browser.waitUntil(
-        async () => (await $$('[data-testid^="model-selector-option-"]').getElements()).length > 1,
-        { timeout: 30_000, timeoutMsg: 'model selector never listed more than one option' }
+      const targetModel = firstListedAlternative(
+        catalog,
+        await listedModelIds(),
+        currentEntry?.id,
+        false
       );
 
       await queueMessageViaEnter('Count slowly from one to five, one number per line.');
