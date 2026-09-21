@@ -477,7 +477,7 @@ class TriStateField<T> {
                   <button
                     type="button"
                     class="mono rounded bg-[var(--accent)] px-4 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                    [disabled]="saving()"
+                    [disabled]="saving() || !isDirty()"
                     (click)="save()"
                     data-testid="telemetry-save"
                   >
@@ -531,6 +531,7 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   readonly probing = signal(false);
   /** Empty until a probe runs; then 'reachable' or 'unreachable from this host'. */
   readonly probeResult = signal('');
+  private readonly loadedFormSnapshot = signal('');
 
   readonly enabled = signal(false);
   readonly protocol = signal<OtlpProtocol>('grpc');
@@ -558,6 +559,11 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   readonly metricIntervalTouched = this.metricIntervalField.touched;
   readonly logsExportIntervalMs = this.logsIntervalField.value;
   readonly logsIntervalTouched = this.logsIntervalField.touched;
+
+  /** True when the form differs from the last loaded/saved state; false until the first load. */
+  readonly isDirty = computed<boolean>(
+    () => this.config() !== null && this.computeFormSnapshot() !== this.loadedFormSnapshot()
+  );
 
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
@@ -588,10 +594,30 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
       this.logToolDetails.set(c.log_tool_details);
       this.logRawApiBodies.set(c.log_raw_api_bodies);
       this.error.set('');
+      this.loadedFormSnapshot.set(this.computeFormSnapshot());
     } catch (e: unknown) {
       this.emitError(e);
     }
     this.cdr.markForCheck();
+  }
+
+  private computeFormSnapshot(): string {
+    return JSON.stringify({
+      enabled: this.enabled(),
+      protocol: this.protocol(),
+      exportMetrics: this.exportMetrics(),
+      exportLogs: this.exportLogs(),
+      includeAccountUuid: this.includeAccountUuid(),
+      logUserPrompts: this.logUserPrompts(),
+      logAssistantResponses: this.logAssistantResponses(),
+      logToolDetails: this.logToolDetails(),
+      logRawApiBodies: this.logRawApiBodies(),
+      endpoint: [this.endpoint(), this.endpointTouched()],
+      headers: [this.headers(), this.headersTouched()],
+      resourceAttributes: [this.resourceAttributes(), this.resourceAttributesTouched()],
+      metricInterval: [this.metricExportIntervalMs(), this.metricIntervalTouched()],
+      logsInterval: [this.logsExportIntervalMs(), this.logsIntervalTouched()],
+    });
   }
 
   /**

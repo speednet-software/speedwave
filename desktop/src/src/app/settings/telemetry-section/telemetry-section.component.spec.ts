@@ -469,4 +469,67 @@ describe('TelemetrySectionComponent', () => {
     ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="telemetry-error"]')).toBeNull();
   });
+
+  describe('dirty tracking (SPEED-637)', () => {
+    async function createLoaded(): Promise<void> {
+      await create();
+      await component.ngOnInit();
+      fixture.detectChanges();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+    }
+
+    it('is clean before load and after the initial load', async () => {
+      await create();
+      expect(component.isDirty()).toBe(false);
+      await component.ngOnInit();
+      await fixture.whenStable();
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('turns dirty on a value edit', async () => {
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      expect(component.isDirty()).toBe(true);
+    });
+
+    it('a tri-state edit back to the loaded value still counts as dirty (touched)', async () => {
+      await createLoaded();
+      component.onHeadersInput('Authorization: Bearer x');
+      component.onHeadersInput('');
+      expect(component.isDirty()).toBe(true);
+    });
+
+    it('a successful save resets dirty', async () => {
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      expect(component.isDirty()).toBe(true);
+      await component.save();
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('a failed save keeps the section dirty and surfaces the error', async () => {
+      await createLoaded();
+      const previous = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_telemetry_config') throw new Error('save failed');
+        return previous ? previous(cmd, args) : undefined;
+      };
+      component.onEndpointInput('https://other:4318');
+      await component.save();
+      expect(component.isDirty()).toBe(true);
+      expect(component.saveError()).toBe('save failed');
+    });
+
+    it('disables Save while clean and enables it on an edit', async () => {
+      await createLoaded();
+      const save = (): HTMLButtonElement | null =>
+        fixture.nativeElement.querySelector('[data-testid="telemetry-save"]');
+      expect(save()?.disabled).toBe(true);
+      component.onEndpointInput('https://other:4318');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      expect(save()?.disabled).toBe(false);
+    });
+  });
 });
