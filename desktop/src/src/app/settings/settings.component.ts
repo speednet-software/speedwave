@@ -21,6 +21,8 @@ import { TelemetrySectionComponent } from './telemetry-section/telemetry-section
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
+import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
+import { SettingsDirtyService } from './settings-dirty.service';
 
 /** One theme card in the Appearance accent grid; swatch reads live `--accent` via `data-theme`. */
 interface ThemeCard {
@@ -73,6 +75,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     SecuritySectionComponent,
     UpdateSectionComponent,
     ProjectPillComponent,
+    ModalOverlayComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
@@ -203,6 +206,25 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         />
       </div>
     </div>
+
+    <app-modal-overlay
+      [open]="dirty.promptOpen()"
+      kicker="⚠ unsaved changes"
+      kickerColor="amber"
+      modalTitle="Unsaved changes"
+      [body]="unsavedBody()"
+      primaryLabel="save and leave"
+      secondaryLabel="stay"
+      tertiaryLabel="leave without saving"
+      testId="settings-unsaved-modal"
+      primaryTestId="unsaved-save-btn"
+      secondaryTestId="unsaved-stay-btn"
+      tertiaryTestId="unsaved-discard-btn"
+      (primary)="dirty.resolvePrompt('save')"
+      (secondary)="dirty.resolvePrompt('stay')"
+      (tertiary)="dirty.resolvePrompt('discard')"
+      (closed)="dirty.resolvePrompt('stay')"
+    />
   `,
 })
 export class SettingsComponent implements OnInit, OnDestroy {
@@ -220,6 +242,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly ui = inject(UiStateService);
   /** Beta-features gate — the transcription and telemetry sections are beta-only. */
   readonly beta = inject(BetaService);
+  /** Dirty-section registry exposed to the template for the leave prompt. */
+  readonly dirty = inject(SettingsDirtyService);
+
+  /** Modal body naming every dirty section. */
+  readonly unsavedBody = computed(
+    () => `Unsaved changes in: ${this.dirty.dirtySectionNames().join(', ')}. Save before leaving?`
+  );
 
   private router = inject(Router);
   private route = inject(ActivatedRoute);
@@ -268,6 +297,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
 
   /** Handles factory reset completion by navigating to setup. */
   onResetCompleted(): void {
+    this.dirty.suppressNextPrompt();
     this.router.navigate(['/setup'], { replaceUrl: true });
   }
 }
