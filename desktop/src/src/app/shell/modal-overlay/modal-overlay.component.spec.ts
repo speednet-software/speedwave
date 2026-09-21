@@ -25,6 +25,7 @@ import {
       [secondaryLabel]="secondaryLabel()"
       [testId]="testId()"
       [tertiaryLabel]="tertiaryLabel()"
+      [showClose]="showClose()"
       (primary)="primaryEvents = primaryEvents + 1"
       (secondary)="secondaryEvents = secondaryEvents + 1"
       (tertiary)="tertiaryEvents = tertiaryEvents + 1"
@@ -45,6 +46,7 @@ class TestHostComponent {
   secondaryLabel = signal<string>('later');
   testId = signal<string>('test-overlay');
   tertiaryLabel = signal<string>('');
+  showClose = signal<boolean>(false);
 
   primaryEvents = 0;
   secondaryEvents = 0;
@@ -215,6 +217,32 @@ describe('ModalOverlayComponent', () => {
       expect(host.tertiaryEvents).toBe(1);
       expect(host.primaryEvents).toBe(0);
       expect(host.secondaryEvents).toBe(0);
+    });
+  });
+
+  describe('close button', () => {
+    it('is hidden by default', () => {
+      expect(q('[data-testid="modal-close"]')).toBeNull();
+    });
+
+    it('dismisses the dialog and emits closed once', () => {
+      host.showClose.set(true);
+      fixture.detectChanges();
+      const btn = q('[data-testid="modal-close"]');
+      expect(btn).not.toBeNull();
+      btn!.click();
+      fixture.detectChanges();
+      expect(host.closedEvents).toBe(1);
+      expect(q('[data-testid="test-overlay"]')).toBeNull();
+    });
+  });
+
+  describe('secondary button visibility', () => {
+    it('is hidden when the label is empty', () => {
+      host.secondaryLabel.set('');
+      fixture.detectChanges();
+      expect(q('[data-testid="modal-secondary"]')).toBeNull();
+      expect(q('[data-testid="modal-primary"]')).not.toBeNull();
     });
   });
 });

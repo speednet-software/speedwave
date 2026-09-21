@@ -29,12 +29,27 @@ export type ModalBorderColor = 'default' | 'red';
   template: `
     <ng-template #content>
       <div
-        class="rounded p-5 bg-[var(--bg-1)]"
+        class="relative rounded p-5 bg-[var(--bg-1)]"
         role="document"
         [class]="boxClasses()"
         [attr.data-testid]="testId()"
       >
-        <div class="mono text-[11px] uppercase tracking-widest" [class]="kickerClasses()">
+        @if (showClose()) {
+          <button
+            type="button"
+            class="mono absolute left-2 top-2 rounded px-1 text-[13px] leading-none text-[var(--ink-mute)] hover:text-[var(--ink)]"
+            aria-label="Close"
+            [attr.data-testid]="closeTestId()"
+            (click)="dismiss()"
+          >
+            ✕
+          </button>
+        }
+        <div
+          class="mono text-[11px] uppercase tracking-widest"
+          [class]="kickerClasses()"
+          [class.pl-6]="showClose()"
+        >
           {{ kicker() }}
         </div>
         <h3 class="view-title view-title-section mt-1 text-[var(--ink)]" data-testid="modal-title">
@@ -81,14 +96,16 @@ export type ModalBorderColor = 'default' | 'red';
               {{ tertiaryLabel() }}
             </button>
           }
-          <button
-            type="button"
-            class="mono rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
-            [attr.data-testid]="secondaryTestId()"
-            (click)="secondary.emit()"
-          >
-            {{ secondaryLabel() }}
-          </button>
+          @if (secondaryLabel()) {
+            <button
+              type="button"
+              class="mono rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
+              [attr.data-testid]="secondaryTestId()"
+              (click)="secondary.emit()"
+            >
+              {{ secondaryLabel() }}
+            </button>
+          }
           <button
             type="button"
             class="mono rounded px-3 py-1 text-[12px] font-medium hover:opacity-90"
@@ -126,7 +143,7 @@ export class ModalOverlayComponent {
   readonly borderColor = input<ModalBorderColor>('default');
   /** Label for the primary (right-side) button. */
   readonly primaryLabel = input.required<string>();
-  /** Label for the secondary (left-side) button — mockup default is "later". */
+  /** Label for the secondary (left-side) button; empty string hides it — default is "later". */
   readonly secondaryLabel = input<string>('later');
   /** Optional `data-testid` for E2E tests targeting a specific overlay. */
   readonly testId = input<string>('modal-overlay');
@@ -138,6 +155,10 @@ export class ModalOverlayComponent {
   readonly tertiaryLabel = input<string>('');
   /** `data-testid` for the tertiary button — defaults to `modal-tertiary`. */
   readonly tertiaryTestId = input<string>('modal-tertiary');
+  /** Shows a ✕ dismiss button in the top-left corner; dismissing behaves like Esc/backdrop. */
+  readonly showClose = input<boolean>(false);
+  /** `data-testid` for the close button — defaults to `modal-close`. */
+  readonly closeTestId = input<string>('modal-close');
 
   /** Emitted when the primary button is clicked. */
   readonly primary = output<void>();
@@ -145,7 +166,7 @@ export class ModalOverlayComponent {
   readonly secondary = output<void>();
   /** Emitted when the tertiary button is clicked. */
   readonly tertiary = output<void>();
-  /** Emitted when the dialog closes via backdrop, Esc, or programmatic close. */
+  /** Emitted when the user dismisses the dialog: backdrop, Esc, or the ✕ close button. */
   readonly closed = output<void>();
 
   protected readonly content = viewChild.required<TemplateRef<unknown>>('content');
@@ -222,6 +243,11 @@ export class ModalOverlayComponent {
       }
       this.closingProgrammatically = false;
     });
+  }
+
+  /** Closes the dialog from the ✕ button — flows through the CDK close path like Esc/backdrop. */
+  protected dismiss(): void {
+    this.dialogRef?.close();
   }
 
   private closeDialog(): void {

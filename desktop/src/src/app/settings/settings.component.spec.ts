@@ -351,11 +351,12 @@ describe('SettingsComponent', () => {
       expect(document.querySelector('[data-testid="modal-body"]')?.textContent).toContain(
         'Telemetry'
       );
-      (document.querySelector('[data-testid="unsaved-stay-btn"]') as HTMLElement).click();
+      expect(document.querySelector('[data-testid="unsaved-stay-btn"]')).toBeNull();
+      (document.querySelector('[data-testid="unsaved-close-btn"]') as HTMLElement).click();
       await expect(pending).resolves.toBe('stay');
     });
 
-    it('the three buttons resolve save / discard / stay', async () => {
+    it('save and discard buttons resolve their choices and the close ✕ resolves stay', async () => {
       const registry = TestBed.inject(SettingsDirtyService);
       registry.register({ name: 'Security', isDirty: signal(true), save: async () => {} });
       component.ngOnInit();
@@ -370,6 +371,11 @@ describe('SettingsComponent', () => {
       fixture.detectChanges();
       (document.querySelector('[data-testid="unsaved-discard-btn"]') as HTMLElement).click();
       await expect(pending2).resolves.toBe('discard');
+      const pending3 = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      (document.querySelector('[data-testid="unsaved-close-btn"]') as HTMLElement).click();
+      await expect(pending3).resolves.toBe('stay');
     });
 
     it('factory reset suppresses the next leave prompt', () => {
