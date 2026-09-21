@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Route } from '@angular/router';
 
 import { routes } from './app.routes';
+import { settingsUnsavedChangesGuard } from './guards/settings-unsaved-changes.guard';
 
 describe('app routes', () => {
   function shellChild(path: string): Route | undefined {
@@ -14,5 +15,9 @@ describe('app routes', () => {
     expect(route).toBeDefined();
     expect(route?.canActivate).toBeUndefined();
     expect(route?.canMatch).toBeUndefined();
+  });
+
+  it('the settings route carries the unsaved-changes deactivation guard', () => {
+    expect(shellChild('settings')?.canDeactivate).toEqual([settingsUnsavedChangesGuard]);
   });
 });
