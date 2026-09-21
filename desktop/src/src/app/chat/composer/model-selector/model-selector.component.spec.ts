@@ -126,6 +126,38 @@ describe('ModelSelectorComponent', () => {
     expect(badge.nativeElement.textContent).not.toContain('openrouter/');
   });
 
+  it('shows the picked model on the badge optimistically after a routed selection', async () => {
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openai/o4-mini',
+      base_url: null,
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      if (cmd === 'discover_llm_models')
+        return Promise.resolve({ models: [{ id: 'meta-llama/llama-3.1-70b-instruct' }] });
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or-pick');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
+    expect(badge.nativeElement.textContent).toContain('openai/o4-mini');
+
+    badge.nativeElement.click();
+    await fixture.whenStable();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    fixture.debugElement
+      .query(By.css('[data-testid="model-selector-option-meta-llama/llama-3.1-70b-instruct"]'))
+      .nativeElement.click();
+    fixture.detectChanges();
+    expect(badge.nativeElement.textContent).toContain('meta-llama/llama-3.1-70b-instruct');
+    expect(badge.nativeElement.textContent).not.toContain('openai/o4-mini');
+  });
+
   it('shows a loader while the rows are fetching, then exactly one row per model', async () => {
     let resolveRows!: (v: ModelPicker) => void;
     tauriInvoke.mockImplementation((cmd: string) => {

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
+  MODEL_SWITCH_NOT_APPLIED,
   NEW_CONVERSATION_AUTH,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
@@ -5582,6 +5583,9 @@ describe('ChatStateService', () => {
       await pending;
       expect(calls).toEqual(['setProviderModel-start', 'setProviderModel-resolved', 'sendMessage']);
       expect(invokeSpy).not.toHaveBeenCalledWith('set_model_pin', expect.anything());
+      expect(
+        invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
+      ).toHaveLength(0);
     });
 
     it('does not send the wire command when setProviderModel rejects', async () => {
@@ -5718,6 +5722,9 @@ describe('ChatStateService', () => {
       });
       expect(startCalls.at(-1)?.i).toBeGreaterThan(pinCallIndex);
       expect(startCalls.at(-1)?.args).toEqual({ project: 'test' });
+      expect(
+        invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
+      ).toHaveLength(0);
       expect(service.pendingModelOverride()).toBeNull();
     });
 
@@ -5810,14 +5817,154 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    it('does nothing further for a no-session non-anthropic selection beyond the write-through', async () => {
+    it('a no-session routed pick re-renders the compose and respawns, so the next turn runs on it', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+        isDefault: false,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy).toHaveBeenCalledWith('set_provider_model', {
+        projectId: 'test',
+        providerId: 'my-ollama',
+        model: 'llama4',
+      });
+      const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
+      const writeIdx = commands.indexOf('set_provider_model');
+      const restartIdx = commands.indexOf('restart_integration_containers');
+      expect(restartIdx).toBeGreaterThan(writeIdx);
+      expect(commands.lastIndexOf('start_chat')).toBeGreaterThan(restartIdx);
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.modelSelectionError()).toBe('');
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('surfaces a failed re-render for a routed pick and leaves the session unspawned', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose render failed');
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+        isDefault: false,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.modelSelectionError()).toContain('compose render failed');
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(projectState.needsRestart).toBe(true);
+    });
+
+    it('tells the user to pick again when a restart is already running', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      projectState.restarting = true;
+      projectState.restartError = 'a failure from an older restart';
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+        isDefault: false,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy).toHaveBeenCalledWith('set_provider_model', {
+        projectId: 'test',
+        providerId: 'my-ollama',
+        model: 'llama4',
+      });
+      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_NOT_APPLIED);
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(projectState.needsRestart).toBe(false);
+    });
+
+    it('keeps a routed pick without an active project from respawning on an unchanged compose', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      projectState.activeProject.set(null);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+        isDefault: false,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(
+        invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
+      ).toHaveLength(0);
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_NOT_APPLIED);
+    });
+
+    it('a mid-stream routed pick on a live session queues the wire switch and leaves containers alone', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const anthropicModels = TestBed.inject(AnthropicModelsService);
-      const setProviderModelSpy = vi
-        .spyOn(anthropicModels, 'setProviderModel')
-        .mockResolvedValue(undefined);
-      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      vi.spyOn(anthropicModels, 'setProviderModel').mockResolvedValue(undefined);
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'my-or/anthropic/claude-sonnet-5', session_id: 'sess-routed' },
+      });
+      await Promise.resolve();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'anthropic/claude-haiku-4-5',
+        wireId: 'my-or/anthropic/claude-haiku-4-5',
+        providerId: 'my-or',
+        kind: 'open_router',
+        isDefault: false,
+      });
+
+      expect(service.pendingModelOverride()).toBe('my-or/anthropic/claude-haiku-4-5');
+      expect(
+        invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
+      ).toHaveLength(0);
+    });
+
+    it('a still-session-less streaming routed pick writes through and leaves the running turn alone', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      service.isStreaming = true;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await service.applyModelSelection({
         catalogId: 'llama4',
@@ -5827,8 +5974,15 @@ describe('ChatStateService', () => {
         isDefault: false,
       });
 
-      expect(setProviderModelSpy).toHaveBeenCalledWith(expect.any(String), 'my-ollama', 'llama4');
-      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(invokeSpy).toHaveBeenCalledWith('set_provider_model', {
+        projectId: 'proj',
+        providerId: 'my-ollama',
+        model: 'llama4',
+      });
+      expect(
+        invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
+      ).toHaveLength(0);
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
       expect(service.pendingModelOverride()).toBeNull();
     });
   });

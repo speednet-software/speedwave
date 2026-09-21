@@ -86,6 +86,9 @@ export const NEW_CONVERSATION_STREAMING =
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
 
+export const MODEL_SWITCH_NOT_APPLIED =
+  'The containers were not restarted, so the model is not in use yet. Pick it again in a moment.';
+
 /**
  * Returns null for anything but the two known backend phrasings.
  * @param raw - Raw error message from the backend.
@@ -184,9 +187,7 @@ export class ChatStateService {
         level,
       });
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`effort pin write-through failed: ${msg}`);
-      this._modelSelectionError.set(msg);
+      this.reportSelectionFailure('effort pin write-through', e);
       return;
     }
     if (this.isStreaming) {
@@ -204,8 +205,8 @@ export class ChatStateService {
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
   /**
-   * The single handler for a composer model-selector pick (Task 16): persists
-   * the pick first (Anthropic: `settings.json` model pin; routed: config write-through), then applies it live (wire switch, queued override, or idle respawn).
+   * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
+   * then applies it: wire switch, queued override, or an idle respawn that a routed pick precedes with a compose re-render.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -231,19 +232,40 @@ export class ChatStateService {
         );
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`model selection persist failed: ${msg}`);
-      this._modelSelectionError.set(msg);
+      this.reportSelectionFailure('model selection persist', e);
       return;
     }
     if (this.hasLiveSession()) {
       if (this.isStreaming) this._pendingModelOverride.set(wireId);
       else await this.sendMessage(`/model ${wireId}`);
-    } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
-      this.resetForNewConversation();
-      this.initialized = true;
-      await this.startChatSession();
+      return;
     }
+    if (this.isStreaming || this._resumeInProgress) return;
+    if (!isAnthropic && !(await this.rerenderContainersForModel())) return;
+    this.resetForNewConversation();
+    this.initialized = true;
+    await this.startChatSession();
+  }
+
+  private reportSelectionFailure(what: string, cause: unknown): void {
+    const msg = cause instanceof Error ? cause.message : String(cause);
+    this.log.warn(`${what} failed: ${msg}`);
+    this._modelSelectionError.set(msg);
+  }
+
+  private async rerenderContainersForModel(): Promise<boolean> {
+    const outcome = await this.projectState.restartContainers();
+    if (outcome === 'restarted') return true;
+    if (outcome === 'failed') {
+      this.reportSelectionFailure(
+        'compose re-render for the picked model',
+        this.projectState.restartError
+      );
+      this.projectState.requestRestart();
+      return false;
+    }
+    this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
+    return false;
   }
 
   private hasLiveSession(): boolean {

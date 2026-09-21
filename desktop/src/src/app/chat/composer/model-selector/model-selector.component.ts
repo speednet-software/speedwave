@@ -525,7 +525,7 @@ export class ModelSelectorComponent {
       kind: summary.kind,
       isDefault: opt.isDefault,
     });
-    if (isAnthropicKind(summary.kind)) this.lastPicked.set(opt.id);
+    this.lastPicked.set(opt.id);
     this.open.set(false);
   }
 

@@ -485,7 +485,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue('restarted');
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement;
       btn.click();
 
@@ -521,6 +521,18 @@ describe('ShellComponent', () => {
       expect(q('[data-testid="restart-later-btn"]')).toBeNull();
     });
 
+    it('shows spinner for a restart nothing asked the user to confirm', () => {
+      projectState.needsRestart = false;
+      projectState.restarting = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const overlay = q('[data-testid="restart-overlay"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay!.textContent).toContain('Restarting containers...');
+      expect(q('[data-testid="restart-now-btn"]')).toBeNull();
+    });
+
     it('shows error when restartError is set', () => {
       projectState.needsRestart = true;
       projectState.restartError = 'compose failed';
@@ -541,7 +553,7 @@ describe('ShellComponent', () => {
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement | null;
       expect(btn).not.toBeNull();
 
-      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue('restarted');
       btn!.click();
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();
