@@ -158,6 +158,24 @@ describe('ModelSelectorComponent', () => {
     expect(badge.nativeElement.textContent).not.toContain('openai/o4-mini');
   });
 
+  it('keeps the active-mark slot at a fixed width so every row label starts at the same edge', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    fixture.debugElement
+      .query(By.css('[data-testid="composer-model-badge"]'))
+      .nativeElement.click();
+    await fixture.whenStable();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    const rows = fixture.debugElement.queryAll(By.css('[data-testid^="model-selector-option-"]'));
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      const slot = row.query(By.css('span[aria-hidden="true"]'));
+      expect(slot).toBeTruthy();
+      expect(slot.nativeElement.className).toContain('shrink-0');
+    }
+  });
+
   it('shows a loader while the rows are fetching, then exactly one row per model', async () => {
     let resolveRows!: (v: ModelPicker) => void;
     tauriInvoke.mockImplementation((cmd: string) => {
