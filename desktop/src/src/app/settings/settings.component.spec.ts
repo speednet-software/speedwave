@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
-import { RouterModule } from '@angular/router';
+import { Router, RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { TauriService } from '../services/tauri.service';
@@ -374,8 +374,10 @@ describe('SettingsComponent', () => {
 
     it('factory reset suppresses the next leave prompt', () => {
       const registry = TestBed.inject(SettingsDirtyService);
+      const navigate = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
       component.onResetCompleted();
       expect(registry.consumeSuppression()).toBe(true);
+      expect(navigate).toHaveBeenCalledWith(['/setup'], { replaceUrl: true });
     });
   });
 });
