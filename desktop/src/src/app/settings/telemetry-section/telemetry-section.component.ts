@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnDestroy,
   OnInit,
   WritableSignal,
@@ -13,6 +14,7 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { ToggleComponent } from '../../shared/toggle.component';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
@@ -568,7 +570,18 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly projectState = inject(ProjectStateService);
+  private readonly dirtyRegistry = inject(SettingsDirtyService);
   private savedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Registers this section's dirty state with the settings leave guard. */
+  constructor() {
+    const unregister = this.dirtyRegistry.register({
+      name: 'Telemetry',
+      isDirty: this.isDirty,
+      save: () => this.save(),
+    });
+    inject(DestroyRef).onDestroy(unregister);
+  }
 
   /** Loads the effective telemetry config on first paint. */
   async ngOnInit(): Promise<void> {
