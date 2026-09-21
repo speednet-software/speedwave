@@ -187,9 +187,7 @@ export class ChatStateService {
         level,
       });
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`effort pin write-through failed: ${msg}`);
-      this._modelSelectionError.set(msg);
+      this.reportSelectionFailure('effort pin write-through', e);
       return;
     }
     if (this.isStreaming) {
@@ -207,8 +205,8 @@ export class ChatStateService {
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
   /**
-   * The single handler for a composer model-selector pick (Task 16): persists
-   * the pick first (Anthropic: `settings.json` model pin; routed: config write-through), then applies it live (wire switch, queued override, or idle respawn preceded by a compose re-render for routed providers).
+   * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
+   * then applies it: wire switch, queued override, or an idle respawn that a routed pick precedes with a compose re-render.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -234,9 +232,7 @@ export class ChatStateService {
         );
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`model selection persist failed: ${msg}`);
-      this._modelSelectionError.set(msg);
+      this.reportSelectionFailure('model selection persist', e);
       return;
     }
     if (this.hasLiveSession()) {
@@ -251,19 +247,19 @@ export class ChatStateService {
     await this.startChatSession();
   }
 
+  private reportSelectionFailure(what: string, cause: unknown): void {
+    const msg = cause instanceof Error ? cause.message : String(cause);
+    this.log.warn(`${what} failed: ${msg}`);
+    this._modelSelectionError.set(msg);
+  }
+
   private async rerenderContainersForModel(): Promise<boolean> {
-    if (this.projectState.restarting) {
-      this._modelSelectionError.set(MODEL_SWITCH_RESTART_BUSY);
-      return false;
-    }
-    await this.projectState.restartContainers();
-    const failure = this.projectState.restartError;
-    if (failure) {
-      this.log.warn(`[chat-state] compose re-render for the picked model failed: ${failure}`);
-      this._modelSelectionError.set(failure);
-      return false;
-    }
-    return true;
+    if (await this.projectState.restartContainers()) return true;
+    this.reportSelectionFailure(
+      'compose re-render for the picked model',
+      this.projectState.restartError || MODEL_SWITCH_RESTART_BUSY
+    );
+    return false;
   }
 
   private hasLiveSession(): boolean {

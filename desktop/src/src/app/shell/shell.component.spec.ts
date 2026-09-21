@@ -485,7 +485,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue(true);
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement;
       btn.click();
 
@@ -553,7 +553,7 @@ describe('ShellComponent', () => {
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement | null;
       expect(btn).not.toBeNull();
 
-      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue(true);
       btn!.click();
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();

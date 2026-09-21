@@ -5905,6 +5905,31 @@ describe('ChatStateService', () => {
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
     });
 
+    it('keeps a routed pick without an active project from respawning on an unchanged compose', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      projectState.activeProject.set(null);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+        isDefault: false,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(
+        invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
+      ).toHaveLength(0);
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_RESTART_BUSY);
+    });
+
     it('a mid-stream routed pick on a live session queues the wire switch and leaves containers alone', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');

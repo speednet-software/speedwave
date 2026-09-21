@@ -278,11 +278,12 @@ the provider being Anthropic, so a pick made before the first turn (the
 session id exists only once the first stream chunk arrives) persisted to
 `config.json` while the running container kept the previously rendered model,
 and the turn failed against a model the badge no longer showed. Soft-impose
-does not cover this case: it fires on `system/init`
-(`chat.rs::maybe_soft_impose`), which Claude Code emits when it is already
-processing the first prompt, so it repairs the second turn onwards and never
-the first - the same first-turn gap the Anthropic side closed with the
-`settings.json` pin. The routed branch now applies the pick the way Settings
+does not cover this case: it fires on the `system/init` line
+(`chat.rs::maybe_soft_impose`), which arrives inside the first turn, so its
+repair lands no earlier than the second one - the field-tested first-turn gap
+recorded in the first amendment above (badge `claude-fable-5`, first reply
+`claude-opus-4-8`), which the Anthropic side closed with the `settings.json`
+pin. The routed branch now applies the pick the way Settings
 has applied one since `model` became part of `computeActiveKey`
 (`desktop/src/src/app/settings/llm-provider/llm-provider.component.ts`):
 `ProjectStateService.restartContainers()` (`restart_integration_containers`,

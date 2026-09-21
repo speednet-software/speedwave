@@ -519,9 +519,12 @@ export class ProjectStateService {
     };
   }
 
-  /** Restarts integration containers; backend rebuilds missing worker images. */
-  async restartContainers(): Promise<void> {
-    if (!this.activeProject() || this.restarting) return;
+  /**
+   * Restarts integration containers; backend rebuilds missing worker images.
+   * @returns false when the restart never ran (no project, one already in flight) or failed, so a caller that depends on the re-rendered compose can tell.
+   */
+  async restartContainers(): Promise<boolean> {
+    if (!this.activeProject() || this.restarting) return false;
     const project = this.activeProject();
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
@@ -554,6 +557,7 @@ export class ProjectStateService {
       this.notifySettled();
       this.notifyRestartComplete();
     }
+    return restartedOk;
   }
 
   /** Dismisses the restart overlay without restarting. */

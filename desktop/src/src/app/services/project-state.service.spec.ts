@@ -1717,11 +1717,25 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      await service.restartContainers();
+      const ran = await service.restartContainers();
 
+      expect(ran).toBe(false);
       expect(service.restartError).toBe('compose failed');
       expect(service.restarting).toBe(false);
       expect(service.needsRestart).toBe(true);
+    });
+
+    it('restartContainers reports back whether the containers were actually restarted', async () => {
+      service.requestRestart();
+
+      await expect(service.restartContainers()).resolves.toBe(true);
+
+      service.restarting = true;
+      await expect(service.restartContainers()).resolves.toBe(false);
+
+      service.restarting = false;
+      service.activeProject.set(null);
+      await expect(service.restartContainers()).resolves.toBe(false);
     });
 
     it('restartContainers recovers after previous failure', async () => {
