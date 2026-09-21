@@ -1263,11 +1263,24 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return fp !== savedFp;
   }
 
+  private saveInFlight: Promise<void> | null = null;
+
   /**
-   * Persists the LLM provider configuration to the backend.
+   * Single-flight wrapper: a save already in flight is returned as-is, never started twice.
+   * A concurrent call while one is in flight ignores its own `forceRestart` and rides the
+   * in-flight save's — acceptable because the UI disables Save while saving, so only the
+   * guard (always default `forceRestart`) can race a user-initiated save.
    * @param forceRestart - forces a full restart even if `active` is unchanged, so a running container can't stay routed to a stale provider
    */
   async saveConfig(forceRestart = false): Promise<void> {
+    if (this.saveInFlight) return this.saveInFlight;
+    this.saveInFlight = this.doSaveConfig(forceRestart).finally(() => {
+      this.saveInFlight = null;
+    });
+    return this.saveInFlight;
+  }
+
+  private async doSaveConfig(forceRestart = false): Promise<void> {
     const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
     if (provider !== 'anthropic' && !this.localModelSatisfied() && localIsActive) {

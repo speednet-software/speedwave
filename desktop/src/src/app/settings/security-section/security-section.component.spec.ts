@@ -494,6 +494,23 @@ describe('SecuritySectionComponent', () => {
         fixture.nativeElement.querySelector('[data-testid="security-save-error"]')
       ).not.toBeNull();
     });
+
+    it('a save already in flight is not started twice (single-flight)', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
+      let calls = 0;
+      const previous = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_security_policy') calls += 1;
+        return previous ? previous(cmd, args) : undefined;
+      };
+      const p1 = component.save();
+      const p2 = component.save();
+      await Promise.all([p1, p2]);
+      expect(calls).toBe(1);
+    });
   });
 
   it('reloads the policy when the active project becomes ready', async () => {
@@ -548,7 +565,6 @@ describe('SecuritySectionComponent', () => {
   });
 
   it('registers in the dirty registry and unregisters on destroy (SPEED-637)', async () => {
-    setup(baseResponse());
     await create();
     const registry = TestBed.inject(SettingsDirtyService);
     component.ngOnInit();

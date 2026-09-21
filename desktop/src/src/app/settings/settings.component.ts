@@ -245,10 +245,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
   /** Dirty-section registry exposed to the template for the leave prompt. */
   readonly dirty = inject(SettingsDirtyService);
 
-  /** Modal body naming every dirty section. */
-  readonly unsavedBody = computed(
-    () => `Unsaved changes in: ${this.dirty.dirtySectionNames().join(', ')}. Save before leaving?`
-  );
+  /** Modal body naming every dirty section; falls back to a generic message once the list empties. */
+  readonly unsavedBody = computed(() => {
+    const names = this.dirty.dirtySectionNames();
+    return names.length
+      ? `Unsaved changes in: ${names.join(', ')}. Save before leaving?`
+      : 'Unsaved changes. Save before leaving?';
+  });
 
   private router = inject(Router);
   private route = inject(ActivatedRoute);

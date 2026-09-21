@@ -36,9 +36,9 @@ export class SettingsDirtyService {
     return () => this.handles.set(this.handles().filter((h) => h !== handle));
   }
 
-  /** Opens the leave prompt; while one is already open, answers 'stay' immediately. */
+  /** Opens the leave prompt; a newer navigation's call supersedes the previous one, which resolves 'stay'. */
   confirmLeave(): Promise<UnsavedChangesChoice> {
-    if (this.pendingResolve() !== null) return Promise.resolve('stay');
+    this.pendingResolve()?.('stay');
     return new Promise((resolve) => this.pendingResolve.set(resolve));
   }
 

@@ -273,6 +273,25 @@ describe('LlmProviderComponent', () => {
     expect(component.saving()).toBe(false);
   });
 
+  it('a save already in flight is not started twice (single-flight)', async () => {
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
+
+    let calls = 0;
+    const previous = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'update_llm_config') calls += 1;
+      return previous ? previous(cmd, args) : undefined;
+    };
+
+    const p1 = component.saveConfig();
+    const p2 = component.saveConfig();
+    await Promise.all([p1, p2]);
+
+    expect(calls).toBe(1);
+  });
+
   it('emits error on save failure', async () => {
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
