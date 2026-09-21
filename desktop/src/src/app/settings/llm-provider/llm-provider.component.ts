@@ -1061,6 +1061,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       if (this.oauthAuthenticated()) {
         this.selectedTarget.set('anthropic');
         this.provider.set('anthropic');
+        await this.saveInFlight;
         await this.saveConfig(true);
       }
     } finally {

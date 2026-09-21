@@ -292,6 +292,47 @@ describe('LlmProviderComponent', () => {
     expect(calls).toBe(1);
   });
 
+  it('onOAuthDone awaits an in-flight save and then runs its own forced save (SPEED-637)', async () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.model.set('claude-opus-4-8');
+
+    const firstSave = createDeferred();
+    let updateCalls = 0;
+    let firstSettled = false;
+    let secondStartedAfterFirst = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') {
+        updateCalls += 1;
+        if (updateCalls === 1) {
+          await firstSave.promise;
+          return undefined;
+        }
+        secondStartedAfterFirst = firstSettled;
+        return undefined;
+      }
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: false,
+          provider_configured: true,
+        };
+      return undefined;
+    };
+
+    const inFlight = component.saveConfig();
+    const oauthDone = component.onOAuthDone(true);
+    await flushMicrotasks();
+    expect(updateCalls).toBe(1);
+
+    firstSettled = true;
+    firstSave.resolve();
+    await Promise.all([inFlight, oauthDone]);
+
+    expect(updateCalls).toBe(2);
+    expect(secondStartedAfterFirst).toBe(true);
+  });
+
   it('emits error on save failure', async () => {
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
