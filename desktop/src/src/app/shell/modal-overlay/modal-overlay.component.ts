@@ -71,6 +71,16 @@ export type ModalBorderColor = 'default' | 'red';
           </div>
         }
         <div class="mt-4 flex justify-end gap-2">
+          @if (tertiaryLabel()) {
+            <button
+              type="button"
+              class="mono mr-auto rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
+              [attr.data-testid]="tertiaryTestId()"
+              (click)="tertiary.emit()"
+            >
+              {{ tertiaryLabel() }}
+            </button>
+          }
           <button
             type="button"
             class="mono rounded border border-[var(--line)] px-3 py-1 text-[12px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
@@ -124,11 +134,17 @@ export class ModalOverlayComponent {
   readonly primaryTestId = input<string>('modal-primary');
   /** `data-testid` for the secondary button — defaults to `modal-secondary`. */
   readonly secondaryTestId = input<string>('modal-secondary');
+  /** Label for the optional tertiary (leftmost) button; empty string hides it. */
+  readonly tertiaryLabel = input<string>('');
+  /** `data-testid` for the tertiary button — defaults to `modal-tertiary`. */
+  readonly tertiaryTestId = input<string>('modal-tertiary');
 
   /** Emitted when the primary button is clicked. */
   readonly primary = output<void>();
   /** Emitted when the secondary button is clicked. */
   readonly secondary = output<void>();
+  /** Emitted when the tertiary button is clicked. */
+  readonly tertiary = output<void>();
   /** Emitted when the dialog closes via backdrop, Esc, or programmatic close. */
   readonly closed = output<void>();
 

@@ -24,8 +24,10 @@ import {
       [primaryLabel]="primaryLabel()"
       [secondaryLabel]="secondaryLabel()"
       [testId]="testId()"
+      [tertiaryLabel]="tertiaryLabel()"
       (primary)="primaryEvents = primaryEvents + 1"
       (secondary)="secondaryEvents = secondaryEvents + 1"
+      (tertiary)="tertiaryEvents = tertiaryEvents + 1"
       (closed)="closedEvents = closedEvents + 1"
     />
   `,
@@ -42,9 +44,11 @@ class TestHostComponent {
   primaryLabel = signal<string>('do it');
   secondaryLabel = signal<string>('later');
   testId = signal<string>('test-overlay');
+  tertiaryLabel = signal<string>('');
 
   primaryEvents = 0;
   secondaryEvents = 0;
+  tertiaryEvents = 0;
   closedEvents = 0;
 }
 
@@ -193,6 +197,24 @@ describe('ModalOverlayComponent', () => {
       host.open.set(false);
       fixture.detectChanges();
       expect(host.closedEvents).toBe(before);
+    });
+  });
+
+  describe('tertiary button', () => {
+    it('is hidden when no label is set', () => {
+      expect(q('[data-testid="modal-tertiary"]')).toBeNull();
+    });
+
+    it('renders and emits when a label is set', () => {
+      host.tertiaryLabel.set('leave without saving');
+      fixture.detectChanges();
+      const btn = q('[data-testid="modal-tertiary"]');
+      expect(btn).not.toBeNull();
+      expect(btn!.textContent).toContain('leave without saving');
+      btn!.click();
+      expect(host.tertiaryEvents).toBe(1);
+      expect(host.primaryEvents).toBe(0);
+      expect(host.secondaryEvents).toBe(0);
     });
   });
 });
