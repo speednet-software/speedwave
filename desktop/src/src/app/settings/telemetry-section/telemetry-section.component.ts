@@ -729,12 +729,23 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  private saveInFlight: Promise<void> | null = null;
+
+  /** Single-flight wrapper: a save already in flight is returned as-is, never started twice. */
+  async save(): Promise<void> {
+    if (this.saveInFlight) return this.saveInFlight;
+    this.saveInFlight = this.doSave().finally(() => {
+      this.saveInFlight = null;
+    });
+    return this.saveInFlight;
+  }
+
   /**
    * Persists the editable fields. Locked fields are omitted entirely (never
    * just server-ignored) so a save with one locked field never blocks an
    * unrelated unlocked edit.
    */
-  async save(): Promise<void> {
+  private async doSave(): Promise<void> {
     this.saving.set(true);
     this.saved.set(false);
     this.cdr.markForCheck();

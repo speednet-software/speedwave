@@ -67,6 +67,17 @@ describe('settingsUnsavedChangesGuard', () => {
     await expect(verdict).resolves.toBe(false);
   });
 
+  it('a superseding second navigation resolves the first as stay and answers the second', async () => {
+    registry.register({ name: 'Security', isDirty: signal(true), save: async () => {} });
+    const first = run();
+    expect(registry.promptOpen()).toBe(true);
+    const second = run();
+    await expect(first).resolves.toBe(false);
+    expect(registry.promptOpen()).toBe(true);
+    registry.resolvePrompt('discard');
+    await expect(second).resolves.toBe(true);
+  });
+
   it('a suppressed evaluation passes once without prompting', async () => {
     registry.register({ name: 'Security', isDirty: signal(true), save: async () => {} });
     registry.suppressNextPrompt();

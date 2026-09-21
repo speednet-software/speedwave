@@ -910,8 +910,19 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     return { policies, custom_policies, pii_ner_enabled: this.piiNerEnabled() };
   }
 
-  /** Persists the enabled policies + custom definitions, then requests a restart. */
+  private saveInFlight: Promise<void> | null = null;
+
+  /** Single-flight wrapper: a save already in flight is returned as-is, never started twice. */
   async save(): Promise<void> {
+    if (this.saveInFlight) return this.saveInFlight;
+    this.saveInFlight = this.doSave().finally(() => {
+      this.saveInFlight = null;
+    });
+    return this.saveInFlight;
+  }
+
+  /** Persists the enabled policies + custom definitions, then requests a restart. */
+  private async doSave(): Promise<void> {
     this.saving.set(true);
     this.saved.set(false);
     this.saveError.set('');

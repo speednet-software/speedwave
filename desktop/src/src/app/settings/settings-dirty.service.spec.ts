@@ -39,12 +39,13 @@ describe('SettingsDirtyService', () => {
     expect(service.promptOpen()).toBe(false);
   });
 
-  it('a second confirmLeave while one is open resolves to stay', async () => {
+  it('a second confirmLeave while one is open supersedes the first, which resolves to stay', async () => {
     const first = service.confirmLeave();
-    await expect(service.confirmLeave()).resolves.toBe('stay');
+    const second = service.confirmLeave();
+    await expect(first).resolves.toBe('stay');
     expect(service.promptOpen()).toBe(true);
     service.resolvePrompt('save');
-    await expect(first).resolves.toBe('save');
+    await expect(second).resolves.toBe('save');
   });
 
   it('resolvePrompt without an open prompt is a no-op', () => {

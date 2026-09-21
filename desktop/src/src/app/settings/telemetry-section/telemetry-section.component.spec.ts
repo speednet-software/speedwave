@@ -522,6 +522,37 @@ describe('TelemetrySectionComponent', () => {
       expect(component.saveError()).toBe('save failed');
     });
 
+    it('a save already in flight is not started twice (single-flight)', async () => {
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      let calls = 0;
+      const previous = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_telemetry_config') calls += 1;
+        return previous ? previous(cmd, args) : undefined;
+      };
+      const p1 = component.save();
+      const p2 = component.save();
+      await Promise.all([p1, p2]);
+      expect(calls).toBe(1);
+    });
+
+    it('a successful save with a reload that throws leaves the section dirty (SPEED-637)', async () => {
+      let getCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_telemetry_config') {
+          getCalls += 1;
+          if (getCalls === 1) return baseResponse();
+          throw new Error('reload failed');
+        }
+        return undefined;
+      };
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      await component.save();
+      expect(component.isDirty()).toBe(true);
+    });
+
     it('disables Save while clean and enables it on an edit', async () => {
       await createLoaded();
       const save = (): HTMLButtonElement | null =>
