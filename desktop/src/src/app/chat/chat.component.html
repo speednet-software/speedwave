@@ -75,7 +75,14 @@
             (modelSelected)="chat.applyModelSelection($event)"
             (effortSelected)="chat.applyEffortSelection($event)"
           />
-          <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />
+          <app-session-stats
+            [stats]="chat.sessionStatsFromState()"
+            [branch]="gitBranch()"
+            [limits]="planLimits()"
+            [limitSignal]="planLimitSignal()"
+            [now]="usageClock()"
+            (usageOpened)="onUsageOpened()"
+          />
         </div>
       </div>
     </div>

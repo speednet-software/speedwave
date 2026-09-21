@@ -3,8 +3,8 @@ use speedwave_runtime::config;
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{
-    check_project, AnthropicModelWire, CustomPolicyDto, LlmConfigResponse, LlmConfigUpdate,
-    PiiRuleInfo, SecurityPolicyResponse, SecurityPolicyTemplateInfo, SecurityPolicyUpdate,
+    check_project, CustomPolicyDto, LlmConfigResponse, LlmConfigUpdate, PiiRuleInfo,
+    SecurityPolicyResponse, SecurityPolicyTemplateInfo, SecurityPolicyUpdate,
     TelemetryConfigResponse, TelemetryConfigUpdate, TelemetryLocks,
 };
 
@@ -881,7 +881,7 @@ pub struct ActiveProviderSummary {
     pub base_url: Option<String>,
 }
 
-fn active_provider_summary_from(
+pub(crate) fn active_provider_summary_from(
     user_config: &config::SpeedwaveUserConfig,
     project: &str,
 ) -> Result<ActiveProviderSummary, String> {
@@ -921,14 +921,8 @@ pub fn get_openrouter_default_model() -> &'static str {
 }
 
 #[tauri::command]
-pub fn list_anthropic_models() -> Vec<AnthropicModelWire> {
+pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::AnthropicModelInfo] {
     speedwave_runtime::defaults::ANTHROPIC_MODELS
-        .iter()
-        .map(|info| AnthropicModelWire {
-            info: info.clone(),
-            has_1m: info.has_1m(),
-        })
-        .collect()
 }
 
 fn build_telemetry_response(
@@ -2076,33 +2070,21 @@ mod tests {
     }
 
     #[test]
-    fn list_anthropic_models_carries_has_1m_from_pricing() {
+    fn list_anthropic_models_serves_the_whole_catalog_without_a_1m_row_flag() {
         let models = list_anthropic_models();
-        let fable = models
-            .iter()
-            .find(|m| m.info.id == "claude-fable-5")
-            .expect("claude-fable-5 must be in the catalog");
-        assert_eq!(fable.info.context_tokens, 1_000_000);
-        assert!(fable.has_1m, "claude-fable-5 must serialize has_1m=true");
+        assert_eq!(models, speedwave_runtime::defaults::ANTHROPIC_MODELS);
 
-        let haiku = models
-            .iter()
-            .find(|m| m.info.id == "claude-haiku-4-5")
-            .expect("claude-haiku-4-5 must be in the catalog");
-        assert_eq!(haiku.info.context_tokens, 200_000);
-        assert!(
-            !haiku.has_1m,
-            "an unpriced 200k model must serialize has_1m=false"
-        );
-
-        let json = serde_json::to_value(&models).expect("catalog must serialize");
+        let json = serde_json::to_value(models).expect("catalog must serialize");
         let fable_json = json
             .as_array()
             .unwrap()
             .iter()
             .find(|v| v["id"] == "claude-fable-5")
             .expect("claude-fable-5 must be present in the JSON payload");
-        assert_eq!(fable_json["has_1m"], serde_json::json!(true));
+        assert_eq!(fable_json["family"], "Fable 5");
+        assert_eq!(fable_json["one_million_context"], "every_plan");
+        assert!(fable_json.get("has_1m").is_none());
+        assert!(fable_json.get("selectable").is_none());
     }
 
     fn make_config_with_active_project() -> SpeedwaveUserConfig {

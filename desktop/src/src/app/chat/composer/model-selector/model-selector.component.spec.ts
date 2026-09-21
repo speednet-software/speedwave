@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
-import { ModelSelectorComponent } from './model-selector.component';
+import { ModelSelectorComponent, type ModelSelection } from './model-selector.component';
 import { TauriService } from '../../../services/tauri.service';
+import { ClaudeControlService } from '../../../services/claude-control.service';
 import type { ActiveProviderSummary, AnthropicModel } from '../../../models/llm';
+import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 
 describe('ActiveProviderSummary', () => {
   it('shape matches the Rust mirror fields, including base_url', () => {
@@ -28,8 +30,6 @@ describe('ModelSelectorComponent', () => {
       context_tokens: 1_000_000,
       latest: true,
       premium: false,
-      selectable: true,
-      has_1m: true,
       effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
       default_effort: 'high',
     } as AnthropicModel,
@@ -39,8 +39,6 @@ describe('ModelSelectorComponent', () => {
       context_tokens: 200_000,
       latest: false,
       premium: true,
-      selectable: false,
-      has_1m: false,
       effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
       default_effort: 'high',
     } as AnthropicModel,
@@ -53,11 +51,40 @@ describe('ModelSelectorComponent', () => {
     base_url: null,
   };
 
+  const picker: ModelPicker = {
+    source: 'claude_code',
+    effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
+    rows: [
+      {
+        id: 'claude-sonnet-5',
+        wire_id: 'claude-sonnet-5[1m]',
+        is_default: true,
+        display_name: null,
+        description: 'Sonnet 5 · Efficient for routine tasks',
+        requires_usage_credits: false,
+        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
+      },
+      {
+        id: 'claude-opus-4-1',
+        wire_id: 'claude-opus-4-1',
+        is_default: false,
+        display_name: null,
+        description: 'Opus 4.1 · Best for complex tasks',
+        requires_usage_credits: false,
+        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
+      },
+    ],
+  };
+
   beforeEach(async () => {
     tauriInvoke = vi.fn(async (cmd: string) => {
       if (cmd === 'get_active_provider_summary') return summary;
       if (cmd === 'list_anthropic_models') return anthropicCatalog;
       if (cmd === 'get_effort_pin') return 'high';
+      if (cmd === 'get_chat_session_info') return { state: 'unavailable' };
+      if (cmd === 'list_model_picker') return picker;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
     await TestBed.configureTestingModule({
@@ -99,14 +126,15 @@ describe('ModelSelectorComponent', () => {
     expect(badge.nativeElement.textContent).not.toContain('openrouter/');
   });
 
-  it('shows a loader while the catalog is fetching, then only selectable options plus their [1m] variants', async () => {
-    let resolveList!: (v: AnthropicModel[]) => void;
+  it('shows a loader while the rows are fetching, then exactly one row per model', async () => {
+    let resolveRows!: (v: ModelPicker) => void;
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
-      if (cmd === 'list_anthropic_models')
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'list_model_picker')
         return new Promise((r) => {
-          resolveList = r;
+          resolveRows = r;
         });
       return Promise.reject(new Error('unexpected'));
     });
@@ -116,77 +144,238 @@ describe('ModelSelectorComponent', () => {
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
     ).toBeTruthy();
-    resolveList(anthropicCatalog);
+    resolveRows(picker);
     await fixture.componentInstance.whenOptionsSettled();
     await fixture.whenStable();
     fixture.detectChanges();
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
     ).toBeFalsy();
-    expect(
-      fixture.debugElement.query(By.css('[data-testid="model-selector-option-claude-sonnet-5"]'))
-    ).toBeTruthy();
-    expect(
-      fixture.debugElement.query(
-        By.css('[data-testid="model-selector-option-claude-sonnet-5[1m]"]')
-      )
-    ).toBeTruthy();
-    expect(
-      fixture.debugElement.query(By.css('[data-testid="model-selector-option-claude-opus-4-1"]'))
-    ).toBeFalsy();
+    const optionIds = fixture.debugElement
+      .queryAll(By.css('[data-testid^="model-selector-option-"]'))
+      .map((o) => o.nativeElement.getAttribute('data-testid'));
+    expect(optionIds).toEqual([
+      'model-selector-option-claude-sonnet-5',
+      'model-selector-option-claude-opus-4-1',
+    ]);
   });
 
-  it('offers the [1m] alias by has_1m, not context_tokens', async () => {
-    const catalogWithFable: AnthropicModel[] = [
-      {
-        id: 'claude-fable-5',
-        family: 'Fable 5',
-        context_tokens: 200_000,
-        latest: true,
-        premium: true,
-        selectable: true,
-        has_1m: true,
-        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        default_effort: 'high',
-      },
-      {
-        id: 'claude-haiku-4-5',
-        family: 'Haiku 4.5',
-        context_tokens: 200_000,
-        latest: true,
-        premium: false,
-        selectable: true,
-        has_1m: false,
-        effort_levels: [],
-        default_effort: null,
-      },
-    ];
+  it('never renders a 1M marker in a row, whatever wire id the row carries', async () => {
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    const rows = fixture.debugElement.queryAll(By.css('[data-testid^="model-selector-option-"]'));
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      expect(row.nativeElement.textContent).not.toMatch(/\[1m\]|\(1M\)/i);
+      expect(row.nativeElement.getAttribute('data-testid')).not.toContain('[1m]');
+    }
+    expect(rows[0].nativeElement.textContent).toContain('Sonnet 5');
+  });
+
+  it('names a row the catalog lacks the way Claude Code lists it', async () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
-      if (cmd === 'list_anthropic_models') return Promise.resolve(catalogWithFable);
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'list_model_picker')
+        return Promise.resolve({
+          source: 'claude_code',
+          effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
+          rows: [
+            {
+              id: 'claude-nova-1',
+              wire_id: 'claude-nova-1[1m]',
+              is_default: false,
+              display_name: 'Nova 1',
+              description: 'Nova 1 · Experimental model',
+              requires_usage_credits: false,
+              effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+              default_effort: 'high',
+            },
+          ],
+        });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
     await fixture.componentInstance.openCombobox();
     await fixture.componentInstance.whenOptionsSettled();
     fixture.detectChanges();
+    const row = fixture.debugElement.query(
+      By.css('[data-testid="model-selector-option-claude-nova-1"]')
+    );
+    expect(row.nativeElement.textContent).toContain('Nova 1');
+  });
+
+  it('marks the active model with a check mark and the plan default with a badge', async () => {
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    const sonnet = fixture.debugElement.query(
+      By.css('[data-testid="model-selector-option-claude-sonnet-5"]')
+    );
+    const opus = fixture.debugElement.query(
+      By.css('[data-testid="model-selector-option-claude-opus-4-1"]')
+    );
+    expect(sonnet.query(By.css('[data-testid="model-selector-active-mark"]'))).toBeTruthy();
+    expect(sonnet.nativeElement.getAttribute('aria-current')).toBe('true');
+    expect(sonnet.query(By.css('[data-testid="model-selector-default-badge"]'))).toBeTruthy();
+    expect(opus.query(By.css('[data-testid="model-selector-active-mark"]'))).toBeFalsy();
+    expect(opus.nativeElement.getAttribute('aria-current')).toBeNull();
+    expect(opus.query(By.css('[data-testid="model-selector-default-badge"]'))).toBeFalsy();
+  });
+
+  it('keeps the check mark on the row of a 1M session model', async () => {
+    fixture.componentRef.setInput('sessionModel', 'claude-opus-4-1[1m]');
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    const marks = fixture.debugElement.queryAll(
+      By.css('[data-testid="model-selector-active-mark"]')
+    );
+    expect(marks.length).toBe(1);
     expect(
-      fixture.debugElement.query(By.css('[data-testid="model-selector-option-claude-fable-5[1m]"]'))
+      fixture.debugElement
+        .query(By.css('[data-testid="model-selector-option-claude-opus-4-1"]'))
+        .query(By.css('[data-testid="model-selector-active-mark"]'))
     ).toBeTruthy();
+  });
+
+  it('emits the row wire id, and flags the default row, on a click', async () => {
+    const events: ModelSelection[] = [];
+    fixture.componentInstance.modelSelected.subscribe((e) => events.push(e));
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    fixture.debugElement
+      .query(By.css('[data-testid="model-selector-option-claude-sonnet-5"]'))
+      .nativeElement.click();
+
+    expect(events).toEqual([
+      {
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      },
+    ]);
+  });
+
+  it('shows Claude Codes usage-credit warning and model description', async () => {
+    const paidPicker: ModelPicker = {
+      ...picker,
+      rows: [
+        {
+          ...picker.rows[1],
+          description: 'Opus 4.1 · Requires usage credits for this account',
+          requires_usage_credits: true,
+        },
+      ],
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'list_model_picker') return Promise.resolve(paidPicker);
+      if (cmd === 'get_chat_session_info') return Promise.resolve({ state: 'unavailable' });
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    const row = fixture.debugElement.query(
+      By.css('[data-testid="model-selector-option-claude-opus-4-1"]')
+    );
+    expect(row.query(By.css('[data-testid="model-selector-usage-credits-badge"]'))).toBeTruthy();
     expect(
-      fixture.debugElement.query(
-        By.css('[data-testid="model-selector-option-claude-haiku-4-5[1m]"]')
-      )
-    ).toBeFalsy();
+      row.query(By.css('[data-testid="model-selector-description-claude-opus-4-1"]')).nativeElement
+        .textContent
+    ).toContain('Requires usage credits');
+  });
+
+  it('requires explicit confirmation before selecting a usage-credit model', async () => {
+    await fixture.whenStable();
+    const events: ModelSelection[] = [];
+    fixture.componentInstance.modelSelected.subscribe((event) => events.push(event));
+    fixture.componentInstance.open.set(true);
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
+    const paid = {
+      id: 'claude-opus-4-1',
+      label: 'Opus 4.1',
+      wireId: 'claude-opus-4-1',
+      isDefault: false,
+      contextTokens: 200_000,
+      description: 'Requires usage credits',
+      requiresUsageCredits: true,
+    };
+
+    fixture.componentInstance.select(paid);
+    expect(events).toEqual([]);
+    expect(fixture.componentInstance.open()).toBe(true);
+
+    confirmSpy.mockReturnValue(true);
+    fixture.componentInstance.select(paid);
+    expect(events).toHaveLength(1);
+    expect(fixture.componentInstance.open()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(confirmSpy.mock.calls[0][0]).toContain('without another prompt');
+    confirmSpy.mockRestore();
+  });
+
+  it('is disabled while Claude Code has not answered initialize yet, and re-reads the rows once it has', async () => {
+    let sessionInfo: unknown = { state: 'pending' };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'get_chat_session_info') return Promise.resolve(sessionInfo);
+      if (cmd === 'list_model_picker') return Promise.resolve(picker);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-pending');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+
+    const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
+    expect(badge.nativeElement.disabled).toBe(true);
+    expect(badge.nativeElement.getAttribute('title')).toBe('Loading models...');
+    const rowFetches = (): number =>
+      tauriInvoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === 'list_model_picker' && (args as { project: string }).project === 'proj-pending'
+      ).length;
+    const fetchesWhilePending = rowFetches();
+
+    sessionInfo = { state: 'ready', info: { models: [], account: {} } };
+    await TestBed.inject(ClaudeControlService).refreshSessionInfo('proj-pending');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(badge.nativeElement.disabled).toBe(false);
+    expect(badge.nativeElement.getAttribute('title')).toBe('Change model');
+    expect(rowFetches()).toBe(fetchesWhilePending + 1);
   });
 
   it('shows error+retry on a fetch failure and recovers on retry', async () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
-      if (cmd === 'list_anthropic_models') return Promise.reject(new Error('boom'));
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'list_model_picker') return Promise.reject(new Error('boom'));
       return Promise.reject(new Error('unexpected'));
     });
+    fixture.componentRef.setInput('projectId', 'proj-failing');
+    fixture.detectChanges();
+    await fixture.whenStable();
     await fixture.componentInstance.openCombobox();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -197,6 +386,7 @@ describe('ModelSelectorComponent', () => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'list_model_picker') return Promise.resolve(picker);
       return Promise.reject(new Error('unexpected'));
     });
     error.query(By.css('[data-testid="model-selector-retry"]')).nativeElement.click();
@@ -274,7 +464,17 @@ describe('ModelSelectorComponent', () => {
 
   it('open_router and local branches produce identically-shaped options from the same discover result', async () => {
     const discovered = { models: [{ id: 'model-a', context_tokens: 4096 }] };
-    const expectedOptions = [{ id: 'model-a', label: 'model-a', contextTokens: 4096 }];
+    const expectedOptions = [
+      {
+        id: 'model-a',
+        label: 'model-a',
+        wireId: 'model-a',
+        isDefault: false,
+        contextTokens: 4096,
+        description: null,
+        requiresUsageCredits: false,
+      },
+    ];
 
     const orSummary: ActiveProviderSummary = {
       provider_id: 'openrouter',
@@ -370,8 +570,7 @@ describe('ModelSelectorComponent', () => {
   it('emits exactly one modelSelected event carrying catalogId, wireId, providerId and kind', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
-    const events: Array<{ catalogId: string; wireId: string; providerId: string; kind: string }> =
-      [];
+    const events: ModelSelection[] = [];
     fixture.componentInstance.modelSelected.subscribe((e) => events.push(e));
 
     await fixture.componentInstance.openCombobox();
@@ -380,7 +579,11 @@ describe('ModelSelectorComponent', () => {
     fixture.componentInstance.select({
       id: 'claude-opus-4-1',
       label: 'Opus 4.1',
+      wireId: 'claude-opus-4-1',
+      isDefault: false,
       contextTokens: 200000,
+      description: null,
+      requiresUsageCredits: false,
     });
 
     expect(events).toEqual([
@@ -389,6 +592,7 @@ describe('ModelSelectorComponent', () => {
         wireId: 'claude-opus-4-1',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       },
     ]);
   });
@@ -713,22 +917,39 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
       context_tokens: 200_000,
       latest: true,
       premium: false,
-      selectable: true,
-      has_1m: true,
       effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
       default_effort: 'high',
     } as AnthropicModel,
   ];
 
   let modelHint: string | null = null;
+  let pickerRows: ModelPicker;
 
   beforeEach(async () => {
     modelHint = null;
+    pickerRows = {
+      source: 'catalog',
+      effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
+      rows: [
+        {
+          id: 'claude-fable-5',
+          wire_id: 'claude-fable-5[1m]',
+          is_default: false,
+          display_name: null,
+          description: null,
+          requires_usage_credits: false,
+          effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          default_effort: 'high',
+        },
+      ],
+    };
     tauriInvoke = vi.fn(async (cmd: string) => {
       if (cmd === 'get_active_provider_summary') return configlessSummary;
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
       if (cmd === 'get_model_hint') return modelHint;
+      if (cmd === 'get_chat_session_info') return { state: 'unavailable' };
+      if (cmd === 'list_model_picker') return pickerRows;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
     await TestBed.configureTestingModule({
@@ -768,17 +989,42 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     await fixture.whenStable();
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
-    expect(badgeText()).toBe('Fable 5 [1m]');
+    expect(badgeText()).toBe('Fable 5');
   });
 
-  it('shows an id the catalog does not know verbatim (SPEED-540 demo: fable[1m] -> claude-fable-5-1[1m])', async () => {
+  it('shows a Claude id the catalog does not know without the prefix and the 1M suffix', async () => {
     modelHint = 'claude-fable-5-1[1m]';
     fixture.componentRef.setInput('projectId', 'proj-2');
     fixture.detectChanges();
     await fixture.whenStable();
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-fable-5-1[1m]');
+    expect(badgeText()).toBe('fable-5.1');
+  });
+
+  it('shows the plan default by name once Claude Code reports the default row', async () => {
+    pickerRows = {
+      source: 'claude_code',
+      effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
+      rows: [
+        {
+          id: 'claude-fable-5',
+          wire_id: 'claude-fable-5[1m]',
+          is_default: true,
+          display_name: null,
+          description: null,
+          requires_usage_credits: false,
+          effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          default_effort: 'high',
+        },
+      ],
+    };
+    fixture.componentRef.setInput('projectId', 'proj-2');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+    expect(badgeText()).toBe('Fable 5');
   });
 
   it('shows an unrecognized pin value verbatim, never "default"', async () => {
@@ -820,7 +1066,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-opus-4-8');
+    expect(badgeText()).toBe('opus-4.8');
   });
 
   it('drops a session-scoped pick when a new conversation starts, falling back to the hint', async () => {
@@ -846,7 +1092,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     await fixture.whenStable();
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-opus-4-8');
+    expect(badgeText()).toBe('opus-4.8');
   });
 
   it('shows the picked catalog id, as its family label, optimistically after a live anthropic selection', async () => {
@@ -878,8 +1124,6 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       context_tokens: 1_000_000,
       latest: true,
       premium: false,
-      selectable: true,
-      has_1m: true,
       effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
       default_effort: 'high',
     } as AnthropicModel,
@@ -889,8 +1133,6 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       context_tokens: 1_000_000,
       latest: false,
       premium: false,
-      selectable: false,
-      has_1m: true,
       effort_levels: ['low', 'medium', 'high', 'max'],
       default_effort: 'high',
     } as AnthropicModel,
@@ -900,8 +1142,6 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       context_tokens: 1_000_000,
       latest: false,
       premium: true,
-      selectable: false,
-      has_1m: true,
       effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
       default_effort: 'xhigh',
     } as AnthropicModel,
@@ -911,18 +1151,32 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       context_tokens: 200_000,
       latest: true,
       premium: false,
-      selectable: true,
-      has_1m: false,
       effort_levels: [],
       default_effort: null,
     } as AnthropicModel,
   ];
 
+  const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+  function rowsFromCatalog(): ModelPickerRow[] {
+    return catalog.map((m) => ({
+      id: m.id,
+      wire_id: m.id,
+      is_default: false,
+      display_name: null,
+      description: null,
+      requires_usage_credits: false,
+      effort_levels: m.effort_levels,
+      default_effort: m.default_effort,
+    }));
+  }
+
   function setSummaryAndPin(
     fixt: ComponentFixture<ModelSelectorComponent>,
     invoke: ReturnType<typeof vi.fn>,
     model: string,
-    pin: string | null
+    pin: string | null,
+    rows: ModelPickerRow[] | null = rowsFromCatalog()
   ): void {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary')
@@ -934,8 +1188,16 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
         });
       if (cmd === 'list_anthropic_models') return Promise.resolve(catalog);
       if (cmd === 'get_effort_pin') return Promise.resolve(pin);
+      if (cmd === 'list_model_picker' && rows)
+        return Promise.resolve({ source: 'claude_code', rows, effort_order: EFFORT_ORDER });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
+  }
+
+  function renderedStops(fixt: ComponentFixture<ModelSelectorComponent>): string[] {
+    return fixt.debugElement
+      .queryAll(By.css('[data-testid^="effort-stop-"]'))
+      .map((s) => s.nativeElement.getAttribute('data-testid').replace('effort-stop-', ''));
   }
 
   async function flush(fixt: ComponentFixture<ModelSelectorComponent>): Promise<void> {
@@ -973,6 +1235,57 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       ).toBeTruthy();
     }
     expect(fixture.debugElement.query(By.css('[data-testid="effort-stop-xhigh"]'))).toBeFalsy();
+  });
+
+  it('shows exactly the stops Claude Code reports for the model, even where the catalog lists more', async () => {
+    const rows = rowsFromCatalog().map((r) =>
+      r.id === 'claude-sonnet-5' ? { ...r, effort_levels: ['low', 'medium', 'high'] } : r
+    );
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'medium', rows);
+    fixture.componentRef.setInput('projectId', 'proj-reported-stops');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    expect(renderedStops(fixture)).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('hides the effort control for a model Claude Code lists without effort support, whatever the catalog says', async () => {
+    const rows = rowsFromCatalog().map((r) =>
+      r.id === 'claude-sonnet-5' ? { ...r, effort_levels: [], default_effort: null } : r
+    );
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'high', rows);
+    fixture.componentRef.setInput('projectId', 'proj-no-effort-row');
+    fixture.detectChanges();
+    await flush(fixture);
+
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
+  });
+
+  it('shows the catalog stops of a legacy row', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', null);
+    fixture.componentRef.setInput('projectId', 'proj-legacy-row');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    expect(renderedStops(fixture)).toEqual(['low', 'medium', 'high', 'max']);
+  });
+
+  it('falls back to the catalog stops when the picker rows are unavailable', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', 'high', null);
+    fixture.componentRef.setInput('projectId', 'proj-no-rows');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    expect(renderedStops(fixture)).toEqual(['low', 'medium', 'high', 'max']);
+  });
+
+  it('shows the model default for an unsupported pin while the slider order is unknown', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', 'xhigh', null);
+    fixture.componentRef.setInput('projectId', 'proj-no-order');
+    await flush(fixture);
+
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+    expect(segment.nativeElement.textContent.trim()).toBe('High');
   });
 
   it('hides the effort segment entirely for a model without effort support (Haiku 4.5)', async () => {
@@ -1071,7 +1384,7 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
     expect(slider.getAttribute('aria-valuemax')).toBe('4');
   });
 
-  it('resolves a doubled [1m] wire suffix to its catalog entry for the label and effort default', async () => {
+  it('resolves a doubled 1M wire suffix to its catalog entry for the label and effort default', async () => {
     setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', null);
     fixture.componentRef.setInput('projectId', 'proj-double-1m');
     fixture.componentRef.setInput('sessionModel', 'claude-opus-4-7[1m][1m]');
@@ -1080,7 +1393,7 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
     expect(
       fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]')).nativeElement
         .textContent
-    ).toContain('Opus 4.7 [1m]');
+    ).toBe(' Opus 4.7 ');
     await openPopover(fixture);
     const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
     expect(slider.nativeElement.getAttribute('aria-valuetext')).toBe('Xhigh');

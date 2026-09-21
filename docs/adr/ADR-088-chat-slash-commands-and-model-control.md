@@ -445,6 +445,28 @@ once a pin exists it outranks both the organization default and the
 account-type default at every subsequent spawn, exactly as the precedence
 order already stated in this decision predicts.
 
+**Amendment (SPEED-648: the `opus` alias is no longer pinned for Anthropic
+kinds).** `defaults.rs::anthropic_default_models_env` pinned
+`ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5[1m]` next to the SONNET and
+HAIKU pins. That pin is plan-dependent: Claude Code's model configuration
+page lists Opus with 1M context as "Included with subscription" on Max, Team
+and Enterprise, as "Requires usage credits" on Pro, and as "Full access" on
+API and pay-as-you-go, and states that with the `[1m]` suffix "the 1M context
+window applies to all usage of the pinned alias, including the plan-mode Opus
+phase of `opusplan` and subagents whose `model` frontmatter names the
+alias"[^1]. On a Pro account the pin therefore forced every `opus` alias
+resolution onto a window that needs usage credits. A capture of the pinned
+Claude Code 2.1.267 on a Max account
+(`desktop/src-tauri/tests/fixtures/cc-2.1.267-control-responses.sanitized.json`,
+`run_A` with the pins, `run_B` without) shows what the pins change: without
+them `default` still resolves to `claude-opus-5[1m]`, `opus` and `sonnet`
+resolve to the bare 200k ids, and `haiku` resolves to the dated
+`claude-haiku-4-5-20251001`. The OPUS entry is removed; SONNET keeps `[1m]`
+(the same page states that Sonnet 5 needs "no usage credits required on any
+plan"[^1]) and HAIKU keeps the undated catalog id. The non-Anthropic
+routed-alias remap in `compose/llm.rs` is unchanged and still covers all four
+aliases.
+
 ### 8. Auto-default rules for fresh non-Anthropic setups
 
 To keep the "model required for non-Anthropic providers" invariant from
@@ -525,10 +547,12 @@ its outcome; it never skips the gate or silently does nothing.
   the composer picker, but a manually typed `/model <full-legacy-id>` still
   reaches Claude Code unmodified, which errors account-appropriately if the
   id is truly gone.
-- Sonnet 5's introductory API pricing of $2/$10 per million input/output
-  tokens is in effect through August 31, 2026, after which standard pricing
-  of $3/$15 per million tokens takes effect[^4] - a pricing bump is
-  scheduled in the catalog around that date.
+- Sonnet 5 costs $2/$10 per million input/output tokens. That price was
+  announced at launch as introductory pricing through August 31, 2026;
+  Anthropic's pricing page now states that it "is now the standard price"
+  and that the increase to $3/$15 per million tokens scheduled for
+  September 1, 2026 "will not occur"[^4], so the catalog's
+  `SONNET_5_PRICING` needs no change.
 - Whether access to a specific current-generation model name is ever
   plan-exclusive on a claude.ai subscription is **not fully verified** by
   this ADR: Anthropic's feature-availability documentation lists
@@ -541,6 +565,32 @@ its outcome; it never skips the gate or silently does nothing.
   therefore does not pre-filter its catalog by plan; Claude Code's own
   account-aware `/model` is the runtime authority and surfaces an explicit
   error or fallback if a selection is genuinely unavailable to the account.
+
+**Amendment (SPEED-641, ADR-089: `[1m]` handling, plan awareness and the
+legacy rows).** Three statements of this section no longer describe the
+product; they stay above as the record of what was known when this ADR was
+written, and ADR-089 carries the current decision. First, the `[1m]` bullet
+describes the Anthropic API, not a Speedwave session: a capture of the
+pinned Claude Code 2.1.267
+(`desktop/src-tauri/tests/fixtures/cc-2.1.267-control-responses.sanitized.json`)
+shows every bare id, Sonnet 5 and the Fable models included, running with a
+200k window and only `<id>[1m]` running with 1M. Every session routes
+through the per-project proxy, and the model configuration page documents
+that case for Sonnet 5: with `ANTHROPIC_BASE_URL` pointing at an LLM gateway
+"Claude Code can't verify 1M support"[^1] and budgets the window at 200K;
+the capture shows the same for every other model. The catalog no longer
+exposes a `[1m]` variant as a separate picker entry: the composer
+shows one row per model and `defaults.rs::anthropic_wire_model_id` picks the
+bare or the `[1m]` id from the catalog's `one_million_context` attribute and
+the account's plan, and no user-visible string carries `[1m]` or `(1M)`.
+Second, the composer is now plan-aware in two ways: for Anthropic providers
+its rows come from the model list Claude Code reports for the signed-in
+account over the `initialize` control request, with the static catalog as
+the fallback, and the 1M window is chosen by plan as above. Claude Code's
+`/model` stays the runtime authority for a selection the account cannot
+use. Third, the `selectable` field is gone: the legacy entries are appended
+to the composer picker after the rows Claude Code lists, so a past model
+stays selectable without typing its id.
 
 ## Consequences
 
@@ -568,7 +618,7 @@ its outcome; it never skips the gate or silently does nothing.
 
 [^3]: Anthropic API model deprecations page - status table showing `claude-opus-4-6`, `claude-opus-4-7`, and `claude-sonnet-4-6` as Active with no retirement date, and `claude-opus-4-1-20250805` as Deprecated with retirement date August 5, 2026. https://platform.claude.com/docs/en/about-claude/model-deprecations
 
-[^4]: Anthropic API pricing page - Claude Sonnet 5 introductory pricing ($2/$10 per MTok through August 31, 2026) and standard pricing ($3/$15 per MTok) thereafter. https://platform.claude.com/docs/en/about-claude/pricing
+[^4]: Anthropic API pricing page - Claude Sonnet 5 at $2/$10 per MTok, announced as introductory pricing through August 31, 2026 and since confirmed as the standard price; the previously scheduled increase to $3/$15 per MTok on September 1, 2026 will not occur. https://platform.claude.com/docs/en/about-claude/pricing
 
 [^5]: Claude Code settings - the `model` key's "Any file" scope, "Set the key in the tool that generates the file" guidance for a pick that must survive when Claude Code itself cannot persist it, and the account-type default model table ("Max, Team Premium, Enterprise, and Anthropic API: defaults to Opus 5"; "Pro and Team Standard: defaults to Sonnet 5"; "Before v2.1.219, `default` resolved to Opus 4.8"). https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
 

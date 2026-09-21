@@ -13,6 +13,7 @@ mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
+mod control_channel;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
@@ -33,6 +34,7 @@ mod llm_cmd;
 mod logging_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
+mod model_picker;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -1157,6 +1159,8 @@ fn main() {
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
             pin_cmd::set_model_pin,
+            pin_cmd::clear_model_pin,
+            model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,
@@ -1182,6 +1186,9 @@ fn main() {
             paste_cmd::save_pasted_image,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
+            chat_session_cmd::get_chat_session_info,
+            chat_session_cmd::get_plan_usage,
+            chat_session_cmd::get_context_usage,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,

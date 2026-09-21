@@ -14,6 +14,7 @@ import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
+import { PlanUsageService } from '../services/plan-usage.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { TranscriptionService } from '../services/transcription.service';
@@ -70,6 +71,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     return windowSize ? formatContextLabel(windowSize) : '';
   });
 
+  readonly usageClock = signal(Date.now());
+  readonly planLimits = computed(() =>
+    this.planUsage.limits(this.projectState.activeProject(), this.usageClock())
+  );
+  readonly planLimitSignal = computed(() =>
+    this.planUsage.lastSignal(this.projectState.activeProject())
+  );
+
   readonly contextOverflowOpen = signal(false);
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
@@ -77,6 +86,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
+  private readonly planUsage = inject(PlanUsageService);
   readonly ui = inject(UiStateService);
   readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
@@ -193,6 +203,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Stops the current turn unconditionally (Stop button). */
   async onStopClicked(): Promise<void> {
     await this.chat.stopConversation();
+  }
+
+  /** The usage popover opened: re-evaluate reset times and re-read the limits and the context. */
+  onUsageOpened(): void {
+    this.usageClock.set(Date.now());
+    void this.chat.refreshUsage();
   }
 
   /**

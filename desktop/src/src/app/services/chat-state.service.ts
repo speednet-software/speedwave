@@ -1,17 +1,30 @@
-import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
+import {
+  Injectable,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+  type Signal,
+} from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
+import { ClaudeControlService } from './claude-control.service';
+import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
+import type { ClaudeContextUsage } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
+  isAnthropicKind,
   isLocalProvider,
   isTerminalCostSource,
   type LlmConfigResponse,
+  type LlmProviderKind,
   type ResponseUsage,
 } from '../models/llm';
 import {
@@ -110,7 +123,10 @@ export interface ModelSelectionInput {
   wireId: string;
   providerId: string;
   kind: string;
+  isDefault: boolean;
 }
+
+const DEFAULT_MODEL_ALIAS = 'default';
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
@@ -195,8 +211,14 @@ export class ChatStateService {
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     this._modelSelectionError.set('');
     const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
+    const clearsPin = isAnthropic && sel.isDefault;
+    const wireId = clearsPin ? DEFAULT_MODEL_ALIAS : sel.wireId;
     try {
-      if (isAnthropic) {
+      if (clearsPin) {
+        await this.tauri.invoke('clear_model_pin', {
+          projectId: this.projectState.activeProject() ?? '',
+        });
+      } else if (isAnthropic) {
         await this.tauri.invoke('set_model_pin', {
           projectId: this.projectState.activeProject() ?? '',
           model: sel.wireId,
@@ -215,8 +237,8 @@ export class ChatStateService {
       return;
     }
     if (this.hasLiveSession()) {
-      if (this.isStreaming) this._pendingModelOverride.set(sel.wireId);
-      else await this.sendMessage(`/model ${sel.wireId}`);
+      if (this.isStreaming) this._pendingModelOverride.set(wireId);
+      else await this.sendMessage(`/model ${wireId}`);
     } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
       this.resetForNewConversation();
       this.initialized = true;
@@ -241,11 +263,12 @@ export class ChatStateService {
   }
 
   private _model = '';
-  private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
   private _lastContextTokens: number | null = null;
   private _contextWindowSize: number | null = null;
+  private _contextSnapshot: ClaudeContextUsage | null = null;
   private _currentProvider: string | null = null;
+  private _activeKind: LlmProviderKind | null = null;
 
   private _persistedContextTokens: number | null = null;
 
@@ -308,12 +331,73 @@ export class ChatStateService {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
+  private control = inject(ClaudeControlService);
+  private planUsage = inject(PlanUsageService);
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
 
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
+
+  /** Reads Claude Code's control data as soon as a session answers `initialize`. */
+  constructor() {
+    effect(() => {
+      const project = this.projectState.activeProject();
+      if (!project || this.control.sessionInfoState(project).state !== 'ready') return;
+      untracked(() => void this.refreshControlData());
+    });
+  }
+
+  /** Re-reads the plan limits and the context usage on demand (the usage popover opened). */
+  refreshUsage(): Promise<void> {
+    return this.refreshControlData();
+  }
+
+  private async refreshControlData(): Promise<void> {
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    const project = this.projectState.activeProject();
+    if (!project) return;
+    if (this._activeKind === 'anthropic_oauth') void this.planUsage.refresh(project);
+    if (this._activeKind && isAnthropicKind(this._activeKind)) {
+      void this.refreshContextUsage(project);
+    }
+  }
+
+  private async refreshContextUsage(project: string): Promise<void> {
+    const generation = this._sessionGeneration;
+    const usage = await this.control.contextUsage(project);
+    if (generation !== this._sessionGeneration) return;
+    if (project !== this.projectState.activeProject()) return;
+    this._contextSnapshot = usage;
+    if (usage) this._contextWindowSize = usage.max_tokens;
+    const cur = this._sessionStats();
+    if (!cur && !usage) return;
+    this._sessionStats.set({
+      session_id: this._lastKnownSessionId ?? '',
+      total_cost: null,
+      total_output_tokens: 0,
+      ...cur,
+      context: usage ?? undefined,
+      context_window_size: this._contextWindowSize,
+    });
+    this.notifyChange();
+  }
+
+  private usesAnthropic(): boolean {
+    return (
+      this._currentProvider === 'anthropic' ||
+      (this._activeKind !== null && isAnthropicKind(this._activeKind))
+    );
+  }
+
+  private async recordRateLimit(info: RateLimitInfo): Promise<void> {
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    const project = this.projectState.activeProject();
+    if (project && this._activeKind === 'anthropic_oauth') {
+      this.planUsage.recordSignal(project, info);
+    }
+  }
 
   readonly messagesFromState: Signal<readonly ChatMessage[]> = computed(() =>
     stateEntriesToChatMessages(this._state().entries)
@@ -871,6 +955,7 @@ export class ChatStateService {
 
       case 'ControlChip': {
         const { command, argument, uuid } = chunk.data;
+        if (command === 'model' && this.usesAnthropic()) this.forgetContextWindow();
         this._messages = [
           ...this._messages,
           {
@@ -884,17 +969,7 @@ export class ChatStateService {
       }
 
       case 'RateLimit':
-        if (chunk.data.utilization !== null) {
-          this._rateLimit = {
-            status: chunk.data.status,
-            utilization: chunk.data.utilization,
-            resets_at: chunk.data.resets_at,
-          };
-          const cur = this._sessionStats();
-          if (cur) {
-            this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
-          }
-        }
+        void this.recordRateLimit(chunk.data);
         break;
 
       case 'Result': {
@@ -932,10 +1007,7 @@ export class ChatStateService {
         if (chunk.data.usage) {
           this._totalOutputTokens += chunk.data.usage.output_tokens;
         }
-        this._contextWindowSize = this.resolveContextWindow(
-          chunk.data.context_window_size,
-          resolvedModel
-        );
+        this._contextWindowSize = this.resolveContextWindow(chunk.data.context_window_size);
         const livePreviewCost =
           !isLocalProvider(this._currentProvider) &&
           typeof chunk.data.total_cost === 'number' &&
@@ -949,7 +1021,7 @@ export class ChatStateService {
           usage: chunk.data.usage,
           context_usage: contextUsage,
           model: resolvedModel,
-          rate_limit: this._rateLimit ?? undefined,
+          context: this._contextSnapshot ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
@@ -962,6 +1034,7 @@ export class ChatStateService {
           this._lastContextTokens = contextTokensFrom(contextUsage);
         }
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
+        void this.refreshControlData();
         break;
       }
 
@@ -1003,6 +1076,7 @@ export class ChatStateService {
         ];
         this._currentBlocks = [];
         this.isStreaming = false;
+        void this.refreshControlData();
         break;
       }
 
@@ -1037,9 +1111,16 @@ export class ChatStateService {
     this.isStreaming = false;
     this._sessionStats.set(null);
     this._model = '';
-    this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._contextWindowSize = null;
+    this._contextSnapshot = null;
+  }
+
+  private forgetContextWindow(): void {
+    this._contextWindowSize = null;
+    this._contextSnapshot = null;
+    const cur = this._sessionStats();
+    if (cur) this._sessionStats.set({ ...cur, context: undefined, context_window_size: null });
   }
 
   /** Clears all chat state to start a fresh conversation. */
@@ -1080,7 +1161,7 @@ export class ChatStateService {
     this._lastKnownSessionId = sessionId;
     const cur = this._sessionStats();
     if (cur?.session_id === sessionId) return;
-    const seeded = this.resolveContextWindow(undefined, cur?.model);
+    const seeded = this.resolveContextWindow(undefined);
     this._sessionStats.set({
       total_cost: null,
       context_window_size: seeded,
@@ -1221,10 +1302,16 @@ export class ChatStateService {
 
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
+      const status = this.projectState.status();
+      const project = this.projectState.activeProject();
+      if (project && (status === 'no_provider' || status === 'auth_required')) {
+        this.planUsage.drop(project);
+      }
       if (this.projectState.status() === 'switching') {
         this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
+        this._activeKind = null;
         this.clearSessionTracking();
         this._pendingModelOverride.set(null);
         this._pendingEffortOverride.set(null);
@@ -1427,16 +1514,15 @@ export class ChatStateService {
     }
   }
 
-  private resolveContextWindow(
-    liveValue: number | undefined,
-    model: string | undefined
-  ): number | null {
+  private resolveContextWindow(liveValue: number | undefined): number | null {
+    if (this.usesAnthropic()) {
+      return this._contextSnapshot?.max_tokens ?? liveValue ?? this._contextWindowSize;
+    }
     if (liveValue) return liveValue;
-    const fromSsot = this.anthropicModels.contextTokensFor(model);
-    if (fromSsot) return fromSsot;
     if (this._persistedContextTokens) return this._persistedContextTokens;
     if (this._contextWindowSize) return this._contextWindowSize;
-    return isLocalProvider(this._currentProvider) ? null : DEFAULT_CONTEXT_TOKENS;
+    if (this._currentProvider === null || isLocalProvider(this._currentProvider)) return null;
+    return DEFAULT_CONTEXT_TOKENS;
   }
 
   /** Re-reads `get_llm_config()` and updates the chat fallback-chain cache. */
@@ -1445,6 +1531,12 @@ export class ChatStateService {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
+      const kind = config.providers?.find((p) => p.id === config.active?.provider_id)?.kind ?? null;
+      const project = this.projectState.activeProject();
+      if (project && this._activeKind === 'anthropic_oauth' && kind !== 'anthropic_oauth') {
+        this.planUsage.drop(project);
+      }
+      this._activeKind = kind;
       if (this._persistedContextTokens && !this._sessionStats()?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }
@@ -1719,7 +1811,7 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
     turn_count: src.messages.filter((m) => m.role === 'assistant').length,
   };
   return {
-    session_id: src.sessionStats?.session_id ?? null,
+    session_id: src.sessionStats?.session_id || null,
     entries,
     session_totals: totals,
     pending_queue: src.pendingQueue,

@@ -1,3 +1,6 @@
+use crate::control_channel::{
+    self, ControlChannel, ControlHandle, ControlQuery, SessionInfoEvent, SessionInfoState,
+};
 use crate::history;
 use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
@@ -72,8 +75,11 @@ pub enum StreamChunk {
     },
     RateLimit {
         status: String,
-        utilization: Option<f64>,
+        rate_limit_type: Option<String>,
+        utilization_percent: Option<f64>,
         resets_at: Option<u64>,
+        overage_status: Option<String>,
+        is_using_overage: Option<bool>,
     },
     UserMessageCommit {
         uuid: String,
@@ -306,7 +312,6 @@ pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsa
 
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
-const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
 const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
 
 #[derive(Debug, Clone)]
@@ -970,25 +975,35 @@ impl StreamParser {
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
-        let utilization = info["utilization"].as_f64();
+        let rate_limit_type = info["rateLimitType"].as_str().map(str::to_string);
+        let utilization_percent = info["utilization"]
+            .as_f64()
+            .and_then(utilization_fraction_to_percent);
         let resets_at = info["resetsAt"]
             .as_u64()
             .or_else(|| info["resets_at"].as_u64());
+        let overage_status = info["overageStatus"].as_str().map(str::to_string);
+        let is_using_overage = info["isUsingOverage"].as_bool();
 
         let log_entry = Some(LogEntry {
             prefix: "RATE_LIMIT",
             message: format!(
-                "status={status} utilization={} resets_at={}",
-                utilization.map_or("none".to_string(), |v| format!("{v:.1}")),
+                "status={status} type={} utilization={} resets_at={} overage={}",
+                rate_limit_type.as_deref().unwrap_or("none"),
+                utilization_percent.map_or("none".to_string(), |v| format!("{v:.0}%")),
                 resets_at.map_or("none".to_string(), |v| v.to_string()),
+                overage_status.as_deref().unwrap_or("none"),
             ),
         });
 
         (
             Some(StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
+                overage_status,
+                is_using_overage,
             }),
             log_entry,
         )
@@ -1071,6 +1086,15 @@ impl StreamParser {
         } else {
             (None, log_entry)
         }
+    }
+}
+
+fn utilization_fraction_to_percent(fraction: f64) -> Option<f64> {
+    if (0.0..=1.0).contains(&fraction) {
+        Some(fraction * 100.0)
+    } else {
+        log::debug!("ignored a rate_limit_event utilization outside the 0-1 fraction: {fraction}");
+        None
     }
 }
 
@@ -1344,7 +1368,7 @@ fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
 
 fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "type": MSG_TYPE_CONTROL_REQUEST,
+        "type": control_channel::MSG_TYPE_CONTROL_REQUEST,
         "request_id": request_id,
         "request": { "subtype": CTRL_SUBTYPE_INTERRUPT },
     })
@@ -1362,11 +1386,46 @@ fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::
     Ok(())
 }
 
+fn consume_control_response(control: &ControlChannel, parsed: &serde_json::Value) -> bool {
+    if parsed["type"].as_str() != Some(control_channel::MSG_TYPE_CONTROL_RESPONSE) {
+        return false;
+    }
+    control.route_response(parsed);
+    true
+}
+
+fn emit_session_info(app_handle: &AppHandle, project: &str, status: SessionInfoState) {
+    let event = SessionInfoEvent {
+        project: project.to_string(),
+        status,
+    };
+    if let Err(e) = app_handle.emit(control_channel::SESSION_INFO_EVENT, event) {
+        log::warn!("failed to emit the chat session info event: {e}");
+    }
+}
+
+fn probe_session_info(
+    query: impl FnOnce() -> Result<serde_json::Value, control_channel::ControlError>,
+    slot: &Mutex<SessionInfoState>,
+    stopping: &std::sync::atomic::AtomicBool,
+) -> Option<SessionInfoState> {
+    let status = control_channel::session_info_state_from(query());
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = status.clone();
+    Some(status)
+}
+
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
     shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     pending_requests: PendingRequests,
+    control: ControlChannel,
+    session_info: Arc<Mutex<SessionInfoState>>,
     drain_handles: Vec<std::thread::JoinHandle<()>>,
     session_log_path: Option<std::path::PathBuf>,
     instance_id: Option<String>,
@@ -1380,6 +1439,8 @@ impl ChatSession {
             project_name: project_name.to_string(),
             shared_stdin: None,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            control: ControlChannel::default(),
+            session_info: Arc::new(Mutex::new(SessionInfoState::Unavailable)),
             drain_handles: Vec::new(),
             session_log_path: None,
             instance_id: None,
@@ -1389,6 +1450,21 @@ impl ChatSession {
 
     pub fn project_name(&self) -> &str {
         &self.project_name
+    }
+
+    pub(crate) fn control_handle(&self) -> anyhow::Result<ControlHandle> {
+        let stdin = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
+    }
+
+    pub(crate) fn session_info_state(&self) -> SessionInfoState {
+        self.session_info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn prepare_args(
@@ -1476,6 +1552,9 @@ impl ChatSession {
             }
         };
 
+        let provider_kind = soft_impose_cfg.kind;
+        let asks_claude_code_for_session_info = provider_kind.is_anthropic();
+
         let mut cmd = rt.container_exec_piped(
             &container,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
@@ -1502,6 +1581,18 @@ impl ChatSession {
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin from child process"))?;
         let shared_stdin = Arc::new(Mutex::new(stdin));
         self.shared_stdin = Some(shared_stdin.clone());
+        self.control = ControlChannel::default();
+        self.session_info = Arc::new(Mutex::new(if asks_claude_code_for_session_info {
+            SessionInfoState::Pending
+        } else {
+            SessionInfoState::Unavailable
+        }));
+        let session_info_probe = asks_claude_code_for_session_info.then(|| {
+            (
+                app_handle.clone(),
+                ControlHandle::new(self.control.clone(), shared_stdin.clone()),
+            )
+        });
 
         let session_log_path = {
             let path = consts::claude_session_log_path(&self.project_name);
@@ -1543,6 +1634,7 @@ impl ChatSession {
         }
 
         let pending_requests = self.pending_requests.clone();
+        let control_for_reader = self.control.clone();
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
@@ -1605,6 +1697,10 @@ impl ChatSession {
                 };
 
                 let msg_type = parsed["type"].as_str().unwrap_or("");
+
+                if consume_control_response(&control_for_reader, &parsed) {
+                    continue;
+                }
 
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
                     speedwave_runtime::log_file::write_log_line(
@@ -1778,6 +1874,7 @@ impl ChatSession {
             if let Some(entry) = http_collator.flush() {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
+            control_for_reader.fail_all();
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if !got_result && !stopping {
@@ -1791,6 +1888,31 @@ impl ChatSession {
             }
         });
         self.drain_handles.push(h);
+
+        if let Some((probe_app_handle, handle)) = session_info_probe {
+            let project = self.project_name.clone();
+            let slot = self.session_info.clone();
+            let stopping = self.stopping.clone();
+            emit_session_info(&probe_app_handle, &project, SessionInfoState::Pending);
+            let h = std::thread::spawn(move || {
+                let status =
+                    probe_session_info(|| handle.query(ControlQuery::Initialize), &slot, &stopping);
+                if let Some(status) = status {
+                    let info = match &status {
+                        SessionInfoState::Ready { info } => Some(info),
+                        SessionInfoState::Pending | SessionInfoState::Unavailable => None,
+                    };
+                    crate::model_picker::normalize_pin_for_session(
+                        consts::data_dir(),
+                        &project,
+                        provider_kind,
+                        info,
+                    );
+                    emit_session_info(&probe_app_handle, &project, status);
+                }
+            });
+            self.drain_handles.push(h);
+        }
 
         self.child = Some(child);
         Ok(())
@@ -2046,6 +2168,11 @@ impl ChatSession {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared_stdin = None;
+        self.control.fail_all();
+        *self
+            .session_info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = SessionInfoState::Unavailable;
         self.reap_instance();
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -2885,6 +3012,125 @@ mod tests {
         let payload = build_interrupt_payload("req_interrupt_err");
         let err = write_interrupt(&mut FailWriter, &payload).expect_err("expected error");
         assert!(err.to_string().contains("boom"), "got: {err}");
+    }
+
+    #[test]
+    fn control_response_is_consumed_before_the_stream_parser() {
+        let control = ControlChannel::default();
+        let line = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": "req_interrupt_1" }
+        });
+        assert!(consume_control_response(&control, &line));
+
+        for other in [
+            serde_json::json!({ "type": "control_request", "request_id": "r" }),
+            serde_json::json!({ "type": "result" }),
+            serde_json::json!({ "foo": "bar" }),
+        ] {
+            assert!(!consume_control_response(&control, &other), "{other}");
+        }
+    }
+
+    #[test]
+    fn stdout_reader_routes_control_responses_before_parsing_the_line() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let route_pos = prod
+            .find("if consume_control_response(&control_for_reader, &parsed)")
+            .expect("the stdout reader must route control responses");
+        let parse_pos = prod
+            .find("parser.parse_line(&parsed)")
+            .expect("the stdout reader must parse lines");
+        assert!(
+            route_pos < parse_pos,
+            "a control_response reaching parse_line is logged as an unknown stream-json type"
+        );
+    }
+
+    #[test]
+    fn stdout_reader_ends_pending_control_requests_when_the_stream_closes() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        assert!(
+            prod.contains("control_for_reader.fail_all();"),
+            "a dead process must fail waiting control requests instead of letting them time out"
+        );
+    }
+
+    #[test]
+    fn probe_session_info_stores_the_parsed_initialize_result() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+        )
+        .expect("a live session reports its status");
+        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 6));
+        assert_eq!(*slot.lock().unwrap(), status);
+    }
+
+    #[test]
+    fn probe_session_info_degrades_to_unavailable_when_the_request_fails() {
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let status = probe_session_info(
+            || {
+                Err(control_channel::ControlError::Timeout {
+                    subtype: "initialize",
+                    timeout: std::time::Duration::from_secs(15),
+                })
+            },
+            &slot,
+            &stopping,
+        );
+        assert_eq!(status, Some(SessionInfoState::Unavailable));
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn probe_session_info_of_a_stopped_session_reports_nothing() {
+        let slot = Mutex::new(SessionInfoState::Unavailable);
+        let stopping = std::sync::atomic::AtomicBool::new(true);
+        let status = probe_session_info(
+            || Err(control_channel::ControlError::SessionEnded),
+            &slot,
+            &stopping,
+        );
+        assert_eq!(status, None);
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn fresh_session_has_no_session_info_and_no_control_handle() {
+        let s = ChatSession::new("test-project");
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+        let err = s.control_handle().err().expect("no stdin yet");
+        assert!(err.to_string().contains("no active session"), "{err}");
+    }
+
+    #[test]
+    fn stop_ends_a_control_request_that_is_still_waiting() {
+        let mut s = ChatSession::new("test-project");
+        s.set_test_stdin_sink(Vec::new());
+        let handle = s.control_handle().expect("handle");
+        let control = s.control.clone();
+        let waiter = std::thread::spawn(move || handle.query(ControlQuery::Usage));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control.pending_ids().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "request never sent");
+            std::thread::yield_now();
+        }
+        s.stop().expect("stop");
+        assert_eq!(
+            waiter.join().expect("join"),
+            Err(control_channel::ControlError::SessionEnded)
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
     }
 
     #[test]
@@ -4692,28 +4938,77 @@ mod tests {
         assert_eq!(entry.message, "init: model=claude-opus-4-6");
     }
 
-    #[test]
-    fn parse_rate_limit_event_extracts_fields() {
+    fn parse_rate_limit(line: &str) -> (StreamChunk, LogEntry) {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, log_entry) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+        (
+            chunks.into_iter().next().expect("a RateLimit chunk"),
+            log_entry.expect("a RATE_LIMIT log entry"),
+        )
+    }
+
+    #[test]
+    fn parse_rate_limit_event_stores_a_warning_fraction_as_percent() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1738425600,"rateLimitType":"five_hour","utilization":0.6,"overageStatus":"rejected","isUsingOverage":false},"uuid":"u","session_id":"s"}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                overage_status,
+                is_using_overage,
+            } => {
                 assert_eq!(status, "allowed_warning");
-                assert!((utilization.unwrap() - 73.5).abs() < f64::EPSILON);
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert!((utilization_percent.unwrap() - 60.0).abs() < 1e-9);
                 assert_eq!(resets_at, Some(1738425600));
+                assert_eq!(overage_status.as_deref(), Some("rejected"));
+                assert_eq!(is_using_overage, Some(false));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
-        let entry = log_entry.unwrap();
         assert_eq!(entry.prefix, "RATE_LIMIT");
-        assert!(entry.message.contains("73.5"));
+        assert!(
+            entry.message.contains("utilization=60%"),
+            "{}",
+            entry.message
+        );
+        assert!(
+            entry.message.contains("type=five_hour"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_ignores_a_utilization_that_is_not_a_fraction() {
+        for raw in ["73.5", "1.01", "-0.1"] {
+            let line = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed_warning","utilization":{raw}}}}}"#
+            );
+            match parse_rate_limit(&line).0 {
+                StreamChunk::RateLimit {
+                    utilization_percent,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(utilization_percent, None, "{raw}");
+                    assert_eq!(status, "allowed_warning");
+                }
+                other => panic!("expected RateLimit, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn utilization_fraction_bounds_map_to_zero_and_one_hundred_percent() {
+        assert_eq!(utilization_fraction_to_percent(0.0), Some(0.0));
+        assert_eq!(utilization_fraction_to_percent(1.0), Some(100.0));
+        assert_eq!(utilization_fraction_to_percent(f64::NAN), None);
     }
 
     #[test]
@@ -4731,41 +5026,76 @@ mod tests {
     }
 
     #[test]
-    fn parse_rate_limit_event_without_utilization() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+    fn parse_rate_limit_event_without_utilization_keeps_status_type_and_reset_time() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1738425600,"rateLimitType":"seven_day","overageStatus":"rejected","isUsingOverage":false}}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                ..
+            } => {
                 assert_eq!(status, "allowed");
-                assert!(utilization.is_none());
-                assert!(resets_at.is_none());
+                assert_eq!(rate_limit_type.as_deref(), Some("seven_day"));
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        assert!(
+            entry.message.contains("utilization=none"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_with_only_a_status_leaves_every_other_field_absent() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
+                status,
+                rate_limit_type,
+                utilization_percent,
+                resets_at,
+                overage_status,
+                is_using_overage,
+            } => {
+                assert_eq!(status, "allowed");
+                assert_eq!(rate_limit_type, None);
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, None);
+                assert_eq!(overage_status, None);
+                assert_eq!(is_using_overage, None);
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_rate_limit_event_rejected() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resetsAt":1738430000}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
-        match chunk {
-            Some(StreamChunk::RateLimit {
+    fn parse_rate_limit_event_rejected_at_the_limit() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1738430000,"rateLimitType":"five_hour","utilization":1.0,"overageStatus":"allowed","isUsingOverage":true}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
+                is_using_overage,
+                overage_status,
                 ..
-            }) => {
+            } => {
                 assert_eq!(status, "rejected");
-                assert!((utilization.unwrap() - 100.0).abs() < f64::EPSILON);
+                assert!((utilization_percent.unwrap() - 100.0).abs() < 1e-9);
+                assert_eq!(overage_status.as_deref(), Some("allowed"));
+                assert_eq!(is_using_overage, Some(true));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
@@ -4774,24 +5104,89 @@ mod tests {
     #[test]
     fn stream_chunk_rate_limit_round_trips() {
         let chunk = StreamChunk::RateLimit {
-            status: "allowed".to_string(),
-            utilization: Some(42.5),
+            status: "allowed_warning".to_string(),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization_percent: Some(42.0),
             resets_at: Some(1738425600),
+            overage_status: None,
+            is_using_overage: Some(false),
         };
-        let json = serde_json::to_string(&chunk).unwrap();
-        let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["chunk_type"], "RateLimit");
+        let mut keys: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "is_using_overage",
+                "overage_status",
+                "rate_limit_type",
+                "resets_at",
+                "status",
+                "utilization_percent"
+            ]
+        );
+        let deserialized: StreamChunk = serde_json::from_value(json).unwrap();
         match deserialized {
             StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
                 resets_at,
+                ..
             } => {
-                assert_eq!(status, "allowed");
-                assert!((utilization.unwrap() - 42.5).abs() < f64::EPSILON);
+                assert_eq!(status, "allowed_warning");
+                assert!((utilization_percent.unwrap() - 42.0).abs() < f64::EPSILON);
                 assert_eq!(resets_at, Some(1738425600));
             }
             other => panic!("expected RateLimit after round-trip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limit_chunk_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "export interface RateLimitInfo {";
+        let idx = ts
+            .find(marker)
+            .expect("chat.ts must declare `export interface RateLimitInfo`");
+        let body = ts[idx + marker.len()..]
+            .split("\n}")
+            .next()
+            .expect("RateLimitInfo must close");
+        let mut ts_fields: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts_fields.sort_unstable();
+        let chunk = StreamChunk::RateLimit {
+            status: "allowed".to_string(),
+            rate_limit_type: None,
+            utilization_percent: None,
+            resets_at: None,
+            overage_status: None,
+            is_using_overage: None,
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        let mut rust_fields: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust_fields.sort_unstable();
+        assert_eq!(rust_fields, ts_fields);
+        let compact: String = ts.split_whitespace().collect();
+        assert!(
+            compact.contains("chunk_type:'RateLimit';data:RateLimitInfo"),
+            "the RateLimit chunk must carry RateLimitInfo"
+        );
     }
 
     #[test]
@@ -5802,7 +6197,7 @@ mod tests {
     #[test]
     fn prepare_args_never_appends_a_model_flag_even_with_a_model_pin_file() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
         let user_config = single_project_user_config();
         let (args, _) =
             ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();

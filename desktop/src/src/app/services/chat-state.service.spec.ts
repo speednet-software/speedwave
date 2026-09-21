@@ -19,6 +19,7 @@ import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
+import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
@@ -1216,9 +1217,8 @@ describe('ChatStateService', () => {
         total_cost: 0.05,
         usage: { input_tokens: 100, output_tokens: 50 },
         total_output_tokens: 50,
-        context_window_size: 200000,
+        context_window_size: null,
         model: undefined,
-        rate_limit: undefined,
       });
     });
 
@@ -1824,6 +1824,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -1892,6 +1893,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -2076,6 +2078,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
@@ -2097,6 +2100,93 @@ describe('ChatStateService', () => {
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
     });
 
+    it('picking the Default row clears the pin and switches the live session to the account default', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
+      expect(commands).toContain('clear_model_pin');
+      expect(commands).not.toContain('set_model_pin');
+      expect(commands.indexOf('clear_model_pin')).toBeLessThan(commands.indexOf('send_message'));
+      const sent = invokeSpy.mock.calls.find(([cmd]) => cmd === 'send_message');
+      expect(JSON.stringify(sent?.[1])).toContain('/model default');
+      expect(JSON.stringify(sent?.[1])).not.toContain('[1m]');
+    });
+
+    it('picking the Default row mid-stream queues the default alias, never the 1M wire id', async () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      expect(service.pendingModelOverride()).toBe('default');
+    });
+
+    it('a Default flag on a proxy-routed pick is ignored: the provider model is still written', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'qwen3',
+        wireId: 'local/qwen3',
+        providerId: 'local',
+        kind: 'local',
+        isDefault: true,
+      });
+
+      const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
+      expect(commands).toContain('set_provider_model');
+      expect(commands).not.toContain('clear_model_pin');
+    });
+
+    it('a failed pin clear surfaces the error and never touches the live session', async () => {
+      const original = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) => {
+        if (cmd === 'clear_model_pin') throw new Error('malformed settings.json');
+        return original(cmd, args);
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      expect(service.modelSelectionError()).toBe('malformed settings.json');
+      expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'send_message')).toBe(false);
+    });
+
     it('applyModelSelection during a streaming turn queues the switch instead of silently dropping it', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
@@ -2112,6 +2202,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       const modelSend = invokeSpy.mock.calls.find(
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
@@ -2133,6 +2224,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -2171,6 +2263,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
       service.isStreaming = false;
@@ -2214,6 +2307,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8[1m]',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(service.pendingModelOverride()).toBe('claude-opus-4-8[1m]');
       service.isStreaming = false;
@@ -2236,57 +2330,183 @@ describe('ChatStateService', () => {
     });
   });
 
-  describe('RateLimit chunk handling', () => {
-    it('RateLimit with utilization updates sessionStats immediately if present', () => {
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-      service.handleStreamChunk({
-        chunk_type: 'Result',
-        data: { session_id: 'abc', total_cost: 0.05 },
-      });
-      expect(service.sessionStats?.rate_limit).toBeUndefined();
+  describe('plan usage limits (get_usage) and the rate_limit_event signal', () => {
+    const NOW = Date.parse('2026-09-18T10:00:00Z');
+    const WARNING = {
+      status: 'allowed_warning',
+      rate_limit_type: 'five_hour',
+      utilization_percent: 60,
+      resets_at: 1738425600,
+      overage_status: null,
+      is_using_overage: false,
+    };
+    let usageCalls: number;
 
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed_warning', utilization: 65, resets_at: 1738425600 },
-      });
+    function useProvider(kind: string): void {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) => {
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: kind.startsWith('anthropic') ? 'anthropic' : 'local',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [{ id: 'active', kind }],
+            active: { provider_id: 'active' },
+          };
+        }
+        if (cmd === 'get_plan_usage') {
+          usageCalls += 1;
+          return {
+            subscription_type: 'max',
+            rate_limits_available: true,
+            rate_limits: {
+              five_hour: { utilization: 15, resets_at: '2026-09-18T12:40:00.744446+00:00' },
+              seven_day: { utilization: 70, resets_at: '2026-09-22T21:00:00.744471+00:00' },
+              seven_day_opus: null,
+              seven_day_sonnet: null,
+              model_scoped: [],
+              extra_usage: null,
+            },
+          };
+        }
+        return base(cmd, args);
+      };
+    }
 
-      expect(service.sessionStats?.rate_limit).toEqual({
-        status: 'allowed_warning',
-        utilization: 65,
-        resets_at: 1738425600,
-      });
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    }
+
+    beforeEach(() => {
+      usageCalls = 0;
+      TestBed.inject(ProjectStateService).activeProject.set('test');
     });
 
-    it('RateLimit before Result is included when Result arrives', () => {
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed', utilization: 30, resets_at: null },
-      });
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-      service.handleStreamChunk({
-        chunk_type: 'Result',
-        data: { session_id: 'abc', total_cost: 0.05 },
-      });
+    it('reads the limits as soon as the session answers initialize', async () => {
+      useProvider('anthropic_oauth');
 
-      expect(service.sessionStats?.rate_limit).toEqual({
-        status: 'allowed',
-        utilization: 30,
-        resets_at: null,
+      mockTauri.dispatchEvent('chat_session_info', {
+        project: 'test',
+        status: { state: 'ready', info: { models: [], account: {} } },
       });
+      TestBed.tick();
+      await settle();
+
+      expect(usageCalls).toBe(1);
+      const windows = TestBed.inject(PlanUsageService).limits('test', NOW)?.windows ?? [];
+      expect(windows.map((w) => [w.key, w.utilization])).toEqual([
+        ['five_hour', 15],
+        ['seven_day', 70],
+      ]);
     });
 
-    it('RateLimit with null utilization does not store rate limit', () => {
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed', utilization: null, resets_at: null },
-      });
+    it('re-reads the limits after every completed turn', async () => {
+      useProvider('anthropic_oauth');
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: { session_id: 'abc', total_cost: 0.05 },
       });
+      await settle();
 
-      expect(service.sessionStats?.rate_limit).toBeUndefined();
+      expect(usageCalls).toBe(1);
+    });
+
+    it('re-reads the limits after a turn that ended in an error', async () => {
+      useProvider('anthropic_oauth');
+
+      service.handleStreamChunk({ chunk_type: 'Error', data: { content: 'boom' } });
+      await settle();
+
+      expect(usageCalls).toBe(1);
+    });
+
+    it('stores a 60% warning as the status signal and triggers a refresh', async () => {
+      useProvider('anthropic_oauth');
+
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(WARNING);
+      expect(usageCalls).toBe(1);
+    });
+
+    it('keeps the status and reset time of an event that carries no utilization', async () => {
+      useProvider('anthropic_oauth');
+      const allowed = { ...WARNING, status: 'allowed', utilization_percent: null };
+
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: allowed });
+      await settle();
+
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(allowed);
+      expect(usageCalls).toBe(1);
+    });
+
+    it('keeps the limits across a new conversation', async () => {
+      useProvider('anthropic_oauth');
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+
+      service.resetForNewConversation();
+
+      const planUsage = TestBed.inject(PlanUsageService);
+      expect(planUsage.limits('test', NOW)?.windows.length).toBe(2);
+      expect(planUsage.lastSignal('test')).toEqual(WARNING);
+    });
+
+    it('never asks for plan limits with an API key: there are none', async () => {
+      useProvider('anthropic_api_key');
+
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      await settle();
+
+      expect(usageCalls).toBe(0);
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).toBeNull();
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toBeNull();
+    });
+
+    it('never sends a control request for a proxy-routed provider', async () => {
+      useProvider('local');
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05 },
+      });
+      await settle();
+
+      expect(usageCalls).toBe(0);
+    });
+
+    it('drops the limits on logout', async () => {
+      useProvider('anthropic_oauth');
+      const projectState = TestBed.inject(ProjectStateService);
+      await service.init();
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).not.toBeNull();
+
+      projectState.forceUnconfigured();
+
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).toBeNull();
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toBeNull();
+    });
+
+    it('drops the limits when the provider stops being an Anthropic sign-in', async () => {
+      useProvider('anthropic_oauth');
+      service.handleStreamChunk({ chunk_type: 'RateLimit', data: WARNING });
+      await settle();
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).not.toBeNull();
+
+      useProvider('local');
+      await service.refreshLlmConfigCache();
+
+      expect(TestBed.inject(PlanUsageService).limits('test', NOW)).toBeNull();
     });
 
     it('output tokens accumulate across turns', () => {
@@ -2311,22 +2531,6 @@ describe('ChatStateService', () => {
         },
       });
       expect(service.sessionStats?.total_output_tokens).toBe(153);
-    });
-
-    it('resetForNewConversation clears rate limit', () => {
-      service.handleStreamChunk({
-        chunk_type: 'RateLimit',
-        data: { status: 'allowed', utilization: 50, resets_at: 123 },
-      });
-      service.resetForNewConversation();
-
-      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
-      service.handleStreamChunk({
-        chunk_type: 'Result',
-        data: { session_id: 'abc', total_cost: 0.05 },
-      });
-
-      expect(service.sessionStats?.rate_limit).toBeUndefined();
     });
   });
 
@@ -3011,9 +3215,23 @@ describe('ChatStateService', () => {
       expect(lateText).toBe(false);
     });
 
-    it('RateLimit chunk dispatched after Result still updates sessionStats.rate_limit', async () => {
+    it('RateLimit chunk dispatched between turns still reaches the plan usage signal', async () => {
       mockTauri.isRunningInTauri = () => true;
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'get_llm_config'
+          ? {
+              provider: 'anthropic',
+              model: null,
+              base_url: null,
+              default_base_url: null,
+              providers: [{ id: 'anthropic', kind: 'anthropic_oauth' }],
+              active: { provider_id: 'anthropic' },
+            }
+          : base(cmd, args);
+      TestBed.inject(ProjectStateService).activeProject.set('test');
       await service.init();
+      await service.refreshLlmConfigCache();
       service.isStreaming = true;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Result',
@@ -3027,17 +3245,18 @@ describe('ChatStateService', () => {
       });
       expect(service.isStreaming).toBe(false);
       expect(service.sessionStats).not.toBeNull();
-      const before = service.sessionStats;
-      mockTauri.dispatchEvent('chat_stream', {
-        chunk_type: 'RateLimit',
-        data: { status: 'ok', utilization: 0.42, resets_at: '2026-04-18T12:00:00Z' },
-      });
-      expect(service.sessionStats).not.toBe(before);
-      expect(service.sessionStats?.rate_limit).toEqual({
-        status: 'ok',
-        utilization: 0.42,
-        resets_at: '2026-04-18T12:00:00Z',
-      });
+      const signal = {
+        status: 'rejected',
+        rate_limit_type: 'five_hour',
+        utilization_percent: 100,
+        resets_at: 1776513600,
+        overage_status: 'rejected',
+        is_using_overage: false,
+      };
+      mockTauri.dispatchEvent('chat_stream', { chunk_type: 'RateLimit', data: signal });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(signal);
     });
 
     it('SystemInit chunk dispatched between turns updates the model', async () => {
@@ -3338,7 +3557,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3373,7 +3591,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3402,7 +3619,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3492,7 +3708,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3532,7 +3747,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3565,7 +3779,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3598,7 +3811,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3606,7 +3818,14 @@ describe('ChatStateService', () => {
       service.isStreaming = false;
       service.handleStreamChunk({
         chunk_type: 'RateLimit',
-        data: { status: 'ok', utilization: null, resets_at: null },
+        data: {
+          status: 'allowed',
+          rate_limit_type: null,
+          utilization_percent: null,
+          resets_at: null,
+          overage_status: null,
+          is_using_overage: null,
+        },
       });
 
       expect(service.retryEnabled()).toBe(false);
@@ -3642,7 +3861,6 @@ describe('ChatStateService', () => {
           total_cost: 0,
           usage: undefined,
           model: undefined,
-          rate_limit: undefined,
           context_window_size: 200_000,
           total_output_tokens: 0,
         },
@@ -3650,7 +3868,14 @@ describe('ChatStateService', () => {
       service.isStreaming = false;
       service.handleStreamChunk({
         chunk_type: 'RateLimit',
-        data: { status: 'ok', utilization: null, resets_at: null },
+        data: {
+          status: 'allowed',
+          rate_limit_type: null,
+          utilization_percent: null,
+          resets_at: null,
+          overage_status: null,
+          is_using_overage: null,
+        },
       });
 
       expect(service.retryEnabled()).toBe(true);
@@ -3808,7 +4033,6 @@ describe('ChatStateService', () => {
           context_used: 0,
           total_output_tokens: 0,
           context_window_size: 200_000,
-          rate_limit: null,
         } as never,
       });
     }
@@ -4169,58 +4393,64 @@ describe('ChatStateService', () => {
 
   describe('resolveContextWindow priority chain', () => {
     type Internal = {
-      resolveContextWindow: (live: number | undefined, model: string | undefined) => number;
+      resolveContextWindow: (live: number | undefined) => number | null;
       _persistedContextTokens: number | null;
-      _contextWindowSize: number;
+      _contextWindowSize: number | null;
+      _currentProvider: string | null;
+      _contextSnapshot: { max_tokens: number } | null;
     };
 
-    it('prefers the live stream value over every fallback', () => {
+    it('prefers the live stream value over every fallback for a routed provider', () => {
       const internal = service as unknown as Internal;
+      internal._currentProvider = 'openrouter';
       internal._persistedContextTokens = 16_384;
       internal._contextWindowSize = 8_192;
-      expect(internal.resolveContextWindow(500_000, 'claude-opus-4-7')).toBe(500_000);
+      expect(internal.resolveContextWindow(500_000)).toBe(500_000);
     });
 
-    it('falls back to the Anthropic SSOT when no live value is available', async () => {
-      const anthropic = TestBed.inject(AnthropicModelsService);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_anthropic_models') {
-          return [
-            {
-              id: 'claude-opus-4-7',
-              family: 'Opus 4.7',
-              context_tokens: 1_000_000,
-              latest: true,
-              premium: true,
-            },
-          ];
-        }
-        return undefined;
-      };
-      await anthropic.list();
+    it('falls back to persisted context_tokens when the live value is absent', () => {
       const internal = service as unknown as Internal;
-      expect(internal.resolveContextWindow(undefined, 'claude-opus-4-7')).toBe(1_000_000);
-    });
-
-    it('falls back to persisted context_tokens when SSOT and live are absent', () => {
-      const internal = service as unknown as Internal;
+      internal._currentProvider = 'local';
       internal._persistedContextTokens = 32_768;
       internal._contextWindowSize = 8_192;
-      expect(internal.resolveContextWindow(undefined, 'unknown-model')).toBe(32_768);
+      expect(internal.resolveContextWindow(undefined)).toBe(32_768);
     });
 
     it('falls back to previous _contextWindowSize when persisted is also absent', () => {
       const internal = service as unknown as Internal;
+      internal._currentProvider = 'openrouter';
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 65_536;
-      expect(internal.resolveContextWindow(undefined, 'unknown-model')).toBe(65_536);
+      expect(internal.resolveContextWindow(undefined)).toBe(65_536);
     });
 
-    it('falls back to DEFAULT_CONTEXT_TOKENS as the last resort', () => {
+    it('falls back to DEFAULT_CONTEXT_TOKENS as the last resort for OpenRouter only', () => {
       const internal = service as unknown as Internal;
+      internal._currentProvider = 'openrouter';
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 0;
-      expect(internal.resolveContextWindow(undefined, undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+      expect(internal.resolveContextWindow(undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+
+    it('never invents a window for a local model or before the provider is known', () => {
+      const internal = service as unknown as Internal;
+      internal._persistedContextTokens = null;
+      internal._contextWindowSize = null;
+      internal._currentProvider = 'local';
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+      internal._currentProvider = null;
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+    });
+
+    it("Anthropic: Claude Code's maxTokens wins over the result stream and no default exists", () => {
+      const internal = service as unknown as Internal;
+      internal._currentProvider = 'anthropic';
+      internal._persistedContextTokens = 32_768;
+      internal._contextWindowSize = null;
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+      expect(internal.resolveContextWindow(1_000_000)).toBe(1_000_000);
+      internal._contextSnapshot = { max_tokens: 200_000 };
+      expect(internal.resolveContextWindow(1_000_000)).toBe(200_000);
     });
   });
 
@@ -4252,23 +4482,19 @@ describe('ChatStateService', () => {
       expect(service.sessionStats?.model).toBe('claude-fable-5');
     });
 
-    it('falls back to the Anthropic SSOT window when context_window_size is absent', async () => {
-      const anthropic = TestBed.inject(AnthropicModelsService);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'list_anthropic_models') {
-          return [
-            {
-              id: 'claude-fable-5',
-              family: 'Fable 5',
-              context_tokens: 1_000_000,
-              latest: false,
-              premium: true,
-            },
-          ];
-        }
-        return undefined;
-      };
-      await anthropic.list();
+    it('Anthropic: a result without a window shows no max instead of the catalog window or 200k', async () => {
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_llm_config'
+          ? {
+              provider: 'anthropic',
+              model: null,
+              base_url: null,
+              default_base_url: null,
+              providers: [{ id: 'anthropic', kind: 'anthropic_oauth' }],
+              active: { provider_id: 'anthropic' },
+            }
+          : undefined;
+      await service.refreshLlmConfigCache();
 
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -4280,8 +4506,237 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', total_cost: 0.5, model: 'claude-fable-5' },
       });
 
+      expect(service.sessionStats?.context_window_size).toBeNull();
+    });
+  });
+
+  describe('context usage from get_context_usage (Anthropic)', () => {
+    const SNAPSHOT_1M = {
+      model: 'claude-opus-5[1m]',
+      total_tokens: 46_567,
+      max_tokens: 1_000_000,
+      percentage: 5,
+      categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
+    };
+    const SNAPSHOT_HAIKU = {
+      model: 'claude-haiku-4-5',
+      total_tokens: 62_767,
+      max_tokens: 200_000,
+      percentage: 31,
+      categories: [{ name: 'System prompt', tokens: 8_257, is_deferred: false }],
+    };
+    let snapshot: unknown;
+    let contextCalls: number;
+
+    function useKind(kind: string): void {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: kind.startsWith('anthropic') ? 'anthropic' : 'openrouter',
+            model: null,
+            base_url: null,
+            default_base_url: null,
+            providers: [{ id: 'active', kind }],
+            active: { provider_id: 'active' },
+          };
+        }
+        if (cmd === 'get_context_usage') {
+          contextCalls += 1;
+          if (snapshot instanceof Error) throw snapshot;
+          return snapshot;
+        }
+        return undefined;
+      };
+    }
+
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    }
+
+    function sessionReady(): void {
+      mockTauri.dispatchEvent('chat_session_info', {
+        project: 'test',
+        status: { state: 'ready', info: { models: [], account: {} } },
+      });
+      TestBed.tick();
+    }
+
+    beforeEach(() => {
+      snapshot = SNAPSHOT_1M;
+      contextCalls = 0;
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+    });
+
+    it('shows used and max before the first turn of a fresh session', async () => {
+      useKind('anthropic_oauth');
+
+      sessionReady();
+      await settle();
+
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
       expect(service.sessionStats?.context_window_size).toBe(1_000_000);
-      expect(service.sessionStats?.context_window_size).not.toBe(DEFAULT_CONTEXT_TOKENS);
+      expect(service.sessionStats?.session_id).toBe('');
+    });
+
+    it('also serves an API-key session: the context is not a plan limit', async () => {
+      useKind('anthropic_api_key');
+
+      sessionReady();
+      await settle();
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('keeps the seeded window when SystemInit later brings the session id', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-5[1m]', session_id: 'sess-1' },
+      });
+
+      expect(service.sessionStats?.session_id).toBe('sess-1');
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('re-reads the context after every completed turn and keeps it in the new stats', async () => {
+      useKind('anthropic_oauth');
+      await service.refreshLlmConfigCache();
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.05, context_window_size: 1_000_000 },
+      });
+      await settle();
+
+      expect(contextCalls).toBe(1);
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
+      expect(service.sessionStats?.session_id).toBe('abc');
+    });
+
+    it('after a switch from a 1M model to Haiku the window is 200k before the next turn ends', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-haiku-4-5' },
+      });
+      expect(service.sessionStats?.context_window_size).toBeNull();
+      expect(service.sessionStats?.context).toBeUndefined();
+
+      snapshot = SNAPSHOT_HAIKU;
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0 },
+      });
+      await settle();
+
+      expect(service.sessionStats?.context_window_size).toBe(200_000);
+      expect(service.sessionStats?.context?.total_tokens).toBe(62_767);
+    });
+
+    it('an effort chip leaves the window alone', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'effort', argument: 'high' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('with get_context_usage failing the window comes from the result, and none is shown before it', async () => {
+      useKind('anthropic_oauth');
+      snapshot = new Error("control request 'get_context_usage' got no response within 5000 ms");
+
+      sessionReady();
+      await settle();
+      expect(service.sessionStats).toBeNull();
+
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0, context_window_size: 1_000_000 },
+      });
+      await settle();
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+      expect(service.sessionStats?.context).toBeUndefined();
+    });
+
+    it('drops a stale snapshot when a later read fails, so the result stream feeds the meter', async () => {
+      useKind('anthropic_oauth');
+      sessionReady();
+      await settle();
+      expect(service.sessionStats?.context).toEqual(SNAPSHOT_1M);
+
+      snapshot = new Error('chat session is busy');
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0, context_window_size: 1_000_000 },
+      });
+      await settle();
+
+      expect(service.sessionStats?.context).toBeUndefined();
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+    });
+
+    it('ignores an answer that arrives after a new conversation started', async () => {
+      useKind('anthropic_oauth');
+      await service.refreshLlmConfigCache();
+      let release!: (v: unknown) => void;
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'get_context_usage' ? new Promise((r) => (release = r)) : base(cmd, args);
+
+      sessionReady();
+      await settle();
+      service.resetForNewConversation();
+      release(SNAPSHOT_1M);
+      await settle();
+
+      expect(service.sessionStats).toBeNull();
+    });
+
+    it('a proxy-routed provider never asks Claude Code for its context', async () => {
+      useKind('open_router');
+      await service.refreshLlmConfigCache();
+
+      sessionReady();
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0 },
+      });
+      await settle();
+
+      expect(contextCalls).toBe(0);
+      expect(service.sessionStats?.context_window_size).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+
+    it('a model chip on a routed provider keeps the window it had', async () => {
+      useKind('open_router');
+      await service.refreshLlmConfigCache();
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0, context_window_size: 128_000 },
+      });
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'openrouter/x-ai/grok-4.3' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(128_000);
     });
   });
 
@@ -5120,6 +5575,7 @@ describe('ChatStateService', () => {
         wireId: 'my-or/anthropic/claude-haiku-4-5',
         providerId: 'my-or',
         kind: 'open_router',
+        isDefault: false,
       });
       expect(calls).toEqual(['setProviderModel-start']);
       resolveSet();
@@ -5140,6 +5596,7 @@ describe('ChatStateService', () => {
         wireId: 'my-or/anthropic/claude-haiku-4-5',
         providerId: 'my-or',
         kind: 'open_router',
+        isDefault: false,
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -5177,6 +5634,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(calls).toEqual(['set_model_pin-start']);
       resolvePin();
@@ -5202,6 +5660,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -5218,6 +5677,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
@@ -5243,6 +5703,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -5271,6 +5732,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
@@ -5299,6 +5761,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
 
       expect(service.modelSelectionError()).toContain('locked settings.json');
@@ -5321,6 +5784,7 @@ describe('ChatStateService', () => {
         wireId: 'claude-haiku-4-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+        isDefault: false,
       });
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
         projectId: expect.any(String),
@@ -5360,6 +5824,7 @@ describe('ChatStateService', () => {
         wireId: 'my-ollama/llama4',
         providerId: 'my-ollama',
         kind: 'local',
+        isDefault: false,
       });
 
       expect(setProviderModelSpy).toHaveBeenCalledWith(expect.any(String), 'my-ollama', 'llama4');

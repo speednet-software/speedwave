@@ -1670,14 +1670,14 @@ mod tests {
         let env = doc["services"]["claude"]["environment"]
             .as_sequence()
             .expect("claude.environment must be a sequence");
-        let opus = env
+        let sonnet = env
             .iter()
             .filter_map(|v| v.as_str())
-            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL="))
-            .expect("ANTHROPIC_DEFAULT_OPUS_MODEL must be present");
+            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_SONNET_MODEL="))
+            .expect("ANTHROPIC_DEFAULT_SONNET_MODEL must be present");
         assert!(
-            opus.ends_with("[1m]"),
-            "1M-context suffix must survive intact, got: {opus:?}"
+            sonnet.ends_with("[1m]"),
+            "1M-context suffix must survive intact, got: {sonnet:?}"
         );
 
         let services = doc["services"].as_mapping().expect("services mapping");
@@ -4160,10 +4160,19 @@ services:
                     || e.starts_with("ANTHROPIC_API_KEY=")),
             "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
         );
+        for alias in [
+            "ANTHROPIC_DEFAULT_SONNET_MODEL=",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL=",
+        ] {
+            assert!(
+                env.iter().any(|e| e.starts_with(alias)),
+                "alias pin {alias} must be present: {env:?}"
+            );
+        }
         assert!(
-            env.iter()
+            !env.iter()
                 .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
-            "alias pins must be present: {env:?}"
+            "the plan-dependent opus alias must not be pinned for Anthropic kinds: {env:?}"
         );
     }
 
