@@ -255,10 +255,12 @@ export class ChatStateService {
 
   private async rerenderContainersForModel(): Promise<boolean> {
     if (await this.projectState.restartContainers()) return true;
+    const failure = this.projectState.restartError;
     this.reportSelectionFailure(
       'compose re-render for the picked model',
-      this.projectState.restartError || MODEL_SWITCH_RESTART_BUSY
+      failure || MODEL_SWITCH_RESTART_BUSY
     );
+    if (failure) this.projectState.requestRestart();
     return false;
   }
 

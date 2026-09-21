@@ -290,7 +290,11 @@ has applied one since `model` became part of `computeActiveKey`
 which re-renders the compose and recreates the containers), followed by the
 same idle respawn. A restart that fails, and one already in flight, both
 surface in the composer with no respawn behind them, so the silent no-op
-cannot return through a second entry point. A live session still takes the
+cannot return through a second entry point; a failed one additionally raises
+the standing restart prompt (`ProjectStateService.requestRestart`), because
+the config write commits first and the badge is read back from it, so the one
+state where a saved model outlives the container it never reached must stay
+visible and one click from being retried. A live session still takes the
 wire `/model` (the proxy routes on the id prefix,
 `containers/proxy/src/router.rs`) and a mid-stream pick still defers its
 override; neither restarts a container.

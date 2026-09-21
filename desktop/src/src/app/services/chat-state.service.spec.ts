@@ -5875,6 +5875,7 @@ describe('ChatStateService', () => {
 
       expect(service.modelSelectionError()).toContain('compose render failed');
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(projectState.needsRestart).toBe(true);
     });
 
     it('tells the user to pick again when a restart is already running', async () => {
@@ -5903,6 +5904,7 @@ describe('ChatStateService', () => {
       });
       expect(service.modelSelectionError()).toBe(MODEL_SWITCH_RESTART_BUSY);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(projectState.needsRestart).toBe(false);
     });
 
     it('keeps a routed pick without an active project from respawning on an unchanged compose', async () => {
