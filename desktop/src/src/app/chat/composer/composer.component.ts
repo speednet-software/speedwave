@@ -643,6 +643,7 @@ export class ComposerComponent implements AfterViewInit {
   private async ingest(files: File[]): Promise<void> {
     const images = files.filter((f) => f.type.startsWith('image/'));
     if (images.length === 0) {
+      this.attachmentError.set(ERROR_UNSUPPORTED_TYPE);
       return;
     }
     const project = this.projectState.activeProject();
