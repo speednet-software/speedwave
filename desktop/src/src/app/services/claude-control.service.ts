@@ -36,8 +36,6 @@ export class ClaudeControlService {
   }
 
   private apply(project: string, status: ClaudeSessionInfoState): void {
-    const current = this.states().get(project);
-    if (status.state === 'pending' && current?.state === 'ready') return;
     const next = new Map(this.states());
     next.set(project, status);
     this.states.set(next);

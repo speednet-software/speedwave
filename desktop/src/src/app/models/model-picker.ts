@@ -10,6 +10,8 @@ export interface ModelPickerRow {
   wire_id: string;
   is_default: boolean;
   display_name: string | null;
+  description: string | null;
+  requires_usage_credits: boolean;
   effort_levels: string[];
   default_effort: string | null;
 }

@@ -60,6 +60,8 @@ describe('ModelSelectorComponent', () => {
         wire_id: 'claude-sonnet-5[1m]',
         is_default: true,
         display_name: null,
+        description: 'Sonnet 5 · Efficient for routine tasks',
+        requires_usage_credits: false,
         effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
         default_effort: 'high',
       },
@@ -68,6 +70,8 @@ describe('ModelSelectorComponent', () => {
         wire_id: 'claude-opus-4-1',
         is_default: false,
         display_name: null,
+        description: 'Opus 4.1 · Best for complex tasks',
+        requires_usage_credits: false,
         effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
         default_effort: 'high',
       },
@@ -184,6 +188,8 @@ describe('ModelSelectorComponent', () => {
               wire_id: 'claude-nova-1[1m]',
               is_default: false,
               display_name: 'Nova 1',
+              description: 'Nova 1 · Experimental model',
+              requires_usage_credits: false,
               effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
               default_effort: 'high',
             },
@@ -257,6 +263,69 @@ describe('ModelSelectorComponent', () => {
         isDefault: true,
       },
     ]);
+  });
+
+  it('shows Claude Codes usage-credit warning and model description', async () => {
+    const paidPicker: ModelPicker = {
+      ...picker,
+      rows: [
+        {
+          ...picker.rows[1],
+          description: 'Opus 4.1 · Requires usage credits for this account',
+          requires_usage_credits: true,
+        },
+      ],
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'list_model_picker') return Promise.resolve(paidPicker);
+      if (cmd === 'get_chat_session_info') return Promise.resolve({ state: 'unavailable' });
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    const row = fixture.debugElement.query(
+      By.css('[data-testid="model-selector-option-claude-opus-4-1"]')
+    );
+    expect(row.query(By.css('[data-testid="model-selector-usage-credits-badge"]'))).toBeTruthy();
+    expect(
+      row.query(By.css('[data-testid="model-selector-description-claude-opus-4-1"]')).nativeElement
+        .textContent
+    ).toContain('Requires usage credits');
+  });
+
+  it('requires explicit confirmation before selecting a usage-credit model', async () => {
+    await fixture.whenStable();
+    const events: ModelSelection[] = [];
+    fixture.componentInstance.modelSelected.subscribe((event) => events.push(event));
+    fixture.componentInstance.open.set(true);
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
+    const paid = {
+      id: 'claude-opus-4-1',
+      label: 'Opus 4.1',
+      wireId: 'claude-opus-4-1',
+      isDefault: false,
+      contextTokens: 200_000,
+      description: 'Requires usage credits',
+      requiresUsageCredits: true,
+    };
+
+    fixture.componentInstance.select(paid);
+    expect(events).toEqual([]);
+    expect(fixture.componentInstance.open()).toBe(true);
+
+    confirmSpy.mockReturnValue(true);
+    fixture.componentInstance.select(paid);
+    expect(events).toHaveLength(1);
+    expect(fixture.componentInstance.open()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(confirmSpy.mock.calls[0][0]).toContain('without another prompt');
+    confirmSpy.mockRestore();
   });
 
   it('is disabled while Claude Code has not answered initialize yet, and re-reads the rows once it has', async () => {
@@ -396,7 +465,15 @@ describe('ModelSelectorComponent', () => {
   it('open_router and local branches produce identically-shaped options from the same discover result', async () => {
     const discovered = { models: [{ id: 'model-a', context_tokens: 4096 }] };
     const expectedOptions = [
-      { id: 'model-a', label: 'model-a', wireId: 'model-a', isDefault: false, contextTokens: 4096 },
+      {
+        id: 'model-a',
+        label: 'model-a',
+        wireId: 'model-a',
+        isDefault: false,
+        contextTokens: 4096,
+        description: null,
+        requiresUsageCredits: false,
+      },
     ];
 
     const orSummary: ActiveProviderSummary = {
@@ -505,6 +582,8 @@ describe('ModelSelectorComponent', () => {
       wireId: 'claude-opus-4-1',
       isDefault: false,
       contextTokens: 200000,
+      description: null,
+      requiresUsageCredits: false,
     });
 
     expect(events).toEqual([
@@ -857,6 +936,8 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
           wire_id: 'claude-fable-5[1m]',
           is_default: false,
           display_name: null,
+          description: null,
+          requires_usage_credits: false,
           effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
           default_effort: 'high',
         },
@@ -931,6 +1012,8 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
           wire_id: 'claude-fable-5[1m]',
           is_default: true,
           display_name: null,
+          description: null,
+          requires_usage_credits: false,
           effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
           default_effort: 'high',
         },
@@ -1081,6 +1164,8 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       wire_id: m.id,
       is_default: false,
       display_name: null,
+      description: null,
+      requires_usage_credits: false,
       effort_levels: m.effort_levels,
       default_effort: m.default_effort,
     }));

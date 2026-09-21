@@ -105,14 +105,15 @@ describe('ClaudeControlService', () => {
     expect(service.sessionInfoState('other')).toEqual({ state: 'pending' });
   });
 
-  it('keeps the last ready list while a new session is pending', async () => {
+  it('invalidates the ready list while a new session is pending', async () => {
     const service = createService();
     await awaitListener();
 
     emit('acme', { state: 'ready', info: INFO });
     emit('acme', { state: 'pending' });
 
-    expect(service.sessionInfo('acme')).toEqual(INFO);
+    expect(service.sessionInfoState('acme')).toEqual({ state: 'pending' });
+    expect(service.sessionInfo('acme')).toBeNull();
   });
 
   it('drops the ready list when the new session reports unavailable', async () => {

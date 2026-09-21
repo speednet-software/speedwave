@@ -27,6 +27,8 @@ interface ModelOption {
   wireId: string;
   isDefault: boolean;
   contextTokens: number | null;
+  description: string | null;
+  requiresUsageCredits: boolean;
   promptPrice?: number;
   completionPrice?: number;
 }
@@ -143,7 +145,7 @@ export interface ModelSelection {
                   [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
                   (click)="select(opt)"
                 >
-                  <span class="flex items-center gap-2">
+                  <span class="flex min-w-0 items-start gap-2">
                     @if (showEffortControl()) {
                       <span class="inline-block w-3 text-[var(--teal)]" aria-hidden="true">
                         @if (opt.id === activeOptionId()) {
@@ -151,14 +153,32 @@ export interface ModelSelection {
                         }
                       </span>
                     }
-                    <span>{{ opt.label }}</span>
-                    @if (opt.isDefault) {
-                      <span
-                        data-testid="model-selector-default-badge"
-                        class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
-                        >Default</span
-                      >
-                    }
+                    <span class="flex min-w-0 flex-col gap-0.5">
+                      <span class="flex items-center gap-2">
+                        <span>{{ opt.label }}</span>
+                        @if (opt.isDefault) {
+                          <span
+                            data-testid="model-selector-default-badge"
+                            class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
+                            >Default</span
+                          >
+                        }
+                        @if (opt.requiresUsageCredits) {
+                          <span
+                            data-testid="model-selector-usage-credits-badge"
+                            class="rounded border border-amber-500/60 px-1 text-[9px] uppercase tracking-wide text-amber-300"
+                            >Usage credits</span
+                          >
+                        }
+                      </span>
+                      @if (opt.description) {
+                        <span
+                          [attr.data-testid]="'model-selector-description-' + opt.id"
+                          class="whitespace-normal text-[10px] leading-tight text-[var(--ink-mute)]"
+                          >{{ opt.description }}</span
+                        >
+                      }
+                    </span>
                   </span>
                   @if (opt.promptPrice !== undefined) {
                     <span class="text-[var(--ink-mute)]"
@@ -368,7 +388,12 @@ export class ModelSelectorComponent {
     const q = this.query().trim().toLowerCase();
     const all = this.options();
     if (!q) return all;
-    return all.filter((o) => o.id.toLowerCase().includes(q) || o.label.toLowerCase().includes(q));
+    return all.filter(
+      (o) =>
+        o.id.toLowerCase().includes(q) ||
+        o.label.toLowerCase().includes(q) ||
+        o.description?.toLowerCase().includes(q)
+    );
   });
 
   /**
@@ -411,6 +436,8 @@ export class ModelSelectorComponent {
       wireId: row.wire_id,
       isDefault: row.is_default,
       contextTokens: null,
+      description: row.description,
+      requiresUsageCredits: row.requires_usage_credits,
     }));
   }
 
@@ -424,6 +451,8 @@ export class ModelSelectorComponent {
       wireId: m.id,
       isDefault: false,
       contextTokens: m.context_tokens ?? null,
+      description: null,
+      requiresUsageCredits: false,
     }));
   }
 
@@ -478,6 +507,14 @@ export class ModelSelectorComponent {
   select(opt: ModelOption): void {
     const summary = this.summary();
     if (!summary) return;
+    if (
+      opt.requiresUsageCredits &&
+      !confirm(
+        `${opt.label} requires usage credits for this account. Speedwave runs Claude Code non-interactively, so Anthropic may charge those credits without another prompt. Continue?`
+      )
+    ) {
+      return;
+    }
     const wireId = isAnthropicKind(summary.kind)
       ? opt.wireId
       : wireModelId(summary.kind, summary.provider_id, opt.id);
