@@ -37,7 +37,7 @@ export type ModalBorderColor = 'default' | 'red';
         @if (showClose()) {
           <button
             type="button"
-            class="mono absolute left-2 top-2 rounded px-1 text-[13px] leading-none text-[var(--ink-mute)] hover:text-[var(--ink)]"
+            class="mono absolute right-2 top-2 rounded px-1 text-[13px] leading-none text-[var(--ink-mute)] hover:text-[var(--ink)]"
             aria-label="Close"
             [attr.data-testid]="closeTestId()"
             (click)="dismiss()"
@@ -48,7 +48,7 @@ export type ModalBorderColor = 'default' | 'red';
         <div
           class="mono text-[11px] uppercase tracking-widest"
           [class]="kickerClasses()"
-          [class.pl-6]="showClose()"
+          [class.pr-6]="showClose()"
         >
           {{ kicker() }}
         </div>
@@ -155,7 +155,7 @@ export class ModalOverlayComponent {
   readonly tertiaryLabel = input<string>('');
   /** `data-testid` for the tertiary button — defaults to `modal-tertiary`. */
   readonly tertiaryTestId = input<string>('modal-tertiary');
-  /** Shows a ✕ dismiss button in the top-left corner; dismissing behaves like Esc/backdrop. */
+  /** Shows a ✕ dismiss button in the top-right corner; dismissing behaves like Esc/backdrop. */
   readonly showClose = input<boolean>(false);
   /** `data-testid` for the close button — defaults to `modal-close`. */
   readonly closeTestId = input<string>('modal-close');
