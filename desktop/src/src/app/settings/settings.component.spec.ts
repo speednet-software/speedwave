@@ -12,6 +12,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS, THEME_MODES } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
+import { SettingsDirtyService } from './settings-dirty.service';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
   mockTauri.invokeHandler = async (cmd: string) => {
@@ -711,6 +712,52 @@ describe('SettingsComponent', () => {
       );
       expect(section.textContent?.toLowerCase()).toContain('mode');
       expect(section.textContent).not.toContain('Backgrounds stay dark');
+    });
+  });
+
+  describe('unsaved-changes modal (SPEED-637)', () => {
+    afterEach(() => {
+      TestBed.inject(SettingsDirtyService).resolvePrompt('stay');
+    });
+
+    it('renders the modal with the dirty section names while a prompt is open', async () => {
+      const registry = TestBed.inject(SettingsDirtyService);
+      registry.register({ name: 'Telemetry', isDirty: signal(true), save: async () => {} });
+      component.ngOnInit();
+      await fixture.whenStable();
+      const pending = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      const modal = document.querySelector('[data-testid="settings-unsaved-modal"]');
+      expect(modal).not.toBeNull();
+      expect(document.querySelector('[data-testid="modal-body"]')?.textContent).toContain(
+        'Telemetry'
+      );
+      (document.querySelector('[data-testid="unsaved-stay-btn"]') as HTMLElement).click();
+      await expect(pending).resolves.toBe('stay');
+    });
+
+    it('the three buttons resolve save / discard / stay', async () => {
+      const registry = TestBed.inject(SettingsDirtyService);
+      registry.register({ name: 'Security', isDirty: signal(true), save: async () => {} });
+      component.ngOnInit();
+      await fixture.whenStable();
+      const pending = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      (document.querySelector('[data-testid="unsaved-save-btn"]') as HTMLElement).click();
+      await expect(pending).resolves.toBe('save');
+      const pending2 = registry.confirmLeave();
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      (document.querySelector('[data-testid="unsaved-discard-btn"]') as HTMLElement).click();
+      await expect(pending2).resolves.toBe('discard');
+    });
+
+    it('factory reset suppresses the next leave prompt', () => {
+      const registry = TestBed.inject(SettingsDirtyService);
+      component.onResetCompleted();
+      expect(registry.consumeSuppression()).toBe(true);
     });
   });
 });
