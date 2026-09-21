@@ -1717,25 +1717,25 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      const ran = await service.restartContainers();
+      const outcome = await service.restartContainers();
 
-      expect(ran).toBe(false);
+      expect(outcome).toBe('failed');
       expect(service.restartError).toBe('compose failed');
       expect(service.restarting).toBe(false);
       expect(service.needsRestart).toBe(true);
     });
 
-    it('restartContainers reports back whether the containers were actually restarted', async () => {
+    it('restartContainers separates a restart it ran from one it never started', async () => {
       service.requestRestart();
 
-      await expect(service.restartContainers()).resolves.toBe(true);
+      await expect(service.restartContainers()).resolves.toBe('restarted');
 
       service.restarting = true;
-      await expect(service.restartContainers()).resolves.toBe(false);
+      await expect(service.restartContainers()).resolves.toBe('skipped');
 
       service.restarting = false;
       service.activeProject.set(null);
-      await expect(service.restartContainers()).resolves.toBe(false);
+      await expect(service.restartContainers()).resolves.toBe('skipped');
     });
 
     it('restartContainers recovers after previous failure', async () => {

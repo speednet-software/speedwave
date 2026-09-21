@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
-  MODEL_SWITCH_RESTART_BUSY,
+  MODEL_SWITCH_NOT_APPLIED,
   NEW_CONVERSATION_AUTH,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
@@ -5886,6 +5886,7 @@ describe('ChatStateService', () => {
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
       projectState.restarting = true;
+      projectState.restartError = 'a failure from an older restart';
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await service.applyModelSelection({
@@ -5902,7 +5903,7 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         model: 'llama4',
       });
-      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_RESTART_BUSY);
+      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_NOT_APPLIED);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
       expect(projectState.needsRestart).toBe(false);
     });
@@ -5929,7 +5930,7 @@ describe('ChatStateService', () => {
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
       ).toHaveLength(0);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
-      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_RESTART_BUSY);
+      expect(service.modelSelectionError()).toBe(MODEL_SWITCH_NOT_APPLIED);
     });
 
     it('a mid-stream routed pick on a live session queues the wire switch and leaves containers alone', async () => {

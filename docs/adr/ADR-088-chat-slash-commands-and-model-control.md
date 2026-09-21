@@ -290,8 +290,10 @@ has applied one since `model` became part of `computeActiveKey`
 which re-renders the compose and recreates the containers), followed by the
 same idle respawn. A restart that fails, and one already in flight, both
 surface in the composer with no respawn behind them, so the silent no-op
-cannot return through a second entry point; a failed one additionally raises
-the standing restart prompt (`ProjectStateService.requestRestart`), because
+cannot return through a second entry point - `restartContainers` reports
+which of the three outcomes it reached, so a restart it never started is not
+read back through the `restartError` of an older one. A failed restart
+additionally raises the standing restart prompt (`requestRestart`), because
 the config write commits first and the badge is read back from it, so the one
 state where a saved model outlives the container it never reached must stay
 visible and one click from being retried. A live session still takes the

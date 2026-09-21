@@ -50,6 +50,9 @@ export type AuthReadiness = 'no_provider' | 'ready' | 'auth_required';
 /** Claude Code's sign-in verdict (Rust `OauthSignIn`, snake_case wire values). */
 export type OauthSignIn = 'verified' | 'saved_unverified' | 'none';
 
+/** What a `restartContainers` call did, for a caller that depends on the re-rendered compose. */
+export type RestartOutcome = 'restarted' | 'skipped' | 'failed';
+
 /** Backend response from the `get_auth_status` Tauri command. */
 export interface AuthStatusResponse {
   /** Backend-derived discriminant (SSOT: Rust `AuthReadiness::derive`). */
@@ -521,10 +524,10 @@ export class ProjectStateService {
 
   /**
    * Restarts integration containers; backend rebuilds missing worker images.
-   * @returns false when the restart never ran (no project, one already in flight) or failed, so a caller that depends on the re-rendered compose can tell.
+   * @returns `skipped` when it never ran (no project, one already in flight, so `restartError` still belongs to an older attempt), else whether it succeeded.
    */
-  async restartContainers(): Promise<boolean> {
-    if (!this.activeProject() || this.restarting) return false;
+  async restartContainers(): Promise<RestartOutcome> {
+    if (!this.activeProject() || this.restarting) return 'skipped';
     const project = this.activeProject();
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
@@ -557,7 +560,7 @@ export class ProjectStateService {
       this.notifySettled();
       this.notifyRestartComplete();
     }
-    return restartedOk;
+    return restartedOk ? 'restarted' : 'failed';
   }
 
   /** Dismisses the restart overlay without restarting. */

@@ -86,8 +86,8 @@ export const NEW_CONVERSATION_STREAMING =
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
 
-export const MODEL_SWITCH_RESTART_BUSY =
-  'Containers are restarting. Pick the model again once they are back.';
+export const MODEL_SWITCH_NOT_APPLIED =
+  'The containers were not restarted, so the model is not in use yet. Pick it again in a moment.';
 
 /**
  * Returns null for anything but the two known backend phrasings.
@@ -254,13 +254,17 @@ export class ChatStateService {
   }
 
   private async rerenderContainersForModel(): Promise<boolean> {
-    if (await this.projectState.restartContainers()) return true;
-    const failure = this.projectState.restartError;
-    this.reportSelectionFailure(
-      'compose re-render for the picked model',
-      failure || MODEL_SWITCH_RESTART_BUSY
-    );
-    if (failure) this.projectState.requestRestart();
+    const outcome = await this.projectState.restartContainers();
+    if (outcome === 'restarted') return true;
+    if (outcome === 'failed') {
+      this.reportSelectionFailure(
+        'compose re-render for the picked model',
+        this.projectState.restartError
+      );
+      this.projectState.requestRestart();
+      return false;
+    }
+    this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
     return false;
   }
 
