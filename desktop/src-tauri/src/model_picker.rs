@@ -625,10 +625,7 @@ mod tests {
             Some("Claude Pro"),
         );
         let picker = build_picker(Some(&info), AnthropicPlan::Pro);
-        assert_eq!(
-            labels(&picker),
-            vec!["Sonnet 5", "Haiku 4.5"]
-        );
+        assert_eq!(labels(&picker), vec!["Sonnet 5", "Haiku 4.5"]);
         assert!(picker.rows[0].is_default);
     }
 
@@ -642,10 +639,7 @@ mod tests {
             Some("Claude Max"),
         );
         let picker = build_picker(Some(&info), AnthropicPlan::Max);
-        assert_eq!(
-            labels(&picker),
-            vec!["Opus 4.8", "Sonnet 5"]
-        );
+        assert_eq!(labels(&picker), vec!["Opus 4.8", "Sonnet 5"]);
         assert!(picker.rows.iter().all(|r| !r.is_default));
     }
 
@@ -710,13 +704,8 @@ mod tests {
 
     #[test]
     fn picker_preserves_the_selected_rows_usage_credit_warning() {
-        let mut paid = listed(
-            "claude-fable-5-1",
-            Some("claude-fable-5-1"),
-            "Fable",
-        );
-        paid.description =
-            "Fable 5.1 · Requires usage credits for this account".to_string();
+        let mut paid = listed("claude-fable-5-1", Some("claude-fable-5-1"), "Fable");
+        paid.description = "Fable 5.1 · Requires usage credits for this account".to_string();
         let row = &build_picker(
             Some(&info_of(vec![paid], Some("Claude Pro"))),
             AnthropicPlan::Pro,
