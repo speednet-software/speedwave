@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SecuritySectionComponent } from './security-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../../testing/deferred';
 import type {
@@ -544,5 +545,18 @@ describe('SecuritySectionComponent', () => {
     await fixture.whenStable();
     expect(component.error()).toBe('boom');
     expect(emitted).toContain('boom');
+  });
+
+  it('registers in the dirty registry and unregisters on destroy (SPEED-637)', async () => {
+    setup(baseResponse());
+    await create();
+    const registry = TestBed.inject(SettingsDirtyService);
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(registry.dirtySectionNames()).toEqual([]);
+    component.enabledPolicies.set(new Set());
+    expect(registry.dirtySectionNames()).toEqual(['Security']);
+    fixture.destroy();
+    expect(registry.dirtySectionNames()).toEqual([]);
   });
 });

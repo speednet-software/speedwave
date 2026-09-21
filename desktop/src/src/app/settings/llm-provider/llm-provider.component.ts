@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnDestroy,
   OnInit,
   computed,
@@ -16,6 +17,7 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { eventValue } from '../../shared/dom-event';
 import { AuthTerminalComponent } from '../auth-terminal.component';
@@ -623,6 +625,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private readonly dirtyRegistry = inject(SettingsDirtyService);
 
   /** Reloads the Anthropic auth status whenever the active project changes. */
   constructor() {
@@ -644,6 +647,12 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.oauthWatcher.startPoll();
       }
     });
+    const unregister = this.dirtyRegistry.register({
+      name: 'LLM provider',
+      isDirty: computed(() => this.loadedFormSnapshot() !== '' && this.isDirty()),
+      save: () => this.saveConfig(),
+    });
+    inject(DestroyRef).onDestroy(unregister);
   }
 
   private chatState = inject(ChatStateService);

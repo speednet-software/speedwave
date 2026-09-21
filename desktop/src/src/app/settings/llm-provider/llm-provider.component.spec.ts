@@ -7,6 +7,7 @@ import { ProjectStateService, type AuthStatusResponse } from '../../services/pro
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { type LlmProviderEntry } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../../testing/deferred';
@@ -3246,5 +3247,17 @@ describe('LlmProviderComponent', () => {
     watcher['context']?.onVerdict('proj', status);
     expect(component.oauthSignIn()).toBe('saved_unverified');
     expect(applySpy).toHaveBeenCalledWith(status);
+  });
+
+  it('registers in the dirty registry and unregisters on destroy (SPEED-637)', async () => {
+    const registry = TestBed.inject(SettingsDirtyService);
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+    expect(registry.dirtySectionNames()).toEqual([]);
+    component.model.set('claude-opus-4-8');
+    expect(registry.dirtySectionNames()).toEqual(['LLM provider']);
+    fixture.destroy();
+    expect(registry.dirtySectionNames()).toEqual([]);
   });
 });
