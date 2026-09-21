@@ -521,6 +521,18 @@ describe('ShellComponent', () => {
       expect(q('[data-testid="restart-later-btn"]')).toBeNull();
     });
 
+    it('shows spinner for a restart nothing asked the user to confirm', () => {
+      projectState.needsRestart = false;
+      projectState.restarting = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const overlay = q('[data-testid="restart-overlay"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay!.textContent).toContain('Restarting containers...');
+      expect(q('[data-testid="restart-now-btn"]')).toBeNull();
+    });
+
     it('shows error when restartError is set', () => {
       projectState.needsRestart = true;
       projectState.restartError = 'compose failed';

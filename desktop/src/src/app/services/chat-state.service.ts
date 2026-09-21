@@ -86,6 +86,9 @@ export const NEW_CONVERSATION_STREAMING =
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
 
+export const MODEL_SWITCH_RESTART_BUSY =
+  'Containers are restarting. Pick the model again once they are back.';
+
 /**
  * Returns null for anything but the two known backend phrasings.
  * @param raw - Raw error message from the backend.
@@ -205,7 +208,7 @@ export class ChatStateService {
 
   /**
    * The single handler for a composer model-selector pick (Task 16): persists
-   * the pick first (Anthropic: `settings.json` model pin; routed: config write-through), then applies it live (wire switch, queued override, or idle respawn).
+   * the pick first (Anthropic: `settings.json` model pin; routed: config write-through), then applies it live (wire switch, queued override, or idle respawn preceded by a compose re-render for routed providers).
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -239,11 +242,28 @@ export class ChatStateService {
     if (this.hasLiveSession()) {
       if (this.isStreaming) this._pendingModelOverride.set(wireId);
       else await this.sendMessage(`/model ${wireId}`);
-    } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
-      this.resetForNewConversation();
-      this.initialized = true;
-      await this.startChatSession();
+      return;
     }
+    if (this.isStreaming || this._resumeInProgress) return;
+    if (!isAnthropic && !(await this.rerenderContainersForModel())) return;
+    this.resetForNewConversation();
+    this.initialized = true;
+    await this.startChatSession();
+  }
+
+  private async rerenderContainersForModel(): Promise<boolean> {
+    if (this.projectState.restarting) {
+      this._modelSelectionError.set(MODEL_SWITCH_RESTART_BUSY);
+      return false;
+    }
+    await this.projectState.restartContainers();
+    const failure = this.projectState.restartError;
+    if (failure) {
+      this.log.warn(`[chat-state] compose re-render for the picked model failed: ${failure}`);
+      this._modelSelectionError.set(failure);
+      return false;
+    }
+    return true;
   }
 
   private hasLiveSession(): boolean {

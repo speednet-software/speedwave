@@ -266,6 +266,34 @@ so the shape rule stays the single SSOT: `/clear`, an argument-less `/model`
 (the picker) and multi-word arguments remain dropped, previews and unread
 counts still exclude the rebuilt line, and the live path is untouched.
 
+**Amendment (SPEED-657, 2026-09-21: a routed pick with no live session
+re-renders the compose, the only carrier the next spawn reads).** For local
+and OpenRouter providers the picked model reaches Claude Code exclusively as
+container environment burned in at compose render (`ANTHROPIC_MODEL` plus the
+`ANTHROPIC_DEFAULT_*` family, `crates/speedwave-runtime/src/compose/llm.rs`),
+and per the SPEED-544 amendment above the session spawn carries no `--model`
+at all. The config write-through therefore reached nothing already running:
+the idle-respawn branch of `ChatStateService.applyModelSelection` was gated on
+the provider being Anthropic, so a pick made before the first turn (the
+session id exists only once the first stream chunk arrives) persisted to
+`config.json` while the running container kept the previously rendered model,
+and the turn failed against a model the badge no longer showed. Soft-impose
+does not cover this case: it fires on `system/init`
+(`chat.rs::maybe_soft_impose`), which Claude Code emits when it is already
+processing the first prompt, so it repairs the second turn onwards and never
+the first - the same first-turn gap the Anthropic side closed with the
+`settings.json` pin. The routed branch now applies the pick the way Settings
+has applied one since `model` became part of `computeActiveKey`
+(`desktop/src/src/app/settings/llm-provider/llm-provider.component.ts`):
+`ProjectStateService.restartContainers()` (`restart_integration_containers`,
+which re-renders the compose and recreates the containers), followed by the
+same idle respawn. A restart that fails, and one already in flight, both
+surface in the composer with no respawn behind them, so the silent no-op
+cannot return through a second entry point. A live session still takes the
+wire `/model` (the proxy routes on the id prefix,
+`containers/proxy/src/router.rs`) and a mid-stream pick still defers its
+override; neither restarts a container.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
