@@ -4815,8 +4815,30 @@ describe('ChatStateService', () => {
       _persistedContextTokens: number | null;
       _contextWindowSize: number | null;
       _currentProvider: string | null;
+      _activeKind: string | null;
       _contextSnapshot: { max_tokens: number } | null;
     };
+
+    it('OpenRouter keeps the DEFAULT_CONTEXT_TOKENS fallback although its legacy provider reads "anthropic"', () => {
+      const internal = service as unknown as Internal;
+      internal._currentProvider = 'anthropic';
+      internal._activeKind = 'open_router';
+      internal._persistedContextTokens = null;
+      internal._contextWindowSize = null;
+      expect(internal.resolveContextWindow(undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
+      expect(internal.resolveContextWindow(128_000)).toBe(128_000);
+    });
+
+    it('an Anthropic kind keeps the Claude Code path and invents no default', () => {
+      const internal = service as unknown as Internal;
+      internal._currentProvider = 'anthropic';
+      internal._activeKind = 'anthropic_oauth';
+      internal._persistedContextTokens = null;
+      internal._contextWindowSize = null;
+      expect(internal.resolveContextWindow(undefined)).toBeNull();
+      internal._contextSnapshot = { max_tokens: 200_000 };
+      expect(internal.resolveContextWindow(1_000_000)).toBe(200_000);
+    });
 
     it('prefers the live stream value over every fallback for a routed provider', () => {
       const internal = service as unknown as Internal;
@@ -4869,6 +4891,60 @@ describe('ChatStateService', () => {
       expect(internal.resolveContextWindow(1_000_000)).toBe(1_000_000);
       internal._contextSnapshot = { max_tokens: 200_000 };
       expect(internal.resolveContextWindow(1_000_000)).toBe(200_000);
+    });
+  });
+
+  describe('context window for OpenRouter as get_llm_config reports it', () => {
+    beforeEach(() => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: 'anthropic',
+            model: null,
+            base_url: null,
+            context_tokens: null,
+            default_base_url: null,
+            active: { provider_id: 'openrouter', model: 'openai/gpt-4o-mini' },
+            providers: [
+              { id: 'anthropic', kind: 'anthropic_oauth', model: null, context_tokens: null },
+              { id: 'local', kind: 'local', model: 'qwen3-coder-30b', context_tokens: null },
+              {
+                id: 'openrouter',
+                kind: 'open_router',
+                model: 'openai/gpt-4o-mini',
+                context_tokens: null,
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+    });
+
+    it('gives the session stats the default window after a turn that reports none', async () => {
+      await service.refreshLlmConfigCache();
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-or', usage: { input_tokens: 2_835, output_tokens: 2 } },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+
+    it('keeps the window across a /model control chip', async () => {
+      await service.refreshLlmConfigCache();
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-or', usage: { input_tokens: 2_835, output_tokens: 2 } },
+      });
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'openrouter/openai/gpt-4o', uuid: 'chip-1' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(DEFAULT_CONTEXT_TOKENS);
     });
   });
 
@@ -4950,7 +5026,7 @@ describe('ChatStateService', () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') {
           return {
-            provider: kind.startsWith('anthropic') ? 'anthropic' : 'openrouter',
+            provider: kind === 'local' ? 'local' : 'anthropic',
             model: null,
             base_url: null,
             default_base_url: null,
