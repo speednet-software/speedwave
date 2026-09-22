@@ -1357,7 +1357,13 @@ export class ChatStateService {
     const id = this._lastKnownSessionId;
     if (!id) return;
     await this.refreshLlmConfigCache();
-    if (historyFitsTarget(this._lastContextTokens, this._persistedContextTokens)) {
+    const historyTokens = this._lastContextTokens;
+    const windowTokens = this._persistedContextTokens;
+    const fits = historyFitsTarget(historyTokens, windowTokens);
+    this.log.info(
+      `[chat-state] restart resume decision: history_tokens=${historyTokens ?? 'unknown'} window_tokens=${windowTokens ?? 'unknown'} fits=${fits} decider=${this._resumeDecider !== null}`
+    );
+    if (fits) {
       void this.resumeConversation(id);
       return;
     }
@@ -2018,8 +2024,7 @@ export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
 }
 
 /**
- * Null handling is asymmetric: unknown history defaults to fits (resume), unknown window
- * defaults to doesn't fit (ask) — local models with no discovery.
+ * Only a known window at or below a known history size counts as not fitting; unknown values resume.
  * @param historyTokens - Tokens used by the conversation so far, or null if unknown.
  * @param windowTokens - Target model's context window, or null if undiscovered.
  */
@@ -2027,8 +2032,7 @@ export function historyFitsTarget(
   historyTokens: number | null,
   windowTokens: number | null
 ): boolean {
-  if (historyTokens == null) return true;
-  if (windowTokens == null) return false;
+  if (historyTokens == null || windowTokens == null) return true;
   return historyTokens < windowTokens;
 }
 

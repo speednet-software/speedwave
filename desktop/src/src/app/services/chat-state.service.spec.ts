@@ -5174,6 +5174,47 @@ describe('ChatStateService', () => {
       expect(calls).toContain('resume_conversation');
     });
 
+    it('resumes without asking when the target model has no known context window', async () => {
+      service.seedSessionId('sess-unknown-window');
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 200_000;
+      const decider = vi.fn(() => Promise.resolve('fresh' as const));
+      service.setResumeDecider(decider);
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'get_llm_config') return { provider: 'local', context_tokens: null };
+        if (cmd === 'get_conversation') return { session_id: 'sess-unknown-window', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(decider).not.toHaveBeenCalled();
+      expect(calls).toContain('resume_conversation');
+      expect(calls).not.toContain('start_chat');
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        '[chat-state] restart resume decision: history_tokens=25229 window_tokens=unknown fits=true decider=true'
+      );
+    });
+
+    it('logs the restart resume decision when a known window is too small and the decider is asked', async () => {
+      service.seedSessionId('sess-log-ask');
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      service.setResumeDecider(() => Promise.resolve('resume'));
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') return { session_id: 'sess-log-ask', messages: [] };
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        '[chat-state] restart resume decision: history_tokens=25229 window_tokens=8192 fits=false decider=true'
+      );
+    });
+
     it('does nothing on restart when no durable session id is known', async () => {
       service.clearSessionTracking();
       const calls: string[] = [];
@@ -5354,12 +5395,18 @@ describe('ChatStateService', () => {
   });
 
   describe('historyFitsTarget', () => {
-    it('fits, exceeds, and unknown', () => {
+    it('fits below the window and does not fit at or above it', () => {
       expect(historyFitsTarget(8000, 131072)).toBe(true);
       expect(historyFitsTarget(25229, 8192)).toBe(false);
-      expect(historyFitsTarget(null, 8192)).toBe(true);
-      expect(historyFitsTarget(25229, null)).toBe(false);
       expect(historyFitsTarget(8192, 8192)).toBe(false);
+      expect(historyFitsTarget(8191, 8192)).toBe(true);
+    });
+
+    it('treats an unknown history or an unknown window as fitting', () => {
+      expect(historyFitsTarget(null, 8192)).toBe(true);
+      expect(historyFitsTarget(25229, null)).toBe(true);
+      expect(historyFitsTarget(null, null)).toBe(true);
+      expect(historyFitsTarget(0, null)).toBe(true);
     });
   });
 
