@@ -186,7 +186,13 @@ setup-dev:
 		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
 	else \
 		echo "  📦 wasm-pack not found, installing..."; \
-		npm install -g wasm-pack && echo "  ✅ wasm-pack installed" || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
+		if npm install -g wasm-pack >/dev/null 2>&1 && command -v wasm-pack >/dev/null 2>&1; then \
+			echo "  ✅ wasm-pack installed (npm)"; \
+		elif cargo install wasm-pack; then \
+			echo "  ✅ wasm-pack installed (cargo)"; \
+		else \
+			echo "  ❌ wasm-pack install failed"; FAIL=1; \
+		fi; \
 	fi; \
 	\
 	echo ""; \
@@ -425,6 +431,7 @@ test-rust: guard-not-prod-data-dir
 	@echo "✅ Rust tests passed"
 
 test-transcription: guard-not-prod-data-dir
+	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh "$(CURDIR)" "root workspace build dir"; fi
 	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
