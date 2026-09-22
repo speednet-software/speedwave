@@ -256,7 +256,11 @@ const createEventTool: Tool = {
       },
       location: { type: 'string', description: 'Event location' },
       description: { type: 'string', description: 'Event description/notes' },
-      all_day: { type: 'boolean', description: 'Whether this is an all-day event' },
+      all_day: {
+        type: 'boolean',
+        description:
+          'true for an all-day event: pass date-only start and end, end being the day after the last day (start 2026-06-15 and end 2026-06-16 is June 15 only)',
+      },
     },
     required: ['summary', 'start', 'end'],
   },

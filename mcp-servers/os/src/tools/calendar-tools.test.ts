@@ -281,6 +281,9 @@ describe('calendar-tools', () => {
           expect(description, `${name}.${field}`).toContain('YYYY-MM-DDTHH:MM:SS (local time)');
         }
       }
+      expect(schema('createEvent').inputSchema.properties.all_day.description).toContain(
+        'start 2026-06-15 and end 2026-06-16 is June 15 only'
+      );
       const listed = schema('listEvents').outputSchema.properties.events.items.properties;
       const got = schema('getEvent').outputSchema.properties;
       for (const props of [listed, got]) {

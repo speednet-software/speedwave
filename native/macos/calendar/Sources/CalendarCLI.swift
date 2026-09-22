@@ -137,40 +137,17 @@ func getEvent(store: EKEventStore, params: [String: Any]) throws -> [String: Any
 }
 
 func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
-    guard let summary = params["summary"] as? String else {
-        throw CLIError.missingField("summary")
+    for field in ["summary", "start", "end"] where !(params[field] is String) {
+        throw CLIError.missingField(field)
     }
-    guard let startStr = params["start"] as? String else {
-        throw CLIError.missingField("start")
-    }
-    guard let endStr = params["end"] as? String else {
-        throw CLIError.missingField("end")
-    }
-
-    let startDate = try eventDate(from: startStr)
-    let endDate = try eventDate(from: endStr)
 
     let event = EKEvent(eventStore: store)
-    event.title = summary
-    event.startDate = startDate
-    event.endDate = endDate
+    try applyEventFields(params, to: event)
 
     if let filter = params["calendar_id"] as? String {
         event.calendar = try resolveSingleCalendar(for: .event, filter: filter, store: store)
     } else {
         event.calendar = store.defaultCalendarForNewEvents
-    }
-
-    if let location = params["location"] as? String {
-        event.location = location
-    }
-
-    if let description = params["description"] as? String {
-        event.notes = description
-    }
-
-    if let allDay = params["all_day"] as? Bool {
-        event.isAllDay = allDay
     }
 
     try store.save(event, span: .thisEvent)
@@ -190,29 +167,7 @@ func updateEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
         throw CLIError.notFound("Event with id '\(id)' not found")
     }
 
-    if let summary = params["summary"] as? String {
-        event.title = summary
-    }
-
-    if let startStr = params["start"] as? String {
-        event.startDate = try eventDate(from: startStr)
-    }
-
-    if let endStr = params["end"] as? String {
-        event.endDate = try eventDate(from: endStr)
-    }
-
-    if let location = params["location"] as? String {
-        event.location = location
-    }
-
-    if let description = params["description"] as? String {
-        event.notes = description
-    }
-
-    if let allDay = params["all_day"] as? Bool {
-        event.isAllDay = allDay
-    }
+    try applyEventFields(params, to: event)
 
     try store.save(event, span: .thisEvent)
 
@@ -233,6 +188,32 @@ func deleteEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
     return ["status": "deleted"]
 }
 
+
+func applyEventFields(_ params: [String: Any], to event: EKEvent, timeZone: TimeZone = .current) throws {
+    if let summary = params["summary"] as? String {
+        event.title = summary
+    }
+
+    if let startStr = params["start"] as? String {
+        event.startDate = try eventDate(from: startStr, timeZone: timeZone)
+    }
+
+    if let endStr = params["end"] as? String {
+        event.endDate = try eventDate(from: endStr, timeZone: timeZone)
+    }
+
+    if let location = params["location"] as? String {
+        event.location = location
+    }
+
+    if let description = params["description"] as? String {
+        event.notes = description
+    }
+
+    if let allDay = params["all_day"] as? Bool {
+        event.isAllDay = allDay
+    }
+}
 
 /// A bare day is local midnight, a time without offset is local time, a time with `Z`/offset keeps its instant.
 func eventDate(from string: String, timeZone: TimeZone = .current) throws -> Date {
