@@ -188,30 +188,35 @@ pub(crate) fn session_info_state_inner(
     }
 }
 
-fn launch_effort_inner(
-    session_arc: &SharedChatSession,
+fn session_for<'a>(
+    session_arc: &'a SharedChatSession,
     project: &str,
-) -> Result<Option<String>, String> {
+) -> Result<std::sync::MutexGuard<'a, ChatSession>, String> {
     let session = session_arc
         .try_lock()
         .map_err(|_| MSG_SESSION_BUSY.to_string())?;
     if session.project_name() != project {
         return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
     }
-    Ok(session.launch_effort().map(str::to_string))
+    Ok(session)
+}
+
+fn launch_effort_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> Result<Option<String>, String> {
+    Ok(session_for(session_arc, project)?
+        .launch_effort()
+        .map(str::to_string))
 }
 
 fn control_handle_for(
     session_arc: &SharedChatSession,
     project: &str,
 ) -> Result<ControlHandle, String> {
-    let session = session_arc
-        .try_lock()
-        .map_err(|_| MSG_SESSION_BUSY.to_string())?;
-    if session.project_name() != project {
-        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
-    }
-    session.control_handle().map_err(|e| e.to_string())
+    session_for(session_arc, project)?
+        .control_handle()
+        .map_err(|e| e.to_string())
 }
 
 fn control_query_inner<T>(

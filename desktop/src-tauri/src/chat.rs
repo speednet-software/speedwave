@@ -1314,9 +1314,11 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
-fn launch_effort_in(args: &[String]) -> Option<String> {
+const EFFORT_FLAG: &str = "--effort";
+
+fn effort_flag_value(args: &[String]) -> Option<String> {
     args.iter()
-        .position(|a| a == "--effort")
+        .position(|a| a == EFFORT_FLAG)
         .and_then(|i| args.get(i + 1))
         .cloned()
 }
@@ -1500,7 +1502,7 @@ impl ChatSession {
 
         let mut flags = resolved.flags.clone();
         if let Some(level) = launch_effort_level(user_config, project_name) {
-            flags.push("--effort".to_string());
+            flags.push(EFFORT_FLAG.to_string());
             flags.push(level);
         }
 
@@ -1580,7 +1582,7 @@ impl ChatSession {
             .spawn()?;
 
         self.instance_id = Some(instance_id);
-        self.launch_effort = launch_effort_in(&args);
+        self.launch_effort = effort_flag_value(&args);
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -6130,7 +6132,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_effort_in_reads_the_level_the_spawn_args_carry() {
+    fn effort_flag_value_reads_the_level_the_spawn_args_carry() {
         let session_id = "11111111-2222-3333-4444-555555555555";
         let mut user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -6150,19 +6152,19 @@ mod tests {
         let (args, _) =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(launch_effort_in(&args), None);
+        assert_eq!(effort_flag_value(&args), None);
 
         user_config.projects[0].effort_pin = Some("low".to_string());
         let (args, _) =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(launch_effort_in(&args).as_deref(), Some("low"));
+        assert_eq!(effort_flag_value(&args).as_deref(), Some("low"));
     }
 
     #[test]
-    fn launch_effort_in_ignores_a_flag_without_a_value() {
-        assert_eq!(launch_effort_in(&[]), None);
-        assert_eq!(launch_effort_in(&["--effort".to_string()]), None);
+    fn effort_flag_value_ignores_a_flag_without_a_value() {
+        assert_eq!(effort_flag_value(&[]), None);
+        assert_eq!(effort_flag_value(&["--effort".to_string()]), None);
     }
 
     #[test]
@@ -6178,7 +6180,7 @@ mod tests {
             .find(".spawn()?;")
             .expect("start_with_retry must spawn the child");
         let record_pos = prod
-            .find("self.launch_effort = launch_effort_in(&args);")
+            .find("self.launch_effort = effort_flag_value(&args);")
             .expect("start_with_retry must record the launch effort");
         assert!(
             spawn_pos < record_pos,

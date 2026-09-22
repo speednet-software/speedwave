@@ -175,9 +175,8 @@ export class ChatStateService {
   }
 
   /**
-   * Persists the effort pin, then applies it: queued mid-turn, wired as `/effort` into a live
-   * conversation (after a `--resume` respawn when its process holds the launch effort, SPEED-650),
-   * or by respawning a session that has no conversation yet (SPEED-538).
+   * Persists the effort pin, then applies it: queued mid-turn or mid-resume, wired as `/effort` into
+   * a live conversation (respawned first if it holds the launch effort), else by an idle respawn.
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
@@ -191,11 +190,11 @@ export class ChatStateService {
       this.reportSelectionFailure('effort pin write-through', e);
       return;
     }
-    if (this.isStreaming) {
+    if (this.isStreaming || this._resumeInProgress) {
       this._pendingEffortOverride.set(level);
     } else if (this.hasLiveSession() && this.hasConversation()) {
       await this.applyEffortToConversation(level);
-    } else if (!this._resumeInProgress) {
+    } else {
       this.resetForNewConversation();
       this.initialized = true;
       await this.startChatSession();
@@ -207,10 +206,9 @@ export class ChatStateService {
     const generation = this._sessionGeneration;
     const held = sessionId !== null && !(await this.sessionTakesWireEffort());
     if (generation !== this._sessionGeneration || sessionId !== this._lastKnownSessionId) return;
-    if (held && !this.isStreaming && (await this.resumeConversation(sessionId)) !== 'started') {
-      return;
-    }
-    if (this.isStreaming) {
+    const busy = () => this.isStreaming || this._resumeInProgress;
+    if (held && !busy() && (await this.resumeConversation(sessionId)) !== 'started') return;
+    if (busy()) {
       this._pendingEffortOverride.set(level);
       return;
     }
@@ -1440,7 +1438,7 @@ export class ChatStateService {
   /**
    * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
    * @param sessionId - session UUID to resume.
-   * @returns `started` only when this call resumed the session; a superseded or skipped resume is `skipped`.
+   * @returns `started` when this call resumed the session, else `skipped`, `failed` or `auth`.
    */
   async resumeConversation(sessionId: string): Promise<StartOutcome> {
     if (this._resumeInProgress) return 'skipped';

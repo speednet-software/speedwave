@@ -2259,6 +2259,66 @@ describe('ChatStateService', () => {
         });
         expect(indexOfCall(invokeSpy.mock.calls, resumedHeld)).toBeGreaterThan(-1);
       });
+
+      it('applies a second pick made while the respawn runs after the first, so the session ends at the latest pick', async () => {
+        heldConversation();
+        const respawn = createDeferred<void>();
+        overrideInvoke('resume_conversation', () => respawn.promise);
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const first = service.applyEffortSelection('low');
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, resumedHeld)).toBeGreaterThan(-1);
+        });
+        overrideInvoke('get_chat_launch_effort', async () => 'low');
+        await service.applyEffortSelection('max');
+        respawn.resolve();
+        await first;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: HELD } } as never);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('max'))).toBeGreaterThan(-1);
+        });
+
+        const calls = invokeSpy.mock.calls;
+        expect(indexOfCall(calls, wiredEffort('max'))).toBeGreaterThan(
+          indexOfCall(calls, wiredEffort('low'))
+        );
+        expect(calls.filter(([cmd, args]) => resumedHeld(cmd, args))).toHaveLength(1);
+      });
+
+      it('never wires /effort when the respawn ends in a sign-in prompt', async () => {
+        heldConversation();
+        overrideInvoke('resume_conversation', async () => {
+          throw new Error('not authenticated');
+        });
+        const retryAuth = vi.spyOn(TestBed.inject(ProjectStateService), 'retryAuth');
+        retryAuth.mockResolvedValue();
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.applyEffortSelection('low');
+
+        expect(retryAuth).toHaveBeenCalled();
+        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('low'))).toBe(-1);
+      });
+
+      it('wires a pick flushed at a turn end that carried no session id, with nothing to resume', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        service.isStreaming = true;
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.applyEffortSelection('low');
+        service.handleStreamChunk({ chunk_type: 'Result', data: {} } as never);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('low'))).toBeGreaterThan(-1);
+        });
+
+        expect(
+          invokeSpy.mock.calls.find(([cmd]) => cmd === 'get_chat_launch_effort')
+        ).toBeUndefined();
+        expect(invokeSpy.mock.calls.find(([cmd]) => cmd === 'resume_conversation')).toBeUndefined();
+      });
     });
 
     it('an idle model-pick respawn claims init() so a remount starts no second session', async () => {
