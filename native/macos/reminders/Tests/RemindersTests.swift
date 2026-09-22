@@ -51,40 +51,101 @@ final class RemindersTests: XCTestCase {
     }
 
 
-    func testUpdateReminderRequiresId() {
-        let params: [String: Any] = [:]
-        XCTAssertNil(params["id"])
+    private func typoReminder(_ store: EKEventStore) throws -> EKReminder {
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "KAcper chce na uop"
+        reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01T10:00:00"))
+        reminder.priority = 5
+        reminder.notes = "[#hr]\nAsk about the start date"
+        return reminder
     }
 
-    func testUpdateReminderPartialParams() {
-        let params: [String: Any] = [
-            "id": "reminder-123",
-            "name": "Corrected title",
-        ]
-        XCTAssertNotNil(params["id"])
-        XCTAssertNotNil(params["name"])
-        XCTAssertNil(params["due_date"])  
-        XCTAssertNil(params["tags"])
+    func testUpdateReminderWithoutIdIsAMissingField() {
+        XCTAssertThrowsError(try updateReminder(store: EKEventStore(), params: [:])) { error in
+            guard case CLIError.missingField("id") = error else { return XCTFail("unexpected \(error)") }
+        }
     }
 
-    func testUpdateReminderAllFields() {
-        let params: [String: Any] = [
-            "id": "reminder-123",
-            "name": "Review PR #42",
-            "list_id": "Work",
-            "due_date": "2026-03-01T09:00:00Z",
-            "priority": 5,
-            "notes": "Rescheduled",
-            "tags": ["work"],
-            "completed": false,
-        ]
-        XCTAssertEqual(params["name"] as? String, "Review PR #42")
-        XCTAssertEqual(params["list_id"] as? String, "Work")
-        XCTAssertNotNil(dueDateComponents(from: params["due_date"] as! String))
-        XCTAssertEqual(params["priority"] as? Int, 5)
-        XCTAssertEqual(params["notes"] as? String, "Rescheduled")
-        XCTAssertEqual(params["tags"] as? [String], ["work"])
-        XCTAssertEqual(params["completed"] as? Bool, false)
+    func testUpdateReminderWithUnknownIdIsNotFoundInsteadOfSilentSuccess() {
+        let params: [String: Any] = ["id": "speedwave-test-no-such-reminder", "name": "x"]
+        XCTAssertThrowsError(try updateReminder(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
+        }
+    }
+
+    func testApplyReminderUpdateWithOnlyNameKeepsEveryOtherField() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        let dueBefore = reminder.dueDateComponents
+        try applyReminderUpdate(["id": "r-1", "name": "Kacper chce na UoP"], to: reminder, store: store)
+        XCTAssertEqual(reminder.title, "Kacper chce na UoP")
+        XCTAssertEqual(reminder.dueDateComponents, dueBefore)
+        XCTAssertEqual(reminder.priority, 5)
+        XCTAssertEqual(reminder.notes, "[#hr]\nAsk about the start date")
+        XCTAssertFalse(reminder.isCompleted)
+    }
+
+    func testApplyReminderUpdateChangesPriorityAndDueDate() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        try applyReminderUpdate(["id": "r-1", "priority": 1, "due_date": "2026-08-01"], to: reminder, store: store)
+        XCTAssertEqual(reminder.priority, 1)
+        let due = try XCTUnwrap(reminder.dueDateComponents)
+        XCTAssertEqual([due.year, due.month, due.day], [2026, 8, 1])
+        XCTAssertTrue(isAllDay(due))
+        XCTAssertEqual(reminder.title, "KAcper chce na uop")
+    }
+
+    func testApplyReminderUpdateNullDueDateAlsoDropsRecurrence() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: .weekly, interval: 1, end: nil))
+        XCTAssertTrue(reminder.hasRecurrenceRules)
+        try applyReminderUpdate(["id": "r-1", "due_date": NSNull()], to: reminder, store: store)
+        XCTAssertNil(reminder.dueDateComponents)
+        XCTAssertFalse(reminder.hasRecurrenceRules)
+        XCTAssertEqual(reminder.title, "KAcper chce na uop")
+    }
+
+    func testApplyReminderUpdateRejectsAnImpossibleDueDate() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        XCTAssertThrowsError(try applyReminderUpdate(["id": "r-1", "due_date": "2026-02-30"], to: reminder, store: store)) { error in
+            guard case CLIError.invalidDate("2026-02-30") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testApplyReminderUpdateToAnUnknownListIsNotFound() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        let params: [String: Any] = ["id": "r-1", "list_id": "speedwave-test-no-such-list"]
+        XCTAssertThrowsError(try applyReminderUpdate(params, to: reminder, store: store)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-list"), message)
+        }
+    }
+
+    func testApplyReminderUpdateCompletedFalseReopensAndClearsTheCompletionDate() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        reminder.isCompleted = true
+        reminder.completionDate = Date()
+        try applyReminderUpdate(["id": "r-1", "completed": false], to: reminder, store: store)
+        XCTAssertFalse(reminder.isCompleted)
+        XCTAssertNil(reminder.completionDate)
+        XCTAssertNil(reminderToDict(reminder)["completed_date"])
+    }
+
+    func testApplyReminderUpdateTagsAndNotesEachKeepTheOther() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        try applyReminderUpdate(["id": "r-1", "tags": ["hr", "urgent"]], to: reminder, store: store)
+        XCTAssertEqual(reminder.notes, "[#hr] [#urgent]\nAsk about the start date")
+        try applyReminderUpdate(["id": "r-1", "notes": "Start in October"], to: reminder, store: store)
+        XCTAssertEqual(reminder.notes, "[#hr] [#urgent]\nStart in October")
+        try applyReminderUpdate(["id": "r-1", "tags": [String]()], to: reminder, store: store)
+        XCTAssertEqual(reminder.notes, "Start in October")
     }
 
     func testUpdateReminderJSONNullArrivesAsNSNull() throws {
@@ -329,6 +390,10 @@ final class RemindersTests: XCTestCase {
 
     func testMergeNotesBothGivenBehavesLikeCreate() {
         XCTAssertEqual(mergeNotes(existing: "[#old]\nx", notes: "  fresh  ", tags: ["A", "a"]), "[#a]\nfresh")
+    }
+
+    func testMergeNotesEmptyTagsAloneClearTheTagsAndKeepTheBody() {
+        XCTAssertEqual(mergeNotes(existing: "[#work] [#urgent]\nbody", notes: nil, tags: []), "body")
     }
 
     func testMergeNotesClearingBothYieldsNil() {

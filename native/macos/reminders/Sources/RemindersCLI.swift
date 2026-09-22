@@ -219,6 +219,13 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         throw CLIError.notFound("Reminder with id '\(id)' not found")
     }
 
+    try applyReminderUpdate(params, to: reminder, store: store)
+    try store.save(reminder, commit: true)
+
+    return ["status": "updated"]
+}
+
+func applyReminderUpdate(_ params: [String: Any], to reminder: EKReminder, store: EKEventStore) throws {
     if let name = params["name"] as? String {
         reminder.title = name
     }
@@ -253,10 +260,6 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
             tags: params["tags"] as? [String]
         )
     }
-
-    try store.save(reminder, commit: true)
-
-    return ["status": "updated"]
 }
 
 func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
