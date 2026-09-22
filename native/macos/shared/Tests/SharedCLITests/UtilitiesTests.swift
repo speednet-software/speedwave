@@ -3,7 +3,65 @@ import XCTest
 @testable import SharedCLI
 
 final class SharedCLITests: XCTestCase {
+    private let warsaw = TimeZone(identifier: "Europe/Warsaw")!
+    private let newYork = TimeZone(identifier: "America/New_York")!
 
+
+    func testParseISODateInputBareDayIsAZonelessGregorianDay() {
+        guard case .day(let c)? = parseISODateInput("2026-06-15") else {
+            return XCTFail("expected a bare day")
+        }
+        XCTAssertEqual([c.year, c.month, c.day], [2026, 6, 15])
+        XCTAssertNil(c.hour)
+        XCTAssertNil(c.timeZone)
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testParseISODateInputWallClockKeepsTheTypedTime() {
+        guard case .wallClock(let c)? = parseISODateInput("2026-06-15T09:30:15.250") else {
+            return XCTFail("expected a wall-clock time")
+        }
+        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 6, 15, 9, 30, 15])
+        XCTAssertNil(c.timeZone)
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testParseISODateInputWithZOrOffsetIsAnInstant() throws {
+        let utc = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        XCTAssertEqual(parseISODateInput("2026-06-15T07:00:00Z"), .instant(utc))
+        XCTAssertEqual(parseISODateInput("2026-06-15T09:00:00+02:00"), .instant(utc))
+        XCTAssertEqual(parseISODateInput("2026-06-15T03:00:00.000-04:00"), .instant(utc))
+    }
+
+    func testParseISODateInputRejectsGarbageUnpaddedAndImpossibleDates() {
+        let rejected = [
+            "", "tomorrow", "March 1st, 2025", "2026-6-1", "2026-06-15 09:30:00", "٢٠٢٦-٠١-٠١",
+            "2026-02-30", "2026-02-30T09:30:00", "2026-02-30T09:30:00Z",
+            "2026-06-15T25:00:00", "2026-06-15T23:60:00", "2026-06-15T25:00:00Z",
+        ]
+        for input in rejected {
+            XCTAssertNil(parseISODateInput(input), input)
+        }
+    }
+
+    func testISODateInputBareDayStartsAtLocalMidnightInEachZone() throws {
+        let day = try XCTUnwrap(parseISODateInput("2026-06-15"))
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(day.date(in: newYork)), timeZone: newYork), "2026-06-15T00:00:00-04:00")
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(day.date(in: warsaw)), timeZone: warsaw), "2026-06-15T00:00:00+02:00")
+    }
+
+    func testISODateInputWallClockIsLocalTimeInEachZone() throws {
+        let time = try XCTUnwrap(parseISODateInput("2026-06-15T09:30:00"))
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(time.date(in: newYork)), timeZone: newYork), "2026-06-15T09:30:00-04:00")
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(time.date(in: warsaw)), timeZone: warsaw), "2026-06-15T09:30:00+02:00")
+    }
+
+    func testISODateInputInstantIsTheSameMomentInEveryZone() throws {
+        let instant = try XCTUnwrap(parseISODateInput("2026-06-15T07:00:00Z"))
+        let utc = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        XCTAssertEqual(instant.date(in: newYork), utc)
+        XCTAssertEqual(instant.date(in: warsaw), utc)
+    }
 
     func testParseISO8601WithTimezone() {
         let date = parseISO8601("2025-03-01T10:00:00Z")
@@ -15,9 +73,9 @@ final class SharedCLITests: XCTestCase {
         XCTAssertNotNil(date)
     }
 
-    func testParseISO8601DateOnly() {
-        let date = parseISO8601("2025-03-01")
-        XCTAssertNotNil(date)
+    func testParseISO8601ParsesInstantsOnlyAndRejectsABareDate() {
+        XCTAssertNil(parseISO8601("2025-03-01"), "a bare day has no instant; parseISODateInput resolves it in a zone")
+        XCTAssertNil(parseISO8601("2025-03-01T10:00:00"), "a time without an offset has no instant either")
     }
 
     func testParseISO8601Invalid() {
@@ -87,8 +145,10 @@ final class SharedCLITests: XCTestCase {
 
     func testCLIErrorInvalidDate() {
         let error = CLIError.invalidDate("bad-date")
-        XCTAssertTrue(error.errorDescription!.contains("Invalid ISO8601 date"))
-        XCTAssertTrue(error.errorDescription!.contains("bad-date"))
+        XCTAssertEqual(
+            error.errorDescription,
+            "Invalid ISO8601 date: bad-date. Expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (local time), optionally with Z or ±HH:MM"
+        )
     }
 
     func testCLIErrorMissingFieldHasDescription() {

@@ -13,7 +13,7 @@ public enum CLIError: LocalizedError {
         case .notFound(let msg), .ambiguous(let msg):
             return msg
         case .invalidDate(let date):
-            return "Invalid ISO8601 date: \(date). Expected format: 2025-03-01T10:00:00Z"
+            return "Invalid ISO8601 date: \(date). Expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (local time), optionally with Z or ±HH:MM"
         }
     }
 }

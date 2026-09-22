@@ -4,7 +4,37 @@ import XCTest
 @testable import calendar_cli
 
 final class CalendarTests: XCTestCase {
+    private let warsaw = TimeZone(identifier: "Europe/Warsaw")!
+    private let newYork = TimeZone(identifier: "America/New_York")!
 
+    func testEventDateBareDayIsLocalMidnightNotUTCMidnight() throws {
+        let inNewYork = try eventDate(from: "2026-06-15", timeZone: newYork)
+        XCTAssertEqual(iso8601String(from: inNewYork, timeZone: newYork), "2026-06-15T00:00:00-04:00")
+        let inWarsaw = try eventDate(from: "2026-06-15", timeZone: warsaw)
+        XCTAssertEqual(iso8601String(from: inWarsaw, timeZone: warsaw), "2026-06-15T00:00:00+02:00")
+    }
+
+    func testEventDateWithoutOffsetIsLocalTime() throws {
+        let inNewYork = try eventDate(from: "2026-06-15T09:30:00", timeZone: newYork)
+        XCTAssertEqual(iso8601String(from: inNewYork, timeZone: newYork), "2026-06-15T09:30:00-04:00")
+        let inWarsaw = try eventDate(from: "2026-06-15T09:30:00", timeZone: warsaw)
+        XCTAssertEqual(iso8601String(from: inWarsaw, timeZone: warsaw), "2026-06-15T09:30:00+02:00")
+    }
+
+    func testEventDateWithOffsetKeepsTheInstantInEveryZone() throws {
+        let utc = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        XCTAssertEqual(try eventDate(from: "2026-06-15T09:00:00+02:00", timeZone: newYork), utc)
+        XCTAssertEqual(try eventDate(from: "2026-06-15T07:00:00Z", timeZone: warsaw), utc)
+    }
+
+    func testEventDateRejectsInvalidInputWithInvalidDate() {
+        for input in ["tomorrow", "2026-02-30", "2026-6-1", "2026-06-15 09:30:00"] {
+            XCTAssertThrowsError(try eventDate(from: input, timeZone: newYork), input) { error in
+                guard case CLIError.invalidDate(let value) = error else { return XCTFail("unexpected \(error)") }
+                XCTAssertEqual(value, input)
+            }
+        }
+    }
 
     func testCalendarTypeStrings() {
         XCTAssertEqual(calendarTypeString(.local), "local")
