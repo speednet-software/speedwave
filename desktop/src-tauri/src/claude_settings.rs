@@ -128,15 +128,11 @@ fn edit_settings(
 }
 
 fn settings_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
-    speedwave_runtime::claude_home::claude_home_dir(data_dir, project)
-        .join(".claude")
-        .join("settings.json")
+    speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join("settings.json")
 }
 
 fn settings_lock_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
-    speedwave_runtime::claude_home::claude_home_dir(data_dir, project)
-        .join(".claude")
-        .join(".settings.json.lock")
+    speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join(".settings.json.lock")
 }
 
 #[cfg(test)]

@@ -54,15 +54,9 @@ pub struct ConversationTranscript {
     pub messages: Vec<ConversationMessage>,
 }
 
-fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
-    data_dir
-        .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
-        .join(project)
-        .join(".claude")
-}
-
 pub(crate) fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
-    let projects_dir = claude_dot_dir_impl(data_dir, project).join("projects");
+    let projects_dir =
+        speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join("projects");
     resolve_workspace_dir(&projects_dir)
 }
 
@@ -1103,16 +1097,6 @@ mod tests {
     #[test]
     fn validate_session_id_rejects_non_hex() {
         assert!(validate_session_id_impl("550e8400-e29b-41d4-a716-44665544000g").is_err());
-    }
-
-    #[test]
-    fn claude_dot_dir_has_correct_structure() {
-        let data_dir = PathBuf::from("/home/test/.speedwave");
-        let result = claude_dot_dir_impl(&data_dir, "acme");
-        assert_eq!(
-            result,
-            PathBuf::from("/home/test/.speedwave/claude-home/acme/.claude")
-        );
     }
 
     #[test]

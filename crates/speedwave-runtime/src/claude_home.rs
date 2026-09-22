@@ -12,11 +12,15 @@ pub fn claude_home_dir(data_dir: &Path, project: &str) -> PathBuf {
         .join(project)
 }
 
+/// Returns `<data_dir>/claude-home/<project>/.claude/`, the container's `~/.claude`.
+pub fn claude_config_dir(data_dir: &Path, project: &str) -> PathBuf {
+    claude_home_dir(data_dir, project).join(".claude")
+}
+
 /// True when `.claude/.credentials.json` exists — evidence a sign-in happened, never a
 /// verdict: Claude Code keeps the file after clearing rejected or expired tokens.
 pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
-    claude_home_dir(data_dir, project)
-        .join(".claude")
+    claude_config_dir(data_dir, project)
         .join(".credentials.json")
         .exists()
 }
@@ -24,10 +28,9 @@ pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
 /// Removes Claude Code's credential files (`.claude/.credentials.json` and `.claude.json`) from
 /// the project's claude-home dir. Returns the count removed; missing files are not an error.
 pub fn remove_claude_credentials(data_dir: &Path, project: &str) -> io::Result<usize> {
-    let home = claude_home_dir(data_dir, project);
     let targets = [
-        home.join(".claude").join(".credentials.json"),
-        home.join(".claude.json"),
+        claude_config_dir(data_dir, project).join(".credentials.json"),
+        claude_home_dir(data_dir, project).join(".claude.json"),
     ];
     let mut removed = 0usize;
     let mut errors: Vec<String> = Vec::new();
@@ -61,6 +64,12 @@ mod tests {
     fn claude_home_dir_layout() {
         let p = claude_home_dir(Path::new("/data"), "myproj");
         assert_eq!(p, Path::new("/data/claude-home/myproj"));
+    }
+
+    #[test]
+    fn claude_config_dir_is_the_dot_claude_dir_of_the_project_home() {
+        let p = claude_config_dir(Path::new("/data"), "myproj");
+        assert_eq!(p, Path::new("/data/claude-home/myproj/.claude"));
     }
 
     #[test]
