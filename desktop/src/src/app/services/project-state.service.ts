@@ -95,6 +95,7 @@ export class ProjectStateService {
   error = '';
   needsRestart = false;
   restarting = false;
+  restartInFlight: Promise<void> | null = null;
   restartError = '';
   /** Restart requested while status was pre-ready; surfaced once we settle. */
   private pendingRestartOnSettle = false;
@@ -532,8 +533,23 @@ export class ProjectStateService {
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
+    let endRestart: () => void = () => undefined;
+    this.restartInFlight = new Promise<void>((resolve) => {
+      endRestart = resolve;
+    });
     this.notifyChange();
+    try {
+      return await this.runRestart(project, justEnabled);
+    } finally {
+      this.restartInFlight = null;
+      endRestart();
+    }
+  }
 
+  private async runRestart(
+    project: string | null,
+    justEnabled: string | null
+  ): Promise<RestartOutcome> {
     let restartedOk = false;
     try {
       await this.notifyRestartBegin();
