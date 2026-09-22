@@ -998,10 +998,12 @@ pub fn mcp_os_log_path() -> std::path::PathBuf {
     data_dir().join(MCP_OS_LOG_FILE)
 }
 
+pub(crate) const CLAUDE_COMPOSE_SERVICE: &str = "claude";
+
 /// Built-in services defined in containers/compose.template.yml.
 /// Used by security checks and image build lists.
 pub const BUILT_IN_SERVICES: &[&str] = &[
-    "claude",
+    CLAUDE_COMPOSE_SERVICE,
     "proxy",
     "mcp-hub",
     "mcp-slack",

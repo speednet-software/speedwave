@@ -446,8 +446,6 @@ mod tests {
     };
     use std::collections::BTreeSet;
 
-    /// A loopback port nothing listens on: bound at 0 and released. A fixed port inside the
-    /// ephemeral range is hit by other tests binding `127.0.0.1:0` (macOS allocates sequentially).
     fn released_loopback_port() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

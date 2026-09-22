@@ -72,12 +72,13 @@ impl LockedRuntime {
         Self { inner }
     }
 
-    /// Starts the project's compose stack (under the per-project lock). Containers may be
-    /// (re)created, so the project's slash-command cache is dropped either way.
+    /// Starts the project's compose stack (under the per-project lock).
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
-        let result = with_acquired(project, || self.inner.compose_up(project));
-        crate::slash::invalidate_cache(project);
-        result
+        with_acquired(project, || {
+            let result = self.inner.compose_up(project);
+            crate::slash::invalidate_cache(project);
+            result
+        })
     }
 
     /// Stops the project's compose stack (under the per-project lock).
@@ -85,18 +86,25 @@ impl LockedRuntime {
         with_acquired(project, || self.inner.compose_down(project))
     }
 
-    /// Recreates the project's compose stack (under the per-project lock). A replaced claude
-    /// container kills an in-flight discovery, so the slash-command cache is dropped either way.
+    /// Recreates the project's compose stack (under the per-project lock).
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
-        let result = with_acquired(project, || self.inner.compose_up_recreate(project));
-        crate::slash::invalidate_cache(project);
-        result
+        with_acquired(project, || {
+            let result = self.inner.compose_up_recreate(project);
+            crate::slash::invalidate_cache(project);
+            result
+        })
     }
 
     /// Recreates one built-in compose service without touching the rest of
     /// the stack (under the per-project lock) — ADR-073 proxy hot-reload.
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
-        with_acquired(project, || self.inner.compose_up_service(project, service))
+        with_acquired(project, || {
+            let result = self.inner.compose_up_service(project, service);
+            if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
+                crate::slash::invalidate_cache(project);
+            }
+            result
+        })
     }
 
     /// Validates the project's compose file (under the per-project lock).

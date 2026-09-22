@@ -295,7 +295,7 @@ describe('ComposerComponent', () => {
       expect(component.slashQuery()).toBe('rev');
     });
 
-    it('re-runs discovery on open when the last result was unavailable', () => {
+    it('runs discovery on open when no commands are cached', () => {
       const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
       const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
       projectState.activeProject.set('acme');
@@ -305,7 +305,7 @@ describe('ComposerComponent', () => {
       expect(slash.refresh).toHaveBeenCalledWith('acme');
     });
 
-    it('keeps a real discovery on open instead of re-running it', () => {
+    it('does not re-run discovery on open while commands are cached', () => {
       const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
       const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
       projectState.activeProject.set('acme');

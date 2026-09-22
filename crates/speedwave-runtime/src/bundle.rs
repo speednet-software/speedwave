@@ -677,8 +677,7 @@ fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf>
     );
 }
 
-/// True when every catalogue hash input resolves under `build_root` (direct path or the vendored
-/// `containers/` layout) — the Desktop build script hashes a staged tree only when this holds.
+/// True when every catalogue hash input resolves under `build_root`.
 pub fn hash_inputs_resolvable(build_root: &Path) -> bool {
     build::IMAGES
         .iter()
@@ -841,8 +840,6 @@ mod tests {
         }
     }
 
-    /// Mirrors `bundle-build-context.sh`: the proxy's repo-root-relative inputs are staged
-    /// under `containers/` only, so their direct paths do not exist in a staged tree.
     fn vendor_proxy_inputs(root: &Path) {
         let vendored = root.join("containers");
         std::fs::create_dir_all(vendored.join("mcp-servers/policies")).unwrap();
