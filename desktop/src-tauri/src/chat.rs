@@ -1435,7 +1435,7 @@ fn probe_session_info(
 pub struct PreparedSpawn {
     pub args: Vec<String>,
     pub container: String,
-    pub launch_effort: Option<String>,
+    pub with_effort: bool,
 }
 
 pub struct ChatSession {
@@ -1448,7 +1448,7 @@ pub struct ChatSession {
     drain_handles: Vec<std::thread::JoinHandle<()>>,
     session_log_path: Option<std::path::PathBuf>,
     instance_id: Option<String>,
-    launch_effort: Option<String>,
+    launched_with_effort: bool,
     stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1464,7 +1464,7 @@ impl ChatSession {
             drain_handles: Vec::new(),
             session_log_path: None,
             instance_id: None,
-            launch_effort: None,
+            launched_with_effort: false,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -1481,13 +1481,9 @@ impl ChatSession {
         Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
     }
 
-    pub(crate) fn live_launch_effort(&mut self) -> Option<&str> {
-        let alive = matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)));
-        if alive {
-            self.launch_effort.as_deref()
-        } else {
-            None
-        }
+    pub(crate) fn takes_wire_effort(&mut self) -> bool {
+        self.launched_with_effort
+            && matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)))
     }
 
     pub(crate) fn session_info_state(&self) -> SessionInfoState {
@@ -1531,7 +1527,7 @@ impl ChatSession {
         Ok(PreparedSpawn {
             args,
             container,
-            launch_effort,
+            with_effort: launch_effort.is_some(),
         })
     }
 
@@ -1563,7 +1559,7 @@ impl ChatSession {
         let PreparedSpawn {
             args,
             container,
-            launch_effort,
+            with_effort,
         } = Self::prepare_args(
             &self.project_name,
             &user_config,
@@ -1606,7 +1602,7 @@ impl ChatSession {
             .spawn()?;
 
         self.instance_id = Some(instance_id);
-        self.launch_effort = launch_effort;
+        self.launched_with_effort = with_effort;
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -2037,21 +2033,21 @@ impl ChatSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_test_process(&mut self, child: Child, launch_effort: Option<&str>) {
+    pub(crate) fn set_test_process(&mut self, child: Child, launched_with_effort: bool) {
         self.child = Some(child);
-        self.launch_effort = launch_effort.map(str::to_string);
+        self.launched_with_effort = launched_with_effort;
     }
 
     #[cfg(test)]
     fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
-        self.child = Some(spawn_test_blocked_child());
+        self.child = Some(spawn_test_child(TestChild::Blocked));
     }
 
     #[cfg(test)]
     fn set_test_stdin_broken_pipe(&mut self) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_broken_pipe_stdin())));
-        self.child = Some(spawn_test_blocked_child());
+        self.child = Some(spawn_test_child(TestChild::Blocked));
     }
 
     pub fn submit_question_answer(
@@ -2376,49 +2372,41 @@ fn test_broken_pipe_stdin() -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
-pub(crate) fn spawn_test_exited_child() -> Child {
-    #[cfg(unix)]
-    let mut command = {
-        let mut c = std::process::Command::new("sh");
-        c.arg("-c").arg("exit 0");
-        c
-    };
-    #[cfg(windows)]
-    let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "exit 0"]);
-        c
-    };
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn test exiting child");
-    child.wait().expect("wait for test exiting child");
-    child
+pub(crate) enum TestChild {
+    Blocked,
+    Exited,
 }
 
 #[cfg(test)]
-pub(crate) fn spawn_test_blocked_child() -> Child {
+pub(crate) fn spawn_test_child(kind: TestChild) -> Child {
     #[cfg(unix)]
     let mut command = {
         let mut c = std::process::Command::new("sh");
-        c.arg("-c").arg("read line");
+        c.arg("-c").arg(match kind {
+            TestChild::Blocked => "read line",
+            TestChild::Exited => "exit 0",
+        });
         c
     };
     #[cfg(windows)]
     let mut command = {
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "pause"]);
+        c.arg("/C").arg(match kind {
+            TestChild::Blocked => "pause",
+            TestChild::Exited => "exit 0",
+        });
         c
     };
-    command
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn test blocked child")
+        .expect("spawn test child");
+    if matches!(kind, TestChild::Exited) {
+        child.wait().expect("wait for the exiting test child");
+    }
+    child
 }
 
 #[cfg(test)]
@@ -6211,7 +6199,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_args_reports_the_launch_effort_it_passes() {
+    fn prepare_args_reports_whether_it_passes_an_effort() {
         let session_id = "11111111-2222-3333-4444-555555555555";
         let mut user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -6231,13 +6219,13 @@ mod tests {
         let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(spawn.launch_effort, None);
+        assert!(!spawn.with_effort);
 
         user_config.projects[0].effort_pin = Some("low".to_string());
         let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(spawn.launch_effort.as_deref(), Some("low"));
+        assert!(spawn.with_effort);
         let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(spawn.args[pos + 1], "low");
 
@@ -6245,34 +6233,25 @@ mod tests {
         let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(
-            spawn.launch_effort, None,
-            "an unknown pin is never launched"
-        );
+        assert!(!spawn.with_effort, "an unknown pin is never launched");
         assert!(!spawn.args.contains(&"--effort".to_string()));
     }
 
     #[test]
-    fn a_session_that_never_spawned_has_no_launch_effort() {
-        assert_eq!(ChatSession::new("myproject").live_launch_effort(), None);
-    }
+    fn only_a_live_process_launched_with_effort_takes_the_wire() {
+        assert!(!ChatSession::new("myproject").takes_wire_effort());
 
-    #[test]
-    fn a_live_process_reports_the_effort_it_launched_with() {
-        let mut session = ChatSession::new("myproject");
-        session.set_test_process(spawn_test_blocked_child(), Some("high"));
-        assert_eq!(session.live_launch_effort(), Some("high"));
+        let mut pinned = ChatSession::new("myproject");
+        pinned.set_test_process(spawn_test_child(TestChild::Blocked), true);
+        assert!(pinned.takes_wire_effort());
 
         let mut unpinned = ChatSession::new("myproject");
-        unpinned.set_test_process(spawn_test_blocked_child(), None);
-        assert_eq!(unpinned.live_launch_effort(), None);
-    }
+        unpinned.set_test_process(spawn_test_child(TestChild::Blocked), false);
+        assert!(!unpinned.takes_wire_effort());
 
-    #[test]
-    fn an_exited_process_reports_no_launch_effort() {
-        let mut session = ChatSession::new("myproject");
-        session.set_test_process(spawn_test_exited_child(), Some("high"));
-        assert_eq!(session.live_launch_effort(), None);
+        let mut exited = ChatSession::new("myproject");
+        exited.set_test_process(spawn_test_child(TestChild::Exited), true);
+        assert!(!exited.takes_wire_effort());
     }
 
     #[test]

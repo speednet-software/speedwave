@@ -1311,4 +1311,61 @@ describe('ChatComponent', () => {
       });
     });
   });
+
+  describe('deferred effort notice (SPEED-650)', () => {
+    async function deferEffort(level: string): Promise<void> {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'get_chat_takes_wire_effort' ? false : base(cmd, args);
+      chatState.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-held' },
+      });
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      chatState.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-held' },
+      } as never);
+      await chatState.applyEffortSelection(level);
+      fixture.detectChanges();
+    }
+
+    const notice = () =>
+      fixture.debugElement.query(By.css('[data-testid="effort-deferred-notice"]'));
+    const restart = () =>
+      fixture.debugElement.query(By.css('[data-testid="effort-deferred-restart"]'));
+
+    it('stays hidden while no pick is deferred', () => {
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      expect(notice()).toBeNull();
+    });
+
+    it('names the deferred level and warns that restarting stops background tasks', async () => {
+      await deferEffort('max');
+
+      const text = (notice().nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Effort Max applies from the next session');
+      expect(text).toContain("stops this session's background tasks");
+    });
+
+    it('Restart now asks the chat state to restart for the deferred effort', async () => {
+      await deferEffort('low');
+      const restartSpy = vi.spyOn(chatState, 'restartForDeferredEffort').mockResolvedValue();
+
+      (restart().nativeElement as HTMLButtonElement).click();
+
+      expect(restartSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('disables Restart now while a turn streams', async () => {
+      await deferEffort('low');
+      void chatState.sendMessage('next question');
+      fixture.detectChanges();
+
+      expect((restart().nativeElement as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
 });
