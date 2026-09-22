@@ -26,6 +26,21 @@ export async function latestAnthropicModelIds(): Promise<string[]> {
   return rows.filter((r) => r.latest).map((r) => r.id);
 }
 
+export async function modelPickerRowIds(project: string): Promise<string[] | null> {
+  return browser.executeAsync((proj: string, done: (ids: string[] | null) => void) => {
+    (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (cmd: string, args: unknown) => Promise<{ rows: { id: string }[] } | null>;
+        };
+      }
+    ).__TAURI_INTERNALS__
+      .invoke('list_model_picker', { project: proj })
+      .then((picker) => done(picker ? picker.rows.map((r) => r.id) : null))
+      .catch(() => done(null));
+  }, project);
+}
+
 export function catalogEntryForBadgeLabel(
   catalog: AnthropicCatalogEntry[],
   label: string

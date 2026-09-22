@@ -8,6 +8,7 @@ import {
   anthropicCatalog,
   latestAnthropicModelIds,
   catalogEntryForBadgeLabel,
+  modelPickerRowIds,
   ONE_MILLION_MARKER,
   type AnthropicCatalogEntry,
 } from '../helpers/anthropic-catalog';
@@ -288,10 +289,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect((await $$('[data-testid="model-selector-active-mark"]').getElements()).length).toBe(
         1
       );
-      const catalog = await anthropicCatalog();
-      for (const legacy of catalog.filter((m) => !m.latest)) {
-        expect(ids).toContain(legacy.id);
-      }
+      expect(ids).toEqual(await modelPickerRowIds(ANTHROPIC_PROJECT));
       await browser.keys('Escape');
     });
 
