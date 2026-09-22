@@ -67,6 +67,8 @@ pub enum StreamChunk {
     },
     Error {
         content: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_ended: bool,
     },
     SystemInit {
         model: String,
@@ -114,8 +116,12 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             content: sanitize(&content),
             is_error,
         },
-        StreamChunk::Error { content } => StreamChunk::Error {
+        StreamChunk::Error {
+            content,
+            turn_ended,
+        } => StreamChunk::Error {
             content: sanitize(&content),
+            turn_ended,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -188,8 +194,12 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             content: detok(policy, &content),
             is_error,
         },
-        StreamChunk::Error { content } => StreamChunk::Error {
+        StreamChunk::Error {
+            content,
+            turn_ended,
+        } => StreamChunk::Error {
             content: detok(policy, &content),
+            turn_ended,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -877,6 +887,7 @@ impl StreamParser {
             return (
                 Some(StreamChunk::Error {
                     content: error_text,
+                    turn_ended: true,
                 }),
                 Some(LogEntry {
                     prefix: "RESULT",
@@ -1080,6 +1091,7 @@ impl StreamParser {
             (
                 Some(StreamChunk::Error {
                     content: message.to_string(),
+                    turn_ended: false,
                 }),
                 log_entry,
             )
@@ -1314,15 +1326,6 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
-const EFFORT_FLAG: &str = "--effort";
-
-fn effort_flag_value(args: &[String]) -> Option<String> {
-    args.iter()
-        .position(|a| a == EFFORT_FLAG)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-}
-
 pub fn build_claude_args(
     instance_id: &str,
     resume_session_id: Option<&str>,
@@ -1428,6 +1431,13 @@ fn probe_session_info(
     Some(status)
 }
 
+#[derive(Debug)]
+pub struct PreparedSpawn {
+    pub args: Vec<String>,
+    pub container: String,
+    pub launch_effort: Option<String>,
+}
+
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
@@ -1471,8 +1481,13 @@ impl ChatSession {
         Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
     }
 
-    pub(crate) fn launch_effort(&self) -> Option<&str> {
-        self.launch_effort.as_deref()
+    pub(crate) fn live_launch_effort(&mut self) -> Option<&str> {
+        let alive = matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)));
+        if alive {
+            self.launch_effort.as_deref()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn session_info_state(&self) -> SessionInfoState {
@@ -1488,7 +1503,7 @@ impl ChatSession {
         instance_id: &str,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
-    ) -> anyhow::Result<(Vec<String>, String)> {
+    ) -> anyhow::Result<PreparedSpawn> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
         }
@@ -1501,9 +1516,10 @@ impl ChatSession {
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
         let mut flags = resolved.flags.clone();
-        if let Some(level) = launch_effort_level(user_config, project_name) {
-            flags.push(EFFORT_FLAG.to_string());
-            flags.push(level);
+        let launch_effort = launch_effort_level(user_config, project_name);
+        if let Some(level) = &launch_effort {
+            flags.push("--effort".to_string());
+            flags.push(level.clone());
         }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
@@ -1512,7 +1528,11 @@ impl ChatSession {
         #[cfg(feature = "e2e")]
         crate::e2e_support::record_spawn_args(&args);
 
-        Ok((args, container))
+        Ok(PreparedSpawn {
+            args,
+            container,
+            launch_effort,
+        })
     }
 
     pub fn start(
@@ -1540,7 +1560,11 @@ impl ChatSession {
         self.reap_instance();
 
         let instance_id = speedwave_runtime::session::new_instance_id();
-        let (args, container) = Self::prepare_args(
+        let PreparedSpawn {
+            args,
+            container,
+            launch_effort,
+        } = Self::prepare_args(
             &self.project_name,
             &user_config,
             &instance_id,
@@ -1582,7 +1606,7 @@ impl ChatSession {
             .spawn()?;
 
         self.instance_id = Some(instance_id);
-        self.launch_effort = effort_flag_value(&args);
+        self.launch_effort = launch_effort;
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -1748,6 +1772,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
+                                        turn_ended: false,
                                     },
                                     &display_policy,
                                 );
@@ -1777,6 +1802,7 @@ impl ChatSession {
                                             content: format!(
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
+                                            turn_ended: false,
                                         },
                                         &display_policy,
                                     );
@@ -1792,6 +1818,7 @@ impl ChatSession {
                                             content: format!(
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
+                                            turn_ended: false,
                                         },
                                         &display_policy,
                                     );
@@ -1804,6 +1831,7 @@ impl ChatSession {
                                     &app_handle,
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
+                                        turn_ended: false,
                                     },
                                     &display_policy,
                                 );
@@ -1899,6 +1927,7 @@ impl ChatSession {
                     content:
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
+                    turn_ended: false,
                 };
                 emit_sanitized_chunk(&app_handle, chunk, &display_policy);
             }
@@ -2008,8 +2037,9 @@ impl ChatSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_test_launch_effort(&mut self, level: Option<&str>) {
-        self.launch_effort = level.map(str::to_string);
+    pub(crate) fn set_test_process(&mut self, child: Child, launch_effort: Option<&str>) {
+        self.child = Some(child);
+        self.launch_effort = launch_effort.map(str::to_string);
     }
 
     #[cfg(test)]
@@ -2346,7 +2376,31 @@ fn test_broken_pipe_stdin() -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
-fn spawn_test_blocked_child() -> Child {
+pub(crate) fn spawn_test_exited_child() -> Child {
+    #[cfg(unix)]
+    let mut command = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg("exit 0");
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "exit 0"]);
+        c
+    };
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn test exiting child");
+    child.wait().expect("wait for test exiting child");
+    child
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_test_blocked_child() -> Child {
     #[cfg(unix)]
     let mut command = {
         let mut c = std::process::Command::new("sh");
@@ -2504,6 +2558,7 @@ mod tests {
             },
             StreamChunk::Error {
                 content: secret.into(),
+                turn_ended: false,
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -2649,10 +2704,17 @@ mod tests {
         match detokenize_chunk(
             StreamChunk::Error {
                 content: tokenized.clone(),
+                turn_ended: true,
             },
             &policy,
         ) {
-            StreamChunk::Error { content } => assert_eq!(content, "secret@example.com"),
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
+                assert_eq!(content, "secret@example.com");
+                assert!(turn_ended, "detokenizing must keep the turn-end marker");
+            }
             other => panic!("variant changed: {other:?}"),
         }
     }
@@ -4527,7 +4589,16 @@ mod tests {
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
         let (chunk, log_entry) = parse_line_full(&mut parser, line);
         match chunk.unwrap() {
-            StreamChunk::Error { content } => assert_eq!(content, "Something went wrong"),
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
+                assert_eq!(content, "Something went wrong");
+                assert!(
+                    turn_ended,
+                    "an is_error result ends the turn of a live process"
+                );
+            }
             other => panic!("expected Error, got {other:?}"),
         }
         let entry = log_entry.expect("error result must produce a log entry");
@@ -4548,7 +4619,7 @@ mod tests {
                 )
             });
             let content = match chunk {
-                StreamChunk::Error { content } => {
+                StreamChunk::Error { content, .. } => {
                     assert!(
                         !content.trim().is_empty(),
                         "placeholder content must be non-empty so the UI has something to render"
@@ -4740,8 +4811,12 @@ mod tests {
         let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => {
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
                 assert!(content.contains("hit your limit"));
+                assert!(!turn_ended, "a system message may arrive mid-turn");
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -4753,7 +4828,7 @@ mod tests {
         let line = r#"{"type":"system","message":"Error: connection refused"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => {
+            StreamChunk::Error { content, .. } => {
                 assert!(content.contains("Error: connection refused"));
             }
             other => panic!("expected Error, got {other:?}"),
@@ -4855,7 +4930,7 @@ mod tests {
         let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => assert!(content.contains("hit your limit")),
+            StreamChunk::Error { content, .. } => assert!(content.contains("hit your limit")),
             other => panic!("expected Error, got {other:?}"),
         }
     }
@@ -6091,7 +6166,9 @@ mod tests {
         };
         let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
         assert!(result.is_ok());
-        let (args, container) = result.unwrap();
+        let PreparedSpawn {
+            args, container, ..
+        } = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
         assert!(!args.contains(&"--effort".to_string()));
@@ -6115,16 +6192,18 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let (args, _) =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None).unwrap();
+        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1, "exactly one --effort flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "xhigh");
 
         user_config.projects[0].effort_pin = Some("max".to_string());
-        let (args, _) =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None).unwrap();
+        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1);
         let pos = args.iter().position(|a| a == "--effort").unwrap();
@@ -6132,7 +6211,7 @@ mod tests {
     }
 
     #[test]
-    fn effort_flag_value_reads_the_level_the_spawn_args_carry() {
+    fn prepare_args_reports_the_launch_effort_it_passes() {
         let session_id = "11111111-2222-3333-4444-555555555555";
         let mut user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -6149,43 +6228,78 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let (args, _) =
+        let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(effort_flag_value(&args), None);
+        assert_eq!(spawn.launch_effort, None);
 
         user_config.projects[0].effort_pin = Some("low".to_string());
-        let (args, _) =
+        let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert_eq!(effort_flag_value(&args).as_deref(), Some("low"));
-    }
+        assert_eq!(spawn.launch_effort.as_deref(), Some("low"));
+        let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(spawn.args[pos + 1], "low");
 
-    #[test]
-    fn effort_flag_value_ignores_a_flag_without_a_value() {
-        assert_eq!(effort_flag_value(&[]), None);
-        assert_eq!(effort_flag_value(&["--effort".to_string()]), None);
+        user_config.projects[0].effort_pin = Some("turbo".to_string());
+        let spawn =
+            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
+                .unwrap();
+        assert_eq!(
+            spawn.launch_effort, None,
+            "an unknown pin is never launched"
+        );
+        assert!(!spawn.args.contains(&"--effort".to_string()));
     }
 
     #[test]
     fn a_session_that_never_spawned_has_no_launch_effort() {
-        assert_eq!(ChatSession::new("myproject").launch_effort(), None);
+        assert_eq!(ChatSession::new("myproject").live_launch_effort(), None);
     }
 
     #[test]
-    fn every_spawn_records_the_launch_effort_of_the_args_it_ran() {
-        let src = include_str!("chat.rs");
-        let prod = src.split("\nmod tests {").next().unwrap_or(src);
-        let spawn_pos = prod
-            .find(".spawn()?;")
-            .expect("start_with_retry must spawn the child");
-        let record_pos = prod
-            .find("self.launch_effort = effort_flag_value(&args);")
-            .expect("start_with_retry must record the launch effort");
-        assert!(
-            spawn_pos < record_pos,
-            "the launch effort is recorded only for a process that actually spawned"
-        );
+    fn a_live_process_reports_the_effort_it_launched_with() {
+        let mut session = ChatSession::new("myproject");
+        session.set_test_process(spawn_test_blocked_child(), Some("high"));
+        assert_eq!(session.live_launch_effort(), Some("high"));
+
+        let mut unpinned = ChatSession::new("myproject");
+        unpinned.set_test_process(spawn_test_blocked_child(), None);
+        assert_eq!(unpinned.live_launch_effort(), None);
+    }
+
+    #[test]
+    fn an_exited_process_reports_no_launch_effort() {
+        let mut session = ChatSession::new("myproject");
+        session.set_test_process(spawn_test_exited_child(), Some("high"));
+        assert_eq!(session.live_launch_effort(), None);
+    }
+
+    #[test]
+    fn error_chunk_carries_turn_ended_only_when_set() {
+        let mid_turn = serde_json::to_value(StreamChunk::Error {
+            content: "rate limit".to_string(),
+            turn_ended: false,
+        })
+        .unwrap();
+        assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
+
+        let ended = serde_json::to_value(StreamChunk::Error {
+            content: "overloaded".to_string(),
+            turn_ended: true,
+        })
+        .unwrap();
+        assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));
+
+        let decoded: StreamChunk =
+            serde_json::from_str(r#"{"chunk_type":"Error","data":{"content":"x"}}"#).unwrap();
+        assert!(matches!(
+            decoded,
+            StreamChunk::Error {
+                turn_ended: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -6209,7 +6323,7 @@ mod tests {
         let result =
             ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
         assert!(result.is_ok());
-        let (args, _container) = result.unwrap();
+        let args = result.unwrap().args;
         assert!(args.contains(&format!(
             "{}=my-inst",
             speedwave_runtime::session::SESSION_INSTANCE_ENV
@@ -6241,7 +6355,7 @@ mod tests {
         let result =
             ChatSession::prepare_args("proj", &user_config, "inst", Some(session_id), Some(uuid));
         assert!(result.is_ok());
-        let (args, _) = result.unwrap();
+        let args = result.unwrap().args;
         assert!(args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&uuid.to_string()));
     }
@@ -6267,8 +6381,9 @@ mod tests {
     #[test]
     fn prepare_args_never_appends_a_model_flag_without_a_pin_file() {
         let user_config = single_project_user_config();
-        let (args, _) =
-            ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
         assert!(!args.contains(&"--model".to_string()));
     }
 
@@ -6277,8 +6392,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
         let user_config = single_project_user_config();
-        let (args, _) =
-            ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
         assert!(!args.contains(&"--model".to_string()));
     }
 

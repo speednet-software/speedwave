@@ -19,7 +19,58 @@ fn start_session_inner(
     let _serialize = START_SERIALIZE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    start_session_serialized(
+        project,
+        resume_session_id,
+        session_arc,
+        oauth_arc,
+        app_handle,
+    )
+}
 
+fn respawn_if_effort_held_inner(
+    project: &str,
+    session_id: &str,
+    session_arc: SharedChatSession,
+    oauth_arc: SharedOauth,
+    app_handle: tauri::AppHandle,
+) -> Result<bool, String> {
+    let _serialize = START_SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut held_session = {
+        let mut session = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        if session_takes_wire_effort(&mut session, project) {
+            return Ok(false);
+        }
+        std::mem::replace(&mut *session, ChatSession::new(project))
+    };
+    log::info!("stopping the chat session held at its launch effort (outside lock)");
+    held_session.stop().map_err(|e| e.to_string())?;
+    drop(held_session);
+    start_session_serialized(
+        project,
+        Some(session_id),
+        session_arc,
+        oauth_arc,
+        app_handle,
+    )?;
+    Ok(true)
+}
+
+fn session_takes_wire_effort(session: &mut ChatSession, project: &str) -> bool {
+    session.project_name() == project && session.live_launch_effort().is_some()
+}
+
+fn start_session_serialized(
+    project: &str,
+    resume_session_id: Option<&str>,
+    session_arc: SharedChatSession,
+    oauth_arc: SharedOauth,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
     containers_cmd::ensure_images_ready()?;
@@ -175,6 +226,25 @@ pub(crate) async fn resume_conversation(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub(crate) async fn respawn_if_effort_held(
+    project: String,
+    session_id: String,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, SharedChatSession>,
+    oauth: tauri::State<'_, SharedOauth>,
+) -> Result<bool, String> {
+    check_project(&project)?;
+    crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
+    let session_arc = state.inner().clone();
+    let oauth_arc = oauth.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        respawn_if_effort_held_inner(&project, &session_id, session_arc, oauth_arc, app_handle)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 const MSG_SESSION_BUSY: &str = "chat session is busy";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
 
@@ -188,35 +258,17 @@ pub(crate) fn session_info_state_inner(
     }
 }
 
-fn session_for<'a>(
-    session_arc: &'a SharedChatSession,
+fn control_handle_for(
+    session_arc: &SharedChatSession,
     project: &str,
-) -> Result<std::sync::MutexGuard<'a, ChatSession>, String> {
+) -> Result<ControlHandle, String> {
     let session = session_arc
         .try_lock()
         .map_err(|_| MSG_SESSION_BUSY.to_string())?;
     if session.project_name() != project {
         return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
     }
-    Ok(session)
-}
-
-fn launch_effort_inner(
-    session_arc: &SharedChatSession,
-    project: &str,
-) -> Result<Option<String>, String> {
-    Ok(session_for(session_arc, project)?
-        .launch_effort()
-        .map(str::to_string))
-}
-
-fn control_handle_for(
-    session_arc: &SharedChatSession,
-    project: &str,
-) -> Result<ControlHandle, String> {
-    session_for(session_arc, project)?
-        .control_handle()
-        .map_err(|e| e.to_string())
+    session.control_handle().map_err(|e| e.to_string())
 }
 
 fn control_query_inner<T>(
@@ -239,15 +291,6 @@ pub(crate) async fn get_chat_session_info(
 ) -> Result<SessionInfoState, String> {
     check_project(&project)?;
     Ok(session_info_state_inner(state.inner(), &project))
-}
-
-#[tauri::command]
-pub(crate) async fn get_chat_launch_effort(
-    project: String,
-    state: tauri::State<'_, SharedChatSession>,
-) -> Result<Option<String>, String> {
-    check_project(&project)?;
-    launch_effort_inner(state.inner(), &project)
 }
 
 #[tauri::command]
@@ -323,35 +366,52 @@ mod tests {
     }
 
     #[test]
-    fn launch_effort_is_none_for_a_session_that_never_spawned() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
-        assert_eq!(launch_effort_inner(&session_arc, "acme"), Ok(None));
-    }
-
-    #[test]
-    fn launch_effort_reports_the_level_the_session_spawned_with() {
+    fn a_live_process_launched_with_effort_takes_the_wire() {
         let mut session = ChatSession::new("acme");
-        session.set_test_launch_effort(Some("xhigh"));
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        assert_eq!(
-            launch_effort_inner(&session_arc, "acme"),
-            Ok(Some("xhigh".to_string()))
+        session.set_test_process(chat::spawn_test_blocked_child(), Some("xhigh"));
+        assert!(session_takes_wire_effort(&mut session, "acme"));
+        assert!(
+            !session_takes_wire_effort(&mut session, "other"),
+            "another project's session says nothing about this one"
         );
     }
 
     #[test]
-    fn launch_effort_errors_for_another_project_and_while_the_session_is_locked() {
-        let mut session = ChatSession::new("acme");
-        session.set_test_launch_effort(Some("low"));
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        assert_eq!(
-            launch_effort_inner(&session_arc, "other"),
-            Err(MSG_NO_SESSION_FOR_PROJECT.to_string())
-        );
-        let _held = session_arc.lock().unwrap();
-        assert_eq!(
-            launch_effort_inner(&session_arc, "acme"),
-            Err(MSG_SESSION_BUSY.to_string())
+    fn a_process_without_effort_or_without_life_needs_the_respawn() {
+        assert!(!session_takes_wire_effort(
+            &mut ChatSession::new("acme"),
+            "acme"
+        ));
+
+        let mut unpinned = ChatSession::new("acme");
+        unpinned.set_test_process(chat::spawn_test_blocked_child(), None);
+        assert!(!session_takes_wire_effort(&mut unpinned, "acme"));
+
+        let mut exited = ChatSession::new("acme");
+        exited.set_test_process(chat::spawn_test_exited_child(), Some("high"));
+        assert!(!session_takes_wire_effort(&mut exited, "acme"));
+    }
+
+    #[test]
+    fn respawn_if_effort_held_checks_the_session_under_the_start_lock() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn respawn_if_effort_held_inner(");
+        let serialize_pos = body
+            .find("START_SERIALIZE")
+            .expect("the check must hold the start lock");
+        let check_pos = body
+            .find("session_takes_wire_effort(")
+            .expect("the respawn must check the live session first");
+        let stop_pos = body
+            .find(".stop()")
+            .expect("the held process must be stopped before the slow start checks");
+        let start_pos = body
+            .find("start_session_serialized(")
+            .expect("the respawn must start through the serialized body");
+        assert!(serialize_pos < check_pos && check_pos < stop_pos && stop_pos < start_pos);
+        assert!(
+            !body.contains("start_session_inner("),
+            "re-taking START_SERIALIZE inside the held lock deadlocks"
         );
     }
 
@@ -466,8 +526,8 @@ mod tests {
             .find("START_SERIALIZE")
             .expect("start_session_inner must acquire START_SERIALIZE");
         let work_pos = body
-            .find("ensure_oauth_running")
-            .expect("start_session_inner must call ensure_oauth_running");
+            .find("start_session_serialized(")
+            .expect("start_session_inner must run the start through start_session_serialized");
         assert!(
             guard_pos < work_pos,
             "START_SERIALIZE must be acquired before any start/stop work"
@@ -505,16 +565,16 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_checks_auth_before_session_start() {
+    fn start_session_serialized_checks_auth_before_session_start() {
         let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
+        let body = extract_fn_body(source, "fn start_session_serialized(");
 
         let auth_pos = body
             .find("check_claude_auth")
-            .expect("start_session_inner must call check_claude_auth");
+            .expect("start_session_serialized must call check_claude_auth");
         let start_pos = body
             .find(".start(app_handle")
-            .expect("start_session_inner must call session.start(app_handle, ...)");
+            .expect("start_session_serialized must call session.start(app_handle, ...)");
 
         assert!(
             auth_pos < start_pos,
@@ -523,16 +583,16 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_acquires_compose_lock_for_auth() {
+    fn start_session_serialized_acquires_compose_lock_for_auth() {
         let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
+        let body = extract_fn_body(source, "fn start_session_serialized(");
 
         let compose_pos = body
             .find("rt.transaction(")
-            .expect("start_session_inner must call rt.transaction for the per-project lock");
+            .expect("start_session_serialized must call rt.transaction for the per-project lock");
         let auth_pos = body
             .find("setup_wizard::check_claude_auth")
-            .expect("start_session_inner must call check_claude_auth");
+            .expect("start_session_serialized must call check_claude_auth");
 
         assert!(
             compose_pos < auth_pos,
@@ -541,19 +601,19 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_waits_for_image_readiness_before_compose_paths() {
+    fn start_session_serialized_waits_for_image_readiness_before_compose_paths() {
         let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
+        let body = extract_fn_body(source, "fn start_session_serialized(");
 
         let ensure_pos = body
             .find("containers_cmd::ensure_images_ready")
-            .expect("start_session_inner must call ensure_images_ready");
+            .expect("start_session_serialized must call ensure_images_ready");
         let recreate_pos = body
             .find("recreate_project_containers_if_running")
-            .expect("start_session_inner must reach recreate_project_containers_if_running");
+            .expect("start_session_serialized must reach recreate_project_containers_if_running");
         let auth_pos = body
             .find("setup_wizard::check_claude_auth")
-            .expect("start_session_inner must reach check_claude_auth");
+            .expect("start_session_serialized must reach check_claude_auth");
 
         assert!(
             ensure_pos < recreate_pos,
@@ -572,6 +632,16 @@ mod tests {
         assert!(
             body.contains("spawn_blocking"),
             "start_chat must use spawn_blocking to avoid blocking the main thread"
+        );
+    }
+
+    #[test]
+    fn respawn_if_effort_held_uses_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn respawn_if_effort_held(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "respawn_if_effort_held must use spawn_blocking to avoid blocking the main thread"
         );
     }
 
@@ -596,12 +666,12 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_acquires_session_lock() {
+    fn start_session_serialized_acquires_session_lock() {
         let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn start_session_inner(");
+        let body = extract_fn_body(source, "fn start_session_serialized(");
         assert!(
             body.contains("session_arc") && body.contains(".lock()"),
-            "start_session_inner must acquire the session lock"
+            "start_session_serialized must acquire the session lock"
         );
     }
 

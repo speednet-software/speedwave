@@ -34,7 +34,7 @@ export type StreamChunk =
         context_usage?: TurnUsage;
       };
     }
-  | { chunk_type: 'Error'; data: { content: string } }
+  | { chunk_type: 'Error'; data: { content: string; turn_ended?: boolean } }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
       chunk_type: 'ControlChip';

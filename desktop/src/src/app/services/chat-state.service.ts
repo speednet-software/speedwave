@@ -157,6 +157,7 @@ export class ChatStateService {
 
   private readonly _pendingModelOverride = signal<string | null>(null);
   private readonly _pendingEffortOverride = signal<string | null>(null);
+  private _effortPick = 0;
   readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
 
   private flushPendingModelOverride(): void {
@@ -168,18 +169,19 @@ export class ChatStateService {
       return;
     }
     const effort = this._pendingEffortOverride();
-    if (effort && !this._pendingQueue) {
+    if (effort) {
       this._pendingEffortOverride.set(null);
-      void this.applyEffortToConversation(effort);
+      void this.applyEffortToConversation(effort, this._effortPick);
     }
   }
 
   /**
-   * Persists the effort pin, then applies it: queued mid-turn or mid-resume, wired as `/effort` into
-   * a live conversation (respawned first if it holds the launch effort), else by an idle respawn.
+   * Persists the effort pin, then applies it: queued while the chat is busy, wired as `/effort` into
+   * a live conversation after the backend releases a launch-effort hold, else by an idle respawn.
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
+    const pick = ++this._effortPick;
     this._modelSelectionError.set('');
     try {
       await this.tauri.invoke('set_effort_pin', {
@@ -190,10 +192,11 @@ export class ChatStateService {
       this.reportSelectionFailure('effort pin write-through', e);
       return;
     }
+    if (pick !== this._effortPick) return;
     if (this.isStreaming || this._resumeInProgress) {
       this._pendingEffortOverride.set(level);
     } else if (this.hasLiveSession() && this.hasConversation()) {
-      await this.applyEffortToConversation(level);
+      await this.applyEffortToConversation(level, pick);
     } else {
       this.resetForNewConversation();
       this.initialized = true;
@@ -201,30 +204,67 @@ export class ChatStateService {
     }
   }
 
-  private async applyEffortToConversation(level: string): Promise<void> {
+  private chatBusy(): boolean {
+    return this.isStreaming || this._resumeInProgress || this.startingSession;
+  }
+
+  private async applyEffortToConversation(level: string, pick: number): Promise<void> {
+    const project = this.projectState.activeProject();
     const sessionId = this._lastKnownSessionId;
-    const generation = this._sessionGeneration;
-    const held = sessionId !== null && !(await this.sessionTakesWireEffort());
-    if (generation !== this._sessionGeneration || sessionId !== this._lastKnownSessionId) return;
-    const busy = () => this.isStreaming || this._resumeInProgress;
-    if (held && !busy() && (await this.resumeConversation(sessionId)) !== 'started') return;
-    if (busy()) {
+    if (!project) return;
+    if (sessionId === null || this.chatBusy() || this._pendingQueue) {
+      this._pendingEffortOverride.set(level);
+      return;
+    }
+    if (!(await this.respawnIfEffortHeld(project, sessionId, level))) return;
+    if (pick !== this._effortPick) {
+      this.flushPendingModelOverride();
+      return;
+    }
+    if (this.chatBusy()) {
       this._pendingEffortOverride.set(level);
       return;
     }
     await this.sendMessage(`/effort ${level}`);
   }
 
-  private async sessionTakesWireEffort(): Promise<boolean> {
+  private async respawnIfEffortHeld(
+    project: string,
+    sessionId: string,
+    level: string
+  ): Promise<boolean> {
+    const generation = this._sessionGeneration;
+    this.startingSession = true;
+    this._lastStartOutcome = null;
+    let outcome: StartOutcome = 'started';
+    let error = '';
     try {
-      const launchEffort = await this.tauri.invoke<string | null>('get_chat_launch_effort', {
-        project: this.projectState.activeProject() ?? '',
-      });
-      return typeof launchEffort === 'string';
+      await this.tauri.invoke<boolean>('respawn_if_effort_held', { project, sessionId });
     } catch (e: unknown) {
-      this.log.debug(`[chat-state] get_chat_launch_effort failed: ${String(e)}`);
-      return false;
+      error = String(e);
+      outcome = isNotAuthenticatedError(error) ? 'auth' : 'failed';
+    } finally {
+      if (generation === this._sessionGeneration) {
+        this.startingSession = false;
+        this._lastStartOutcome = outcome;
+      }
     }
+    if (generation !== this._sessionGeneration) return false;
+    if (outcome === 'auth') {
+      await this.projectState.retryAuth();
+    } else if (outcome === 'failed') {
+      this.log.error(`[chat-state] effort respawn failed: ${error}`);
+      this._messages = [
+        ...this._messages,
+        {
+          role: 'assistant',
+          blocks: [{ type: 'error', content: `Could not apply effort ${level}: ${error}` }],
+          timestamp: Date.now(),
+        },
+      ];
+      this.notifyChange();
+    }
+    return outcome === 'started';
   }
 
   private readonly _modelSelectionError = signal('');
@@ -1141,6 +1181,7 @@ export class ChatStateService {
         ];
         this._currentBlocks = [];
         this.isStreaming = false;
+        if (chunk.data.turn_ended) this.flushPendingModelOverride();
         void this.refreshControlData();
         break;
       }
@@ -1438,10 +1479,9 @@ export class ChatStateService {
   /**
    * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
    * @param sessionId - session UUID to resume.
-   * @returns `started` when this call resumed the session, else `skipped`, `failed` or `auth`.
    */
-  async resumeConversation(sessionId: string): Promise<StartOutcome> {
-    if (this._resumeInProgress) return 'skipped';
+  async resumeConversation(sessionId: string): Promise<void> {
+    if (this._resumeInProgress) return;
     this._resumeInProgress = true;
     if (this.projectState.restartInFlight && !(await this.outlastRestart())) {
       this._resumeInProgress = false;
@@ -1457,7 +1497,7 @@ export class ChatStateService {
     let outcome: StartOutcome = 'started';
     try {
       const project = this.projectState.activeProject();
-      if (!project) return 'skipped';
+      if (!project) return;
 
       const transcriptPromise = this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
@@ -1468,7 +1508,7 @@ export class ChatStateService {
       const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
 
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
-      if (gen !== this._sessionGeneration) return 'skipped';
+      if (gen !== this._sessionGeneration) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
       } else {
@@ -1492,7 +1532,7 @@ export class ChatStateService {
       this._optimisticSessionId = null;
       if (gen !== this._sessionGeneration) {
         this.log.debug(`[chat-state] resumeConversation superseded by a reset: ${String(err)}`);
-        return 'skipped';
+        return;
       }
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
@@ -1519,7 +1559,7 @@ export class ChatStateService {
         void this.startChatSession();
       }
     }
-    return outcome;
+    if (outcome === 'started' && gen === this._sessionGeneration) this.flushPendingModelOverride();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];

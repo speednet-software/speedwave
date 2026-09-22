@@ -462,46 +462,60 @@ migration widens it only as far as its writes go, and those are bounded: the
 function returns before writing when the key is absent, so once the template stops
 seeding it and one pass has stripped it, every later call is a locked read.
 
-**Amendment (SPEED-650, 2026-09-22: a conversation whose process was spawned
-without `--effort` is respawned with `--resume` before the wire `/effort`).** This
-closes the gap the 2026-09-15 amendment accepted. The backend records the
-`--effort` value each spawn carried (`desktop/src-tauri/src/chat.rs`,
-`ChatSession::launch_effort`, read from the argv that `start_with_retry` ran, so
-start, resume and retry all report it), and
-`desktop/src-tauri/src/chat_session_cmd.rs::get_chat_launch_effort` returns it for
-the project's session. `ChatStateService.applyEffortToConversation`
-(`desktop/src/src/app/services/chat-state.service.ts`) asks before wiring. A
-process spawned with `--effort` takes the wire `/effort` live, as before. A
-process spawned without it, which is a project that had no pin at spawn time, is
-first respawned through `resumeConversation`: the pin was written a moment earlier,
-so the new process carries it as `--effort` next to `--resume <session>`. Only then
-does the wire `/effort` go out. The new process accepts it (the release measured in
-the first amendment above), and the wire send keeps the standard control chip in
-the chat and the change in the transcript. A failed query counts as a held process,
-because a spare respawn costs one reload while a refused wire leaves the turn at the
-model default under a pill that shows the pick. A failed respawn sends nothing.
+**Amendment (SPEED-650, 2026-09-22: the backend respawns a conversation held at
+its launch effort before the wire `/effort`).** This closes the gap the 2026-09-15
+amendment accepted. Each spawn records the `--effort` value `prepare_args` passed
+(`desktop/src-tauri/src/chat.rs`, `PreparedSpawn::launch_effort`, stored on the
+`ChatSession`), and `ChatSession::live_launch_effort` reports it only while that
+process is alive. Before wiring a composer pick into a live conversation,
+`ChatStateService.applyEffortToConversation`
+(`desktop/src/src/app/services/chat-state.service.ts`) calls
+`respawn_if_effort_held` (`desktop/src-tauri/src/chat_session_cmd.rs`). Under
+`START_SERIALIZE`, the lock every chat start takes, the command leaves a live
+process that launched with `--effort` alone. Any other process it stops in the same
+critical section and starts the conversation again with `--resume <session>`,
+which carries the pin written a moment earlier as `--effort`. The frontend then
+sends the wire `/effort`. The process accepts it (the release measured in the
+first amendment above), and the wire send keeps the standard control chip in the
+chat and the change in the transcript.
 
-Timing. A pick made while a turn streams, or while any resume runs, is queued and
-applied at the next turn end, so a second pick made during the respawn lands after
-the first one's wire `/effort` and the session ends at the latest pick. A pick also
-waits out a message queued for the turn end (ADR-045), because a respawn would kill
-the turn that message starts; that queued message therefore still runs at the level
-its process launched with, and the pick applies from the turn after it.
+The check and the respawn share one lock, so no other start can replace the
+session between them. A dead process counts as held, so the pick resumes its
+conversation instead of leaving the next send to open a fresh one. The respawn
+happens in place: the chat keeps its messages and reloads no transcript. A message
+sent while the respawn runs reaches the stopped session, fails as "no active
+session", and the existing wait on the starting session resends it to the new
+process. A failed respawn sends nothing and shows its error in the chat.
+
+Timing. A pick is queued and wired at the next turn end while a turn streams,
+while a session starts or resumes, and while a message queued for the turn end
+(ADR-045) is about to drain, because a respawn at that moment would kill the turn
+that message starts. That queued message therefore still runs at the level its
+process launched with. A pick made during a resume is applied as soon as the
+resume completes. Each pick carries a sequence number and only the latest one is
+wired, so two quick picks cannot leave the session at the older level. A turn end
+without a session id holds the pick until one arrives. A turn that ends in an API
+error (an `is_error` result) now releases pending picks as a `Result` does: the
+backend marks that `Error` chunk `turn_ended` (`chat.rs::StreamChunk::Error`) and
+the frontend flushes the pending model and effort picks on it. Every other `Error`
+chunk (a system message that can arrive mid-turn, a stream that ended) leaves the
+picks queued.
 
 The condition is the launch flag, not the model. The hold is per model (the 2.1.267
 re-verification above: Opus 4.8 and Fable 5, not Fable 5.1 or Sonnet 5), but a
 model list would drift with every Claude Code bump, and a session can switch
 models on the wire after it spawned; the flag is a fact Speedwave decided itself.
-The cost is one reload the first time an unpinned project changes effort
+The cost is one respawn the first time an unpinned project changes effort
 mid-conversation on a model without the hold. No Speedwave code path clears an
 effort pin (`desktop/src-tauri/src/pin_cmd.rs` only sets one or adopts a legacy
 `effortLevel`), so the pin that pick writes makes every later spawn of the project
 carry `--effort` and the respawn does not repeat. Not measured: whether a process
 launched with `--effort` on one model keeps accepting a wire `/effort` after a wire
 `/model` switch to a hold model; the probes above do not cover a model switched to
-after launch. The model-config page[^1] no longer describes the hold at the time of this
-amendment. The respawn stays correct if a later Claude Code pin drops the hold,
-because the wire `/effort` it sends goes to a process launched with `--effort`.
+after launch. The model-config page[^1] no longer describes the hold at the time of
+this amendment. The respawn stays correct if a later Claude Code pin drops the
+hold, because the wire `/effort` it sends goes to a process launched with
+`--effort`.
 
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 

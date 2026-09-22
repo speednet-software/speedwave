@@ -1187,7 +1187,7 @@ fn main() {
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::get_chat_session_info,
-            chat_session_cmd::get_chat_launch_effort,
+            chat_session_cmd::respawn_if_effort_held,
             chat_session_cmd::get_plan_usage,
             chat_session_cmd::get_context_usage,
             retry_cmd::retry_last_turn,
