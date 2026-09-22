@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SecuritySectionComponent } from './security-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../../testing/deferred';
 import type {
@@ -493,6 +494,23 @@ describe('SecuritySectionComponent', () => {
         fixture.nativeElement.querySelector('[data-testid="security-save-error"]')
       ).not.toBeNull();
     });
+
+    it('a save already in flight is not started twice (single-flight)', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
+      let calls = 0;
+      const previous = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_security_policy') calls += 1;
+        return previous ? previous(cmd, args) : undefined;
+      };
+      const p1 = component.save();
+      const p2 = component.save();
+      await Promise.all([p1, p2]);
+      expect(calls).toBe(1);
+    });
   });
 
   it('reloads the policy when the active project becomes ready', async () => {
@@ -544,5 +562,17 @@ describe('SecuritySectionComponent', () => {
     await fixture.whenStable();
     expect(component.error()).toBe('boom');
     expect(emitted).toContain('boom');
+  });
+
+  it('registers in the dirty registry and unregisters on destroy (SPEED-637)', async () => {
+    await create();
+    const registry = TestBed.inject(SettingsDirtyService);
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(registry.dirtySectionNames()).toEqual([]);
+    component.enabledPolicies.set(new Set());
+    expect(registry.dirtySectionNames()).toEqual(['Security']);
+    fixture.destroy();
+    expect(registry.dirtySectionNames()).toEqual([]);
   });
 });

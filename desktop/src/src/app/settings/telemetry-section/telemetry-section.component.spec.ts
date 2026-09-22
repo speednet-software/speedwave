@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { TelemetrySectionComponent } from './telemetry-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import type { TelemetryConfigResponse } from '../../models/telemetry';
 
@@ -468,5 +469,111 @@ describe('TelemetrySectionComponent', () => {
       fixture.nativeElement.querySelector('[data-testid="telemetry-save-error"]')
     ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="telemetry-error"]')).toBeNull();
+  });
+
+  describe('dirty tracking (SPEED-637)', () => {
+    async function createLoaded(): Promise<void> {
+      await create();
+      await component.ngOnInit();
+      fixture.detectChanges();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+    }
+
+    it('is clean before load and after the initial load', async () => {
+      await create();
+      expect(component.isDirty()).toBe(false);
+      await component.ngOnInit();
+      await fixture.whenStable();
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('turns dirty on a value edit', async () => {
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      expect(component.isDirty()).toBe(true);
+    });
+
+    it('a tri-state edit back to the loaded value still counts as dirty (touched)', async () => {
+      await createLoaded();
+      component.onHeadersInput('Authorization: Bearer x');
+      component.onHeadersInput('');
+      expect(component.isDirty()).toBe(true);
+    });
+
+    it('a successful save resets dirty', async () => {
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      expect(component.isDirty()).toBe(true);
+      await component.save();
+      expect(component.isDirty()).toBe(false);
+    });
+
+    it('a failed save keeps the section dirty and surfaces the error', async () => {
+      await createLoaded();
+      const previous = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_telemetry_config') throw new Error('save failed');
+        return previous ? previous(cmd, args) : undefined;
+      };
+      component.onEndpointInput('https://other:4318');
+      await component.save();
+      expect(component.isDirty()).toBe(true);
+      expect(component.saveError()).toBe('save failed');
+    });
+
+    it('a save already in flight is not started twice (single-flight)', async () => {
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      let calls = 0;
+      const previous = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'update_telemetry_config') calls += 1;
+        return previous ? previous(cmd, args) : undefined;
+      };
+      const p1 = component.save();
+      const p2 = component.save();
+      await Promise.all([p1, p2]);
+      expect(calls).toBe(1);
+    });
+
+    it('a successful save with a reload that throws leaves the section dirty (SPEED-637)', async () => {
+      let getCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_telemetry_config') {
+          getCalls += 1;
+          if (getCalls === 1) return baseResponse();
+          throw new Error('reload failed');
+        }
+        return undefined;
+      };
+      await createLoaded();
+      component.onEndpointInput('https://other:4318');
+      await component.save();
+      expect(component.isDirty()).toBe(true);
+    });
+
+    it('disables Save while clean and enables it on an edit', async () => {
+      await createLoaded();
+      const save = (): HTMLButtonElement | null =>
+        fixture.nativeElement.querySelector('[data-testid="telemetry-save"]');
+      expect(save()?.disabled).toBe(true);
+      component.onEndpointInput('https://other:4318');
+      fixture.changeDetectorRef.markForCheck();
+      fixture.detectChanges();
+      expect(save()?.disabled).toBe(false);
+    });
+
+    it('registers in the dirty registry and unregisters on destroy (SPEED-637)', async () => {
+      await create();
+      const registry = TestBed.inject(SettingsDirtyService);
+      await component.ngOnInit();
+      await fixture.whenStable();
+      expect(registry.dirtySectionNames()).toEqual([]);
+      component.onEndpointInput('https://other:4318');
+      expect(registry.dirtySectionNames()).toEqual(['Telemetry']);
+      fixture.destroy();
+      expect(registry.dirtySectionNames()).toEqual([]);
+    });
   });
 });

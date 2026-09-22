@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnDestroy,
   OnInit,
   computed,
@@ -16,6 +17,7 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { eventValue } from '../../shared/dom-event';
 import { AuthTerminalComponent } from '../auth-terminal.component';
@@ -623,6 +625,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
+  private readonly dirtyRegistry = inject(SettingsDirtyService);
 
   /** Reloads the Anthropic auth status whenever the active project changes. */
   constructor() {
@@ -644,6 +647,12 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.oauthWatcher.startPoll();
       }
     });
+    const unregister = this.dirtyRegistry.register({
+      name: 'LLM provider',
+      isDirty: computed(() => this.loadedFormSnapshot() !== '' && this.isDirty()),
+      save: () => this.saveConfig(),
+    });
+    inject(DestroyRef).onDestroy(unregister);
   }
 
   private chatState = inject(ChatStateService);
@@ -1052,6 +1061,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       if (this.oauthAuthenticated()) {
         this.selectedTarget.set('anthropic');
         this.provider.set('anthropic');
+        await this.saveInFlight;
         await this.saveConfig(true);
       }
     } finally {
@@ -1254,11 +1264,24 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return fp !== savedFp;
   }
 
+  private saveInFlight: Promise<void> | null = null;
+
   /**
-   * Persists the LLM provider configuration to the backend.
+   * Single-flight wrapper: a save already in flight is returned as-is, never started twice.
+   * A concurrent call while one is in flight ignores its own `forceRestart` and rides the
+   * in-flight save's — acceptable because the UI disables Save while saving, so only the
+   * guard (always default `forceRestart`) can race a user-initiated save.
    * @param forceRestart - forces a full restart even if `active` is unchanged, so a running container can't stay routed to a stale provider
    */
   async saveConfig(forceRestart = false): Promise<void> {
+    if (this.saveInFlight) return this.saveInFlight;
+    this.saveInFlight = this.doSaveConfig(forceRestart).finally(() => {
+      this.saveInFlight = null;
+    });
+    return this.saveInFlight;
+  }
+
+  private async doSaveConfig(forceRestart = false): Promise<void> {
     const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
     if (provider !== 'anthropic' && !this.localModelSatisfied() && localIsActive) {

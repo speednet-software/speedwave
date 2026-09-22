@@ -7,6 +7,7 @@ import { ProjectStateService, type AuthStatusResponse } from '../../services/pro
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { type LlmProviderEntry } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../../testing/deferred';
@@ -264,6 +265,66 @@ describe('LlmProviderComponent', () => {
     expect(update['base_url']).toBe('http://localhost:11434');
     expect(component.saved()).toBe(true);
     expect(component.saving()).toBe(false);
+  });
+
+  it('a save already in flight is not started twice (single-flight)', async () => {
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
+
+    let calls = 0;
+    const previous = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'update_llm_config') calls += 1;
+      return previous ? previous(cmd, args) : undefined;
+    };
+
+    const p1 = component.saveConfig();
+    const p2 = component.saveConfig();
+    await Promise.all([p1, p2]);
+
+    expect(calls).toBe(1);
+  });
+
+  it('onOAuthDone awaits an in-flight save and then runs its own forced save (SPEED-637)', async () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.model.set('claude-opus-4-8');
+
+    const firstSave = createDeferred();
+    let updateCalls = 0;
+    let firstSettled = false;
+    let secondStartedAfterFirst = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') {
+        updateCalls += 1;
+        if (updateCalls === 1) {
+          await firstSave.promise;
+          return undefined;
+        }
+        secondStartedAfterFirst = firstSettled;
+        return undefined;
+      }
+      if (cmd === 'get_auth_status')
+        return {
+          api_key_configured: false,
+          oauth_authenticated: true,
+          needs_anthropic_auth: false,
+          provider_configured: true,
+        };
+      return undefined;
+    };
+
+    const inFlight = component.saveConfig();
+    const oauthDone = component.onOAuthDone(true);
+    await flushMicrotasks();
+    expect(updateCalls).toBe(1);
+
+    firstSettled = true;
+    firstSave.resolve();
+    await Promise.all([inFlight, oauthDone]);
+
+    expect(updateCalls).toBe(2);
+    expect(secondStartedAfterFirst).toBe(true);
   });
 
   it('emits error on save failure', async () => {
@@ -3240,5 +3301,17 @@ describe('LlmProviderComponent', () => {
     watcher['context']?.onVerdict('proj', status);
     expect(component.oauthSignIn()).toBe('saved_unverified');
     expect(applySpy).toHaveBeenCalledWith(status);
+  });
+
+  it('registers in the dirty registry and unregisters on destroy (SPEED-637)', async () => {
+    const registry = TestBed.inject(SettingsDirtyService);
+    component.ngOnInit();
+    await fixture.whenStable();
+    await flushMicrotasks();
+    expect(registry.dirtySectionNames()).toEqual([]);
+    component.model.set('claude-opus-4-8');
+    expect(registry.dirtySectionNames()).toEqual(['LLM provider']);
+    fixture.destroy();
+    expect(registry.dirtySectionNames()).toEqual([]);
   });
 });

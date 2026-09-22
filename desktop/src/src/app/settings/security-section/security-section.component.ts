@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnDestroy,
   OnInit,
   computed,
@@ -12,6 +13,7 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
+import { SettingsDirtyService } from '../settings-dirty.service';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
   CustomPolicyDtoInput,
@@ -399,9 +401,20 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly projectState = inject(ProjectStateService);
+  private readonly dirtyRegistry = inject(SettingsDirtyService);
   private unsubProjectReady: (() => void) | null = null;
 
   protected readonly eventValue = eventValue;
+
+  /** Registers this section's dirty state with the settings leave guard. */
+  constructor() {
+    const unregister = this.dirtyRegistry.register({
+      name: 'Security',
+      isDirty: computed(() => this.loaded() && this.isDirty()),
+      save: () => this.save(),
+    });
+    inject(DestroyRef).onDestroy(unregister);
+  }
 
   /** Loads categories/templates/policy on first paint; reloads on project switch. */
   ngOnInit(): void {
@@ -829,8 +842,19 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     return { policies, custom_policies };
   }
 
-  /** Persists the enabled policies + custom definitions, then requests a restart. */
+  private saveInFlight: Promise<void> | null = null;
+
+  /** Single-flight wrapper: a save already in flight is returned as-is, never started twice. */
   async save(): Promise<void> {
+    if (this.saveInFlight) return this.saveInFlight;
+    this.saveInFlight = this.doSave().finally(() => {
+      this.saveInFlight = null;
+    });
+    return this.saveInFlight;
+  }
+
+  /** Persists the enabled policies + custom definitions, then requests a restart. */
+  private async doSave(): Promise<void> {
     this.saving.set(true);
     this.saved.set(false);
     this.saveError.set('');
