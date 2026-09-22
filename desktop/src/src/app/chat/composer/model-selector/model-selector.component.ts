@@ -147,7 +147,7 @@ export interface ModelSelection {
                 >
                   <span class="flex min-w-0 items-start gap-2">
                     @if (showEffortControl()) {
-                      <span class="inline-block w-3 text-[var(--teal)]" aria-hidden="true">
+                      <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
                         @if (opt.id === activeOptionId()) {
                           <span data-testid="model-selector-active-mark">&#x2713;</span>
                         }
