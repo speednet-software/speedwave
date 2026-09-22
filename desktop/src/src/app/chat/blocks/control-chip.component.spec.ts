@@ -22,7 +22,6 @@ const CATALOG: AnthropicModel[] = [
 ];
 
 const PICKER: ModelPicker = {
-  source: 'claude_code',
   effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
   rows: [
     {

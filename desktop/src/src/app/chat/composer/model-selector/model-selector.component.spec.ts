@@ -52,7 +52,6 @@ describe('ModelSelectorComponent', () => {
   };
 
   const picker: ModelPicker = {
-    source: 'claude_code',
     effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
     rows: [
       {
@@ -96,6 +95,34 @@ describe('ModelSelectorComponent', () => {
     fixture.componentRef.setInput('streaming', false);
     fixture.detectChanges();
   });
+
+  function optionIds(): string[] {
+    return fixture.debugElement
+      .queryAll(By.css('[data-testid^="model-selector-option-"]'))
+      .map((o) =>
+        (o.nativeElement.getAttribute('data-testid') as string).replace(
+          'model-selector-option-',
+          ''
+        )
+      );
+  }
+
+  function mockWithPickerRows(rows: () => ModelPicker | null): void {
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'get_chat_session_info') return Promise.resolve({ state: 'unavailable' });
+      if (cmd === 'list_model_picker') return Promise.resolve(rows());
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+  }
+
+  async function settle(): Promise<void> {
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+  }
 
   it('shows the normalized badge as the catalog family label (no entry-id prefix)', async () => {
     await fixture.whenStable();
@@ -201,13 +228,7 @@ describe('ModelSelectorComponent', () => {
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
     ).toBeFalsy();
-    const optionIds = fixture.debugElement
-      .queryAll(By.css('[data-testid^="model-selector-option-"]'))
-      .map((o) => o.nativeElement.getAttribute('data-testid'));
-    expect(optionIds).toEqual([
-      'model-selector-option-claude-sonnet-5',
-      'model-selector-option-claude-opus-4-1',
-    ]);
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
   });
 
   it('never renders a 1M marker in a row, whatever wire id the row carries', async () => {
@@ -230,7 +251,6 @@ describe('ModelSelectorComponent', () => {
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker')
         return Promise.resolve({
-          source: 'claude_code',
           effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
           rows: [
             {
@@ -254,6 +274,66 @@ describe('ModelSelectorComponent', () => {
       By.css('[data-testid="model-selector-option-claude-nova-1"]')
     );
     expect(row.nativeElement.textContent).toContain('Nova 1');
+  });
+
+  it('says the model list is unavailable, with Retry, until the session reports its models', async () => {
+    fixture.componentRef.setInput('projectId', 'proj-fresh');
+    mockWithPickerRows(() => null);
+    fixture.detectChanges();
+
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    expect(optionIds()).toEqual([]);
+    const error = fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'));
+    expect(error.nativeElement.textContent).toContain('Model list unavailable.');
+    expect(error.query(By.css('[data-testid="model-selector-retry"]'))).toBeTruthy();
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
+    ).toBeFalsy();
+  });
+
+  it('keeps the last known rows, badge included, while the session respawns', async () => {
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    fixture.componentInstance.open.set(false);
+    fixture.detectChanges();
+
+    mockWithPickerRows(() => null);
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'))).toBeFalsy();
+    expect(
+      fixture.debugElement
+        .query(By.css('[data-testid="model-selector-option-claude-sonnet-5"]'))
+        .query(By.css('[data-testid="model-selector-default-badge"]'))
+    ).toBeTruthy();
+  });
+
+  it('Retry renders the rows once the session reports them', async () => {
+    fixture.componentRef.setInput('projectId', 'proj-fresh');
+    let reported: ModelPicker | null = null;
+    mockWithPickerRows(() => reported);
+    fixture.detectChanges();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(optionIds()).toEqual([]);
+
+    reported = picker;
+    fixture.debugElement
+      .query(By.css('[data-testid="model-selector-retry"]'))
+      .nativeElement.click();
+    await settle();
+
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'))).toBeFalsy();
   });
 
   it('marks the active model with a check mark and the plan default with a badge', async () => {
@@ -390,9 +470,7 @@ describe('ModelSelectorComponent', () => {
     });
     fixture.componentRef.setInput('projectId', 'proj-pending');
     fixture.detectChanges();
-    await fixture.whenStable();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    fixture.detectChanges();
+    await settle();
 
     const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
     expect(badge.nativeElement.disabled).toBe(true);
@@ -978,7 +1056,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
   beforeEach(async () => {
     modelHint = null;
     pickerRows = {
-      source: 'catalog',
       effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
       rows: [
         {
@@ -1054,7 +1131,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
 
   it('shows the plan default by name once Claude Code reports the default row', async () => {
     pickerRows = {
-      source: 'claude_code',
       effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
       rows: [
         {
@@ -1239,7 +1315,7 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
       if (cmd === 'list_anthropic_models') return Promise.resolve(catalog);
       if (cmd === 'get_effort_pin') return Promise.resolve(pin);
       if (cmd === 'list_model_picker' && rows)
-        return Promise.resolve({ source: 'claude_code', rows, effort_order: EFFORT_ORDER });
+        return Promise.resolve({ rows, effort_order: EFFORT_ORDER });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
   }

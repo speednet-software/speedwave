@@ -21,6 +21,8 @@ import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
+const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
+
 interface ModelOption {
   id: string;
   label: string;
@@ -471,8 +473,12 @@ export class ModelSelectorComponent {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
         await this.anthropicModels.list();
-        const picker = (await this.picker.refresh(projectId)) ?? this.picker.picker(projectId);
-        if (!picker) throw new Error('model picker rows unavailable');
+        const picker = await this.picker.refresh(projectId);
+        if (!picker) {
+          this.options.set([]);
+          this.error.set(MODEL_LIST_UNAVAILABLE);
+          return;
+        }
         this.options.set(this.anthropicOptionsFrom(picker, projectId));
       } else {
         const isOpenRouter = summary.kind === 'open_router';

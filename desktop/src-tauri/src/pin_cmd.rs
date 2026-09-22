@@ -106,6 +106,8 @@ fn picker_wire_ids(session_arc: &SharedChatSession, project_name: &str) -> Vec<S
     config::load_user_config()
         .map_err(|e| e.to_string())
         .and_then(|cfg| crate::model_picker::picker_for(&cfg, session_arc, project_name))
+        .ok()
+        .flatten()
         .map(|picker| picker.rows.into_iter().map(|r| r.wire_id).collect())
         .unwrap_or_default()
 }
