@@ -182,7 +182,7 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     reminder.title = name
 
     if let filter = params["list_id"] as? String {
-        reminder.calendar = try resolveReminderList(filter, store: store)
+        reminder.calendar = try resolveSingleCalendar(for: .reminder, filter: filter, store: store)
     } else {
         reminder.calendar = store.defaultCalendarForNewReminders()
     }
@@ -231,7 +231,7 @@ func applyReminderUpdate(_ params: [String: Any], to reminder: EKReminder, store
     }
 
     if let filter = params["list_id"] as? String {
-        reminder.calendar = try resolveReminderList(filter, store: store)
+        reminder.calendar = try resolveSingleCalendar(for: .reminder, filter: filter, store: store)
     }
 
     if params["due_date"] is NSNull {
@@ -279,15 +279,6 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
     return ["status": "completed"]
 }
 
-
-/// One list by id or exact name; several lists sharing a name are refused rather than picked blindly.
-func resolveReminderList(_ filter: String, store: EKEventStore) throws -> EKCalendar {
-    let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
-    guard matches.count == 1 else {
-        throw CLIError.ambiguous("Reminder list '\(filter)' matches \(matches.count) lists; pass the list id instead")
-    }
-    return matches[0]
-}
 
 func reminderToDict(_ r: EKReminder, timeZone: TimeZone = .current) -> [String: Any] {
     let rawNotes = r.notes ?? ""

@@ -133,6 +133,45 @@ final class SharedCLITests: XCTestCase {
     }
 
 
+    private func calendars(_ titles: [String], for entityType: EKEntityType) -> [EKCalendar] {
+        let store = EKEventStore()
+        return titles.map { title in
+            let calendar = EKCalendar(for: entityType, eventStore: store)
+            calendar.title = title
+            return calendar
+        }
+    }
+
+    func testSingleCalendarMatchReturnsTheOnlyMatch() throws {
+        let work = calendars(["Work"], for: .event)
+        XCTAssertTrue(try singleCalendarMatch(work, filter: "Work", entityType: .event) === work[0])
+    }
+
+    func testSingleCalendarMatchRefusesACalendarNameSharedByTwoCalendars() {
+        let twins = calendars(["Work", "Work"], for: .event)
+        XCTAssertThrowsError(try singleCalendarMatch(twins, filter: "Work", entityType: .event)) { error in
+            guard case CLIError.ambiguous(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(message, "Calendar 'Work' matches 2 calendars; pass the calendar id instead")
+        }
+    }
+
+    func testSingleCalendarMatchRefusesAListNameSharedByTwoReminderLists() {
+        let twins = calendars(["Groceries", "Groceries"], for: .reminder)
+        XCTAssertThrowsError(try singleCalendarMatch(twins, filter: "Groceries", entityType: .reminder)) { error in
+            guard case CLIError.ambiguous(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(message, "Reminder list 'Groceries' matches 2 lists; pass the list id instead")
+        }
+    }
+
+    func testResolveSingleCalendarReportsAnUnknownNameAsNotFound() {
+        let filter = "speedwave-test-no-such-calendar"
+        XCTAssertThrowsError(try resolveSingleCalendar(for: .event, filter: filter, store: EKEventStore())) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(message, "Calendar '\(filter)' not found")
+        }
+    }
+
+
     func testCLIErrorMissingField() {
         let error = CLIError.missingField("name")
         XCTAssertEqual(error.errorDescription, "Missing required field: name")

@@ -156,8 +156,7 @@ func createEvent(store: EKEventStore, params: [String: Any]) throws -> [String: 
     event.endDate = endDate
 
     if let filter = params["calendar_id"] as? String {
-        let matches = try resolveCalendars(for: .event, filter: filter, store: store)
-        event.calendar = matches[0]
+        event.calendar = try resolveSingleCalendar(for: .event, filter: filter, store: store)
     } else {
         event.calendar = store.defaultCalendarForNewEvents
     }
