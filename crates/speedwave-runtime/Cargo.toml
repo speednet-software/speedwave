@@ -84,6 +84,10 @@ name = "lock_acquisitions"
 required-features = ["test-support"]
 
 [[test]]
+name = "apt_noninteractive"
+required-features = ["test-support"]
+
+[[test]]
 name = "compose_lock_cross_process"
 required-features = ["test-support"]
 

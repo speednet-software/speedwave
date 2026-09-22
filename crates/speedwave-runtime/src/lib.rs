@@ -53,6 +53,13 @@ pub mod usage;
 pub mod usage_cost;
 pub mod validation;
 
+/// Test-only re-export of the host build-output dir names.
+#[cfg(any(test, feature = "test-support"))]
+pub mod bundle_test_support {
+    /// Host build-output dir names that tests walking the repo must skip.
+    pub const HOST_BUILD_OUTPUT_DIRS: &[&str] = crate::bundle::HOST_BUILD_OUTPUT_DIRS;
+}
+
 /// Test-only re-exports of internal transaction helpers.
 #[cfg(any(test, feature = "test-support"))]
 pub mod update_test_support {
