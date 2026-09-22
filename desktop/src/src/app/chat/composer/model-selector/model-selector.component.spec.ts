@@ -695,6 +695,125 @@ describe('ModelSelectorComponent', () => {
     expect(discoverCalls).toBe(3);
   });
 
+  it('shows the last discovered routed list, marked as not refreshed, when a new selector instance cannot reach the provider', async () => {
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openai/o4-mini',
+      base_url: null,
+    };
+    let reachable = true;
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      if (cmd === 'discover_llm_models') {
+        return reachable
+          ? Promise.resolve({
+              models: [{ id: 'openai/o4-mini' }, { id: 'meta-llama/llama-3.1-70b-instruct' }],
+            })
+          : Promise.reject(new Error('Failed to read models response chunk: operation timed out'));
+      }
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or-held');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(
+      fixture.debugElement.queryAll(By.css('[data-testid^="model-selector-option-"]')).length
+    ).toBe(2);
+
+    fixture.destroy();
+    reachable = false;
+    const revived = TestBed.createComponent(ModelSelectorComponent);
+    revived.componentRef.setInput('projectId', 'proj-or-held');
+    revived.detectChanges();
+    await revived.whenStable();
+    await revived.componentInstance.openCombobox();
+    await revived.componentInstance.whenOptionsSettled();
+    revived.detectChanges();
+
+    expect(revived.debugElement.query(By.css('[data-testid="model-selector-error"]'))).toBeFalsy();
+    expect(
+      revived.debugElement.queryAll(By.css('[data-testid^="model-selector-option-"]')).length
+    ).toBe(2);
+    expect(revived.debugElement.query(By.css('[data-testid="model-selector-stale"]'))).toBeTruthy();
+  });
+
+  it('drops the not-refreshed marker once a retry reaches the provider again', async () => {
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openai/o4-mini',
+      base_url: null,
+    };
+    let reachable = true;
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      if (cmd === 'discover_llm_models') {
+        return reachable
+          ? Promise.resolve({ models: [{ id: 'openai/o4-mini' }] })
+          : Promise.reject(new Error('Failed to read models response chunk: operation timed out'));
+      }
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or-retry');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+
+    reachable = false;
+    await fixture.componentInstance.fetchOptions(true);
+    fixture.detectChanges();
+    const stale = fixture.debugElement.query(By.css('[data-testid="model-selector-stale"]'));
+    expect(stale).toBeTruthy();
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="model-selector-option-openai/o4-mini"]'))
+    ).toBeTruthy();
+
+    reachable = true;
+    stale.query(By.css('[data-testid="model-selector-retry"]')).nativeElement.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="model-selector-stale"]'))).toBeFalsy();
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="model-selector-option-openai/o4-mini"]'))
+    ).toBeTruthy();
+  });
+
+  it('shows the failure message with no list when a routed provider was never reached', async () => {
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openai/o4-mini',
+      base_url: null,
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      if (cmd === 'discover_llm_models')
+        return Promise.reject(
+          new Error('Failed to read models response chunk: operation timed out')
+        );
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or-never');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    const error = fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'));
+    expect(error.nativeElement.textContent).toContain('Failed to load models.');
+    expect(error.query(By.css('[data-testid="model-selector-retry"]'))).toBeTruthy();
+    expect(fixture.debugElement.query(By.css('[data-testid="model-selector-stale"]'))).toBeFalsy();
+    expect(
+      fixture.debugElement.queryAll(By.css('[data-testid^="model-selector-option-"]')).length
+    ).toBe(0);
+  });
+
   it('emits exactly one modelSelected event carrying catalogId, wireId, providerId and kind', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
