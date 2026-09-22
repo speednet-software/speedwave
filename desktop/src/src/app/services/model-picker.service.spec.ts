@@ -31,7 +31,6 @@ const CATALOG: AnthropicModel[] = [
 ];
 
 const PICKER: ModelPicker = {
-  source: 'claude_code',
   effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
   rows: [
     {
@@ -72,7 +71,7 @@ describe('ModelPickerService', () => {
   let logger: ReturnType<typeof makeMockLogger>;
   let service: ModelPickerService;
   let pickerCalls: Array<Record<string, unknown> | undefined>;
-  let pickerResult: () => Promise<ModelPicker>;
+  let pickerResult: () => Promise<ModelPicker | null>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
@@ -115,12 +114,45 @@ describe('ModelPickerService', () => {
       throw new Error('the model picker rows exist for Anthropic providers only');
     };
 
-    expect(await service.refresh('acme')).toBeNull();
+    expect(await service.refresh('acme')).toEqual(PICKER);
 
     expect(service.picker('acme')).toEqual(PICKER);
     expect(logger.warn).toHaveBeenCalledWith(
       'list_model_picker failed: the model picker rows exist for Anthropic providers only'
     );
+  });
+
+  it('keeps the last known rows while the session has not reported its models', async () => {
+    await service.refresh('acme');
+    pickerResult = async () => null;
+
+    expect(await service.refresh('acme')).toEqual(PICKER);
+
+    expect(pickerCalls).toEqual([{ project: 'acme' }, { project: 'acme' }]);
+    expect(service.picker('acme')).toEqual(PICKER);
+    expect(service.rowFor('acme', 'default')?.id).toBe('claude-opus-5');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('has no rows while nothing is known and the session has not reported its models', async () => {
+    pickerResult = async () => null;
+
+    expect(await service.refresh('acme')).toBeNull();
+
+    expect(service.picker('acme')).toBeNull();
+    expect(service.rowFor('acme', 'default')).toBeNull();
+    expect(service.label('default', 'acme')).toBe('default');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('replaces the held rows once the session reports its models again', async () => {
+    pickerResult = async () => null;
+    await service.refresh('acme');
+    pickerResult = async () => PICKER;
+
+    expect(await service.refresh('acme')).toEqual(PICKER);
+
+    expect(service.picker('acme')).toEqual(PICKER);
   });
 
   it('finds the row of every spelling of a model id', async () => {

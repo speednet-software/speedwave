@@ -11,13 +11,6 @@ use std::path::Path;
 
 const DEFAULT_ROW_VALUE: &str = "default";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum PickerSource {
-    ClaudeCode,
-    Catalog,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct PickerRow {
     pub(crate) id: String,
@@ -32,7 +25,6 @@ pub(crate) struct PickerRow {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ModelPicker {
-    pub(crate) source: PickerSource,
     pub(crate) rows: Vec<PickerRow>,
     pub(crate) effort_order: Vec<String>,
 }
@@ -72,24 +64,6 @@ fn catalog_default_effort(id: &str, levels: &[String]) -> Option<String> {
         .and_then(|m| m.default_effort)
         .filter(|default| levels.iter().any(|l| l == default))
         .map(str::to_string)
-}
-
-fn catalog_row(model: &AnthropicModelInfo, plan: AnthropicPlan) -> PickerRow {
-    let effort_levels: Vec<String> = model
-        .effort_levels
-        .iter()
-        .map(|l| (*l).to_string())
-        .collect();
-    PickerRow {
-        id: model.id.to_string(),
-        wire_id: anthropic_wire_model_id(model.id, plan),
-        is_default: false,
-        display_name: None,
-        description: None,
-        requires_usage_credits: false,
-        default_effort: catalog_default_effort(model.id, &effort_levels),
-        effort_levels,
-    }
 }
 
 fn group_of<'a>(id: &str, info: &'a SessionInfo) -> Vec<&'a ModelRow> {
@@ -202,21 +176,10 @@ fn listed_row(id: &str, info: &SessionInfo, plan: AnthropicPlan, is_default: boo
     }
 }
 
-fn catalog_picker(plan: AnthropicPlan) -> ModelPicker {
-    ModelPicker {
-        source: PickerSource::Catalog,
-        rows: ANTHROPIC_MODELS
-            .iter()
-            .map(|m| catalog_row(m, plan))
-            .collect(),
-        effort_order: effort_order(),
+pub(crate) fn build_picker(info: &SessionInfo, plan: AnthropicPlan) -> Option<ModelPicker> {
+    if info.models.is_empty() {
+        return None;
     }
-}
-
-pub(crate) fn build_picker(info: Option<&SessionInfo>, plan: AnthropicPlan) -> ModelPicker {
-    let Some(info) = info.filter(|i| !i.models.is_empty()) else {
-        return catalog_picker(plan);
-    };
     let default_id = info
         .models
         .iter()
@@ -232,11 +195,10 @@ pub(crate) fn build_picker(info: Option<&SessionInfo>, plan: AnthropicPlan) -> M
         let is_default = default_id.as_deref() == Some(id);
         rows.push(listed_row(id, info, plan, is_default));
     }
-    ModelPicker {
-        source: PickerSource::ClaudeCode,
+    Some(ModelPicker {
         rows,
         effort_order: effort_order(),
-    }
+    })
 }
 
 pub(crate) fn normalized_pin(pin: &str, plan: AnthropicPlan) -> Option<String> {
@@ -260,9 +222,7 @@ pub(crate) fn normalize_pin_for_session(
     info: Option<&SessionInfo>,
 ) {
     let plan = plan_for(kind, info);
-    let picker = info
-        .filter(|session| !session.models.is_empty())
-        .map(|session| build_picker(Some(session), plan));
+    let picker = info.and_then(|session| build_picker(session, plan));
     match crate::claude_settings::normalize_model_pin(data_dir, project, |pin| {
         if let Some(picker) = &picker {
             let id = canonical_anthropic_model_id(pin);
@@ -296,23 +256,21 @@ pub(crate) fn picker_for(
     user_config: &config::SpeedwaveUserConfig,
     session_arc: &SharedChatSession,
     project: &str,
-) -> Result<ModelPicker, String> {
+) -> Result<Option<ModelPicker>, String> {
     let summary = crate::containers_cmd::active_provider_summary_from(user_config, project)?;
     if !summary.kind.is_anthropic() {
         return Err("the model picker rows exist for Anthropic providers only".to_string());
     }
     let info = session_info_for(session_arc, project);
-    Ok(build_picker(
-        info.as_ref(),
-        plan_for(summary.kind, info.as_ref()),
-    ))
+    let plan = plan_for(summary.kind, info.as_ref());
+    Ok(info.as_ref().and_then(|info| build_picker(info, plan)))
 }
 
 #[tauri::command]
 pub(crate) fn list_model_picker(
     project: String,
     state: tauri::State<'_, SharedChatSession>,
-) -> Result<ModelPicker, String> {
+) -> Result<Option<ModelPicker>, String> {
     check_project(&project)?;
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     picker_for(&user_config, state.inner(), &project)
@@ -361,6 +319,10 @@ mod tests {
         (&row.effort_levels, row.default_effort.as_deref())
     }
 
+    fn picker_of(info: &SessionInfo, plan: AnthropicPlan) -> ModelPicker {
+        build_picker(info, plan).expect("Claude Code listed at least one model")
+    }
+
     #[test]
     fn listed_model_takes_its_effort_stops_from_claude_code_not_the_catalog() {
         let info = info_of(
@@ -371,7 +333,7 @@ mod tests {
             )],
             Some("Claude Max"),
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Max);
+        let picker = picker_of(&info, AnthropicPlan::Max);
         let (levels, default) = effort_of(&picker, "claude-sonnet-5");
         assert_eq!(levels, ["low", "medium", "high"]);
         assert_eq!(default, Some("high"));
@@ -379,7 +341,7 @@ mod tests {
 
     #[test]
     fn listed_model_without_supports_effort_offers_no_stops() {
-        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
         let (levels, default) = effort_of(&picker, "claude-haiku-4-5");
         assert!(levels.is_empty());
         assert_eq!(default, None);
@@ -389,13 +351,13 @@ mod tests {
     fn listed_model_with_levels_but_no_supports_effort_flag_offers_no_stops() {
         let mut row = listed_with_effort("opus", "claude-opus-5", &["low", "high"]);
         row.supports_effort = false;
-        let picker = build_picker(Some(&info_of(vec![row], None)), AnthropicPlan::Unknown);
+        let picker = picker_of(&info_of(vec![row], None), AnthropicPlan::Unknown);
         assert!(effort_of(&picker, "claude-opus-5").0.is_empty());
     }
 
     #[test]
     fn captured_max_account_reports_all_five_stops_for_every_listed_effort_model() {
-        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
         for id in ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5"] {
             let (levels, default) = effort_of(&picker, id);
             assert_eq!(levels, EFFORT_LEVELS, "{id}");
@@ -405,7 +367,7 @@ mod tests {
 
     #[test]
     fn successful_initialize_does_not_restore_models_claude_code_omits() {
-        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
         for id in [
             "claude-fable-5",
             "claude-opus-4-8",
@@ -414,16 +376,6 @@ mod tests {
             "claude-sonnet-4-6",
         ] {
             assert!(!picker.rows.iter().any(|row| row.id == id), "{id}");
-        }
-    }
-
-    #[test]
-    fn catalog_fallback_keeps_the_catalog_effort_table_for_every_row() {
-        let picker = build_picker(None, AnthropicPlan::Unknown);
-        for model in ANTHROPIC_MODELS {
-            let (levels, default) = effort_of(&picker, model.id);
-            assert_eq!(levels, model.effort_levels, "{}", model.id);
-            assert_eq!(default, model.default_effort, "{}", model.id);
         }
     }
 
@@ -437,7 +389,7 @@ mod tests {
             )],
             None,
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        let picker = picker_of(&info, AnthropicPlan::Unknown);
         assert_eq!(
             effort_of(&picker, "claude-opus-5").0,
             ["low", "high", "max"]
@@ -454,7 +406,7 @@ mod tests {
             )],
             None,
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        let picker = picker_of(&info, AnthropicPlan::Unknown);
         assert_eq!(effort_of(&picker, "claude-opus-4-7").1, None);
     }
 
@@ -468,7 +420,7 @@ mod tests {
             )],
             None,
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        let picker = picker_of(&info, AnthropicPlan::Unknown);
         let (levels, default) = effort_of(&picker, "claude-nova-1");
         assert_eq!(levels, ["low", "high"]);
         assert_eq!(default, None);
@@ -476,12 +428,8 @@ mod tests {
 
     #[test]
     fn picker_carries_the_effort_order_from_the_ssot() {
-        for picker in [
-            build_picker(None, AnthropicPlan::Unknown),
-            build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max),
-        ] {
-            assert_eq!(picker.effort_order, EFFORT_LEVELS);
-        }
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        assert_eq!(picker.effort_order, EFFORT_LEVELS);
     }
 
     fn info_of(models: Vec<ModelRow>, plan: Option<&str>) -> SessionInfo {
@@ -513,8 +461,7 @@ mod tests {
             let info = fixture_info(run);
             let plan = plan_for(LlmProviderKind::AnthropicOauth, Some(&info));
             assert_eq!(plan, AnthropicPlan::Max);
-            let picker = build_picker(Some(&info), plan);
-            assert_eq!(picker.source, PickerSource::ClaudeCode);
+            let picker = picker_of(&info, plan);
             assert_eq!(
                 labels(&picker),
                 vec!["Opus 5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"],
@@ -534,7 +481,7 @@ mod tests {
     #[test]
     fn max_account_wire_ids_are_exactly_the_reported_variants() {
         let info = fixture_info("run_A");
-        let picker = build_picker(Some(&info), AnthropicPlan::Max);
+        let picker = picker_of(&info, AnthropicPlan::Max);
         let wire: Vec<&str> = picker.rows.iter().map(|r| r.wire_id.as_str()).collect();
         assert_eq!(
             wire,
@@ -556,10 +503,10 @@ mod tests {
             ],
             Some("Claude Pro"),
         );
-        let pro = build_picker(Some(&info), AnthropicPlan::Pro);
+        let pro = picker_of(&info, AnthropicPlan::Pro);
         assert_eq!(pro.rows[0].wire_id, "claude-opus-5");
 
-        let max = build_picker(Some(&info), AnthropicPlan::Max);
+        let max = picker_of(&info, AnthropicPlan::Max);
         assert_eq!(max.rows[0].wire_id, "claude-opus-5[1m]");
     }
 
@@ -573,7 +520,7 @@ mod tests {
             )],
             Some("Claude Pro"),
         );
-        let row = &build_picker(Some(&info), AnthropicPlan::Pro).rows[0];
+        let row = &picker_of(&info, AnthropicPlan::Pro).rows[0];
         assert_eq!(row.wire_id, "claude-opus-5-20260901[1m]");
     }
 
@@ -588,13 +535,19 @@ mod tests {
             plan_for(LlmProviderKind::AnthropicApiKey, None),
             AnthropicPlan::Api
         );
-        let picker = build_picker(None, AnthropicPlan::Api);
-        let sonnet_46 = picker
-            .rows
-            .iter()
-            .find(|r| r.id == "claude-sonnet-4-6")
-            .unwrap();
-        assert_eq!(sonnet_46.wire_id, "claude-sonnet-4-6[1m]");
+        let info = info_of(
+            vec![
+                listed("claude-sonnet-4-6", Some("claude-sonnet-4-6"), "Sonnet 4.6"),
+                listed(
+                    "claude-sonnet-4-6[1m]",
+                    Some("claude-sonnet-4-6[1m]"),
+                    "Sonnet 4.6 (1M context)",
+                ),
+            ],
+            None,
+        );
+        let picker = picker_of(&info, AnthropicPlan::Api);
+        assert_eq!(picker.rows[0].wire_id, "claude-sonnet-4-6[1m]");
     }
 
     #[test]
@@ -624,7 +577,7 @@ mod tests {
             ],
             Some("Claude Pro"),
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Pro);
+        let picker = picker_of(&info, AnthropicPlan::Pro);
         assert_eq!(labels(&picker), vec!["Sonnet 5", "Haiku 4.5"]);
         assert!(picker.rows[0].is_default);
     }
@@ -638,14 +591,14 @@ mod tests {
             ],
             Some("Claude Max"),
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Max);
+        let picker = picker_of(&info, AnthropicPlan::Max);
         assert_eq!(labels(&picker), vec!["Opus 4.8", "Sonnet 5"]);
         assert!(picker.rows.iter().all(|r| !r.is_default));
     }
 
     #[test]
     fn dated_resolved_model_groups_with_its_catalog_row_and_keeps_the_snapshot() {
-        let picker = build_picker(Some(&fixture_info("run_B")), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_B"), AnthropicPlan::Max);
         let haiku: Vec<&PickerRow> = picker
             .rows
             .iter()
@@ -670,7 +623,7 @@ mod tests {
             ],
             Some("Claude Max"),
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Max);
+        let picker = picker_of(&info, AnthropicPlan::Max);
         let row = &picker.rows[0];
         assert_eq!(row.id, "claude-opus-9");
         assert_eq!(row.display_name.as_deref(), Some("Opus"));
@@ -696,7 +649,7 @@ mod tests {
             )],
             Some("Claude Max"),
         );
-        let row = &build_picker(Some(&info), AnthropicPlan::Max).rows[0];
+        let row = &picker_of(&info, AnthropicPlan::Max).rows[0];
         assert_eq!(row.id, "claude-nova-1");
         assert_eq!(row.wire_id, "claude-nova-1[1m]");
         assert_eq!(row.display_name.as_deref(), Some("Nova 1"));
@@ -706,11 +659,7 @@ mod tests {
     fn picker_preserves_the_selected_rows_usage_credit_warning() {
         let mut paid = listed("claude-fable-5-1", Some("claude-fable-5-1"), "Fable");
         paid.description = "Fable 5.1 · Requires usage credits for this account".to_string();
-        let row = &build_picker(
-            Some(&info_of(vec![paid], Some("Claude Pro"))),
-            AnthropicPlan::Pro,
-        )
-        .rows[0];
+        let row = &picker_of(&info_of(vec![paid], Some("Claude Pro")), AnthropicPlan::Pro).rows[0];
         assert_eq!(
             row.description.as_deref(),
             Some("Fable 5.1 · Requires usage credits for this account")
@@ -722,8 +671,8 @@ mod tests {
     fn ordinary_descriptions_do_not_trigger_the_usage_credit_warning() {
         let mut included = listed("sonnet", Some("claude-sonnet-5"), "Sonnet");
         included.description = "Efficient for routine tasks".to_string();
-        let row = &build_picker(
-            Some(&info_of(vec![included], Some("Claude Pro"))),
+        let row = &picker_of(
+            &info_of(vec![included], Some("Claude Pro")),
             AnthropicPlan::Pro,
         )
         .rows[0];
@@ -740,28 +689,19 @@ mod tests {
             vec![listed("claude-sonnet-5[1m]", None, "Sonnet 5 (1M context)")],
             None,
         );
-        let picker = build_picker(Some(&info), AnthropicPlan::Unknown);
+        let picker = picker_of(&info, AnthropicPlan::Unknown);
         assert_eq!(picker.rows[0].id, "claude-sonnet-5");
         assert_eq!(picker.rows[0].wire_id, "claude-sonnet-5[1m]");
     }
 
     #[test]
-    fn no_session_info_or_an_empty_list_falls_back_to_the_whole_catalog() {
-        for picker in [
-            build_picker(None, AnthropicPlan::Unknown),
-            build_picker(Some(&info_of(Vec::new(), None)), AnthropicPlan::Unknown),
+    fn an_empty_model_list_yields_no_picker() {
+        for plan in [
+            AnthropicPlan::Unknown,
+            AnthropicPlan::Max,
+            AnthropicPlan::Api,
         ] {
-            assert_eq!(picker.source, PickerSource::Catalog);
-            let ids: Vec<&str> = picker.rows.iter().map(|r| r.id.as_str()).collect();
-            let catalog: Vec<&str> = ANTHROPIC_MODELS.iter().map(|m| m.id).collect();
-            assert_eq!(ids, catalog);
-            assert!(picker.rows.iter().all(|r| !r.is_default));
-            let opus = picker
-                .rows
-                .iter()
-                .find(|r| r.id == "claude-opus-5")
-                .unwrap();
-            assert_eq!(opus.wire_id, "claude-opus-5");
+            assert_eq!(build_picker(&info_of(Vec::new(), None), plan), None);
         }
     }
 
@@ -769,7 +709,7 @@ mod tests {
     fn no_row_id_or_display_name_carries_a_1m_marker() {
         let info = fixture_info("run_A");
         for plan in [AnthropicPlan::Max, AnthropicPlan::Pro, AnthropicPlan::Api] {
-            for row in build_picker(Some(&info), plan).rows {
+            for row in picker_of(&info, plan).rows {
                 assert!(!row.id.contains("[1m]"), "{row:?}");
                 let name = row.display_name.unwrap_or_default().to_ascii_lowercase();
                 assert!(!name.contains("1m"), "{name}");
@@ -950,7 +890,7 @@ mod tests {
     #[test]
     fn model_picker_matches_ts_mirror() {
         let ts = include_str!("../../src/src/app/models/model-picker.ts");
-        let picker = build_picker(Some(&fixture_info("run_A")), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
         let fields = |value: serde_json::Value| {
             let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
             keys.sort_unstable();
@@ -979,12 +919,76 @@ mod tests {
             fields(serde_json::to_value(&picker).unwrap()),
             ts_fields("ModelPicker")
         );
-        for source in [PickerSource::ClaudeCode, PickerSource::Catalog] {
-            let tag = serde_json::to_value(source).unwrap();
-            assert!(
-                ts.contains(&format!("'{}'", tag.as_str().unwrap())),
-                "ModelPickerSource must carry {tag}"
-            );
+    }
+
+    fn anthropic_oauth_config(project: &str) -> config::SpeedwaveUserConfig {
+        config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: project.to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(config::LlmConfig {
+                        schema_version: Some(config::LLM_SCHEMA_VERSION),
+                        providers: vec![config::LlmProviderEntry {
+                            id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                            kind: LlmProviderKind::AnthropicOauth,
+                            base_url: None,
+                            model: None,
+                            has_api_key: false,
+                            context_tokens: None,
+                            has_custom_headers: false,
+                        }],
+                        active: Some(config::LlmActive {
+                            provider_id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                            model: None,
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            ..Default::default()
         }
+    }
+
+    fn idle_session(project: &str) -> SharedChatSession {
+        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new(
+            project,
+        )))
+    }
+
+    #[test]
+    fn picker_offers_no_rows_until_the_session_reports_its_models() {
+        let cfg = anthropic_oauth_config("proj");
+        let session = idle_session("proj");
+
+        assert_eq!(picker_for(&cfg, &session, "proj").unwrap(), None);
+
+        let held = session.lock().unwrap();
+        let respawning = picker_for(&cfg, &session, "proj");
+        drop(held);
+        assert_eq!(respawning.unwrap(), None);
+    }
+
+    #[test]
+    fn picker_rows_exist_for_anthropic_providers_only() {
+        let mut cfg = anthropic_oauth_config("proj");
+        let llm = cfg.projects[0]
+            .claude
+            .as_mut()
+            .unwrap()
+            .llm
+            .as_mut()
+            .unwrap();
+        llm.providers[0].kind = LlmProviderKind::Local;
+        llm.providers[0].base_url = Some("http://host.docker.internal:11434".to_string());
+
+        let err = picker_for(&cfg, &idle_session("proj"), "proj").unwrap_err();
+        assert!(err.contains("Anthropic providers only"), "{err}");
     }
 }

@@ -36,20 +36,24 @@ export class ModelPickerService {
   }
 
   /**
-   * Re-reads the rows from the backend; a failure keeps the previous rows and returns `null`.
+   * Re-reads the rows and returns the rows held afterwards: a session that has not reported its
+   * models yet (`null` from the backend) and a failed call both keep the previous rows.
    * @param project - Project the rows belong to.
    */
   async refresh(project: string): Promise<ModelPicker | null> {
     try {
-      const picker = await this.tauri.invoke<ModelPicker>('list_model_picker', { project });
-      const next = new Map(this.pickers());
-      next.set(project, picker);
-      this.pickers.set(next);
-      return picker;
+      const picker = await this.tauri.invoke<ModelPicker | null>('list_model_picker', {
+        project,
+      });
+      if (picker) {
+        const next = new Map(this.pickers());
+        next.set(project, picker);
+        this.pickers.set(next);
+      }
     } catch (e: unknown) {
       this.log.warn(`list_model_picker failed: ${e instanceof Error ? e.message : String(e)}`);
-      return null;
     }
+    return this.picker(project);
   }
 
   /**

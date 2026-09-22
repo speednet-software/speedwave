@@ -1,6 +1,3 @@
-/** Where the picker rows came from. Mirror of Rust `model_picker::PickerSource`. */
-export type ModelPickerSource = 'claude_code' | 'catalog';
-
 /**
  * One picker row per model; `wire_id` is what gets pinned and sent, `effort_levels` are the slider
  * stops (Claude Code's where it lists the model). Mirror of Rust `model_picker::PickerRow`.
@@ -16,9 +13,11 @@ export interface ModelPickerRow {
   default_effort: string | null;
 }
 
-/** Anthropic picker rows of one project plus the slider order. Mirror of Rust `model_picker::ModelPicker`. */
+/**
+ * The rows Claude Code listed for one project plus the slider order; `list_model_picker` returns
+ * `null` until the session reports them. Mirror of Rust `model_picker::ModelPicker`.
+ */
 export interface ModelPicker {
-  source: ModelPickerSource;
   rows: ModelPickerRow[];
   effort_order: string[];
 }
