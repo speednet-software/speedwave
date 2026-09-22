@@ -168,15 +168,16 @@ export class ChatStateService {
       return;
     }
     const effort = this._pendingEffortOverride();
-    if (effort) {
+    if (effort && !this._pendingQueue) {
       this._pendingEffortOverride.set(null);
-      void this.sendMessage(`/effort ${effort}`);
+      void this.applyEffortToConversation(effort);
     }
   }
 
   /**
    * Persists the effort pin, then applies it: queued mid-turn, wired as `/effort` into a live
-   * conversation, or by respawning a session that has no conversation yet (SPEED-538).
+   * conversation (after a `--resume` respawn when its process holds the launch effort, SPEED-650),
+   * or by respawning a session that has no conversation yet (SPEED-538).
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
@@ -193,11 +194,38 @@ export class ChatStateService {
     if (this.isStreaming) {
       this._pendingEffortOverride.set(level);
     } else if (this.hasLiveSession() && this.hasConversation()) {
-      await this.sendMessage(`/effort ${level}`);
+      await this.applyEffortToConversation(level);
     } else if (!this._resumeInProgress) {
       this.resetForNewConversation();
       this.initialized = true;
       await this.startChatSession();
+    }
+  }
+
+  private async applyEffortToConversation(level: string): Promise<void> {
+    const sessionId = this._lastKnownSessionId;
+    const generation = this._sessionGeneration;
+    const held = sessionId !== null && !(await this.sessionTakesWireEffort());
+    if (generation !== this._sessionGeneration || sessionId !== this._lastKnownSessionId) return;
+    if (held && !this.isStreaming && (await this.resumeConversation(sessionId)) !== 'started') {
+      return;
+    }
+    if (this.isStreaming) {
+      this._pendingEffortOverride.set(level);
+      return;
+    }
+    await this.sendMessage(`/effort ${level}`);
+  }
+
+  private async sessionTakesWireEffort(): Promise<boolean> {
+    try {
+      const launchEffort = await this.tauri.invoke<string | null>('get_chat_launch_effort', {
+        project: this.projectState.activeProject() ?? '',
+      });
+      return typeof launchEffort === 'string';
+    } catch (e: unknown) {
+      this.log.debug(`[chat-state] get_chat_launch_effort failed: ${String(e)}`);
+      return false;
     }
   }
 
@@ -1412,9 +1440,10 @@ export class ChatStateService {
   /**
    * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
    * @param sessionId - session UUID to resume.
+   * @returns `started` only when this call resumed the session; a superseded or skipped resume is `skipped`.
    */
-  async resumeConversation(sessionId: string): Promise<void> {
-    if (this._resumeInProgress) return;
+  async resumeConversation(sessionId: string): Promise<StartOutcome> {
+    if (this._resumeInProgress) return 'skipped';
     this._resumeInProgress = true;
     if (this.projectState.restartInFlight && !(await this.outlastRestart())) {
       this._resumeInProgress = false;
@@ -1430,7 +1459,7 @@ export class ChatStateService {
     let outcome: StartOutcome = 'started';
     try {
       const project = this.projectState.activeProject();
-      if (!project) return;
+      if (!project) return 'skipped';
 
       const transcriptPromise = this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
@@ -1441,7 +1470,7 @@ export class ChatStateService {
       const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
 
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
-      if (gen !== this._sessionGeneration) return;
+      if (gen !== this._sessionGeneration) return 'skipped';
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
       } else {
@@ -1465,7 +1494,7 @@ export class ChatStateService {
       this._optimisticSessionId = null;
       if (gen !== this._sessionGeneration) {
         this.log.debug(`[chat-state] resumeConversation superseded by a reset: ${String(err)}`);
-        return;
+        return 'skipped';
       }
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
@@ -1492,6 +1521,7 @@ export class ChatStateService {
         void this.startChatSession();
       }
     }
+    return outcome;
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];

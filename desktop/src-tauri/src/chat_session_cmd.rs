@@ -188,6 +188,19 @@ pub(crate) fn session_info_state_inner(
     }
 }
 
+fn launch_effort_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> Result<Option<String>, String> {
+    let session = session_arc
+        .try_lock()
+        .map_err(|_| MSG_SESSION_BUSY.to_string())?;
+    if session.project_name() != project {
+        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+    }
+    Ok(session.launch_effort().map(str::to_string))
+}
+
 fn control_handle_for(
     session_arc: &SharedChatSession,
     project: &str,
@@ -221,6 +234,15 @@ pub(crate) async fn get_chat_session_info(
 ) -> Result<SessionInfoState, String> {
     check_project(&project)?;
     Ok(session_info_state_inner(state.inner(), &project))
+}
+
+#[tauri::command]
+pub(crate) async fn get_chat_launch_effort(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<Option<String>, String> {
+    check_project(&project)?;
+    launch_effort_inner(state.inner(), &project)
 }
 
 #[tauri::command]
@@ -292,6 +314,39 @@ mod tests {
         assert_eq!(
             session_info_state_inner(&session_arc, "acme"),
             SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn launch_effort_is_none_for_a_session_that_never_spawned() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        assert_eq!(launch_effort_inner(&session_arc, "acme"), Ok(None));
+    }
+
+    #[test]
+    fn launch_effort_reports_the_level_the_session_spawned_with() {
+        let mut session = ChatSession::new("acme");
+        session.set_test_launch_effort(Some("xhigh"));
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
+        assert_eq!(
+            launch_effort_inner(&session_arc, "acme"),
+            Ok(Some("xhigh".to_string()))
+        );
+    }
+
+    #[test]
+    fn launch_effort_errors_for_another_project_and_while_the_session_is_locked() {
+        let mut session = ChatSession::new("acme");
+        session.set_test_launch_effort(Some("low"));
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
+        assert_eq!(
+            launch_effort_inner(&session_arc, "other"),
+            Err(MSG_NO_SESSION_FOR_PROJECT.to_string())
+        );
+        let _held = session_arc.lock().unwrap();
+        assert_eq!(
+            launch_effort_inner(&session_arc, "acme"),
+            Err(MSG_SESSION_BUSY.to_string())
         );
     }
 

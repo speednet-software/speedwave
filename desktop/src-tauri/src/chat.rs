@@ -1314,6 +1314,13 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
+fn launch_effort_in(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|a| a == "--effort")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 pub fn build_claude_args(
     instance_id: &str,
     resume_session_id: Option<&str>,
@@ -1429,6 +1436,7 @@ pub struct ChatSession {
     drain_handles: Vec<std::thread::JoinHandle<()>>,
     session_log_path: Option<std::path::PathBuf>,
     instance_id: Option<String>,
+    launch_effort: Option<String>,
     stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1444,6 +1452,7 @@ impl ChatSession {
             drain_handles: Vec::new(),
             session_log_path: None,
             instance_id: None,
+            launch_effort: None,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -1458,6 +1467,10 @@ impl ChatSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no active session"))?;
         Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
+    }
+
+    pub(crate) fn launch_effort(&self) -> Option<&str> {
+        self.launch_effort.as_deref()
     }
 
     pub(crate) fn session_info_state(&self) -> SessionInfoState {
@@ -1567,6 +1580,7 @@ impl ChatSession {
             .spawn()?;
 
         self.instance_id = Some(instance_id);
+        self.launch_effort = launch_effort_in(&args);
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -1989,6 +2003,11 @@ impl ChatSession {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_launch_effort(&mut self, level: Option<&str>) {
+        self.launch_effort = level.map(str::to_string);
     }
 
     #[cfg(test)]
@@ -6108,6 +6127,63 @@ mod tests {
         assert_eq!(effort_count, 1);
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "max");
+    }
+
+    #[test]
+    fn launch_effort_in_reads_the_level_the_spawn_args_carry() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let mut user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "myproject".to_string(),
+                dir: "/home/user/myproject".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (args, _) =
+            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
+                .unwrap();
+        assert_eq!(launch_effort_in(&args), None);
+
+        user_config.projects[0].effort_pin = Some("low".to_string());
+        let (args, _) =
+            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
+                .unwrap();
+        assert_eq!(launch_effort_in(&args).as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn launch_effort_in_ignores_a_flag_without_a_value() {
+        assert_eq!(launch_effort_in(&[]), None);
+        assert_eq!(launch_effort_in(&["--effort".to_string()]), None);
+    }
+
+    #[test]
+    fn a_session_that_never_spawned_has_no_launch_effort() {
+        assert_eq!(ChatSession::new("myproject").launch_effort(), None);
+    }
+
+    #[test]
+    fn every_spawn_records_the_launch_effort_of_the_args_it_ran() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let spawn_pos = prod
+            .find(".spawn()?;")
+            .expect("start_with_retry must spawn the child");
+        let record_pos = prod
+            .find("self.launch_effort = launch_effort_in(&args);")
+            .expect("start_with_retry must record the launch effort");
+        assert!(
+            spawn_pos < record_pos,
+            "the launch effort is recorded only for a process that actually spawned"
+        );
     }
 
     #[test]

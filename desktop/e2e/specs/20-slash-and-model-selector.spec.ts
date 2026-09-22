@@ -328,6 +328,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
         }
       );
 
+      const argsBeforeEffortPick = await lastSpawnArgs();
       await (await $('[data-testid="effort-segment"]')).click();
       await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000 });
       await (await $('[data-testid="effort-stop-max"]')).click();
@@ -336,6 +337,10 @@ describe('Slash Popover + Model/Effort Selector', function () {
         timeout: 30_000,
         timeoutMsg: 'effort control-chip never rendered after picking max',
       });
+      const resumedArgs = await waitForFreshSpawnArgs(argsBeforeEffortPick);
+      expect(resumedArgs).toContain('--resume');
+      expect(resumedArgs.filter((a) => a === '--effort').length).toBe(1);
+      expect(resumedArgs[resumedArgs.indexOf('--effort') + 1]).toBe('max');
 
       await startNewConversation();
 

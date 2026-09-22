@@ -462,6 +462,37 @@ migration widens it only as far as its writes go, and those are bounded: the
 function returns before writing when the key is absent, so once the template stops
 seeding it and one pass has stripped it, every later call is a locked read.
 
+**Amendment (SPEED-650, 2026-09-22: a conversation whose process was spawned
+without `--effort` is respawned with `--resume` before the wire `/effort`).** This
+closes the gap the 2026-09-15 amendment accepted. The backend records the
+`--effort` value each spawn carried (`chat.rs::ChatSession::launch_effort`, read
+from the argv that `start_with_retry` ran, so start, resume and retry all report
+it), and `chat_session_cmd::get_chat_launch_effort` returns it for the project's
+session. `ChatStateService.applyEffortToConversation` asks before wiring. A
+process spawned with `--effort` takes the wire `/effort` live, as before. A
+process spawned without it, which is a project that had no pin at spawn time, is
+first respawned through `resumeConversation`: the pin was written a moment earlier,
+so the new process carries it as `--effort` next to `--resume <session>`. Only then
+does the wire `/effort` go out. The new process accepts it, and the wire send keeps
+the standard control chip in the chat and the change in the transcript. A failed query
+counts as a held process, because a spare respawn costs one reload while a refused
+wire leaves the turn at the model default under a pill that shows the pick. A
+failed respawn sends nothing. A pick made while a turn streams waits for the turn
+end as before, and also waits out a queued message that the turn end drains,
+because a respawn at that moment would kill the drained turn.
+
+The condition is the launch flag, not the model. The hold is per model (the 2.1.267
+re-verification above: Opus 4.8 and Fable 5, not Fable 5.1 or Sonnet 5), but a
+model list would drift with every Claude Code bump, and a session can switch
+models on the wire after it spawned; the flag is a fact Speedwave decided itself.
+The cost is one reload the first time an unpinned project changes effort
+mid-conversation on a model without the hold. No Speedwave command clears an
+effort pin, so the pin that pick writes makes every later spawn of the project
+carry `--effort` and the respawn does not repeat. The model-config page[^1] no
+longer describes the hold at the time of this amendment. The respawn stays correct
+if a later Claude Code pin drops the hold, because a process launched with
+`--effort` accepts a wire `/effort` either way.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the
