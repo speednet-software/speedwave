@@ -4842,7 +4842,8 @@ describe('ChatStateService', () => {
 
     it('prefers the live stream value over every fallback for a routed provider', () => {
       const internal = service as unknown as Internal;
-      internal._currentProvider = 'openrouter';
+      internal._currentProvider = 'anthropic';
+      internal._activeKind = 'open_router';
       internal._persistedContextTokens = 16_384;
       internal._contextWindowSize = 8_192;
       expect(internal.resolveContextWindow(500_000)).toBe(500_000);
@@ -4851,6 +4852,7 @@ describe('ChatStateService', () => {
     it('falls back to persisted context_tokens when the live value is absent', () => {
       const internal = service as unknown as Internal;
       internal._currentProvider = 'local';
+      internal._activeKind = 'local';
       internal._persistedContextTokens = 32_768;
       internal._contextWindowSize = 8_192;
       expect(internal.resolveContextWindow(undefined)).toBe(32_768);
@@ -4858,7 +4860,8 @@ describe('ChatStateService', () => {
 
     it('falls back to previous _contextWindowSize when persisted is also absent', () => {
       const internal = service as unknown as Internal;
-      internal._currentProvider = 'openrouter';
+      internal._currentProvider = 'anthropic';
+      internal._activeKind = 'open_router';
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 65_536;
       expect(internal.resolveContextWindow(undefined)).toBe(65_536);
@@ -4866,7 +4869,8 @@ describe('ChatStateService', () => {
 
     it('falls back to DEFAULT_CONTEXT_TOKENS as the last resort for OpenRouter only', () => {
       const internal = service as unknown as Internal;
-      internal._currentProvider = 'openrouter';
+      internal._currentProvider = 'anthropic';
+      internal._activeKind = 'open_router';
       internal._persistedContextTokens = null;
       internal._contextWindowSize = 0;
       expect(internal.resolveContextWindow(undefined)).toBe(DEFAULT_CONTEXT_TOKENS);
@@ -4877,8 +4881,10 @@ describe('ChatStateService', () => {
       internal._persistedContextTokens = null;
       internal._contextWindowSize = null;
       internal._currentProvider = 'local';
+      internal._activeKind = 'local';
       expect(internal.resolveContextWindow(undefined)).toBeNull();
       internal._currentProvider = null;
+      internal._activeKind = null;
       expect(internal.resolveContextWindow(undefined)).toBeNull();
     });
 
