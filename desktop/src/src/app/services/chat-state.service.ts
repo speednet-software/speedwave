@@ -252,6 +252,18 @@ export class ChatStateService {
     return this.isStreaming || this._resumeInProgress || this.hasLiveSession();
   }
 
+  private async outlastRestart(): Promise<boolean> {
+    const project = this.projectState.activeProject();
+    let restart = this.projectState.restartInFlight;
+    while (restart) {
+      await restart;
+      restart = this.projectState.restartInFlight;
+    }
+    return (
+      project === this.projectState.activeProject() && this.projectState.status() !== 'switching'
+    );
+  }
+
   private reportSelectionFailure(what: string, cause: unknown): void {
     const msg = cause instanceof Error ? cause.message : String(cause);
     this.log.warn(`${what} failed: ${msg}`);
@@ -1375,6 +1387,7 @@ export class ChatStateService {
     }
     if (this._resumeDecider) {
       const choice = await this._resumeDecider();
+      if (this._lastKnownSessionId !== id) return;
       if (choice === 'resume') void this.resumeConversation(id);
       else void this.startFreshSession();
     } else {
@@ -1403,14 +1416,9 @@ export class ChatStateService {
   async resumeConversation(sessionId: string): Promise<void> {
     if (this._resumeInProgress) return;
     this._resumeInProgress = true;
-    const restart = this.projectState.restartInFlight;
-    if (restart) {
-      const project = this.projectState.activeProject();
-      await restart;
-      if (project !== this.projectState.activeProject()) {
-        this._resumeInProgress = false;
-        return;
-      }
+    if (this.projectState.restartInFlight && !(await this.outlastRestart())) {
+      this._resumeInProgress = false;
+      return;
     }
     this.resetForNewConversation();
     this.beginTranscriptLoad();

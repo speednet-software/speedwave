@@ -5134,6 +5134,27 @@ describe('ChatStateService', () => {
       expect(calls).toContain('resume_conversation');
     });
 
+    it('drops a decider answer once the chat moved to another session while the dialog was open', async () => {
+      service.seedSessionId('sess-asked');
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const answer = createDeferred<'resume' | 'fresh'>();
+      service.setResumeDecider(() => answer.promise);
+      const resumed: unknown[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'resume_conversation') resumed.push(args?.['sessionId']);
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+      await service.resumeConversation('sess-chosen');
+      answer.resolve('resume');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(resumed).toEqual(['sess-chosen']);
+      expect(service.lastKnownSessionId).toBe('sess-chosen');
+    });
+
     it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
       service.seedSessionId('sess-window');
       (service as unknown as TokensInternal)._lastContextTokens = 25229;
@@ -6168,6 +6189,50 @@ describe('ChatStateService', () => {
 
       expect(resumedSessions()).toEqual(['sess-picked']);
       expect(service.lastKnownSessionId).toBe('sess-picked');
+    });
+
+    it('also waits out a restart that starts while it waits', async () => {
+      const second = createDeferred();
+      const restarts = [pendingRestart, second];
+      mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, sessionId: args?.['sessionId'] });
+        const next = cmd === 'restart_integration_containers' ? restarts.shift() : undefined;
+        return next ? next.promise : Promise.resolve(undefined);
+      };
+      let chained = false;
+      projectState.onRestartComplete(() => {
+        if (chained) return;
+        chained = true;
+        void projectState.restartContainers();
+      });
+
+      const first = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-picked');
+      pendingRestart.resolve();
+      await first;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(commands().filter((c) => c === 'restart_integration_containers')).toHaveLength(2);
+      expect(resumedSessions()).toEqual([]);
+
+      second.resolve();
+      await resume;
+
+      expect(resumedSessions()).toEqual(['sess-picked']);
+    });
+
+    it('drops the resume when a project switch starts before the restart ends', async () => {
+      const restart = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-of-test');
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      pendingRestart.resolve();
+      await restart;
+      await resume;
+
+      expect(resumedSessions()).toEqual([]);
+      expect(commands()).not.toContain('get_conversation');
+      expect(service.lastKnownSessionId).toBeNull();
     });
 
     it('drops the resume when the project changes before the restart ends, and frees the chat', async () => {

@@ -533,16 +533,17 @@ export class ProjectStateService {
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
-    let endRestart: () => void = () => undefined;
-    this.restartInFlight = new Promise<void>((resolve) => {
-      endRestart = resolve;
-    });
     this.notifyChange();
+    const run = this.runRestart(project, justEnabled);
+    const done = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.restartInFlight = done;
     try {
-      return await this.runRestart(project, justEnabled);
+      return await run;
     } finally {
-      this.restartInFlight = null;
-      endRestart();
+      if (this.restartInFlight === done) this.restartInFlight = null;
     }
   }
 

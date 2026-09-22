@@ -1764,6 +1764,33 @@ describe('ProjectStateService', () => {
       expect(service.restartInFlight).toBeNull();
     });
 
+    it('a restart ending after a project switch let a newer one start leaves the newer handle', async () => {
+      const first = createDeferred();
+      const second = createDeferred();
+      const pending = [first, second];
+      mockTauri.invokeHandler = (cmd: string) => {
+        const next = cmd === 'restart_integration_containers' ? pending.shift() : undefined;
+        return next ? next.promise : Promise.resolve(undefined);
+      };
+
+      const older = service.restartContainers();
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      const newer = service.restartContainers();
+      const newerHandle = service.restartInFlight;
+      await new Promise((r) => setTimeout(r, 0));
+      first.resolve();
+      await older;
+
+      expect(newerHandle).not.toBeNull();
+      expect(service.restartInFlight).toBe(newerHandle);
+
+      second.resolve();
+      await newer;
+
+      expect(service.restartInFlight).toBeNull();
+    });
+
     it('restartInFlight stays null for a restart that never started', async () => {
       service.restarting = true;
 
