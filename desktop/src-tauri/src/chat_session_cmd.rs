@@ -214,6 +214,28 @@ fn control_query_inner<T>(
         .map_err(|e| e.to_string())
 }
 
+fn takes_wire_effort_inner(session_arc: &SharedChatSession, project: &str) -> bool {
+    let _serialize = START_SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut session = session_arc
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    session.project_name() == project && session.takes_wire_effort()
+}
+
+#[tauri::command]
+pub(crate) async fn get_chat_takes_wire_effort(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<bool, String> {
+    check_project(&project)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || takes_wire_effort_inner(&session_arc, &project))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub(crate) async fn get_chat_session_info(
     project: String,
@@ -292,6 +314,84 @@ mod tests {
         assert_eq!(
             session_info_state_inner(&session_arc, "acme"),
             SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_live_process_launched_with_effort_takes_the_wire() {
+        let mut session = ChatSession::new("acme");
+        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
+        assert!(takes_wire_effort_inner(&session_arc, "acme"));
+        assert!(
+            !takes_wire_effort_inner(&session_arc, "other"),
+            "another project's session says nothing about this one"
+        );
+    }
+
+    #[test]
+    fn a_process_without_effort_or_without_life_does_not_take_the_wire() {
+        let never_spawned: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        assert!(!takes_wire_effort_inner(&never_spawned, "acme"));
+
+        let mut unpinned = ChatSession::new("acme");
+        unpinned.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), false);
+        let unpinned: SharedChatSession = Arc::new(Mutex::new(unpinned));
+        assert!(!takes_wire_effort_inner(&unpinned, "acme"));
+
+        let mut exited = ChatSession::new("acme");
+        exited.set_test_process(chat::spawn_test_child(chat::TestChild::Exited), true);
+        let exited: SharedChatSession = Arc::new(Mutex::new(exited));
+        assert!(!takes_wire_effort_inner(&exited, "acme"));
+    }
+
+    #[test]
+    fn the_wire_effort_answer_waits_for_a_start_in_progress() {
+        let mut session = ChatSession::new("acme");
+        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
+        let starting = START_SERIALIZE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reader = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !reader.is_finished(),
+            "a start stopping the old process holds only START_SERIALIZE, and must not read as a hold"
+        );
+        drop(starting);
+        assert!(reader.join().unwrap());
+    }
+
+    #[test]
+    fn the_wire_effort_answer_waits_for_the_session_lock() {
+        let mut session = ChatSession::new("acme");
+        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
+        let held = session_arc.lock().unwrap();
+        let reader = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !reader.is_finished(),
+            "a busy session must not read as a held one"
+        );
+        drop(held);
+        assert!(reader.join().unwrap());
+    }
+
+    #[test]
+    fn get_chat_takes_wire_effort_uses_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn get_chat_takes_wire_effort(");
+        assert!(
+            body.contains("spawn_blocking"),
+            "the blocking session lock must not run on the async runtime"
         );
     }
 

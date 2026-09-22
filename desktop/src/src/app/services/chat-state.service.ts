@@ -157,7 +157,11 @@ export class ChatStateService {
 
   private readonly _pendingModelOverride = signal<string | null>(null);
   private readonly _pendingEffortOverride = signal<string | null>(null);
+  private _effortPick = 0;
   readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
+  private readonly _deferredEffort = signal<string | null>(null);
+  /** Effort level saved for the next session because the live one holds its launch effort. */
+  readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
 
   private flushPendingModelOverride(): void {
     if (this.isStreaming) return;
@@ -170,16 +174,17 @@ export class ChatStateService {
     const effort = this._pendingEffortOverride();
     if (effort) {
       this._pendingEffortOverride.set(null);
-      void this.sendMessage(`/effort ${effort}`);
+      void this.applyEffortToConversation(effort, this._effortPick);
     }
   }
 
   /**
-   * Persists the effort pin, then applies it: queued mid-turn, wired as `/effort` into a live
-   * conversation, or by respawning a session that has no conversation yet (SPEED-538).
+   * Persists the effort pin, then applies it: queued while the chat is busy, wired as `/effort` into
+   * a live conversation (deferred to the next session if it holds its launch effort), else respawned.
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
+    const pick = ++this._effortPick;
     this._modelSelectionError.set('');
     try {
       await this.tauri.invoke('set_effort_pin', {
@@ -190,15 +195,58 @@ export class ChatStateService {
       this.reportSelectionFailure('effort pin write-through', e);
       return;
     }
-    if (this.isStreaming) {
+    if (pick !== this._effortPick) return;
+    if (this.isStreaming || this._resumeInProgress) {
       this._pendingEffortOverride.set(level);
     } else if (this.hasLiveSession() && this.hasConversation()) {
-      await this.sendMessage(`/effort ${level}`);
-    } else if (!this._resumeInProgress) {
+      await this.applyEffortToConversation(level, pick);
+    } else {
       this.resetForNewConversation();
       this.initialized = true;
       await this.startChatSession();
     }
+  }
+
+  private chatBusy(): boolean {
+    return this.isStreaming || this._resumeInProgress || this.startingSession;
+  }
+
+  private async applyEffortToConversation(level: string, pick: number): Promise<void> {
+    const project = this.projectState.activeProject();
+    if (!project) return;
+    if (this._lastKnownSessionId === null || this.chatBusy()) {
+      this._pendingEffortOverride.set(level);
+      return;
+    }
+    const generation = this._sessionGeneration;
+    const takesWire = await this.sessionTakesWireEffort(project);
+    if (generation !== this._sessionGeneration || pick !== this._effortPick) return;
+    if (!takesWire) {
+      this._deferredEffort.set(level);
+      return;
+    }
+    if (this.chatBusy()) {
+      this._pendingEffortOverride.set(level);
+      return;
+    }
+    this._deferredEffort.set(null);
+    await this.sendMessage(`/effort ${level}`);
+  }
+
+  private async sessionTakesWireEffort(project: string): Promise<boolean> {
+    try {
+      return (await this.tauri.invoke<boolean>('get_chat_takes_wire_effort', { project })) === true;
+    } catch (e: unknown) {
+      this.log.warn(`[chat-state] get_chat_takes_wire_effort failed: ${String(e)}`);
+      return false;
+    }
+  }
+
+  /** Resumes the live conversation so it launches with the deferred effort; its background tasks stop. */
+  async restartForDeferredEffort(): Promise<void> {
+    const sessionId = this._lastKnownSessionId;
+    if (sessionId === null || this.chatBusy() || this.newConversationBlockedReason()) return;
+    await this.resumeConversation(sessionId);
   }
 
   private readonly _modelSelectionError = signal('');
@@ -578,6 +626,7 @@ export class ChatStateService {
     if (project && !this.startingSession) {
       this.startingSession = true;
       this._lastStartOutcome = null;
+      this._deferredEffort.set(null);
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
@@ -740,6 +789,7 @@ export class ChatStateService {
           const result = await this.tauri.invoke<ProjectList>('list_projects');
           if (result.active_project) {
             this.startingSession = true;
+            this._deferredEffort.set(null);
             try {
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {
@@ -1115,6 +1165,7 @@ export class ChatStateService {
         ];
         this._currentBlocks = [];
         this.isStreaming = false;
+        if (chunk.data.turn_ended) this.flushPendingModelOverride();
         void this.refreshControlData();
         break;
       }
@@ -1174,6 +1225,7 @@ export class ChatStateService {
     this.clearSessionTracking();
     this._pendingModelOverride.set(null);
     this._pendingEffortOverride.set(null);
+    this._deferredEffort.set(null);
     this.notifyChange();
   }
 
@@ -1316,6 +1368,7 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.isStreaming = true;
     this._turnId += 1;
+    this._deferredEffort.set(null);
     this.notifyChange();
 
     try {
@@ -1354,6 +1407,7 @@ export class ChatStateService {
         this.clearSessionTracking();
         this._pendingModelOverride.set(null);
         this._pendingEffortOverride.set(null);
+        this._deferredEffort.set(null);
         this.notifyChange();
       } else if (this.projectState.status() === 'ready') {
         void this.refreshLlmConfigCache();
@@ -1492,6 +1546,7 @@ export class ChatStateService {
         void this.startChatSession();
       }
     }
+    if (outcome === 'started' && gen === this._sessionGeneration) this.flushPendingModelOverride();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];

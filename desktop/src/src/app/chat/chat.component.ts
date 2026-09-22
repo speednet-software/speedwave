@@ -28,6 +28,7 @@ import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
+import { capitalizeLevel } from './composer/model-selector/effort-slider.component';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
@@ -64,6 +65,11 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (msgs[i].role === 'assistant') return i;
     }
     return -1;
+  });
+
+  readonly deferredEffortLabel = computed(() => {
+    const level = this.chat.deferredEffort();
+    return level ? capitalizeLevel(level) : '';
   });
 
   readonly composerContextLabel = computed(() => {
