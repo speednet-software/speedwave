@@ -4053,12 +4053,16 @@ mod tests {
     }
 
     #[test]
-    fn build_script_requires_complete_context_for_hash_root() {
+    fn build_script_hashes_the_staged_context_through_the_ssot_resolver() {
         let source = include_str!("../build.rs");
         assert!(
-            source.contains("flat_map(|img| img.hash_inputs.iter())")
-                && source.contains("all(|input| build_context.join(input).exists())"),
-            "partial/stubbed build-context must fall back to the repo root"
+            source.contains("bundle::hash_inputs_resolvable(&build_context)"),
+            "the hash root must be decided by bundle::hash_inputs_resolvable"
+        );
+        assert!(
+            !source.contains(".join(input).exists()"),
+            "a direct-path existence check misses the vendored containers/ layout and hashes \
+             the repo root while the image builds from the staged tree"
         );
     }
 

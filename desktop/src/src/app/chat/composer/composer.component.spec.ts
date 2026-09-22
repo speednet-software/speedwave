@@ -295,6 +295,26 @@ describe('ComposerComponent', () => {
       expect(component.slashQuery()).toBe('rev');
     });
 
+    it('runs discovery on open when no commands are cached', () => {
+      const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+      const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
+      projectState.activeProject.set('acme');
+      slash.commands.set([]);
+      slash.source.set('Unavailable');
+      dispatchInputAt('/', 1);
+      expect(slash.refresh).toHaveBeenCalledWith('acme');
+    });
+
+    it('does not re-run discovery on open while commands are cached', () => {
+      const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+      const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
+      projectState.activeProject.set('acme');
+      slash.commands.set([{ name: 'speedwave-tdd' }]);
+      slash.source.set('Init');
+      dispatchInputAt('/', 1);
+      expect(slash.refresh).not.toHaveBeenCalled();
+    });
+
     it('opens the slash popover when the slash toolbar button is clicked and inserts `/`', async () => {
       const events: boolean[] = [];
       component.slashOpenChange.subscribe((e) => events.push(e));

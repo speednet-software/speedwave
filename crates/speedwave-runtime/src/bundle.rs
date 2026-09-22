@@ -677,6 +677,14 @@ fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf>
     );
 }
 
+/// True when every catalogue hash input resolves under `build_root`.
+pub fn hash_inputs_resolvable(build_root: &Path) -> bool {
+    build::IMAGES
+        .iter()
+        .flat_map(|img| img.hash_inputs.iter())
+        .all(|input| resolve_hash_input(build_root, input).is_ok())
+}
+
 /// Test-only seam: `build.rs`'s catalog tests assert every declared input resolves.
 #[cfg(test)]
 pub(crate) fn resolve_hash_input_for_test(
@@ -830,6 +838,68 @@ mod tests {
         for candidate in [direct, vendored] {
             let expected = candidate.display().to_string().replace('\\', "/");
             assert!(norm.contains(&expected), "{err}");
+        }
+    }
+
+    fn vendor_proxy_inputs(root: &Path) {
+        let vendored = root.join("containers");
+        std::fs::create_dir_all(vendored.join("mcp-servers/policies")).unwrap();
+        std::fs::rename(root.join("crates"), vendored.join("crates")).unwrap();
+        std::fs::rename(
+            root.join("mcp-servers/policies/rules.yaml"),
+            vendored.join("mcp-servers/policies/rules.yaml"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hash_inputs_resolvable_accepts_the_staged_vendored_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        vendor_proxy_inputs(tmp.path());
+
+        let direct_paths_only = build::IMAGES
+            .iter()
+            .flat_map(|img| img.hash_inputs.iter())
+            .all(|input| tmp.path().join(input).exists());
+        assert!(
+            !direct_paths_only,
+            "a direct-path check must call this complete staged tree incomplete"
+        );
+        assert!(hash_inputs_resolvable(tmp.path()));
+    }
+
+    #[test]
+    fn hash_inputs_resolvable_rejects_a_tree_missing_one_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        std::fs::remove_file(tmp.path().join("containers/entrypoint.sh")).unwrap();
+        assert!(!hash_inputs_resolvable(tmp.path()));
+    }
+
+    #[test]
+    fn hash_inputs_resolvable_rejects_stub_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("mcp-servers")).unwrap();
+        assert!(!hash_inputs_resolvable(tmp.path()));
+    }
+
+    #[test]
+    fn vendored_layout_keeps_the_proxy_and_claude_hashes() {
+        let repo = tempfile::tempdir().unwrap();
+        write_build_tree(repo.path());
+        let staged = tempfile::tempdir().unwrap();
+        copy_dir_recursive(repo.path(), staged.path()).unwrap();
+        vendor_proxy_inputs(staged.path());
+
+        let from_repo = generate_bundle_manifest("1.2.3", "2.1.0", repo.path()).unwrap();
+        let from_staged = generate_bundle_manifest("1.2.3", "2.1.0", staged.path()).unwrap();
+        for name in [build::IMAGE_PROXY, build::IMAGE_CLAUDE] {
+            assert_eq!(
+                from_repo.image_hashes[name], from_staged.image_hashes[name],
+                "{name}: the digest labels inputs by their declared path, not where they resolve"
+            );
         }
     }
 

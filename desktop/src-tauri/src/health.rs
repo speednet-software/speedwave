@@ -446,6 +446,13 @@ mod tests {
     };
     use std::collections::BTreeSet;
 
+    fn released_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
     /// Returns a PID that is alive and different from `std::process::id()`.
     /// Unix: parent PID. Windows: spawns a sleeping process.
     fn external_alive_pid() -> (u32, Option<std::process::Child>) {
@@ -783,10 +790,11 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let (external_pid, _child) = external_alive_pid();
+        let port = released_loopback_port();
         std::fs::write(
-            tmp.path().join("64999.lock"),
+            tmp.path().join(format!("{port}.lock")),
             format!(
-                r#"{{"port":64999,"wsUrl":"ws://127.0.0.1:64999","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws","pid":{external_pid}}}"#,
+                r#"{{"port":{port},"wsUrl":"ws://127.0.0.1:{port}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws","pid":{external_pid}}}"#,
             ),
         ).unwrap();
 
@@ -1207,7 +1215,7 @@ mod tests {
     fn is_mcp_os_alive_false_when_pid_alive_port_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        write_mcp_os_lock(data_dir, std::process::id(), 64999);
+        write_mcp_os_lock(data_dir, std::process::id(), released_loopback_port());
 
         assert!(
             !super::check_mcp_os_alive_in(data_dir),

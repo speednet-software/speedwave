@@ -109,6 +109,7 @@ fn discover_slash_commands_with_timeout(
         return Ok(cached);
     }
 
+    let generation = cache_generation(&project.name);
     let container = claude_container_name(&project.name);
     let outcome = lead_discovery(&project.name, || {
         run_discovery_with_timeout(runtime, &container, timeout).map_err(|e| e.to_string())
@@ -117,7 +118,7 @@ fn discover_slash_commands_with_timeout(
     match outcome {
         Ok(raw) => {
             let discovery = enrich_and_filter(raw, &project.dir, consts::data_dir().as_path());
-            cache_put(&project.name, discovery.clone());
+            cache_put(&project.name, generation, discovery.clone());
             Ok(discovery)
         }
         Err(err) => {
@@ -127,7 +128,7 @@ fn discover_slash_commands_with_timeout(
                 source: DiscoverySource::Unavailable,
                 reason: Some(err),
             };
-            cache_put(&project.name, discovery.clone());
+            cache_put(&project.name, generation, discovery.clone());
             Ok(discovery)
         }
     }
@@ -208,22 +209,24 @@ fn follow_slot(slot: &InFlightSlot) -> Result<RawDiscovery, String> {
         .unwrap_or_else(|| Err("discovery leader failed".to_string()))
 }
 
-/// Invalidates the cached discovery for one project. Call on plugin
-/// install/remove, active-project change, or an explicit refresh.
+/// Drops the cached discovery for one project and retires any discovery in flight for it.
 pub fn invalidate_cache(project_name: &str) {
     match cache().lock() {
-        Ok(mut map) => {
-            map.remove(project_name);
+        Ok(mut state) => {
+            state.entries.remove(project_name);
+            *state
+                .generations
+                .entry(project_name.to_string())
+                .or_insert(0) += 1;
         }
         Err(e) => log_cache_poisoned("invalidate_cache", &e),
     }
 }
 
-/// Invalidates every cached discovery. Useful on factory reset and at
-/// the end of tests that share process state.
+/// Drops every cached discovery.
 pub fn invalidate_all_caches() {
     match cache().lock() {
-        Ok(mut map) => map.clear(),
+        Ok(mut state) => state.entries.clear(),
         Err(e) => log_cache_poisoned("invalidate_all_caches", &e),
     }
 }
@@ -260,9 +263,31 @@ struct CachedDiscovery {
     discovery: SlashDiscovery,
 }
 
-fn cache() -> &'static Mutex<HashMap<String, CachedDiscovery>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CachedDiscovery>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<String, CachedDiscovery>,
+    generations: HashMap<String, u64>,
+}
+
+impl CacheState {
+    fn generation(&self, project_name: &str) -> u64 {
+        self.generations.get(project_name).copied().unwrap_or(0)
+    }
+}
+
+fn cache() -> &'static Mutex<CacheState> {
+    static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CacheState::default()))
+}
+
+fn cache_generation(project_name: &str) -> Option<u64> {
+    match cache().lock() {
+        Ok(state) => Some(state.generation(project_name)),
+        Err(e) => {
+            log_cache_poisoned("cache_generation", &e);
+            None
+        }
+    }
 }
 
 fn ttl_for(discovery: &SlashDiscovery) -> Duration {
@@ -273,35 +298,45 @@ fn ttl_for(discovery: &SlashDiscovery) -> Duration {
 }
 
 fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
-    let mut map = match cache().lock() {
-        Ok(map) => map,
+    let mut state = match cache().lock() {
+        Ok(state) => state,
         Err(e) => {
             log_cache_poisoned("cache_get", &e);
             return None;
         }
     };
-    let entry = map.get(project_name)?;
+    let entry = state.entries.get(project_name)?;
     if entry.stored_at.elapsed() < ttl_for(&entry.discovery) {
         Some(entry.discovery.clone())
     } else {
-        map.remove(project_name);
+        state.entries.remove(project_name);
         None
     }
 }
 
 #[cfg(test)]
 fn backdate_cache_entry(project_name: &str, age: Duration) {
-    if let Ok(mut map) = cache().lock() {
-        if let Some(entry) = map.get_mut(project_name) {
+    if let Ok(mut state) = cache().lock() {
+        if let Some(entry) = state.entries.get_mut(project_name) {
             entry.stored_at -= age;
         }
     }
 }
 
-fn cache_put(project_name: &str, discovery: SlashDiscovery) {
+fn cache_put(project_name: &str, generation: Option<u64>, discovery: SlashDiscovery) {
+    let Some(generation) = generation else {
+        return;
+    };
     match cache().lock() {
-        Ok(mut map) => {
-            map.insert(
+        Ok(mut state) => {
+            if state.generation(project_name) != generation {
+                log::debug!(
+                    "slash discovery for '{project_name}' finished after its containers changed; \
+                     result not cached"
+                );
+                return;
+            }
+            state.entries.insert(
                 project_name.to_string(),
                 CachedDiscovery {
                     stored_at: Instant::now(),
@@ -826,7 +861,12 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
 }
 
 fn claude_container_name(project: &str) -> String {
-    format!("{}_{}_claude", consts::compose_prefix(), project)
+    format!(
+        "{}_{}_{}",
+        consts::compose_prefix(),
+        project,
+        consts::CLAUDE_COMPOSE_SERVICE
+    )
 }
 
 #[cfg(test)]
@@ -837,7 +877,7 @@ fn claude_container_name(project: &str) -> String {
 )]
 mod tests {
     use super::*;
-    use crate::runtime::mock_runtime::MockRuntimeBuilder;
+    use crate::runtime::mock_runtime::{MockHandles, MockRuntimeBuilder};
 
     #[test]
     fn is_bare_slash_matches_lone_slash_with_surrounding_whitespace() {
@@ -1564,6 +1604,186 @@ mod tests {
         invalidate_cache(&project.name);
         let third = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(third.source, DiscoverySource::Unavailable);
+    }
+
+    fn cache_a_real_discovery(project: &ProjectHandle) {
+        let script = format!("{}\n", sample_init_json());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        assert_eq!(
+            discover_slash_commands(&working, project).unwrap().source,
+            DiscoverySource::Init
+        );
+    }
+
+    fn failing_runtime() -> (crate::runtime::LockedRuntime, MockHandles) {
+        MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build()
+    }
+
+    fn reap_compose_lock_dirs(projects: &[&str]) {
+        for project in projects {
+            crate::runtime::compose_locks::remove_project_lock_dir_for_test(project);
+        }
+    }
+
+    #[test]
+    fn a_compose_recreate_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("recreate"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up_recreate(&project.name).unwrap();
+        let after = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(after.source, DiscoverySource::Unavailable);
+        assert_eq!(
+            handles.exec_calls.lock().unwrap().len(),
+            1,
+            "the recreate must drop the cached entry so discovery re-runs"
+        );
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_compose_up_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("up"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up(&project.name).unwrap();
+        let after = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(after.source, DiscoverySource::Unavailable);
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_failed_compose_up_still_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("up-failed"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_up(&[project.name.as_str()])
+            .with_exec_piped_error("container not running")
+            .build();
+        failing
+            .compose_up(&project.name)
+            .expect_err("the mock compose_up must fail");
+        let after = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(after.source, DiscoverySource::Unavailable);
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_compose_recreate_for_another_project_keeps_the_cache() {
+        let project = ProjectHandle::new(unique_project_name("other"), std::env::temp_dir());
+        let unrelated = unique_project_name("unrelated");
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up_recreate(&unrelated).unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Init
+        );
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+        reap_compose_lock_dirs(&[&unrelated]);
+    }
+
+    #[test]
+    fn a_claude_service_recreate_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("svc-claude"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing
+            .compose_up_service(&project.name, consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Unavailable
+        );
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_proxy_service_recreate_keeps_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("svc-proxy"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up_service(&project.name, "proxy").unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Init
+        );
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    fn discover_while_recreating(
+        project: &ProjectHandle,
+        recreated: &str,
+    ) -> (SlashDiscovery, crate::runtime::LockedRuntime) {
+        let (hanging, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .with_exec_piped_script("")
+            .build();
+        let rt = &hanging;
+        let outcome = std::thread::scope(|s| {
+            let discovery = s.spawn(|| {
+                discover_slash_commands_with_timeout(rt, project, Duration::from_millis(500))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handles.exec_calls.lock().unwrap().is_empty() {
+                assert!(
+                    Instant::now() < deadline,
+                    "discovery never spawned its probe"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            rt.compose_up_recreate(recreated).unwrap();
+            discovery.join().unwrap().unwrap()
+        });
+        assert_eq!(outcome.source, DiscoverySource::Unavailable);
+        (outcome, hanging)
+    }
+
+    #[test]
+    fn a_recreate_during_an_in_flight_discovery_leaves_nothing_cached() {
+        let project = ProjectHandle::new(unique_project_name("inflight"), std::env::temp_dir());
+        discover_while_recreating(&project, &project.name);
+
+        let script = format!("{}\n", sample_init_json());
+        let (working, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        let after = discover_slash_commands(&working, &project).unwrap();
+        assert_eq!(
+            after.source,
+            DiscoverySource::Init,
+            "a result produced against the replaced container must not be cached"
+        );
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_recreate_of_another_project_during_an_in_flight_discovery_keeps_the_result() {
+        let project =
+            ProjectHandle::new(unique_project_name("inflight-other"), std::env::temp_dir());
+        let unrelated = unique_project_name("inflight-unrelated");
+        let (first, _) = discover_while_recreating(&project, &unrelated);
+
+        let (working, handles) = failing_runtime();
+        let after = discover_slash_commands(&working, &project).unwrap();
+        assert_eq!(after, first);
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+        reap_compose_lock_dirs(&[&unrelated]);
     }
 
     #[test]
