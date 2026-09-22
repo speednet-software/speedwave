@@ -215,6 +215,9 @@ fn control_query_inner<T>(
 }
 
 fn takes_wire_effort_inner(session_arc: &SharedChatSession, project: &str) -> bool {
+    let _serialize = START_SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut session = session_arc
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -344,6 +347,27 @@ mod tests {
 
     #[test]
     fn the_wire_effort_answer_waits_for_a_start_in_progress() {
+        let mut session = ChatSession::new("acme");
+        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
+        let starting = START_SERIALIZE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reader = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !reader.is_finished(),
+            "a start stopping the old process holds only START_SERIALIZE, and must not read as a hold"
+        );
+        drop(starting);
+        assert!(reader.join().unwrap());
+    }
+
+    #[test]
+    fn the_wire_effort_answer_waits_for_the_session_lock() {
         let mut session = ChatSession::new("acme");
         session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
         let session_arc: SharedChatSession = Arc::new(Mutex::new(session));

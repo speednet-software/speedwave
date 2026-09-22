@@ -74,7 +74,7 @@ export interface ModelSelection {
           type="button"
           data-testid="effort-segment"
           class="hidden text-[var(--ink-mute)] hover:text-[var(--ink)] hover:underline md:inline"
-          appTooltip="Reasoning effort - applies to the current session and persists for new ones"
+          appTooltip="Reasoning effort - saved for this project's sessions"
           placement="top"
           (click)="toggleEffortPopover()"
         >

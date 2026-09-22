@@ -237,7 +237,7 @@ export class ChatStateService {
     try {
       return (await this.tauri.invoke<boolean>('get_chat_takes_wire_effort', { project })) === true;
     } catch (e: unknown) {
-      this.log.debug(`[chat-state] get_chat_takes_wire_effort failed: ${String(e)}`);
+      this.log.warn(`[chat-state] get_chat_takes_wire_effort failed: ${String(e)}`);
       return false;
     }
   }
@@ -245,7 +245,7 @@ export class ChatStateService {
   /** Resumes the live conversation so it launches with the deferred effort; its background tasks stop. */
   async restartForDeferredEffort(): Promise<void> {
     const sessionId = this._lastKnownSessionId;
-    if (sessionId === null || this.chatBusy()) return;
+    if (sessionId === null || this.chatBusy() || this.newConversationBlockedReason()) return;
     await this.resumeConversation(sessionId);
   }
 
@@ -626,6 +626,7 @@ export class ChatStateService {
     if (project && !this.startingSession) {
       this.startingSession = true;
       this._lastStartOutcome = null;
+      this._deferredEffort.set(null);
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
@@ -788,6 +789,7 @@ export class ChatStateService {
           const result = await this.tauri.invoke<ProjectList>('list_projects');
           if (result.active_project) {
             this.startingSession = true;
+            this._deferredEffort.set(null);
             try {
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {

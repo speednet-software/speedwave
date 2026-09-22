@@ -2092,6 +2092,7 @@ describe('ChatStateService', () => {
 
       function liveConversation(takesWire: boolean): void {
         TestBed.inject(ProjectStateService).activeProject.set('test');
+        TestBed.inject(ProjectStateService).status.set('ready');
         mockTauri.invokeHandler = async (cmd: string) =>
           cmd === 'get_chat_takes_wire_effort' ? takesWire : undefined;
         service.handleStreamChunk({
@@ -2172,6 +2173,67 @@ describe('ChatStateService', () => {
         });
         expect(service.deferredEffort()).toBeNull();
         expect(service.lastKnownSessionId).toBe(LIVE);
+      });
+
+      it('Restart now does nothing while the project is not ready', async () => {
+        liveConversation(false);
+        await Promise.resolve();
+        await service.applyEffortSelection('max');
+        TestBed.inject(ProjectStateService).status.set('switching');
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.restartForDeferredEffort();
+
+        expect(indexOfCall(invokeSpy.mock.calls, restarted)).toBe(-1);
+      });
+
+      it('a start of a new process clears the notice, since that spawn carries the pin', async () => {
+        liveConversation(false);
+        await Promise.resolve();
+        await service.applyEffortSelection('max');
+        expect(service.deferredEffort()).toBe('max');
+        service.clearSessionTracking();
+        TestBed.inject(ProjectStateService).status.set('ready');
+
+        await service.init();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(service.deferredEffort()).toBeNull();
+      });
+
+      it('a send that restarts a dead process clears the notice', async () => {
+        liveConversation(false);
+        await Promise.resolve();
+        await service.applyEffortSelection('max');
+        let sends = 0;
+        overrideInvoke('send_message', async () => {
+          sends += 1;
+          if (sends === 1) throw new Error('session exited (exit status: 1)');
+          return undefined;
+        });
+        overrideInvoke('list_projects', async () => ({
+          projects: [{ name: 'test', dir: '/tmp/test' }],
+          active_project: 'test',
+        }));
+
+        await service.sendMessage('next question');
+
+        expect(sends).toBe(2);
+        expect(service.deferredEffort()).toBeNull();
+      });
+
+      it('warns when the check fails, so a broken command does not pass for a hold', async () => {
+        liveConversation(true);
+        overrideInvoke('get_chat_takes_wire_effort', async () => {
+          throw new Error('command get_chat_takes_wire_effort not found');
+        });
+        await Promise.resolve();
+
+        await service.applyEffortSelection('medium');
+
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('get_chat_takes_wire_effort failed')
+        );
       });
 
       it('Restart now does nothing while a turn streams', async () => {

@@ -469,9 +469,12 @@ ticket allowed. Each spawn records whether `prepare_args` passed `--effort`
 (`desktop/src-tauri/src/chat.rs`, `PreparedSpawn::with_effort`, stored on the
 `ChatSession`), and `ChatSession::takes_wire_effort` is true only for a live
 process that launched with it.
-`desktop/src-tauri/src/chat_session_cmd.rs::get_chat_takes_wire_effort` answers
-under a blocking session lock, so a start in progress is waited out and never read
-as a hold. Before wiring a composer pick into a live conversation,
+`desktop/src-tauri/src/chat_session_cmd.rs::get_chat_takes_wire_effort` takes the
+start lock (`START_SERIALIZE`) and then the session lock, so a start through
+`start_session_inner`, including the window where it has swapped in an empty
+session and stops the old process, is waited out and never read as a hold. A retry
+(`retry_cmd.rs`) does not take the start lock, but it streams, so the frontend
+queues a pick until it ends. Before wiring a composer pick into a live conversation,
 `ChatStateService.applyEffortToConversation`
 (`desktop/src/src/app/services/chat-state.service.ts`) asks. A process that takes
 the wire gets the wire `/effort`, as before. For any other process, and for a
@@ -515,6 +518,15 @@ hold model; the probes above do not cover a model switched to after launch. The
 model-config page[^1] no longer describes the hold at the time of this amendment.
 If a later Claude Code pin drops it, the notice stays truthful (the session keeps
 its level until it restarts) and is merely no longer needed.
+
+Two residuals predate this change and are not fixed by it. The frontend ends its
+streaming state on every `Error` chunk, including a system message that can arrive
+mid-turn, so for the rest of such a turn a pick is wired instead of queued and
+Restart now is enabled. And Restart now inherits the failure mode of every resume:
+when the new process fails to start after the old one was stopped, the next send
+recovers with a fresh `start_chat`, not a resume, under the old history. The notice
+itself is cleared by every spawn the frontend starts (a start, a resume, a retry,
+and the send recovery), since each of those launches with the pin.
 
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
