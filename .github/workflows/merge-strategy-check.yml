@@ -1,9 +1,3 @@
-# Merge Strategy Check — ensures PRs to main follow conventions
-#
-# - Release-please and backmerge PRs are exempt
-# - All other PRs must have release-triggering conventional commit titles
-#   for squash merge, so the desktop updater sees a newer semver.
-# - Non-release types are rejected; see scripts/validate-pr-title-main.sh
 
 name: Merge Strategy Check
 
@@ -21,7 +15,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Validate PR title for squash merge
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

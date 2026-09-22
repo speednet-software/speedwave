@@ -23,8 +23,6 @@ import {
 } from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
 
-// ── Tests for Code Executor (sandbox security and basic validation) ──────────────────────────
-
 describe('executor', () => {
   beforeAll(() => {
     _resetRegistryForTesting();
@@ -394,7 +392,6 @@ describe('executor', () => {
       const code = `await redmine.listProjects()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
-      // listProjectIds is the closest real method to the attempted listProjects
       expect(result.error?.message).toContain('Did you mean:');
       expect(result.error?.message).toContain('listProjectIds');
     });
@@ -491,7 +488,6 @@ describe('executor', () => {
 
     it('teaches the camelCase global when a dashed slug is called verbatim', async () => {
       enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
-      // `my-plugin.getCurrentUser()` parses as `my - plugin...` → "my is not defined".
       const result = await executeCode({
         code: `return my-plugin.getCurrentUser()`,
         timeoutMs: 5000,
@@ -508,7 +504,6 @@ describe('executor', () => {
         'acme-crm': pluginRegistry('acme-crm', ['foo']),
         'acme-docs': pluginRegistry('acme-docs', ['bar']),
       });
-      // `acme-crm.foo()` → "acme is not defined"; the segment maps to both enabled services.
       const result = await executeCode({ code: `return acme-crm.foo()`, timeoutMs: 5000 });
 
       expect(result.success).toBe(false);
@@ -562,7 +557,6 @@ describe('executor', () => {
       });
       const result = await executeCode({ code: `return typeof aB`, timeoutMs: 5000 });
 
-      // Neither may win: picking one by SERVICE_NAMES order makes the outcome config-dependent.
       expect(result.success).toBe(true);
       expect(result.data).toBe('undefined');
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a-b'"));
@@ -572,8 +566,6 @@ describe('executor', () => {
 
     it('lets an exact service name beat a camelCased one, so a plugin cannot shadow a built-in', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      // `redmine-` is a valid plugin slug and camelCases to `redmine`; ordered first it would
-      // otherwise take over the built-in global and route redmine.* to the plugin's bridge.
       enablePlugins({
         'redmine-': pluginRegistry('redmine-', ['pluginOwnedTool']),
         redmine: pluginRegistry('redmine', ['listIssueIds']),
@@ -588,8 +580,6 @@ describe('executor', () => {
 
     it('skips a slug shadowing a JS value global, keeping `x === undefined` honest', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      // `undefined` is a legal parameter name, so it passes the identifier probe: shadowing it
-      // would silently invert every undefined-check in model-generated code.
       enablePlugins({ undefined: pluginRegistry('undefined', ['foo']) });
       const result = await executeCode({
         code: 'let x; return [typeof undefined, x === undefined]',
@@ -616,7 +606,6 @@ describe('executor', () => {
     it('does not expose a service enabled but absent from the discovered registry set', async () => {
       const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
       mutableRegistry['example-plugin'] = pluginRegistry('example-plugin', ['searchCustomers']);
-      // SERVICE_NAMES is the discovered set the sandbox iterates; it deliberately omits the plugin.
       _setServiceNamesForTesting(['slack']);
       process.env.ENABLED_SERVICES = 'slack,example-plugin';
 
@@ -658,7 +647,6 @@ describe('executor', () => {
     });
 
     it('skips suggestion computation entirely for an oversized attempted name', () => {
-      // Bounds the DP cost against attacker-sized property names from execute_code bodies.
       const huge = 'a'.repeat(100_000);
       const start = Date.now();
       expect(closestMatches(huge, ['listIssues', 'getIssue'])).toEqual([]);
@@ -675,7 +663,6 @@ describe('executor', () => {
     });
 
     it('breaks ties alphabetically', () => {
-      // Both 'aaa' and 'aab' are distance 1 from 'aax'
       const result = closestMatches('aax', ['aab', 'aaa']);
       expect(result).toEqual(['aaa', 'aab']);
     });
@@ -686,7 +673,6 @@ describe('executor', () => {
     });
 
     it('suggests a distance-1 candidate for a 1-character attempted name', () => {
-      // maxDistance floors to 1 for a 1-char name, so an adjacent single char still matches.
       expect(closestMatches('a', ['b', 'c'])).toEqual(['b', 'c']);
     });
 
@@ -710,7 +696,6 @@ describe('executor', () => {
     });
 
     it('should handle object message (GitBeaker style)', () => {
-      // GitBeaker sometimes returns errors with object messages
       const error = new Error('ignored');
       (error as unknown as { message: object }).message = {
         error: 'API failed',
@@ -759,8 +744,6 @@ describe('executor', () => {
       expect(result).toContain('Bad Request');
     });
   });
-
-  // Sensitive-key-detection tests live in the policy-engine package's tokenizer test suite
 
   describe('batch helper (through executeCode)', () => {
     beforeEach(() => {
@@ -845,7 +828,6 @@ describe('executor', () => {
       const code = `const x = 42;`;
       const result = await executeCode({ code, timeoutMs: 5000 });
       expect(result.success).toBe(true);
-      // const doesn't return a value, result is undefined
       expect(result.data).toBeUndefined();
     });
 
@@ -875,7 +857,6 @@ describe('executor', () => {
     it('should handle empty code', async () => {
       const code = ``;
       const result = await executeCode({ code, timeoutMs: 5000 });
-      // Empty code should not crash
       expect(result.success).toBe(true);
     });
 
@@ -886,7 +867,6 @@ describe('executor', () => {
     });
 
     it('should handle multiline async await expression', async () => {
-      // This simulates the actual failing case: multiline await with object param
       const code = `await Promise.resolve({
         success: true,
         data: "test"
@@ -930,7 +910,6 @@ describe('executor', () => {
       });`;
       const result = await executeCode({ code, timeoutMs: 5000 });
       expect(result.success).toBe(true);
-      // const doesn't return, result is undefined
       expect(result.data).toBeUndefined();
     });
 
@@ -938,7 +917,6 @@ describe('executor', () => {
       const code = `if (true) { 42 }`;
       const result = await executeCode({ code, timeoutMs: 5000 });
       expect(result.success).toBe(true);
-      // if statement doesn't return a value
       expect(result.data).toBeUndefined();
     });
 
@@ -1028,11 +1006,9 @@ describe('executor', () => {
       const { initializeBridges, _setBridgesForTesting } = await import('./executor.js');
       const { initializeAllBridges } = await import('./http-bridge.js');
 
-      // Reset bridge state so initializeBridges runs (bridgesInitialized = false)
       _setBridgesForTesting(null);
 
       vi.spyOn(initializeAllBridges as never, 'call').mockRejectedValue(new Error('bridge boom'));
-      // Mock the actual module function via vi.mock override inside test — use a spy on the module
       const httpBridgeModule = await import('./http-bridge.js');
       const spy = vi
         .spyOn(httpBridgeModule, 'initializeAllBridges')
@@ -1065,12 +1041,10 @@ describe('executor', () => {
       const { initializeBridges, _setBridgesForTesting } = await import('./executor.js');
       const httpBridgeModule = await import('./http-bridge.js');
 
-      // Pre-mark bridges as initialized
       _setBridgesForTesting(createMockBridges());
 
       const spy = vi.spyOn(httpBridgeModule, 'initializeAllBridges');
 
-      // Should return without calling initializeAllBridges
       await initializeBridges();
 
       expect(spy).not.toHaveBeenCalled();
@@ -1134,7 +1108,6 @@ describe('executor', () => {
     it('warns and continues execution when addAutoReturn returns a parseError', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      // Malformed code (unclosed brace) — addAutoReturn cannot parse it
       const code = `const x = {`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
@@ -1143,7 +1116,6 @@ describe('executor', () => {
       expect(syntaxWarnEmitted).toBe(true);
 
       warnSpy.mockRestore();
-      // The result is expected to fail (syntax error in JS)
       expect(result.success).toBe(false);
     });
   });
@@ -1154,7 +1126,6 @@ describe('executor', () => {
     let originalFetch: typeof globalThis.fetch;
 
     beforeEach(() => {
-      // Save and set worker URLs so callWorker can resolve the service URL
       const services = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
       for (let i = 0; i < services.length; i++) {
         const key = `WORKER_${services[i].toUpperCase()}_URL`;
@@ -1164,12 +1135,10 @@ describe('executor', () => {
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
       _setBridgesForTesting(createMockBridges());
-      // Save original fetch
       originalFetch = globalThis.fetch;
     });
 
     afterEach(() => {
-      // Restore fetch
       globalThis.fetch = originalFetch;
       _setBridgesForTesting(null);
       if (savedEnabledServices === undefined) {
@@ -1188,7 +1157,6 @@ describe('executor', () => {
     });
 
     it('audit log is written when a service tool is called', async () => {
-      // Mock fetch to return a successful JSON-RPC tool result
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
@@ -1208,7 +1176,6 @@ describe('executor', () => {
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      // Audit log is emitted via console.log with "[READ]", "[WRITE]", or "[DELETE]"
       const auditCallFound = logSpy.mock.calls.some((args) =>
         String(args[0]).match(/\[(READ|WRITE|DELETE)\]/)
       );
@@ -1218,7 +1185,6 @@ describe('executor', () => {
     });
 
     it('wrapBridgeCall error path: re-throws with service prefix', async () => {
-      // Mock fetch to throw a network error so callWorker propagates it through wrapBridgeCall
       globalThis.fetch = vi
         .fn()
         .mockRejectedValue(new Error('network down')) as unknown as typeof fetch;
@@ -1234,7 +1200,6 @@ describe('executor', () => {
       const savedNodeEnv = process.env.NODE_ENV;
       process.env.NODE_ENV = 'development';
 
-      // Mock fetch to throw an Error with a stack so logErrorDebug logs it in dev mode
       const bridgeError = new Error('dev mode error');
       globalThis.fetch = vi.fn().mockRejectedValue(bridgeError) as unknown as typeof fetch;
 
@@ -1243,7 +1208,6 @@ describe('executor', () => {
       const code = `return await slack.sendChannel({ channel: 'test' });`;
       await executeCode({ code, timeoutMs: 5000 });
 
-      // In dev mode, error.stack is logged separately as a second console.error call
       const stackLogged = errorSpy.mock.calls.some((args) =>
         args.some((a) => typeof a === 'string' && a.includes('Error: dev mode error'))
       );
@@ -1254,7 +1218,6 @@ describe('executor', () => {
     });
 
     it('logErrorDebug: logs non-Error objects in production mode', async () => {
-      // Mock fetch to throw a plain string (not an Error instance)
       globalThis.fetch = vi.fn().mockRejectedValue('plain string error') as unknown as typeof fetch;
 
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1262,7 +1225,6 @@ describe('executor', () => {
       const code = `return await slack.sendChannel({ channel: 'test' });`;
       await executeCode({ code, timeoutMs: 5000 });
 
-      // The non-Error branch in logErrorDebug logs the value directly as the last arg
       const plainErrorLogged = errorSpy.mock.calls.some((args) =>
         args.some((a) => a === 'plain string error')
       );
@@ -1283,24 +1245,19 @@ describe('executor', () => {
         process.env.ENABLED_SERVICES = savedEnabledServices;
       }
       resetServiceCaches();
-      // Restore SERVICE_NAMES to the original mock set
       _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
     });
 
     it('skips a service in SERVICE_NAMES that is not in ENABLED_SERVICES', async () => {
-      // 'os' is in SERVICE_NAMES but not ENABLED_SERVICES — hits the skip branch
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack';
-      // Add 'os' to SERVICE_NAMES even though it is not enabled
       _setServiceNamesForTesting(['slack', 'os']);
       _setBridgesForTesting(createMockBridges());
 
-      // Simple code that accesses 'slack' — 'os' should not appear in the sandbox
       const code = `typeof os`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      // 'os' is not in ENABLED_SERVICES so it is excluded from tools context
       expect(result.data).toBe('undefined');
     });
   });
@@ -1315,7 +1272,6 @@ describe('executor', () => {
     });
 
     it('converts non-Error rejection to string in errors array', async () => {
-      // Line 450: String(result.reason) when rejected value is not an Error instance
       const code = `
         const promises = [
           Promise.resolve({ id: 1 }),
@@ -1342,12 +1298,10 @@ describe('executor', () => {
     });
 
     it('uses "Unknown execution error" when caught value is not an Error', async () => {
-      // Throw a plain string to exercise the non-Error catch path
       const code = `throw 'a plain string error';`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(false);
-      // The non-Error catch path produces 'Unknown execution error' as the base message
       expect(result.error?.message).toBe('Unknown execution error');
     });
   });
@@ -1367,18 +1321,15 @@ describe('executor', () => {
     });
 
     it('falls through to generic error when the identified service is not in sandbox', async () => {
-      // unknown service → serviceTools undefined → falsy branch
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack';
       _setBridgesForTesting(createMockBridges());
 
-      // 'unknownSvc' is not in the sandbox, so serviceTools is undefined
       const code = `const unknownSvc = null; unknownSvc.nonExistent()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
-      // Generic sanitized error (no "Available methods" suggestion because service unknown)
       expect(result.error?.message).not.toContain('Available');
     });
   });
@@ -1500,7 +1451,6 @@ describe('executor', () => {
     });
 
     it('falls through when underscore-split service is not in sandbox', async () => {
-      // `ghost_method` → `ghost` not in sandbox → underscore handler falls through
       resetServiceCaches();
       process.env.ENABLED_SERVICES = 'slack';
       _setBridgesForTesting(createMockBridges());
@@ -1510,7 +1460,6 @@ describe('executor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
-      // The underscore handler couldn't find 'ghost' in the sandbox, so it does not add hints
       expect(result.error?.message).toContain('ghost_method is not defined');
     });
   });
@@ -1552,7 +1501,6 @@ describe('executor', () => {
     });
 
     it('audit log uses empty object fallback when params is undefined', async () => {
-      // No-arg call → params undefined → exercises the `params ?? {}` fallback
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
@@ -1567,12 +1515,10 @@ describe('executor', () => {
 
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      // Call a tool with no arguments — params will be undefined in wrapWithAudit
       const code = `return await slack.listChannelIds();`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      // Audit log was emitted with empty params {}
       const auditCallFound = logSpy.mock.calls.some((args) =>
         String(args[0]).match(/\[(READ|WRITE|DELETE)\].*\(\{\}\)/)
       );
@@ -1605,12 +1551,10 @@ describe('executor', () => {
         process.env.WORKER_MY_SERVICE_URL = savedWorkerUrl;
       }
       resetServiceCaches();
-      // Restore SERVICE_NAMES to the original mock set
       _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os']);
     });
 
     it('iterates serviceName parts to find the real service when it contains underscores', async () => {
-      // Service name with underscore forces the split-iteration while loop
       const mutableRegistry = TOOL_REGISTRY as Record<
         string,
         Record<string, Record<string, unknown>>
@@ -1627,21 +1571,17 @@ describe('executor', () => {
         },
       };
 
-      // my_service must be in SERVICE_NAMES for createToolWrappers to include it
       _setServiceNamesForTesting(['slack', 'sharepoint', 'redmine', 'gitlab', 'os', 'my_service']);
 
-      // Worker URL so callWorker doesn't throw "Unknown service: my_service"
       process.env.WORKER_MY_SERVICE_URL = 'http://mcp-my-service:9999';
       process.env.ENABLED_SERVICES = 'slack,my_service';
       resetServiceCaches();
 
-      // Triggers the `XXX_YYY is not defined` handler; while loop resolves my_service.doThing
       const code = `my_service_doThing()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
-      // Should show "Did you mean: my_service.doThing()?"
       expect(result.error?.message).toContain('Did you mean');
       expect(result.error?.message).toContain('my_service.doThing');
 
@@ -1713,8 +1653,6 @@ describe('executor', () => {
     });
 
     it('detokenizes a token in params before the value reaches the bridge call', async () => {
-      // Obtain a real token from this process's engine by round-tripping an email through a call
-      // whose mocked worker response echoes the same text back (so the result gets tokenized).
       mockWorkerJsonResponse({ text: 'reach me at alice@example.com' });
       const tokenizeCode = `return await slack.sendChannel({ channel: 'general', text: 'reach me at alice@example.com' });`;
       const first = await executeCode({ code: tokenizeCode, timeoutMs: 5000 });
@@ -1851,9 +1789,6 @@ describe('executor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
-      // Never the raw, un-tokenized bridge message — a fixed generic string instead.
-      // (The outer catch's own tokenize attempt also fails and degrades again, dropping the
-      // service-name prefix wrapBridgeCall's degrade had added.)
       expect(result.error?.message).toBe('tool call failed');
 
       spy.mockRestore();
@@ -1916,7 +1851,6 @@ describe('executor', () => {
       expect(rows.length).toBeGreaterThan(0);
       const sandboxRow = rows.find((r) => r.layer === 'sandbox-return' && r.category === 'EMAIL');
       expect(sandboxRow).toMatchObject({ action: 'tokenized', count: 1, tool: null });
-      // Never carries the scanned value itself.
       expect(content).not.toContain('bob@example.com');
     });
 

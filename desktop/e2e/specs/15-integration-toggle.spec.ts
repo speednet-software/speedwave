@@ -38,14 +38,10 @@ describe('Integration Toggle', function () {
     it('enables the integration but does not start containers', async function () {
       this.timeout(60_000);
       await toggleIntegration(SERVICE);
-      // Row reflects the enable optimistically.
       await browser.waitUntil(async () => (await rowStatus(SERVICE)) !== 'disabled', {
         timeout: 15_000,
         timeoutMsg: `${SERVICE} row never left disabled after enable`,
       });
-      // requestRestart routes no_provider through ensureContainersRunning, which
-      // runs a brief system_check/checking cycle then defers. No restart overlay
-      // ever renders and containers stay down — assert it holds, not just once.
       for (let i = 0; i < 6; i++) {
         expect(await $('[data-testid="restart-now-btn"]').isExisting()).toBe(false);
         expect(await containersRunning(NO_LLM_PROJECT)).toBe(false);

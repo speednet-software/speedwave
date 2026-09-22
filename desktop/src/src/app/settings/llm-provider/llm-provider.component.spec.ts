@@ -7,12 +7,10 @@ import { ProjectStateService, type AuthStatusResponse } from '../../services/pro
 import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
-import { type AnthropicModel } from '../../models/llm';
+import { type LlmProviderEntry } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { createDeferred, type Deferred } from '../../testing/deferred';
+import { makeMockLogger } from '../../testing/mock-logger';
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   ollama: 'http://host.docker.internal:11434',
@@ -20,17 +18,12 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   llamacpp: 'http://host.docker.internal:8080',
 };
 
-/**
- * Drains pending non-Zone microtasks.
- * @param cycles - how many `await Promise.resolve()` ticks to drain
- */
 async function flushMicrotasks(cycles = 10): Promise<void> {
   for (let i = 0; i < cycles; i++) {
     await Promise.resolve();
   }
 }
 
-/** Stable test fixture mirroring `speedwave_runtime::defaults::AnthropicModelInfo`; keep `context_tokens` in sync with `crates/speedwave-runtime/src/defaults.rs`. */
 const TEST_ANTHROPIC_MODELS = [
   {
     id: 'claude-fable-5',
@@ -38,6 +31,8 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-opus-4-8',
@@ -45,6 +40,8 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-sonnet-4-6',
@@ -52,6 +49,8 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: true,
     premium: false,
+    effort_levels: ['low', 'medium', 'high', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-haiku-4-5',
@@ -59,6 +58,8 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 200_000,
     latest: true,
     premium: false,
+    effort_levels: [],
+    default_effort: null,
   },
   {
     id: 'claude-opus-4-7',
@@ -66,6 +67,8 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'xhigh',
   },
   {
     id: 'claude-opus-4-6',
@@ -73,6 +76,8 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
+    effort_levels: ['low', 'medium', 'high', 'max'],
+    default_effort: 'high',
   },
 ];
 
@@ -93,9 +98,7 @@ function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): vo
       case 'update_llm_config':
         return undefined;
       case 'discover_llm_models':
-        // Default: empty list so the component falls back to text input.
-        // Individual tests override this.
-        throw new Error('offline');
+        return { models: [{ id: 'llama3.3' }] };
       default:
         return undefined;
     }
@@ -121,8 +124,6 @@ describe('LlmProviderComponent', () => {
       ],
     }).compileComponents();
 
-    // AnthropicModelsService is providedIn root and caches the catalog
-    // across tests — reset so each spec sees its own mock response.
     TestBed.inject(AnthropicModelsService).resetForTesting();
 
     fixture = TestBed.createComponent(LlmProviderComponent);
@@ -130,8 +131,6 @@ describe('LlmProviderComponent', () => {
   });
 
   afterEach(() => {
-    // Runs ngOnDestroy so the OAuth completion setInterval is cleared — without
-    // this each test that sets activeProject leaks a 1500ms timer into later tests.
     fixture?.destroy();
   });
 
@@ -165,8 +164,6 @@ describe('LlmProviderComponent', () => {
     component.ngOnInit();
     await fixture.whenStable();
 
-    // Legacy provider name auto-migrated to `local` for the UI; the
-    // legacyMigrationProvider flag drives the migration banner.
     expect(component.provider()).toBe('local');
     expect(component.legacyMigrationProvider()).toBe('ollama');
     expect(component.provider()).not.toBe('ollama');
@@ -212,8 +209,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('a loadConfig error still settles the initial-load join (no permanently-dirty Save)', async () => {
-    // If get_llm_config throws while get_auth_status succeeds, the join must
-    // still close — else isDirty() is stuck true and Save never disables.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_llm_config') throw new Error('backend unavailable');
       if (cmd === 'get_auth_status')
@@ -244,25 +239,6 @@ describe('LlmProviderComponent', () => {
     expect(spy).toHaveBeenCalledWith('ollama');
   });
 
-  it('returns an empty Anthropic placeholder while the SSOT catalog is loading', () => {
-    // No catalog yet (reset in beforeEach) — placeholder is blank until the SSOT loads.
-    component.provider.set('anthropic');
-    expect(component.modelPlaceholder()).toBe('');
-  });
-
-  it('derives the Anthropic placeholder from the SSOT catalog (latest non-Opus)', async () => {
-    // Once the catalog loads, the placeholder is the latest non-Opus (Sonnet)
-    // model id, not a hard-coded literal.
-    await TestBed.inject(AnthropicModelsService).list();
-    component.provider.set('anthropic');
-    expect(component.modelPlaceholder()).toBe('claude-sonnet-4-6');
-  });
-
-  it('returns the local placeholder for non-Anthropic providers', () => {
-    component.provider.set('local');
-    expect(component.modelPlaceholder()).toBe('llama3.3');
-  });
-
   it('saves config and sets saved flag', async () => {
     component.provider.set('ollama');
     component.model.set('llama3.3');
@@ -273,6 +249,9 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'update_llm_config') {
         invokedArgs = args ?? {};
         return undefined;
+      }
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
       }
       return undefined;
     };
@@ -310,6 +289,7 @@ describe('LlmProviderComponent', () => {
     component.providerChange.subscribe(spy);
     component.provider.set('ollama');
     component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     await component.saveConfig();
 
@@ -319,9 +299,10 @@ describe('LlmProviderComponent', () => {
   it('requests container restart on successful save', async () => {
     const projectState = TestBed.inject(ProjectStateService);
     projectState.needsRestart = false;
-    projectState.status.set('ready'); // save on an already-running project
+    projectState.status.set('ready');
     component.provider.set('ollama');
     component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     await component.saveConfig();
 
@@ -350,10 +331,10 @@ describe('LlmProviderComponent', () => {
     const ensureSpy = vi.spyOn(projectState, 'ensureContainersRunning').mockResolvedValue();
     component.provider.set('ollama');
     component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     await component.saveConfig();
 
-    // First provider on a fresh project: start containers, don't just flag a restart.
     expect(ensureSpy).toHaveBeenCalled();
     expect(projectState.needsRestart).toBe(false);
   });
@@ -381,11 +362,10 @@ describe('LlmProviderComponent', () => {
   });
 
   it('hot-reloads the proxy with the input-signal project, not projectState', async () => {
-    // T10 regression: saveConfig reads the active project from the activeProject() input, not ProjectStateService.
     fixture.componentRef.setInput('activeProject', 'proj-from-input');
     const projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject.set('wrong-project');
-    projectState.status.set('ready'); // hot-reload requires a live stack
+    projectState.status.set('ready');
 
     let restartProject: unknown = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -398,8 +378,6 @@ describe('LlmProviderComponent', () => {
 
     component.provider.set('anthropic');
     component.model.set('');
-    // Make the active selection unchanged so the hot-reload branch fires —
-    // derive the key the same way saveConfig will (R6: kind/headers-aware).
     component['loadedActiveKey'] = component['computeActiveKey'](
       'anthropic',
       null,
@@ -413,7 +391,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('writes provider keys before the config and aborts the config on key failure', async () => {
-    // T11 regression: a per-provider key write must precede update_llm_config.
     const errorSpy = vi.fn();
     component.errorOccurred.subscribe(errorSpy);
 
@@ -426,7 +403,6 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
 
-    // Configure the openrouter row with a touched key so the loop runs.
     const row = component.extraProviders().find((r) => r.id === 'openrouter');
     expect(row).toBeDefined();
     row!.keyInput = 'sk-or-test';
@@ -438,7 +414,6 @@ describe('LlmProviderComponent', () => {
     expect(calls).not.toContain('update_llm_config');
     expect(errorSpy).toHaveBeenCalledWith('key write failed');
     expect(component.saved()).toBe(false);
-    // The failed key stays editable (not optimistically cleared).
     expect(row!.keyTouched).toBe(true);
     expect(row!.keyInput).toBe('sk-or-test');
   });
@@ -458,69 +433,52 @@ describe('LlmProviderComponent', () => {
       return captured;
     }
 
-    it('resolves Anthropic context_tokens from the SSOT catalog', async () => {
-      // Pre-populate the catalog signal (normally loaded via AnthropicModelsService →
-      // list_anthropic_models) to keep the test focused on the resolution logic.
-      const cmp = component as unknown as {
-        anthropicCatalog: { set: (v: AnthropicModel[]) => void };
-      };
-      cmp.anthropicCatalog.set(TEST_ANTHROPIC_MODELS);
+    it('sends null context_tokens for anthropic (no model control writes it)', async () => {
       component.provider.set('anthropic');
-      component.model.set('claude-opus-4-7');
       const update = await captureUpdate();
-      expect(update['context_tokens']).toBe(1_000_000);
+      expect(update['context_tokens']).toBeNull();
     });
 
-    it('resolves local-provider context_tokens from the discovery payload', async () => {
-      component.discoveryState.set({
-        kind: 'ready',
-        url: 'http://localhost:11434',
-        models: [{ id: 'llama3.3', context_tokens: 32_768 }],
-      });
-      component.provider.set('ollama');
-      component.model.set('llama3.3');
-      component.baseUrl.set('http://localhost:11434');
-      const update = await captureUpdate();
-      expect(update['context_tokens']).toBe(32_768);
-    });
-
-    it('falls back to loadedLocalContextTokens when discovery has not run', async () => {
-      // Simulates a saved context window from get_llm_config: saving without clicking
-      // "Refresh models" must not wipe the persisted value.
+    it('sends the loadedLocalContextTokens value for local providers', async () => {
       const cmp = component as unknown as {
         loadedLocalContextTokens: number | null;
+        loadedLocalEntry: LlmProviderEntry | null;
       };
-      component.discoveryState.set({ kind: 'idle' });
       cmp.loadedLocalContextTokens = 16_384;
+      cmp.loadedLocalEntry = {
+        id: 'local',
+        kind: 'local',
+        base_url: 'http://localhost:11434',
+        model: 'llama3.3',
+        has_api_key: false,
+        context_tokens: 16_384,
+        has_custom_headers: false,
+      };
       component.provider.set('ollama');
-      component.model.set('llama3.3');
       component.baseUrl.set('http://localhost:11434');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBe(16_384);
     });
 
-    it('sends null context_tokens when the model is empty', async () => {
-      component.provider.set('anthropic');
-      component.model.set('');
-      const update = await captureUpdate();
-      expect(update['context_tokens']).toBeNull();
-    });
-
-    it('sends null context_tokens when the model is unknown to the Anthropic catalog', async () => {
-      const cmp = component as unknown as {
-        anthropicCatalog: { set: (v: AnthropicModel[]) => void };
+    it('sends null context_tokens for local when nothing was loaded', async () => {
+      const cmp = component as unknown as { loadedLocalEntry: LlmProviderEntry | null };
+      cmp.loadedLocalEntry = {
+        id: 'local',
+        kind: 'local',
+        base_url: 'http://localhost:11434',
+        model: 'llama3.3',
+        has_api_key: false,
+        context_tokens: null,
+        has_custom_headers: false,
       };
-      cmp.anthropicCatalog.set(TEST_ANTHROPIC_MODELS);
-      component.provider.set('anthropic');
-      component.model.set('claude-fictional-9-9');
+      component.provider.set('ollama');
+      component.baseUrl.set('http://localhost:11434');
       const update = await captureUpdate();
       expect(update['context_tokens']).toBeNull();
     });
   });
 
   it('refreshes ChatStateService cache after a successful save', async () => {
-    // Without this, the chat footer keeps showing the previous model's
-    // context window until the next session starts.
     const chatState = TestBed.inject(ChatStateService);
     const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCache').mockResolvedValue();
     component.provider.set('ollama');
@@ -571,7 +529,7 @@ describe('LlmProviderComponent', () => {
     expect(localCard.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('shows a backend-served model dropdown for anthropic (no base_url field)', async () => {
+  it('renders no model selector for the anthropic provider (no base_url field either)', async () => {
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.ngOnInit();
@@ -579,122 +537,36 @@ describe('LlmProviderComponent', () => {
     fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
 
-    // The unified-list redesign (ADR-073) drops the read-only base_url field for anthropic.
     const baseUrlInput = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-base-url"]'
     );
     expect(baseUrlInput).toBeNull();
 
     const modelEl = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(modelEl).not.toBeNull();
-    expect(modelEl.tagName).toBe('SELECT');
-    const options = Array.from(modelEl.querySelectorAll('option')).map(
-      (o) => (o as HTMLOptionElement).value
-    );
-    // Default option plus every backend-SSOT catalog id, latest first then legacy.
-    expect(options).toEqual([
-      '',
-      'claude-fable-5',
-      'claude-opus-4-8',
-      'claude-sonnet-4-6',
-      'claude-haiku-4-5',
-      'claude-opus-4-7',
-      'claude-opus-4-6',
-    ]);
-    const defaultLabel = (
-      modelEl.querySelector('option[value=""]') as HTMLOptionElement
-    )?.textContent?.trim();
-    // Default option carries the SSOT-resolved Opus family label (exact string verified below).
-    expect(defaultLabel?.toLowerCase()).toContain('default');
-
-    // Latest entries land in an optgroup labelled "Latest".
-    const latestGroup = modelEl.querySelector('optgroup[label="Latest"]') as HTMLOptGroupElement;
-    expect(latestGroup).not.toBeNull();
-    const latestIds = Array.from(latestGroup.querySelectorAll('option')).map(
-      (o) => (o as HTMLOptionElement).value
-    );
-    expect(latestIds).toEqual([
-      'claude-fable-5',
-      'claude-opus-4-8',
-      'claude-sonnet-4-6',
-      'claude-haiku-4-5',
-    ]);
-
-    // Legacy entries are visible but quarantined to the "Legacy" optgroup.
-    const legacyGroup = modelEl.querySelector('optgroup[label="Legacy"]') as HTMLOptGroupElement;
-    expect(legacyGroup).not.toBeNull();
-    const legacyIds = Array.from(legacyGroup.querySelectorAll('option')).map(
-      (o) => (o as HTMLOptionElement).value
-    );
-    expect(legacyIds).toEqual(['claude-opus-4-7', 'claude-opus-4-6']);
-
-    // Labels carry family + context window (1M for Opus 4.8, 200k for Haiku).
-    const opus48Label = (
-      modelEl.querySelector('option[value="claude-opus-4-8"]') as HTMLOptionElement
-    )?.textContent?.trim();
-    expect(opus48Label).toContain('Opus 4.8');
-    expect(opus48Label).toContain('1M ctx');
-    const haikuLabel = (
-      modelEl.querySelector('option[value="claude-haiku-4-5"]') as HTMLOptionElement
-    )?.textContent?.trim();
-    expect(haikuLabel).toContain('200k ctx');
+    expect(modelEl).toBeNull();
   });
 
-  it('preserves a previously-saved model id that is no longer in the SSOT catalog', async () => {
-    // A persisted-but-retired model id is surfaced as a "(not in catalog)" option, not reset.
+  it('never sends a model for the anthropic provider on save', async () => {
+    component.selectedTarget.set('anthropic');
+    component.provider.set('anthropic');
+    component.apiKeyConfigured.set(true);
+    let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-      switch (cmd) {
-        case 'get_llm_config':
-          return {
-            provider: 'anthropic',
-            model: 'claude-opus-4-1',
-            base_url: null,
-            default_base_url: null,
-          };
-        case 'get_default_base_url':
-          return DEFAULT_BASE_URLS[(args?.['provider'] as string) ?? ''] ?? null;
-        case 'list_anthropic_models':
-          return TEST_ANTHROPIC_MODELS;
-        default:
-          return undefined;
-      }
+      if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
+      return undefined;
     };
-    component.ngOnInit();
-    await fixture.whenStable();
-    await flushMicrotasks();
-    fixture.changeDetectorRef.markForCheck();
     fixture.detectChanges();
+    await component.saveConfig();
 
-    const modelEl = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-model"]'
-    ) as HTMLSelectElement;
-    const stray = Array.from(modelEl.querySelectorAll('option'))
-      .map((o) => o as HTMLOptionElement)
-      .find((o) => o.value === 'claude-opus-4-1');
-    expect(stray).toBeTruthy();
-    expect(stray?.textContent).toContain('not in catalog');
-  });
-
-  it('renders a plan-neutral Default label (F3 — Speedwave cannot see the plan)', async () => {
-    // The real default depends on the account plan (Pro→Sonnet, Max→Opus),
-    // so the label must not promise a specific model.
-    component.ngOnInit();
-    await fixture.whenStable();
-    await flushMicrotasks();
-    fixture.changeDetectorRef.markForCheck();
-    fixture.detectChanges();
-
-    const modelEl = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-model"]'
-    ) as HTMLSelectElement;
-    const defaultLabel = (
-      modelEl.querySelector('option[value=""]') as HTMLOptionElement
-    )?.textContent?.trim();
-    expect(defaultLabel).toBe('Default — depends on your plan (switchable via /model)');
+    expect(captured).not.toBeNull();
+    const update = captured!;
+    expect(update['model']).toBeNull();
+    const providers = update['providers'] as Array<Record<string, unknown>>;
+    const anthropicEntry = providers.find((p) => p['id'] === 'anthropic');
+    expect(anthropicEntry?.['model']).toBeNull();
   });
 
   it('openrouter_discover_disabled_without_key', () => {
-    // Discover button is disabled when the API key is empty (gate).
     const row = component.extraProviders().find((p) => p.id === 'openrouter');
     expect(row).toBeTruthy();
     component.selectExtraProvider(row!);
@@ -705,7 +577,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('openrouter_discover_enabled_with_key', () => {
-    // Key present at first render → button enabled (no OnPush mutation timing).
     const row = component.extraProviders().find((p) => p.id === 'openrouter');
     component.selectExtraProvider(row!);
     component.onExtraKeyInput(row!, 'sk-or-x');
@@ -732,8 +603,7 @@ describe('LlmProviderComponent', () => {
     expect(btn.disabled).toBe(false);
   });
 
-  it('switching cards back and forth, entering a URL, and discovering a model enables Save', async () => {
-    // Real-world flow on a fresh project: load, switch card, type URL, discover, pick model.
+  it('switching cards back and forth and entering a URL enables Save (server auto-defaults the model)', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -764,18 +634,13 @@ describe('LlmProviderComponent', () => {
     component.provider.set('local');
     await component.onProviderChange();
     component.baseUrl.set('http://10.155.3.101:4000');
-    await component.discoverModels(false);
-    await flushMicrotasks();
     fixture.detectChanges();
 
-    expect(component.model()).toBe('unsloth/Qwen3.6-35B-A3B');
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(false);
   });
 
   it('enables_save_for_authenticated_anthropic_without_model', () => {
-    // Anthropic needs no model, but DOES need credentials (oauth or api key);
-    // oauthAuthenticated flipping true from its default false is itself a change.
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.model.set('');
@@ -786,8 +651,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('no_op_load_keeps_save_disabled_for_already_connected_anthropic', async () => {
-    // Bug repro: a freshly-loaded, already-connected Anthropic card must not
-    // show an enabled Save button until the user actually changes something.
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -817,12 +680,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('no_op_load_keeps_save_disabled_when_auth_status_resolves_after_config_with_active_project', async () => {
-    // Real-world race: the constructor effect's loadAuthStatus() runs concurrently with
-    // ngOnInit's loadConfig(); get_auth_status resolving after get_llm_config must not make isDirty() true with zero user edits.
-    let resolveAuthStatus: ((value: AuthStatusResponse) => void) | undefined;
-    const authStatusPromise = new Promise<AuthStatusResponse>((resolve) => {
-      resolveAuthStatus = resolve;
-    });
+    const pendingAuthStatus = createDeferred<AuthStatusResponse>();
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -835,7 +693,7 @@ describe('LlmProviderComponent', () => {
             active: { provider_id: 'anthropic', model: 'claude-sonnet-4-6' },
           };
         case 'get_auth_status':
-          return authStatusPromise;
+          return pendingAuthStatus.promise;
         case 'list_anthropic_models':
           return TEST_ANTHROPIC_MODELS;
         default:
@@ -843,15 +701,11 @@ describe('LlmProviderComponent', () => {
       }
     };
 
-    // setInput fires the constructor effect's loadAuthStatus() (get_auth_status,
-    // held pending below); detectChanges runs ngOnInit's loadConfig() alongside it.
     fixture.componentRef.setInput('activeProject', 'proj');
     fixture.detectChanges();
-    // Let loadConfig() (get_llm_config) settle while get_auth_status is still pending.
     await flushMicrotasks();
 
-    // Now the in-flight auth probe resolves with the real, already-connected state.
-    resolveAuthStatus?.({
+    pendingAuthStatus.resolve({
       api_key_configured: false,
       oauth_authenticated: true,
       needs_anthropic_auth: false,
@@ -886,8 +740,6 @@ describe('LlmProviderComponent', () => {
       }
     };
 
-    // loadConfig() (ngOnInit) and the constructor effect's loadAuthStatus() race for real
-    // here — the initial-load join must still land on a clean snapshot once both settle.
     fixture.componentRef.setInput('activeProject', 'proj');
     component.ngOnInit();
     await fixture.whenStable();
@@ -925,8 +777,6 @@ describe('LlmProviderComponent', () => {
       }
     };
 
-    // loadConfig() (ngOnInit) and the constructor effect's loadAuthStatus() race for real
-    // here — the initial-load join must still land on a clean snapshot once both settle.
     fixture.componentRef.setInput('activeProject', 'proj');
     component.ngOnInit();
     await fixture.whenStable();
@@ -945,6 +795,7 @@ describe('LlmProviderComponent', () => {
 
   it('shows_logout_not_login_when_oauth_authenticated', () => {
     fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.authMethod.set('oauth');
@@ -958,10 +809,12 @@ describe('LlmProviderComponent', () => {
 
   it('shows_login_not_logout_when_not_authenticated', () => {
     fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.authMethod.set('oauth');
     component.oauthAuthenticated.set(false);
+    component.oauthSignIn.set('none');
     fixture.detectChanges();
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]')
@@ -969,20 +822,38 @@ describe('LlmProviderComponent', () => {
     expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
   });
 
+  it('shows_logout_not_login_when_oauth_sign_in_saved_unverified', () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.authMethod.set('oauth');
+    component.oauthAuthenticated.set(false);
+    component.oauthSignIn.set('saved_unverified');
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]')
+    ).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeFalsy();
+  });
+
   it('logout_button_invokes_anthropic_logout_clears_provider_and_reloads_status', async () => {
     const calls: string[] = [];
+    let loggedOut = false;
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
-      if (cmd === 'anthropic_logout') return undefined;
+      if (cmd === 'anthropic_logout') {
+        loggedOut = true;
+        return undefined;
+      }
       if (cmd === 'clear_active_llm_provider') return undefined;
       if (cmd === 'get_auth_status')
         return {
-          // Logout leaves the project with no active provider.
           api_key_configured: false,
-          oauth_authenticated: false,
+          oauth_authenticated: !loggedOut,
           needs_anthropic_auth: true,
-          provider_configured: false,
+          provider_configured: !loggedOut,
         };
       return prev(cmd, args);
     };
@@ -990,16 +861,13 @@ describe('LlmProviderComponent', () => {
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.authMethod.set('oauth');
-    component.oauthAuthenticated.set(true);
-    fixture.detectChanges();
+    component.ngOnInit();
     await fixture.whenStable();
-    // Discard the initial render's auth-status probe; assert only the logout sequence.
+    fixture.detectChanges();
     calls.length = 0;
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-oauth-logout"]');
     btn.click();
     await fixture.whenStable();
-    // Logout must clear credentials AND the active provider (no-provider state),
-    // then reload status so the UI reflects the cleared selection.
     expect(calls).toContain('anthropic_logout');
     expect(calls).toContain('clear_active_llm_provider');
     expect(calls).toContain('get_auth_status');
@@ -1012,8 +880,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('logout forces no_provider even from a live ready chat session', async () => {
-    // Reproduces the bug: a deliberate logout while status is already 'ready'
-    // must blank the chat view, not silently stay on 'ready'.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'anthropic_logout') return undefined;
       if (cmd === 'clear_active_llm_provider') return undefined;
@@ -1051,7 +917,6 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    // Local is the active provider before the user logs in to Anthropic.
     component.provider.set('local');
     component.selectedTarget.set('local');
 
@@ -1062,11 +927,9 @@ describe('LlmProviderComponent', () => {
   });
 
   it('onOAuthDone_saves_and_forces_full_restart_even_when_already_on_anthropic_card', async () => {
-    // Regression: guarding on effectiveTarget() !== 'anthropic' skipped autosave when already
-    // on the Anthropic card. Login must always commit active=anthropic and force a full restart.
     const projectState = TestBed.inject(ProjectStateService);
     projectState.needsRestart = false;
-    projectState.status.set('ready'); // OAuth login self-heal on a running project
+    projectState.status.set('ready');
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
     const calls: string[] = [];
     const prev = mockTauri.invokeHandler;
@@ -1083,7 +946,6 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    // User is already on the Anthropic card when they log in (the common path).
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
 
@@ -1091,23 +953,21 @@ describe('LlmProviderComponent', () => {
 
     expect(component.selectedTarget()).toBe('anthropic');
     expect(calls).toContain('update_llm_config');
-    // Full restart, not a light proxy reload — this is the self-heal.
     expect(restartSpy).toHaveBeenCalled();
     expect(projectState.needsRestart).toBe(true);
     expect(calls).not.toContain('restart_llm_proxy');
   });
 
   it('external-terminal login (watcher detects oauth false→true) auto-saves Anthropic', async () => {
-    // The external "Open terminal and log in" path has no frontend callback, so
-    // the watcher detects the credentials flip and runs the embedded autosave.
     const calls: string[] = [];
+    let authenticated = false;
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
       if (cmd === 'get_auth_status')
         return {
           api_key_configured: false,
-          oauth_authenticated: true,
+          oauth_authenticated: authenticated,
           needs_anthropic_auth: true,
           provider_configured: true,
         };
@@ -1115,9 +975,12 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    // Fresh project: not yet authenticated; the external terminal just completed.
-    component.oauthAuthenticated.set(false);
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(component.oauthSignIn()).toBe('none');
+    calls.length = 0;
 
+    authenticated = true;
     await fixture.debugElement.injector.get(OauthCompletionWatcher).checkNow();
 
     expect(component.selectedTarget()).toBe('anthropic');
@@ -1139,7 +1002,6 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    // Already authenticated (e.g. embedded path handled it) → no false→true edge.
     component.oauthAuthenticated.set(true);
 
     await fixture.debugElement.injector.get(OauthCompletionWatcher).checkNow();
@@ -1150,14 +1012,12 @@ describe('LlmProviderComponent', () => {
   it('logout restarts the completion poll so a later external re-login is detected', async () => {
     fixture.componentRef.setInput('activeProject', 'proj');
     const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
-    // Authenticated state stops the poll on its next tick / via the probe.
     component.oauthAuthenticated.set(true);
     watcher.stopPoll();
     expect(watcher.isPolling()).toBe(false);
 
     await component.anthropicLogout('proj');
 
-    // A fresh poll is running again after logout.
     expect(watcher.isPolling()).toBe(true);
   });
 
@@ -1190,16 +1050,15 @@ describe('LlmProviderComponent', () => {
   });
 
   it('window regaining focus forces an immediate auth check (past poll throttling)', async () => {
-    // The OS/webview throttles setInterval in an unfocused window, so a window
-    // focus event must trigger the same check independent of the poll cadence.
     const calls: string[] = [];
+    let authenticated = false;
     const prev = mockTauri.invokeHandler;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       calls.push(cmd);
       if (cmd === 'get_auth_status')
         return {
           api_key_configured: false,
-          oauth_authenticated: true,
+          oauth_authenticated: authenticated,
           needs_anthropic_auth: true,
           provider_configured: true,
         };
@@ -1207,10 +1066,12 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
-    component.oauthAuthenticated.set(false);
     component.ngOnInit();
-    await flushMicrotasks();
+    await fixture.whenStable();
+    expect(component.oauthSignIn()).toBe('none');
+    calls.length = 0;
 
+    authenticated = true;
     mockTauri.dispatchEvent('window_focused', undefined);
     await flushMicrotasks();
 
@@ -1227,6 +1088,80 @@ describe('LlmProviderComponent', () => {
     component.ngOnDestroy();
 
     expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();
+  });
+
+  it('saves the configuration once when a detected login arrives while probes are slow', async () => {
+    const calls: string[] = [];
+    const notConfigured: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      status: 'auth_required',
+    };
+    const verified: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: true,
+      oauth_sign_in: 'verified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+      status: 'ready',
+    };
+    let slow = false;
+    const pendingAuthStatus: Deferred<AuthStatusResponse>[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'get_llm_config') {
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
+      }
+      if (cmd === 'get_auth_status') {
+        if (!slow) return notConfigured;
+        const deferred = createDeferred<AuthStatusResponse>();
+        pendingAuthStatus.push(deferred);
+        return deferred.promise;
+      }
+      if (cmd === 'get_auth_command') return "speedwave login --project 'desktop'";
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('activeProject', 'desktop');
+      fixture.detectChanges();
+      await flushMicrotasks();
+      fixture.detectChanges();
+
+      expect(component.oauthSignIn()).toBe('none');
+      expect(fixture.nativeElement.querySelector('app-auth-terminal')).toBeTruthy();
+
+      slow = true;
+      vi.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(1500);
+      vi.advanceTimersByTime(3000);
+      mockTauri.dispatchEvent('window_focused', undefined);
+      vi.advanceTimersByTime(1500);
+
+      expect(pendingAuthStatus.length).toBeGreaterThan(1);
+
+      for (let round = 0; round < 10 && pendingAuthStatus.length > 0; round++) {
+        const batch = pendingAuthStatus.splice(0, pendingAuthStatus.length);
+        for (const deferred of batch) deferred.resolve(verified);
+        await flushMicrotasks();
+      }
+      fixture.detectChanges();
+      await flushMicrotasks();
+      fixture.detectChanges();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(calls.filter((c) => c === 'update_llm_config')).toHaveLength(1);
+    expect(component.oauthAuthenticated()).toBe(true);
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="auth-status-value"]')?.textContent
+    ).toContain('connected');
   });
 
   it('onOAuthDone_failure_does_not_save', async () => {
@@ -1265,13 +1200,34 @@ describe('LlmProviderComponent', () => {
   });
 
   it('enables_save_for_anthropic_with_api_key', () => {
-    // apiKeyConfigured flipping true from its default false is itself a change.
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component.apiKeyConfigured.set(true);
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(false);
+  });
+
+  it('canSave is true for anthropic with a saved-unverified sign-in once dirty', () => {
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('');
+    component.oauthSignIn.set('saved_unverified');
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('canSave stays false for anthropic when oauth_sign_in is none', () => {
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.model.set('');
+    component.oauthAuthenticated.set(false);
+    component.apiKeyConfigured.set(false);
+    component.oauthSignIn.set('none');
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
+    expect(btn.disabled).toBe(true);
   });
 
   it('renders_local_fields_in_order_url_key_discover', () => {
@@ -1298,7 +1254,6 @@ describe('LlmProviderComponent', () => {
       '[data-testid="settings-llm-base-url"]'
     );
     expect(baseUrlInput).not.toBeNull();
-    // No model field on a fresh form — it appears only after discovery.
     const modelInput = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(modelInput).toBeNull();
   });
@@ -1364,8 +1319,6 @@ describe('LlmProviderComponent', () => {
     expect(btn.textContent.trim().toLowerCase()).toContain('save');
   });
 
-  // ── Model discovery (ADR-041) ────────────────────────────────────────
-
   function setupDiscoveryMock(
     mockTauri: MockTauriService,
     opts: {
@@ -1373,8 +1326,6 @@ describe('LlmProviderComponent', () => {
       baseUrl?: string;
       defaultBaseUrl?: string;
       model?: string;
-      // String shape is accepted for test convenience — we lift it to the
-      // new `DiscoveredModel { id, context_tokens? }` DTO before returning.
       discover?: (args?: Record<string, unknown>) => Promise<string[]>;
     } = {}
   ): { discoverCalls: Array<Record<string, unknown> | undefined> } {
@@ -1415,42 +1366,31 @@ describe('LlmProviderComponent', () => {
     return { discoverCalls };
   }
 
-  it('renders_select_on_happy_path', async () => {
+  it('renders a hint instead of a model select once discovery is ready', async () => {
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       discover: async () => ['llama3.3', 'qwen2.5'],
     });
     component.ngOnInit();
     await flushMicrotasks();
-    // Discovery is explicit now — no auto-probe on load.
     component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     fixture.detectChanges();
 
-    const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(select).not.toBeNull();
-    expect(select.tagName).toBe('SELECT');
-    const opts = Array.from(select.querySelectorAll('option') as NodeListOf<Element>).map((o) =>
-      (o.textContent || '').trim()
-    );
-    expect(opts).toContain('llama3.3');
-    expect(opts).toContain('qwen2.5');
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-test-success"]')
+    ).not.toBeNull();
   });
 
-  it('editing_base_url_resets_discovery_and_model', async () => {
-    // Configured (model + ready list), then the user edits the URL → the stale
-    // list and model must clear so Save is disabled until a fresh discover.
+  it('editing_base_url_resets_discovery_state', async () => {
     setupDiscoveryMock(mockTauri, { provider: 'ollama', discover: async () => ['m1', 'm2'] });
     component.ngOnInit();
     await flushMicrotasks();
     component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     expect(component.discoveryState().kind).toBe('ready');
-    expect(component.model()).toBe('m1');
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]').disabled).toBe(
-      false
-    );
 
     const input = fixture.nativeElement.querySelector(
       '[data-testid="settings-llm-base-url"]'
@@ -1461,14 +1401,11 @@ describe('LlmProviderComponent', () => {
 
     expect(component.baseUrl()).toBe('http://host.docker.internal:1234');
     expect(component.discoveryState().kind).toBe('idle');
-    expect(component.model()).toBe('');
     const saveBtn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
-    expect(saveBtn.disabled).toBe(true);
+    expect(saveBtn.disabled).toBe(false);
   });
 
-  it('selects_the_auto_chosen_model_in_the_dropdown', async () => {
-    // After discovery the first model is auto-selected; the <select> must show
-    // it (the rendered option must be marked selected, not left blank).
+  it('discovery no longer auto-selects into the model signal (Task 18)', async () => {
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       discover: async () => ['llama3.3', 'qwen2.5'],
@@ -1479,13 +1416,8 @@ describe('LlmProviderComponent', () => {
     await component.discoverModels(true);
     fixture.detectChanges();
 
-    expect(component.model()).toBe('llama3.3');
-    const select = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-model"]'
-    ) as HTMLSelectElement;
-    expect(select.value).toBe('llama3.3');
-    const selectedOption = select.querySelector('option:checked') as HTMLOptionElement | null;
-    expect(selectedOption?.value).toBe('llama3.3');
+    expect(component.discoveryState().kind).toBe('ready');
+    expect(component.model()).toBe('');
   });
 
   it('keeps_input_on_offline_failure', async () => {
@@ -1504,7 +1436,6 @@ describe('LlmProviderComponent', () => {
     await component.discoverModels(true);
     fixture.detectChanges();
 
-    // No free-text fallback — the model field is hidden on failure (Task 2).
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).toBeNull();
     expect(component.discoveryState().kind).toBe('failed');
@@ -1519,7 +1450,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('does_not_probe_on_load_or_switch', async () => {
-    // Explicit-discovery: neither init/load nor a provider switch probes.
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       defaultBaseUrl: 'http://host.docker.internal:11434',
@@ -1528,14 +1458,12 @@ describe('LlmProviderComponent', () => {
     await component.ngOnInit();
     await fixture.whenStable();
     expect(discoverCalls.length).toBe(0);
-    // Only the explicit button probes.
     component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     expect(discoverCalls.length).toBe(1);
   });
 
   it('refresh_button_invokes_discovery_bypassing_dedupe', async () => {
-    // Two sequential refreshes on the same URL must both fire.
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       discover: async () => ['m'],
@@ -1555,48 +1483,33 @@ describe('LlmProviderComponent', () => {
     });
     await component.ngOnInit();
     await fixture.whenStable();
-    // A restored model the server no longer lists must survive discovery.
     component.model.set('restored-not-on-server');
     await component.discoverModels(true);
     expect(component.model()).toBe('restored-not-on-server');
-    // But a blank model still auto-selects the first discovered one.
-    component.model.set('');
-    await component.discoverModels(true);
-    expect(component.model()).toBe('m1');
   });
 
   it('dedupes_provider_change_and_blur_on_same_url', async () => {
-    // While a probe is in-flight against URL X, a second same-URL trigger is deduped.
-    let resolveFirst: (v: string[]) => void = () => {};
-    const hanging = new Promise<string[]>((resolve) => {
-      resolveFirst = resolve;
-    });
+    const hanging = createDeferred<string[]>();
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
-      discover: async () => await hanging,
+      discover: async () => await hanging.promise,
     });
-    // Bypass ngOnInit — set state directly so we can control timing.
     component.provider.set('ollama');
     component.baseUrl.set('http://localhost:11434');
     const firstCall = component.discoverModels(false);
-    // Same URL, while first is pending → must dedupe.
     await component.discoverModels(false);
     expect(discoverCalls.length).toBe(1);
-    resolveFirst(['m']);
+    hanging.resolve(['m']);
     await firstCall;
   });
 
   it('discards_stale_response_on_rapid_blur', async () => {
-    // On rapid URL change, final state reflects the latest URL, not the stale slow response.
-    let resolveFirst: (v: string[]) => void = () => {};
-    const slow = new Promise<string[]>((r) => {
-      resolveFirst = r;
-    });
+    const slow = createDeferred<string[]>();
     let callIdx = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'discover_llm_models') {
         callIdx += 1;
-        if (callIdx === 1) return await slow;
+        if (callIdx === 1) return await slow.promise;
         return { models: [{ id: 'model-from-second' }] };
       }
       return undefined;
@@ -1604,13 +1517,10 @@ describe('LlmProviderComponent', () => {
     component.provider.set('ollama');
     component.baseUrl.set('http://a.invalid');
     const firstCall = component.discoverModels(false);
-    // Flush the first invoke so its await on `slow` is reached before we
-    // mutate baseUrl (otherwise a change-detection flush may conflate them).
     await Promise.resolve();
     component.baseUrl.set('http://b.invalid');
     await component.discoverModels(false);
-    // Now let the first probe finish with a stale result.
-    resolveFirst(['model-from-first']);
+    slow.resolve(['model-from-first']);
     await firstCall;
     await fixture.whenStable();
     const st = component.discoveryState();
@@ -1628,19 +1538,15 @@ describe('LlmProviderComponent', () => {
     });
     component.ngOnInit();
     await flushMicrotasks();
-    // Explicit discovery to reach a `ready` state.
     component.baseUrl.set('http://host.docker.internal:11434');
     await component.discoverModels(true);
     expect(component.discoveryState().kind).toBe('ready');
-    // Switching provider resets state to idle — no auto-probe on switch.
     component.provider.set('lmstudio');
     await component.onProviderChange();
     expect(component.discoveryState().kind).toBe('idle');
   });
 
   it('preserves_legacy_model_spoza_listy', async () => {
-    // A persisted model survives loadConfig without auto-discovery and renders
-    // as a single-option <select> (no free-text fallback).
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       model: 'legacy',
@@ -1653,15 +1559,10 @@ describe('LlmProviderComponent', () => {
 
     expect(component.model()).toBe('legacy');
     expect(component.discoveryState().kind).toBe('idle');
-    const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(el).not.toBeNull();
-    expect(el.tagName).toBe('SELECT');
-    expect((el.textContent || '').trim()).toContain('legacy');
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
   });
 
   it('shows_saved_model_without_discovery', async () => {
-    // A loaded config with a local provider entry renders the model as a
-    // single-option <select>, with no discovery probe.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_llm_config') {
         return {
@@ -1688,9 +1589,7 @@ describe('LlmProviderComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
     expect(component.model()).toBe('gemma');
-    const field = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(field).toBeTruthy();
-    expect(field.tagName).toBe('SELECT');
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
   });
 
   it('hides_model_field_on_discovery_failure', async () => {
@@ -1713,9 +1612,7 @@ describe('LlmProviderComponent', () => {
     expect(err.textContent).toContain('API key');
   });
 
-  it('explicit_discovery_renders_all_options_and_keeps_listed_model', async () => {
-    // No auto-probe on load. After an explicit discover the model <select>
-    // renders all options; a persisted model present in the list is kept.
+  it('explicit_discovery_renders_a_hint_and_keeps_the_listed_model_signal', async () => {
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       model: 'legacy',
@@ -1729,20 +1626,14 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
 
     expect(component.model()).toBe('legacy');
-    const select = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
-    expect(select).not.toBeNull();
-    expect(select.tagName).toBe('SELECT');
-    const opts = Array.from(select.querySelectorAll('option') as NodeListOf<Element>).map((o) =>
-      (o.getAttribute('value') || '').toString()
-    );
-    expect(opts).toContain('legacy');
-    expect(opts).toContain('a');
-    expect(opts).toContain('b');
+    expect(component.discoveryState().kind).toBe('ready');
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-test-success"]')
+    ).not.toBeNull();
   });
 
   it('non_default_stored_base_url_stays_idle_on_init', async () => {
-    // Non-default URL (incl. link-local/RFC1918) must NOT be auto-probed on startup;
-    // discoveryState stays idle until the user explicitly clicks Refresh or blurs Base URL.
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       baseUrl: 'http://169.254.169.254',
@@ -1756,14 +1647,11 @@ describe('LlmProviderComponent', () => {
 
     expect(discoverCalls.length).toBe(0);
     expect(component.discoveryState().kind).toBe('idle');
-    // No saved model + no discovery → no model field (no free-text fallback).
     const el = fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]');
     expect(el).toBeNull();
   });
 
   it('non_default_stored_base_url_probes_on_explicit_refresh', async () => {
-    // After init (no auto-probe), user clicking Refresh must trigger discovery
-    // even for a non-default URL.
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       baseUrl: 'http://169.254.169.254',
@@ -1781,8 +1669,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('skips_auto_probe_for_persisted_non_default_url', async () => {
-    // A cloned malicious repo could set base_url to an internal RFC1918 host; opening
-    // Settings must NOT silently probe it — the user must explicitly click Refresh or blur.
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       baseUrl: 'http://192.168.1.50:11434',
@@ -1798,39 +1684,27 @@ describe('LlmProviderComponent', () => {
   });
 
   it('onProviderChange_increments_counter_before_state_reset', async () => {
-    // Invariant: discoveryCounter is bumped synchronously inside onProviderChange, so an
-    // in-flight response from the previous provider (carrying the OLD id) is discarded on arrival.
     setupDiscoveryMock(mockTauri, { provider: 'ollama' });
-    // Seed the counter at a known value via a private-field cast.
     (component as unknown as Record<string, number>)['discoveryCounter'] = 5;
     component.provider.set('ollama');
-    // Plant a stale in-flight state with the current (pre-bump) id.
     component.discoveryState.set({
       kind: 'in-flight',
       url: 'http://prev',
-      id: 5, // matches seeded counter — will be stale after bump
+      id: 5,
     });
     component.provider.set('lmstudio');
     await component.onProviderChange();
 
-    // Counter must have grown beyond 5 (bumped at least once in onProviderChange,
-    // possibly again inside discoverModels). Any response carrying id=5 is now stale.
     const currentCounter = (component as unknown as Record<string, number>)['discoveryCounter'];
     expect(currentCounter).toBeGreaterThan(5);
 
-    // If a discoverModels probe is in-flight, its id must also be > 5,
-    // confirming the stale id=5 response would be rejected on arrival.
     const stInflight = component.discoveryState();
     if (stInflight.kind === 'in-flight') {
       expect(stInflight.id).toBeGreaterThan(5);
     }
   });
 
-  // ── DiscoveryState.reason: unsupported / empty categories ────────────
-
   it('maps_unsupported_error_to_unsupported_reason', async () => {
-    // Backend returns Err("unsupported") for anthropic-like providers; the component must
-    // map it to reason='unsupported' with a message distinct from the offline case.
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       discover: async () => {
@@ -1848,7 +1722,6 @@ describe('LlmProviderComponent', () => {
     }
     const unsupportedMsg = component.discoveryFailureMessage();
     expect(unsupportedMsg.length).toBeGreaterThan(0);
-    // Must differ from the offline message produced by reason='offline'.
     const offlineMsg = (() => {
       const saved = component.discoveryState();
       component.discoveryState.set({
@@ -1864,8 +1737,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('maps_empty_error_to_other_reason', async () => {
-    // Backend returns Err("empty") when the server is up but has no models loaded.
-    // The component must map the "empty" message to reason='other'.
     setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
       discover: async () => {
@@ -1883,7 +1754,6 @@ describe('LlmProviderComponent', () => {
     }
     const otherMsg = component.discoveryFailureMessage();
     expect(otherMsg.length).toBeGreaterThan(0);
-    // Must differ from the offline message.
     const offlineMsg = (() => {
       const saved = component.discoveryState();
       component.discoveryState.set({
@@ -1898,9 +1768,6 @@ describe('LlmProviderComponent', () => {
     expect(otherMsg).not.toBe(offlineMsg);
   });
 
-  // ── DiscoveryState.reason: auth / server-error categories ────────────
-
-  // Helper: the message reason='offline' would produce, for not-equal asserts.
   const offlineMessageFor = (url: string): string => {
     const saved = component.discoveryState();
     component.discoveryState.set({ kind: 'failed', url, reason: 'offline' });
@@ -1910,7 +1777,6 @@ describe('LlmProviderComponent', () => {
   };
 
   it('maps_auth_error_to_auth_reason', async () => {
-    // Backend returns Err("auth") for HTTP 401/403 — bad or missing API key.
     setupDiscoveryMock(mockTauri, {
       provider: 'local',
       discover: async () => {
@@ -1928,7 +1794,6 @@ describe('LlmProviderComponent', () => {
     }
     const msg = component.discoveryFailureMessage();
     expect(msg).toContain('API key');
-    // The core bug: 401 must NOT be reported as offline/not reachable.
     expect(msg).not.toBe(offlineMessageFor('http://host.docker.internal:8888'));
   });
 
@@ -1975,7 +1840,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('keeps_connect_failure_as_offline', async () => {
-    // A true connection failure must stay offline — regression guard.
     setupDiscoveryMock(mockTauri, {
       provider: 'local',
       discover: async () => {
@@ -1994,16 +1858,15 @@ describe('LlmProviderComponent', () => {
     expect(component.discoveryFailureMessage()).toContain('not reachable');
   });
 
-  // ── saveConfig: effectiveBaseUrl fallback for local providers ─────────
-
   it('save_falls_back_to_default_base_url_for_local_provider_with_blank_url', async () => {
-    // A blank Base URL for a local provider must fall back to defaultBaseUrl so compose can
-    // inject ANTHROPIC_BASE_URL — an empty string or null leaves the container without one.
     let invokedArgs: Record<string, unknown> = {};
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') {
         invokedArgs = args ?? {};
         return undefined;
+      }
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
       }
       return undefined;
     };
@@ -2021,9 +1884,7 @@ describe('LlmProviderComponent', () => {
     expect(update['base_url']).not.toBe('');
   });
 
-  it('save_rejects_local_provider_with_empty_model', async () => {
-    // UX guard: compose::apply_llm_config rejects a null model for local providers, but that
-    // error only surfaces at container start — catching it at Save time gives immediate feedback.
+  it('save_rejects_local_provider_with_no_model_and_no_base_url', async () => {
     let invokeCalled = false;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') {
@@ -2038,7 +1899,7 @@ describe('LlmProviderComponent', () => {
     });
 
     component.provider.set('ollama');
-    component.baseUrl.set('http://localhost:11434');
+    component.baseUrl.set('');
     component.model.set('');
 
     await component.saveConfig();
@@ -2047,9 +1908,34 @@ describe('LlmProviderComponent', () => {
     expect(emittedError).toContain('model name is required');
   });
 
+  it('canSave and saveConfig agree a whitespace-only local model is no model (Defect 19)', async () => {
+    let invokeCalled = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') {
+        invokeCalled = true;
+      }
+      return undefined;
+    };
+
+    let emittedError = '';
+    component.errorOccurred.subscribe((msg: string) => {
+      emittedError = msg;
+    });
+
+    component.provider.set('ollama');
+    component.baseUrl.set('');
+    component.defaultBaseUrl.set('');
+    component.model.set('   ');
+
+    expect(component['canSave']()).toBe(false);
+
+    await component.saveConfig();
+
+    expect(invokeCalled).toBe(false);
+    expect(emittedError).toContain('model name is required');
+  });
+
   it('save_allows_anthropic_with_empty_model', async () => {
-    // Anthropic starts on ANTHROPIC_DEFAULT_MODEL, a persisted /model pick, or
-    // Claude's plan default — no model in config is legal.
     let invokeCalled = false;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') {
@@ -2066,8 +1952,6 @@ describe('LlmProviderComponent', () => {
 
     expect(invokeCalled).toBe(true);
   });
-
-  // ── Remote providers (ADR-073) ──────────────────────────────────────────
 
   it('renders the openrouter permanent remote row with no add or remove controls', () => {
     expect(component.extraProviders().map((p) => p.id)).toEqual(['openrouter']);
@@ -2123,8 +2007,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('preserves the inactive local entry verbatim across a save', async () => {
-    // The user's local server config must survive saves made while another
-    // provider is active — rebuilding it from card state erased it.
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'get_llm_config') {
@@ -2151,7 +2033,9 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
-      if (cmd === 'discover_llm_models') throw new Error('offline');
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'deepseek/deepseek-v4-flash' }] };
+      }
       return undefined;
     };
 
@@ -2165,7 +2049,6 @@ describe('LlmProviderComponent', () => {
     expect(local['model']).toBe('unsloth/Qwen3.6-35B-A3B');
     expect(local['has_api_key']).toBe(true);
     expect(local['context_tokens']).toBe(262144);
-    // The remote row's model rides on its provider entry too.
     const or = providers.find((p) => p['id'] === 'openrouter')!;
     expect(or['model']).toBe('deepseek/deepseek-v4-flash');
   });
@@ -2233,6 +2116,9 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'set_llm_provider_key') keyCalls.push(args ?? {});
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'qwen/qwen3-coder' }] };
+      }
       return undefined;
     };
 
@@ -2255,12 +2141,11 @@ describe('LlmProviderComponent', () => {
     const active = update['active'] as Record<string, unknown>;
     expect(active['provider_id']).toBe('openrouter');
     expect(active['model']).toBe('qwen/qwen3-coder');
-    // The key value went through set_llm_provider_key, not the config DTO.
     expect(JSON.stringify(update)).not.toContain('sk-or-v1-test');
     expect(keyCalls).toEqual([{ providerId: 'openrouter', key: 'sk-or-v1-test' }]);
   });
 
-  it('openrouter rows fetch the tool-capable catalog and render a dropdown', async () => {
+  it('openrouter rows fetch the tool-capable catalog but render no model selector', async () => {
     const discoverArgs: Array<Record<string, unknown>> = [];
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'discover_llm_models') {
@@ -2276,22 +2161,19 @@ describe('LlmProviderComponent', () => {
     };
 
     component.toggleExtraExpanded(component.extraProviders()[0]);
-    // Explicit discovery (gated on key) — no auto-discover on expand.
     component.extraProviders()[0].keyInput = 'sk-or-x';
     await component.discoverExtraModels(component.extraProviders()[0]);
     await flushMicrotasks();
     fixture.detectChanges();
 
     expect(discoverArgs).toEqual([{ provider: 'openrouter', baseUrl: '', apiKey: 'sk-or-x' }]);
-    const select = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-extra-model-openrouter"]'
-    ) as HTMLSelectElement;
-    expect(select.tagName).toBe('SELECT');
-    expect(select.textContent).toContain('deepseek/deepseek-v3.2 (164k)');
-
-    component.onExtraModelSelect(component.extraProviders()[0], 'qwen/qwen3-coder');
-    expect(component.extraProviders()[0].model).toBe('qwen/qwen3-coder');
-    expect(component.extraProviders()[0].contextTokens).toBe(262144);
+    expect(component.extraProviders()[0].models).toEqual([
+      { id: 'deepseek/deepseek-v3.2', context_tokens: 163840 },
+      { id: 'qwen/qwen3-coder', context_tokens: 262144 },
+    ]);
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
+    ).toBeNull();
   });
 
   it('openrouter catalog failure hides the model field (no fallback)', async () => {
@@ -2306,7 +2188,6 @@ describe('LlmProviderComponent', () => {
     await flushMicrotasks();
     fixture.detectChanges();
 
-    // No catalog → no model field (model select appears only after success).
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
     ).toBeNull();
@@ -2330,7 +2211,6 @@ describe('LlmProviderComponent', () => {
     );
     expect(err).not.toBeNull();
     expect(err.textContent).toContain('Authentication failed — check the API key.');
-    // Still no model field — the error message is the user's signal.
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
     ).toBeNull();
@@ -2397,6 +2277,11 @@ describe('LlmProviderComponent', () => {
     expect(fixture.nativeElement.querySelector(errSelector)).toBeNull();
     expect(
       fixture.nativeElement.querySelector('[data-testid="settings-llm-extra-model-openrouter"]')
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="settings-llm-extra-test-success-openrouter"]'
+      )
     ).not.toBeNull();
   });
 
@@ -2429,79 +2314,48 @@ describe('LlmProviderComponent', () => {
     expect(component.extraProviders()[0].discoverError).toBeNull();
   });
 
-  it('marks the saved model selected once the async catalog renders', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'discover_llm_models') {
-        return {
-          models: [
-            { id: 'ai21/jamba-large-1.7', context_tokens: 256000 },
-            { id: 'deepseek/deepseek-v4-flash', context_tokens: 1000000 },
-          ],
-        };
-      }
-      return undefined;
-    };
-
-    component.toggleExtraExpanded(component.extraProviders()[0]);
-    component.extraProviders()[0].keyInput = 'sk-or-x';
-    component.extraProviders()[0].model = 'deepseek/deepseek-v4-flash';
-    await component.discoverExtraModels(component.extraProviders()[0]);
-    await flushMicrotasks();
-    fixture.detectChanges();
-
-    const select = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-extra-model-openrouter"]'
-    ) as HTMLSelectElement;
-    // Not the alphabetically-first catalog row — the persisted choice.
-    expect(select.value).toBe('deepseek/deepseek-v4-flash');
-  });
-
-  it('a saved model missing from the catalog is preserved as an option', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      if (cmd === 'discover_llm_models') {
-        return { models: [{ id: 'qwen/qwen3-coder', context_tokens: 262144 }] };
-      }
-      return undefined;
-    };
-
-    component.toggleExtraExpanded(component.extraProviders()[0]);
-    component.extraProviders()[0].keyInput = 'sk-or-x';
-    component.extraProviders()[0].model = 'vendor/retired-model';
-    await component.discoverExtraModels(component.extraProviders()[0]);
-    await flushMicrotasks();
-    fixture.detectChanges();
-
-    const select = fixture.nativeElement.querySelector(
-      '[data-testid="settings-llm-extra-model-openrouter"]'
-    ) as HTMLSelectElement;
-    expect(select.textContent).toContain('vendor/retired-model');
-  });
-
-  it('save persists the catalog context window for remote providers', async () => {
+  it('save persists the loaded context window for remote providers (no live pick)', async () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_llm_config') {
+        return {
+          provider: 'anthropic',
+          model: null,
+          base_url: null,
+          default_base_url: null,
+          providers: [
+            { id: 'anthropic', kind: 'anthropic_oauth', has_api_key: false },
+            {
+              id: 'openrouter',
+              kind: 'open_router',
+              model: 'qwen/qwen3-coder',
+              has_api_key: true,
+              context_tokens: 262144,
+            },
+          ],
+          active: { provider_id: 'openrouter', model: 'qwen/qwen3-coder' },
+        };
+      }
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
       if (cmd === 'discover_llm_models') {
-        return { models: [{ id: 'qwen/qwen3-coder', context_tokens: 262144 }] };
+        return { models: [{ id: 'qwen/qwen3-coder' }] };
       }
       return undefined;
     };
 
-    component.toggleExtraExpanded(component.extraProviders()[0]);
-    component.extraProviders()[0].keyInput = 'sk-or-x';
-    await component.discoverExtraModels(component.extraProviders()[0]);
-    await flushMicrotasks();
-    component.onExtraModelSelect(component.extraProviders()[0], 'qwen/qwen3-coder');
+    component.ngOnInit();
+    await fixture.whenStable();
     await component.saveConfig();
 
     const providers = captured!['providers'] as Array<Record<string, unknown>>;
     const or = providers.find((p) => p['id'] === 'openrouter')!;
+    expect(or['model']).toBe('qwen/qwen3-coder');
     expect(or['context_tokens']).toBe(262144);
   });
 
-  it('save rejects an active remote provider without a model', async () => {
+  it('save rejects an active remote provider with neither model nor key', async () => {
     let invoked = false;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') invoked = true;
@@ -2515,11 +2369,37 @@ describe('LlmProviderComponent', () => {
     await component.saveConfig();
 
     expect(invoked).toBe(false);
-    expect(emitted).toContain('requires a model name');
+    expect(emitted).toContain('requires an API key');
+  });
+
+  it('save accepts a keyed remote provider without a model (backend auto-defaults, ADR-088 §8)', async () => {
+    let captured: Record<string, unknown> | null = null;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
+      }
+      return undefined;
+    };
+    let emitted = '';
+    component.errorOccurred.subscribe((msg: string) => (emitted = msg));
+
+    const row = component.extraProviders()[0];
+    component.toggleExtraExpanded(row);
+    component.selectExtraProvider(row);
+    component.onExtraKeyInput(row, 'sk-or-fresh-key');
+    fixture.detectChanges();
+    expect(component['canSave']()).toBe(true);
+    await component.saveConfig();
+
+    expect(emitted).toBe('');
+    expect(captured).not.toBeNull();
+    const providers = captured!['providers'] as Array<Record<string, unknown>>;
+    const or = providers.find((p) => p['id'] === 'openrouter')!;
+    expect(or['model'] ?? null).toBeNull();
   });
 
   it('loadConfig never adopts a foreign model under the anthropic card (F1)', async () => {
-    // Corrupted config: anthropic active + flat model both carry an OR id.
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -2554,7 +2434,6 @@ describe('LlmProviderComponent', () => {
     component.selectedTarget.set('anthropic');
     component.model.set('claude-opus-4-8');
     component.selectExtraProvider(component.extraProviders()[0]);
-    // The fresh card model is captured so a later Save won't lose it.
     expect(component['loadedAnthropicModel']).toBe('claude-opus-4-8');
   });
 
@@ -2569,7 +2448,6 @@ describe('LlmProviderComponent', () => {
 
   it('onProviderChange never snapshots a foreign model from the anthropic card (S4)', async () => {
     component['loadedAnthropicModel'] = 'claude-opus-4-8';
-    // Corrupted card state: a `provider/model` id must not poison the snapshot.
     component.model.set('vendor/foreign-model');
 
     component.provider.set('local');
@@ -2633,8 +2511,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('reload after OpenRouter-active save does not poison the anthropic card (F-5/b2)', async () => {
-    // Backend config persisted while OpenRouter was active (flat masquerade = anthropic, but
-    // providers[] anthropic entry stays clean) — on reload the anthropic card must not pick it up.
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -2662,7 +2538,6 @@ describe('LlmProviderComponent', () => {
     await flushMicrotasks();
 
     expect(component['loadedAnthropicModel']).toBeNull();
-    // Switching to anthropic + building the provider set keeps the entry clean.
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     const built = component['buildProviderSet'](false);
@@ -2671,8 +2546,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('loadConfig: entry model wins over a disagreeing active.model (CR#2)', async () => {
-    // On-disk disagreement: openrouter entry='z-ai/glm-5.2' but active points
-    // at a stale id. Entry must win (mirror Rust effective_active_model).
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -2709,15 +2582,16 @@ describe('LlmProviderComponent', () => {
       calls.push(cmd);
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
+      }
       return undefined;
     };
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.status.set('ready'); // hot-reload requires a live stack
+    projectState.status.set('ready');
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
-    // The active project comes from the input signal (not projectState).
     fixture.componentRef.setInput('activeProject', 'proj');
 
-    // Anthropic card active, default model — same as the loaded snapshot.
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
     component['loadedActiveKey'] = component['computeActiveKey'](
@@ -2730,17 +2604,25 @@ describe('LlmProviderComponent', () => {
     expect(calls).toContain('restart_llm_proxy');
     expect(restartSpy).not.toHaveBeenCalled();
 
-    // Changing the model flips to the full restart.
     calls.length = 0;
-    component.model.set('claude-opus-4-8');
+    component.provider.set('local');
+    component.selectedTarget.set('local');
+    component.baseUrl.set('http://localhost:11434');
+    component['loadedLocalEntry'] = {
+      id: 'local',
+      kind: 'local',
+      base_url: 'http://localhost:11434',
+      model: 'llama3.3',
+      has_api_key: false,
+      context_tokens: null,
+      has_custom_headers: false,
+    };
     await component.saveConfig();
     expect(calls).not.toContain('restart_llm_proxy');
     expect(restartSpy).toHaveBeenCalled();
   });
 
   it('base-url-only save on a DOWN stack requests a restart, not a hot-reload', async () => {
-    // A lone proxy would accept the reload while claude stays dead — the
-    // save must route through requestRestart (which also starts containers).
     const calls: string[] = [];
     mockTauri.invokeHandler = async (cmd: string) => {
       calls.push(cmd);
@@ -2749,7 +2631,7 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.status.set('no_provider'); // containers down
+    projectState.status.set('no_provider');
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
     fixture.componentRef.setInput('activeProject', 'proj');
 
@@ -2776,16 +2658,12 @@ describe('LlmProviderComponent', () => {
     const k1 = component['computeActiveKey']('local', 'qwen3', base);
     const k2 = component['computeActiveKey']('local', 'qwen3', withHeaders);
     expect(k1).not.toBe(k2);
-    // Same inputs → same key (stable).
     expect(component['computeActiveKey']('local', 'qwen3', base)).toBe(k1);
-    // Kind change (anthropic_oauth → anthropic_api_key) flips the key.
     const oauth = [{ id: 'anthropic', kind: 'anthropic_oauth' as const }];
     const apikey = [{ id: 'anthropic', kind: 'anthropic_api_key' as const }];
     expect(component['computeActiveKey']('anthropic', null, oauth)).not.toBe(
       component['computeActiveKey']('anthropic', null, apikey)
     );
-    // I1: base_url is EXCLUDED — a base_url-only change keeps the SAME key
-    // (proxy reload, not full restart).
     const url1 = [
       { id: 'local', kind: 'local' as const, model: 'qwen3', base_url: 'http://a:9000' },
     ];
@@ -2796,8 +2674,6 @@ describe('LlmProviderComponent', () => {
       component['computeActiveKey']('local', 'qwen3', url2)
     );
   });
-
-  // ── Save dirty-check gating ──────────────────────────────────────────────
 
   function setupLocalLoadedConfig(mockTauri: MockTauriService): void {
     mockTauri.invokeHandler = async (cmd: string) => {
@@ -2842,8 +2718,6 @@ describe('LlmProviderComponent', () => {
   });
 
   it('editing_local_base_url_enables_save', async () => {
-    // Editing base_url resets the model (see editing_base_url_resets_discovery_and_model), so
-    // Save first goes invalid; re-picking a model proves the dirty edit carries through.
     setupLocalLoadedConfig(mockTauri);
 
     component.ngOnInit();
@@ -2858,31 +2732,6 @@ describe('LlmProviderComponent', () => {
     ) as HTMLInputElement;
     input.value = 'http://host.docker.internal:1234';
     input.dispatchEvent(new Event('input'));
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]').disabled).toBe(
-      true
-    );
-
-    component.model.set('llama3.3');
-    fixture.detectChanges();
-
-    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
-    expect(btn.disabled).toBe(false);
-  });
-
-  it('editing_local_model_enables_save', async () => {
-    setupLocalLoadedConfig(mockTauri);
-
-    component.ngOnInit();
-    await fixture.whenStable();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]').disabled).toBe(
-      true
-    );
-
-    // No matching <option> for an undiscovered model on the idle saved-model select, so drive
-    // the handler directly like other specs exercising protected members (e.g. computeActiveKey).
-    component['onLocalModelChange']('qwen2.5');
     fixture.detectChanges();
 
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
@@ -2930,50 +2779,7 @@ describe('LlmProviderComponent', () => {
     expect(btn.disabled).toBe(false);
   });
 
-  it('editing_an_active_extra_row_model_enables_save', async () => {
-    mockTauri.invokeHandler = async (cmd: string) => {
-      switch (cmd) {
-        case 'get_llm_config':
-          return {
-            provider: 'anthropic',
-            model: null,
-            base_url: null,
-            default_base_url: null,
-            providers: [
-              { id: 'anthropic', kind: 'anthropic_oauth', has_api_key: false },
-              { id: 'openrouter', kind: 'open_router', model: 'deepseek/v4', has_api_key: true },
-            ],
-            active: { provider_id: 'openrouter', model: 'deepseek/v4' },
-          };
-        case 'get_auth_status':
-          return { api_key_configured: false, provider_configured: true };
-        case 'list_anthropic_models':
-          return [];
-        case 'discover_llm_models':
-          throw new Error('offline');
-        default:
-          return undefined;
-      }
-    };
-
-    component.ngOnInit();
-    await fixture.whenStable();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]').disabled).toBe(
-      true
-    );
-
-    const row = component.extraProviders().find((p) => p.id === 'openrouter')!;
-    component.onExtraModelSelect(row, 'deepseek/v5');
-    fixture.detectChanges();
-
-    const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
-    expect(btn.disabled).toBe(false);
-  });
-
   it('switching_to_a_different_already_valid_provider_enables_save', async () => {
-    // Switching the active target changes what Save would persist (`active`),
-    // even though both anthropic and local are independently already valid.
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -3028,7 +2834,7 @@ describe('LlmProviderComponent', () => {
       true
     );
 
-    component['onLocalModelChange']('qwen2.5');
+    component['onBaseUrlInput']('http://host.docker.internal:9999');
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]').disabled).toBe(
       false
@@ -3042,18 +2848,24 @@ describe('LlmProviderComponent', () => {
       }
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
+      }
       return undefined;
     };
 
     await component.saveConfig();
-    expect((invokedArgs['update'] as Record<string, unknown>)['model']).toBe('qwen2.5');
+    expect((invokedArgs['update'] as Record<string, unknown>)['base_url']).toBe(
+      'http://host.docker.internal:9999'
+    );
+    const update = invokedArgs['update'] as Record<string, unknown>;
+    const providers = update['providers'] as Array<Record<string, unknown>>;
+    expect(providers.find((p) => p['id'] === 'local')?.['model']).toBe('llama3.3');
     fixture.detectChanges();
 
     const btn = fixture.nativeElement.querySelector('[data-testid="settings-llm-save"]');
     expect(btn.disabled).toBe(true);
   });
-
-  // ── Anthropic auth, absorbed from the former Authentication section ─────
 
   it('loads auth status and renders the connected pills', async () => {
     mockTauri.invokeHandler = async (cmd: string) => {
@@ -3073,6 +2885,56 @@ describe('LlmProviderComponent', () => {
       'connected'
     );
     expect(el.querySelector('[data-testid="auth-status-method"]')?.textContent).toContain('oauth');
+  });
+
+  it('falls back oauth_sign_in to verified from oauth_authenticated when the field is absent', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return { api_key_configured: false, oauth_authenticated: true, provider_configured: true };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(component.oauthSignIn()).toBe('verified');
+  });
+
+  it('falls back oauth_sign_in to none from oauth_authenticated when the field is absent', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return { api_key_configured: false, oauth_authenticated: false, provider_configured: true };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(component.oauthSignIn()).toBe('none');
+  });
+
+  it('passes the full auth-status payload including oauth_sign_in to applyAuthStatus', async () => {
+    const payload = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'saved_unverified',
+      provider_configured: true,
+    };
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return payload;
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+
+    expect(applySpy).toHaveBeenCalledWith(payload);
   });
 
   it('saves and removes the anthropic api key via the secrets commands', async () => {
@@ -3133,6 +2995,54 @@ describe('LlmProviderComponent', () => {
     expect(el.querySelector('[data-testid="auth-status-method"]')).toBeNull();
   });
 
+  it('renders the saved-unverified pill when a saved sign-in could not be verified', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          oauth_sign_in: 'saved_unverified',
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'saved sign-in · not verified'
+    );
+    expect(el.querySelector('[data-testid="auth-status-method"]')).toBeNull();
+  });
+
+  it('renders not-configured and the auth terminal when oauth_sign_in is none', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          oauth_sign_in: 'none',
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(el.querySelector('app-auth-terminal')).toBeTruthy();
+  });
+
   it('guards the anthropic key commands when no project is active', async () => {
     const calls: string[] = [];
     mockTauri.invokeHandler = async (cmd: string) => {
@@ -3165,5 +3075,170 @@ describe('LlmProviderComponent', () => {
 
     await component.deleteAnthropicApiKey();
     expect(errors).toContain('delete failed');
+  });
+
+  it('switching activeProject shows checking sign-in… with neither logout nor terminal until the response applies', async () => {
+    const deferred = createDeferred<AuthStatusResponse>();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return deferred.promise;
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    fixture.detectChanges();
+
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'checking sign-in'
+    );
+    expect(el.querySelector('[data-testid="settings-oauth-logout"]')).toBeNull();
+    expect(el.querySelector('app-auth-terminal')).toBeNull();
+
+    deferred.resolve({
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    });
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(el.querySelector('app-auth-terminal')).toBeTruthy();
+  });
+
+  it('drops a late response for the previous project once a newer project is active', async () => {
+    const projA = createDeferred<AuthStatusResponse>();
+    const projB = createDeferred<AuthStatusResponse>();
+    const responses: Record<string, Promise<AuthStatusResponse>> = {
+      a: projA.promise,
+      b: projB.promise,
+    };
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_auth_status') return responses[args?.['project'] as string];
+      return undefined;
+    };
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+
+    fixture.componentRef.setInput('activeProject', 'a');
+    fixture.detectChanges();
+    fixture.componentRef.setInput('activeProject', 'b');
+    fixture.detectChanges();
+
+    projB.resolve({
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'none',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    });
+    await flushMicrotasks();
+    fixture.detectChanges();
+    applySpy.mockClear();
+
+    projA.resolve({
+      api_key_configured: false,
+      oauth_authenticated: true,
+      oauth_sign_in: 'verified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    });
+    await flushMicrotasks();
+    fixture.detectChanges();
+
+    expect(component.oauthAuthenticated()).toBe(false);
+    expect(component.oauthSignIn()).toBe('none');
+    expect(applySpy).not.toHaveBeenCalled();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(el.querySelector('app-auth-terminal')).toBeTruthy();
+  });
+
+  it('an invoke error while pending renders not configured (no verdict could be taken)', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') throw new Error('container not running');
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.ngOnInit();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(component.oauthSignIn()).toBe('none');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="auth-status-value"]')?.textContent).toContain(
+      'not configured'
+    );
+    expect(mockLogger.debug).toHaveBeenCalled();
+  });
+
+  it('an invoke error after a verdict is already known keeps that verdict', async () => {
+    let fail = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') {
+        if (fail) throw new Error('container not running');
+        return {
+          api_key_configured: false,
+          oauth_authenticated: false,
+          oauth_sign_in: 'saved_unverified',
+          needs_anthropic_auth: true,
+          provider_configured: true,
+        };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.ngOnInit();
+    await fixture.whenStable();
+    expect(component.oauthSignIn()).toBe('saved_unverified');
+
+    fail = true;
+    await component.loadAuthStatus();
+
+    expect(component.oauthSignIn()).toBe('saved_unverified');
+  });
+
+  it('the watcher poll stops once oauthSignIn reaches verified (lastKnown context wiring)', () => {
+    vi.useFakeTimers();
+    try {
+      fixture.componentRef.setInput('activeProject', 'proj');
+      const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
+      watcher.startPoll();
+      expect(watcher.isPolling()).toBe(true);
+
+      component.oauthSignIn.set('verified');
+      vi.advanceTimersByTime(1500);
+
+      expect(watcher.isPolling()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the watcher context onVerdict updates the tile for the active project, ignores a stale one', () => {
+    fixture.componentRef.setInput('activeProject', 'proj');
+    const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
+    const projectState = TestBed.inject(ProjectStateService);
+    const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
+    const status: AuthStatusResponse = {
+      api_key_configured: false,
+      oauth_authenticated: false,
+      oauth_sign_in: 'saved_unverified',
+      needs_anthropic_auth: true,
+      provider_configured: true,
+    };
+
+    watcher['context']?.onVerdict('other-project', status);
+    expect(component.oauthSignIn()).toBe('pending');
+    expect(applySpy).not.toHaveBeenCalled();
+
+    watcher['context']?.onVerdict('proj', status);
+    expect(component.oauthSignIn()).toBe('saved_unverified');
+    expect(applySpy).toHaveBeenCalledWith(status);
   });
 });

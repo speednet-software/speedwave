@@ -18,7 +18,6 @@ describe('ChatMessageListComponent', () => {
 
     fixture = TestBed.createComponent(ChatMessageListComponent);
     component = fixture.componentInstance;
-    // `messages` is required; seed with empty so `setInput` can mutate later.
     fixture.componentRef.setInput('messages', []);
   });
 
@@ -26,8 +25,6 @@ describe('ChatMessageListComponent', () => {
   function fakeOnChanges(): void {
     component.ngOnChanges();
   }
-
-  // ── Happy path — per-message rendering ────────────────────────────────
 
   it('renders one chat-message per entry in messages', () => {
     fixture.componentRef.setInput('messages', [
@@ -49,8 +46,6 @@ describe('ChatMessageListComponent', () => {
     const rendered = fixture.nativeElement.querySelectorAll('app-chat-message');
     expect(rendered.length).toBe(0);
   });
-
-  // ── Transcript loading spinner ────────────────────────────────────────
 
   it('shows the transcript spinner when loadingTranscript is true and messages are empty', () => {
     fixture.componentRef.setInput('messages', []);
@@ -84,8 +79,6 @@ describe('ChatMessageListComponent', () => {
     expect(spinner).toBeFalsy();
   });
 
-  // ── Streaming: last entry has streaming=true ──────────────────────────
-
   it('appends a streaming placeholder when isStreaming is true and currentBlocks has content', () => {
     const messages: ChatMessage[] = [
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },
@@ -102,7 +95,6 @@ describe('ChatMessageListComponent', () => {
     );
     expect(streamingEl).not.toBeNull();
 
-    // A text last block renders the per-block streaming caret.
     const caret = fixture.nativeElement.querySelector('[data-testid="streaming-caret"]');
     expect(caret).not.toBeNull();
   });
@@ -114,11 +106,9 @@ describe('ChatMessageListComponent', () => {
     fakeOnChanges();
     fixture.detectChanges();
 
-    // The full streaming bubble is suppressed (no blocks yet)…
     expect(
       fixture.nativeElement.querySelector('[data-testid="chat-message-list-streaming"]')
     ).toBeNull();
-    // …but a standalone blinking caret tells the user the assistant started.
     const caret = fixture.nativeElement.querySelector('[data-testid="chat-message-list-awaiting"]');
     expect(caret).not.toBeNull();
     expect(caret!.querySelector('.caret')).not.toBeNull();
@@ -135,7 +125,6 @@ describe('ChatMessageListComponent', () => {
       '[data-testid="chat-message-list-streaming"]'
     );
     expect(streamingEl).toBeNull();
-    // And no awaiting caret either when the turn isn't running.
     const awaiting = fixture.nativeElement.querySelector(
       '[data-testid="chat-message-list-awaiting"]'
     );
@@ -158,8 +147,6 @@ describe('ChatMessageListComponent', () => {
     ).not.toBeNull();
   });
 
-  // ── ARIA — log role + polite live region ──────────────────────────────
-
   it('exposes a polite log live region for screen readers', () => {
     fixture.componentRef.setInput('messages', []);
     fakeOnChanges();
@@ -171,8 +158,6 @@ describe('ChatMessageListComponent', () => {
     expect(container.getAttribute('role')).toBe('log');
     expect(container.getAttribute('aria-live')).toBe('polite');
   });
-
-  // ── Auto-scroll logic ────────────────────────────────────────────────
 
   it('pins scroll to bottom on new messages when user is at the bottom', () => {
     const messages: ChatMessage[] = [
@@ -187,7 +172,7 @@ describe('ChatMessageListComponent', () => {
     ) as HTMLDivElement;
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1000 });
     Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
-    container.scrollTop = 600; // at bottom
+    container.scrollTop = 600;
     container.dispatchEvent(new Event('scroll'));
 
     fixture.componentRef.setInput('messages', [
@@ -195,7 +180,6 @@ describe('ChatMessageListComponent', () => {
       { role: 'assistant', blocks: [{ type: 'text', content: 'second' }], timestamp: 2 },
     ]);
     fakeOnChanges();
-    // Grow content height before Angular runs ngAfterViewChecked.
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1400 });
     fixture.detectChanges();
 
@@ -203,7 +187,6 @@ describe('ChatMessageListComponent', () => {
   });
 
   it('re-arms auto-scroll on a new message even after the user scrolled up', () => {
-    // A new turn snaps the view back to the bottom unconditionally.
     fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
     ]);
@@ -215,7 +198,7 @@ describe('ChatMessageListComponent', () => {
     ) as HTMLDivElement;
     Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1000 });
     Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
-    container.scrollTop = 100; // user scrolled up
+    container.scrollTop = 100;
     container.dispatchEvent(new Event('scroll'));
 
     fixture.componentRef.setInput('messages', [
@@ -228,8 +211,6 @@ describe('ChatMessageListComponent', () => {
 
     expect(container.scrollTop).toBe(1400);
   });
-
-  // ── isPrecedingUserEdited helper ─────────────────────────────────────
 
   it('isPrecedingUserEdited returns false for index 0', () => {
     fixture.componentRef.setInput('messages', [
@@ -278,8 +259,6 @@ describe('ChatMessageListComponent', () => {
     ]);
     expect(component.isPrecedingUserEdited(5)).toBe(false);
   });
-
-  // ── Forwarding the questionAnswered event ────────────────────────────
 
   it('re-emits questionAnswered from child chat-message', () => {
     fixture.componentRef.setInput('messages', [

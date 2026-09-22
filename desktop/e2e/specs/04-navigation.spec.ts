@@ -9,7 +9,6 @@ describe('Navigation', function () {
   before(async function () {
     this.timeout(65_000);
 
-    // Project pill = ready signal (setupCompleteGuard resolved).
     const pill = await $('[data-testid="project-pill"]');
     await pill.waitForExist({
       timeout: 15_000,
@@ -17,13 +16,11 @@ describe('Navigation', function () {
         'Shell not found — spec 02 (setup wizard) must complete successfully before navigation tests can run',
     });
 
-    // Fail fast if project is in error state.
     const errorBanner = await $('[data-testid="blocking-error"]');
     if (await errorBanner.isExisting()) {
       throw new Error('Project is in error state — cannot test navigation');
     }
 
-    // Wait for blocking overlay to clear (status → ready).
     const overlay = await $('[data-testid="blocking-overlay"]');
     if (await overlay.isExisting()) {
       await overlay.waitForExist({
@@ -43,7 +40,6 @@ describe('Navigation', function () {
   it('should expose Integrations and Settings nav links (Chat conditional on auth)', async function () {
     this.timeout(15_000);
 
-    // Chat link presence depends on auth state; verify only.
     const integrations = await $('[data-testid="nav-integrations"]');
     expect(await integrations.isExisting()).toBe(true);
 
@@ -56,7 +52,6 @@ describe('Navigation', function () {
     const chat = await $('[data-testid="nav-chat"]');
     if (await chat.isExisting()) {
       await chat.click();
-      // Chat route mounted if chat-view OR chat-view-blocked exists.
       await browser.waitUntil(
         async () => {
           return (
@@ -64,7 +59,7 @@ describe('Navigation', function () {
             (await $('[data-testid="chat-view-blocked"]').isExisting())
           );
         },
-        { timeout: 20_000, timeoutMsg: 'Chat route did not mount any of the expected surfaces' },
+        { timeout: 20_000, timeoutMsg: 'Chat route did not mount any of the expected surfaces' }
       );
     }
   });
@@ -74,7 +69,6 @@ describe('Navigation', function () {
     const integrations = await $('[data-testid="nav-integrations"]');
     await integrations.click();
 
-    // Integrations route anchored by body container.
     const body = await $('[data-testid="integrations-body"]');
     await body.waitForExist({ timeout: 10_000 });
     expect(await body.isDisplayed()).toBe(true);
@@ -85,7 +79,6 @@ describe('Navigation', function () {
     const settings = await $('[data-testid="nav-settings"]');
     await settings.click();
 
-    // Settings ready signal: page heading (project card removed).
     const title = await $('[data-testid="settings-title"]');
     await title.waitForExist({ timeout: 10_000 });
     expect(await title.isDisplayed()).toBe(true);

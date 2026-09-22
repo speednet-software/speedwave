@@ -12,7 +12,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Recorded `remove_images` call args: `(tags, force)`.
 type RemoveImagesCall = (Vec<String>, bool);
 
 /// Shared introspection handles cloned into the mock before wrapping.
@@ -156,6 +155,10 @@ pub struct MockRuntimeBuilder {
     build_panic_substrings: Vec<String>,
     container_exec_program: String,
     exec_piped_script: Option<String>,
+    exec_piped_hang_secs: Option<u64>,
+    exec_piped_hang_used: Arc<Mutex<bool>>,
+    exec_piped_orphan_hang_secs: Option<u64>,
+    exec_piped_orphan_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -182,8 +185,6 @@ enum BuildResult {
     AllErr(String),
 }
 
-/// Per-tag build attempt counter. Keyed by image tag, value is the running
-/// 1-based attempt count.
 type AttemptCounter = Arc<Mutex<HashMap<String, u32>>>;
 
 impl Default for MockRuntimeBuilder {
@@ -217,6 +218,10 @@ impl MockRuntimeBuilder {
             build_panic_substrings: Vec::new(),
             container_exec_program: "true".to_string(),
             exec_piped_script: None,
+            exec_piped_hang_secs: None,
+            exec_piped_hang_used: Arc::new(Mutex::new(false)),
+            exec_piped_orphan_hang_secs: None,
+            exec_piped_orphan_hang_used: Arc::new(Mutex::new(false)),
             exec_piped_error: None,
             exec_piped_failure_queue: Arc::new(Mutex::new(Vec::new())),
             validate_script: Arc::new(Mutex::new(Vec::new())),
@@ -342,6 +347,21 @@ impl MockRuntimeBuilder {
         self.exec_piped_script = Some(script.to_string());
         self
     }
+    /// ONE-SHOT hang: the first `container_exec_piped` call returns a real
+    /// `sh -c "sleep <secs>"` child (alive, zero stdout); later calls fall through.
+    pub fn with_exec_piped_hang(mut self, sleep_secs: u64) -> Self {
+        self.exec_piped_hang_secs = Some(sleep_secs);
+        self
+    }
+    /// ONE-SHOT orphan hang: the first `container_exec_piped` call returns a
+    /// `sh -c "sleep <secs> & exit 0"` child. The shell exits immediately
+    /// (`child.wait()` returns) but the orphaned `sleep` inherits and holds
+    /// the stdout pipe write end open, so a reader blocked on it never sees
+    /// EOF. Later calls fall through.
+    pub fn with_exec_piped_orphan_hang(mut self, sleep_secs: u64) -> Self {
+        self.exec_piped_orphan_hang_secs = Some(sleep_secs);
+        self
+    }
     /// Makes `container_exec_piped` fail with `msg`.
     pub fn with_exec_piped_error(mut self, msg: &str) -> Self {
         self.exec_piped_error = Some(msg.to_string());
@@ -403,6 +423,10 @@ impl MockRuntimeBuilder {
             build_panic_substrings: self.build_panic_substrings,
             container_exec_program: self.container_exec_program,
             exec_piped_script: self.exec_piped_script,
+            exec_piped_hang_secs: self.exec_piped_hang_secs,
+            exec_piped_hang_used: self.exec_piped_hang_used,
+            exec_piped_orphan_hang_secs: self.exec_piped_orphan_hang_secs,
+            exec_piped_orphan_hang_used: self.exec_piped_orphan_hang_used,
             exec_piped_error: self.exec_piped_error,
             exec_piped_failure_queue: self.exec_piped_failure_queue,
             validate_script: self.validate_script,
@@ -441,6 +465,10 @@ struct MockRuntime {
     build_panic_substrings: Vec<String>,
     container_exec_program: String,
     exec_piped_script: Option<String>,
+    exec_piped_hang_secs: Option<u64>,
+    exec_piped_hang_used: Arc<Mutex<bool>>,
+    exec_piped_orphan_hang_secs: Option<u64>,
+    exec_piped_orphan_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -505,10 +533,29 @@ impl ContainerRuntime for MockRuntime {
             container: container.to_string(),
             argv: cmd.iter().map(|s| s.to_string()).collect(),
         });
+        if let Some(secs) = self.exec_piped_hang_secs {
+            let mut used = self.exec_piped_hang_used.lock().unwrap();
+            if !*used {
+                *used = true;
+                // SSOT-allow: test fixture spawn
+                let mut c = Command::new("sh");
+                c.args(["-c", &format!("sleep {secs}")]);
+                return Ok(c);
+            }
+        }
+        if let Some(secs) = self.exec_piped_orphan_hang_secs {
+            let mut used = self.exec_piped_orphan_hang_used.lock().unwrap();
+            if !*used {
+                *used = true;
+                // SSOT-allow: test fixture spawn
+                let mut c = Command::new("sh");
+                c.args(["-c", &format!("sleep {secs} & exit 0")]);
+                return Ok(c);
+            }
+        }
         if let Some(err) = &self.exec_piped_error {
             anyhow::bail!("{err}");
         }
-        // FIFO failure queue: returns a Command that writes stderr and exits non-zero.
         let next_failure = {
             let mut q = self.exec_piped_failure_queue.lock().unwrap();
             if q.is_empty() {
@@ -556,7 +603,6 @@ impl ContainerRuntime for MockRuntime {
         containerfile: &str,
         build_args: &[(&str, &str)],
     ) -> anyhow::Result<()> {
-        // Panic before recording so panicking calls do not show up in `build_calls`.
         for needle in &self.build_panic_substrings {
             if tag.contains(needle.as_str()) {
                 panic!("mock build_image panic for tag containing {needle:?}");
@@ -577,7 +623,6 @@ impl ContainerRuntime for MockRuntime {
             *entry += 1;
             *entry
         };
-        // Per-attempt override beats the global tag/all-err result.
         let outcome = if let Some(msg) = self.build_attempt_errors.get(&(tag.to_string(), attempt))
         {
             Err(msg.clone())
@@ -593,7 +638,6 @@ impl ContainerRuntime for MockRuntime {
         };
         match outcome {
             Ok(()) => {
-                // Mirror real-runtime semantics: a successful build makes the tag exist.
                 self.image_exists
                     .lock()
                     .unwrap()
@@ -642,7 +686,6 @@ impl ContainerRuntime for MockRuntime {
         if let Some(err) = &self.image_exists_error {
             anyhow::bail!("{err}");
         }
-        // Exact-match override wins; then substring "missing" rule; then default.
         if let Some(v) = self.image_exists.lock().unwrap().get(tag).copied() {
             return Ok(v);
         }
@@ -814,7 +857,6 @@ mod tests {
 
     #[test]
     fn validate_script_consumes_in_fifo_order() {
-        // First push -> first pop. Matches push_exec_piped_failure semantics.
         let (rt, _) = MockRuntimeBuilder::new()
             .push_validate_result(Err("propagation lag".to_string()))
             .push_validate_result(Ok(()))
@@ -855,7 +897,6 @@ mod tests {
 
     #[test]
     fn successful_build_makes_image_exist_next_call() {
-        // Mirrors real-runtime semantics: image_exists returns true after a successful build.
         let (rt, handles) = MockRuntimeBuilder::new().build();
         assert!(!rt.image_exists("fresh:1").unwrap());
         rt.build_image("fresh:1", ".", "C", &[]).unwrap();
@@ -917,7 +958,6 @@ mod tests {
             .push_exec_piped_failure("first failure stderr")
             .push_exec_piped_failure("second failure stderr")
             .build();
-        // First call: returns Command that fails with the first message.
         let out1 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
@@ -925,7 +965,6 @@ mod tests {
             .unwrap();
         assert!(!out1.status.success());
         assert!(String::from_utf8_lossy(&out1.stderr).contains("first failure stderr"));
-        // Second call: pops the second entry.
         let out2 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
@@ -933,12 +972,31 @@ mod tests {
             .unwrap();
         assert!(!out2.status.success());
         assert!(String::from_utf8_lossy(&out2.stderr).contains("second failure stderr"));
-        // Third call: queue drained, falls back to default success.
         let out3 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
             .output()
             .unwrap();
         assert!(out3.status.success());
+    }
+
+    #[test]
+    fn exec_piped_hang_is_one_shot_and_spawns_live_child() {
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .with_exec_piped_script("second-call")
+            .build();
+        let mut first = rt.container_exec_piped("c", &["x"]).unwrap();
+        let mut child = first.spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(child.try_wait().unwrap().is_none(), "first call must hang");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let out = rt
+            .container_exec_piped("c", &["x"])
+            .unwrap()
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "second-call");
     }
 }

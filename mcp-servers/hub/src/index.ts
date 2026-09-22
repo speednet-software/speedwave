@@ -6,7 +6,6 @@
 
 import express, { Express, NextFunction, Request, Response } from 'express';
 
-// Import MCP infrastructure from shared library
 import {
   JSONRPCHandler,
   handleMCPPost,
@@ -17,24 +16,17 @@ import {
   ts,
 } from '@speedwave/mcp-shared';
 
-// Import handlers
 import { createCodeExecutorHandlers } from './handlers.js';
 
-// Detail-level SSOT (powers the TS union, this JSON-schema enum, and the validator)
 import { DETAIL_LEVELS } from './search-tools.js';
 
-// Import bridge initialization
 import { initializeBridges } from './executor.js';
 
-// Import registry initialization
 import { initializeRegistry } from './tool-registry.js';
 
-// Import auth token loader
 import { loadAuthTokens } from './auth-tokens.js';
 
 import { loadPolicy } from './policy.js';
-
-// ── Constants & Configuration ────────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -50,8 +42,6 @@ const SERVER_INFO = {
 const HUB_RATE_LIMIT_MAX = 100;
 /** Rate-limit window in milliseconds (1 minute). */
 const HUB_RATE_LIMIT_WINDOW_MS = 60_000;
-
-// ── MCP Tool Definitions (2 Meta-Tools) ──────────────────────────────────────────────────────────
 
 const TOOLS: Tool[] = [
   {
@@ -141,7 +131,10 @@ Available globals:
   ⚠️ Returns { results: T[], errors: [{index, error}] } - ALWAYS destructure!
   ✅ const { results } = await batch([...])
   ❌ const data = await batch([...]); data.map(...) // WRONG: data is not array!
-- paginate(): Async generator for large datasets
+- paginate(fetcher, config): Async generator for large datasets
+  fetcher(offset, limit) returns one page: { ids, total_count }, { issues, total_count }, ... or a bare array (arrays under other keys throw)
+  config: { limit, offset, maxItems, maxPages, stopWhen }; consume with collectPages/findInPages/countInPages/filterPages/mapPages/takeFromPages
+  const allIds = await collectPages(paginate((offset, limit) => redmine.listIssueIds({ status: "open", offset, limit }), { maxItems: 500 }));
 
 Plugin services use the same dot syntax. A dashed plugin slug is camelCased into its global (e.g. \`my-plugin\` → \`myPlugin.someTool()\`); search_tools returns this as the \`sandboxGlobal\` field whenever it differs from the service name.
 
@@ -199,48 +192,35 @@ return { total: results.length, failed: errors.length };
   },
 ];
 
-// ── HTTP Server Setup ────────────────────────────────────────────────────────────────────────────
-
 /** Main server initialization and startup. */
 /* c8 ignore start: server bootstrap (registry/bridge init + listen); exercised by container run */
 async function main() {
   console.log(`${ts()} 🚀 Starting Speedwave Code Executor MCP Server...`);
   console.log(`${ts()} 📊 Token reduction: 44 tools → 2 meta-tools (97.6% reduction)`);
 
-  // Load per-service auth tokens (e.g., for mcp-os on host)
   loadAuthTokens();
 
-  // Load the PII policy; an invalid POLICY_FILE throws here and aborts startup (fail-closed)
   loadPolicy();
 
-  // Initialize dynamic tool registry (fetches tools from workers)
   console.log(`${ts()} 🔧 Initializing dynamic tool registry...`);
   await initializeRegistry();
   console.log(`${ts()} ✅ Tool registry initialized`);
 
-  // Initialize HTTP bridges to workers
   console.log(`${ts()} 🔧 Initializing HTTP bridges to workers...`);
   await initializeBridges();
   console.log(`${ts()} ✅ HTTP bridges initialized`);
 
-  // Create JSON-RPC handler
   const rpcHandler = new JSONRPCHandler(SERVER_INFO);
 
-  // Create handlers
   const handlers = createCodeExecutorHandlers({ timeoutMs: TIMEOUTS.EXECUTION_MS });
 
-  // Register meta-tools
   rpcHandler.registerTool(TOOLS[0], handlers.handleSearchTools);
   rpcHandler.registerTool(TOOLS[1], handlers.handleExecuteCode);
 
   console.log(`${ts()} ✅ 2 meta-tools registered: search_tools, execute_code`);
 
-  // Create Express app using shared transport utilities
   const app = createHubApp(rpcHandler);
 
-  // ── Start Server ───────────────────────────────────────────────────────────────────────────────
-
-  // bind all interfaces — must be reachable from the container network
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`${ts()} ✅ Speedwave Code Executor MCP Server running on port ${PORT}`);
     console.log(`${ts()} 📡 MCP Protocol: Streamable HTTP (JSON-RPC 2.0 + optional SSE)`);
@@ -256,7 +236,6 @@ async function main() {
     console.log(`${ts()}    2. execute_code     - JavaScript execution in sandbox`);
   });
 
-  // Graceful shutdown handler.
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
     server.close(() => {
@@ -274,8 +253,6 @@ async function main() {
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 /* c8 ignore stop */
-
-// ── Hub Express App Factory ──────────────────────────────────────────────────────────────────────
 
 /**
  * Sliding-window rate limiter keyed by MCP session id (IP fallback before a
@@ -297,7 +274,6 @@ export function createSessionRateLimiter() {
 
     valid.push(now);
     hits.set(key, valid);
-    // Evict idle keys so the map does not grow unboundedly across ephemeral sessions.
     for (const [k, stamps] of hits) {
       if (k !== key && stamps.every((t) => now - t >= HUB_RATE_LIMIT_WINDOW_MS)) hits.delete(k);
     }
@@ -312,22 +288,15 @@ export function createSessionRateLimiter() {
 export function createHubApp(rpcHandler: JSONRPCHandler): Express {
   const app = express();
 
-  // Security: Disable X-Powered-By header
   app.disable('x-powered-by');
 
-  app.use(express.json({ limit: '1mb' })); // Allow larger payloads for code
-
-  // ── Health Check Endpoint ──────────────────────────────────────────────────────────────────────
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok' });
   });
 
-  // ── Rate Limiting (sliding window, per MCP session — falls back to IP pre-session) ─────────────
-
   app.use(createSessionRateLimiter());
-
-  // ── MCP Protocol Endpoints (Streamable HTTP) ───────────────────────────────────────────────────
 
   app.post('/', async (req: Request, res: Response) => {
     await handleMCPPost(rpcHandler, req, res);
@@ -337,8 +306,6 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
     handleMCPDelete(req, res);
   });
 
-  // ── Method Not Allowed (405 for unsupported HTTP methods on /) ─────────────────────────────────
-
   app.all('/', (_req: Request, res: Response) => {
     res.setHeader('Allow', 'POST, DELETE');
     res.status(405).json({ error: 'Method Not Allowed' });
@@ -347,7 +314,6 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
   return app;
 }
 
-// Run server — the catch callback is only reachable when main() rejects at runtime
 /* c8 ignore next 4 */
 main().catch((error) => {
   console.error(`${ts()} Fatal error:`, error);

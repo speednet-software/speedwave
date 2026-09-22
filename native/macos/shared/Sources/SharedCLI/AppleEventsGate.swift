@@ -32,7 +32,6 @@ public struct AppleEventsGate: PermissionGate {
     }
 
     public func requestAccess(completion: @escaping (Bool, Error?) -> Void) {
-        // askUserIfNeeded=true triggers the TCC consent dialog.
         DispatchQueue.global().async {
             let status = self.determineStatus(askUserIfNeeded: true)
             completion(status == .granted, nil)
@@ -68,7 +67,6 @@ public struct AppleEventsGate: PermissionGate {
         }
         logTrace("AEDETERMINE host-pid target=\(targetBundleId) pid=\(pid)")
 
-        // Stage 2: AEAddressDesc with typeKernelProcessID (4-byte pid_t).
         var pidValue: pid_t = pid
         var target = AEAddressDesc()
         let createStatus: OSStatus = withUnsafePointer(to: &pidValue) { ptr in
@@ -119,7 +117,6 @@ public struct AppleEventsGate: PermissionGate {
     }
 }
 
-// MARK: - PID resolver (LaunchServices abstraction)
 
 /// Resolves a bundle identifier to the running process's PID, or `nil` when
 /// the target app is not currently running.
@@ -138,12 +135,11 @@ public struct NSWorkspacePidResolver: PidResolver {
     }
 }
 
-// MARK: - App launcher (NSWorkspace.openApplication abstraction)
 
 public enum AppLaunchOutcome {
     case succeeded(pid_t)
     case failed(String)
-    case notSupported  // urlForApplication returned nil — bundle id not installed
+    case notSupported  
 }
 
 /// Launches a macOS app by bundle id. Abstracted as a protocol so unit tests
@@ -190,7 +186,6 @@ public struct NeverLaunchAppLauncher: AppLauncher {
     }
 }
 
-// MARK: - stderr trace + RawAuthorizationStatus debug helpers
 
 /// Writes a `[SHARED]`-prefixed trace line to stderr, collected by the Rust
 /// parent's `check_os_permission` and forwarded to the unified log.
@@ -211,19 +206,18 @@ private func describeRaw(_ raw: RawAuthorizationStatus) -> String {
     }
 }
 
-// MARK: - OSStatus mapping
 
 /// SSOT mapping for AEDeterminePermissionToAutomateTarget OSStatus → RawAuthorizationStatus:
 /// noErr(0)=granted, errAEEventNotPermitted(-1743)=denied, errAEEventWouldRequireUserConsent(-1744)=notDetermined, procNotFound(-600)=targetNotRunning.
 public func mapAEStatusToRaw(_ status: OSStatus, targetBundleId: String) -> RawAuthorizationStatus {
     switch Int(status) {
-    case 0:                                       // noErr
+    case 0:                                       
         return .granted
-    case -1743:                                   // errAEEventNotPermitted
+    case -1743:                                   
         return .denied
-    case -1744:                                   // errAEEventWouldRequireUserConsent
+    case -1744:                                   
         return .notDetermined
-    case -600:                                    // procNotFound
+    case -600:                                    
         return .targetNotRunning(bundleId: targetBundleId)
     default:
         return .unknown

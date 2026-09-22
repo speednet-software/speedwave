@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     if let Err(e) = run() {
-        println!("cargo:warning=build.rs failed: {e}");
+        let mut message = e.to_string();
+        let mut source = std::error::Error::source(e.as_ref());
+        while let Some(cause) = source {
+            message.push_str(&format!(": {cause}"));
+            source = std::error::Error::source(cause);
+        }
+        println!("cargo:warning=build.rs failed: {message}");
         std::process::exit(1);
     }
 }
@@ -21,8 +27,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
     let allow_stubs = std::env::var_os("SPEEDWAVE_ALLOW_BUNDLE_STUBS").is_some();
-    // Hash the staged tree `nerdctl build` reads whenever it is complete (vendored layout
-    // included); a partial or stubbed build-context falls back to the repo root.
     let hash_root = if speedwave_runtime::bundle::hash_inputs_resolvable(&build_context) {
         build_context.clone()
     } else {

@@ -84,7 +84,6 @@ function validateDocxElement(el: unknown, where: string): void {
     }
     case 'image':
       reqStr(e, 'path', where);
-      // resolved later by the caller using resolveImagePaths
       break;
     case 'pagebreak':
       break;
@@ -165,7 +164,6 @@ export async function editDocx(
     }
   }
   const src = await resolveInputFile(userPath);
-  // Resolve any image paths inside append ops.
   const resolvedOps = await Promise.all(
     (ops as DocxOp[]).map(async (o) =>
       o.op === 'append' && o.element.type === 'image'

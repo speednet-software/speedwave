@@ -30,8 +30,6 @@ pub async fn get_usage_for_response(
     response_id: String,
 ) -> Option<speedwave_runtime::usage::ResponseUsage> {
     let data_dir = speedwave_runtime::consts::data_dir();
-    // Wait (no HTTP) for the proxy's async append; backoff 100→1600ms
-    // (~3.1s) tolerates slow I/O (WSL2), but usually lands on attempt 0.
     let mut found = None;
     let mut delay = std::time::Duration::from_millis(100);
     for attempt in 0..6 {
@@ -49,12 +47,9 @@ pub async fn get_usage_for_response(
         }
     }
     let u = found?;
-    // Already priced (terminal cost in the sidecar) → done.
     if u.cost_usd.is_some() {
         return Some(u);
     }
-    // Price EVERY unpriced row (local→Free/null, subscription→null), not just
-    // OpenRouter — else the footer keeps Claude Code's live preview (invariant 6).
     enrich_with_openrouter(data_dir.as_path(), &project).await;
     enrich_all_unpriced(data_dir.as_path(), &project);
     speedwave_runtime::usage::get_usage_for_response_in(data_dir.as_path(), &project, &response_id)
@@ -77,8 +72,6 @@ pub async fn get_session_cost(project: String) -> Option<f64> {
     let data_dir = speedwave_runtime::consts::data_dir();
     let dir = data_dir.as_path();
     speedwave_runtime::usage::rotate_usage_if_large_in(dir, &project);
-    // One scan yields both the enrich work-list and the window for the sum;
-    // enrich only writes the sidecar, so the window stays valid afterward.
     let priced = speedwave_runtime::usage_cost::read_cost_cache_in(dir, &project);
     let window = speedwave_runtime::usage::scan_usage_window_in(dir, &project, &priced);
     enrich_openrouter_gen_ids(dir, &project, window.pending_gen_ids).await;
@@ -180,7 +173,6 @@ mod tests {
     #[tokio::test]
     async fn gen_cost_rejects_non_gen_id_without_http() {
         let dir = tempfile::tempdir().unwrap();
-        // A non-`gen-` id never touches the network or the key file.
         let c = fetch_openrouter_gen_cost(dir.path(), "proj", "msg_1").await;
         assert!(c.is_none());
     }
@@ -210,7 +202,6 @@ mod tests {
     #[tokio::test]
     async fn enrich_empty_gen_ids_is_noop() {
         let dir = tempfile::tempdir().unwrap();
-        // Empty work-list → no HTTP, sidecar stays absent (read returns empty).
         enrich_openrouter_gen_ids(dir.path(), "proj", Vec::new()).await;
         let costs = speedwave_runtime::usage_cost::read_cost_cache_in(dir.path(), "proj");
         assert!(costs.is_empty());

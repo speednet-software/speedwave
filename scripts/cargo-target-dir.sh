@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Prints the effective cargo target dir for a crate dir, resolving every layer cargo does:
-# CARGO_TARGET_DIR wins, then the crate-local/home/repo-root config.toml `[build] target-dir`.
 
 set -euo pipefail
 
 crate_dir="${1:?usage: $0 <crate-dir>}"
-# Absolute up front: a relative crate dir would be re-prefixed by the relative-target-dir
-# normalization below, yielding <crate>/<crate>/target.
 crate_dir="$(cd "$crate_dir" && pwd)"
 
 target_dir="${CARGO_TARGET_DIR:-}"
@@ -20,12 +16,10 @@ if [ -z "$target_dir" ]; then
     if command -v jq >/dev/null 2>&1; then
       target_dir="$(printf '%s' "$metadata" | jq -r .target_directory)"
     else
-      # No jq (bare dev shells): scrape the JSON, un-escape the doubled Windows backslashes.
       target_dir="$(printf '%s' "$metadata" | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
       target_dir="${target_dir//\\\\/\\}"
     fi
   else
-    # No cargo on PATH (bare shells): assume the default crate-local target dir.
     target_dir="$crate_dir/target"
   fi
 fi
@@ -35,7 +29,6 @@ if [ -z "$target_dir" ]; then
   exit 1
 fi
 
-# A relative target-dir resolves against cargo's working directory — the crate dir.
 case "$target_dir" in
   /* | [A-Za-z]:* | \\\\*) ;;
   *) target_dir="$crate_dir/$target_dir" ;;

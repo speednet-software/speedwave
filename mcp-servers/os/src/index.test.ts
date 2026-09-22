@@ -7,16 +7,15 @@ import http from 'node:http';
 import { createToolDefinitions } from './tools/index.js';
 import { createMCPServer } from '@speedwave/mcp-shared';
 
-// Mock the platform runner so tests don't need real binaries
 vi.mock('./platform-runner.js', () => ({
   runCommand: vi.fn().mockResolvedValue({ stdout: '{}', parsed: {} }),
 }));
 
 describe('mcp-os integration', () => {
   describe('createToolDefinitions', () => {
-    it('returns all 25 tools', () => {
+    it('returns all 26 tools', () => {
       const tools = createToolDefinitions();
-      expect(tools).toHaveLength(25);
+      expect(tools).toHaveLength(26);
     });
 
     it('all tool names are unique', () => {
@@ -44,6 +43,7 @@ describe('mcp-os integration', () => {
       expect(names).toContain('listReminders');
       expect(names).toContain('getReminder');
       expect(names).toContain('createReminder');
+      expect(names).toContain('updateReminder');
       expect(names).toContain('completeReminder');
     });
 
@@ -85,7 +85,6 @@ describe('mcp-os integration', () => {
     it('tool names use camelCase', () => {
       const tools = createToolDefinitions();
       for (const { tool } of tools) {
-        // camelCase: starts with lowercase letter, no underscores, no hyphens
         expect(tool.name).toMatch(/^[a-z][a-zA-Z]*$/);
       }
     });
@@ -95,6 +94,7 @@ describe('mcp-os integration', () => {
       const toolsWithRequired = [
         'getReminder',
         'createReminder',
+        'updateReminder',
         'completeReminder',
         'getEvent',
         'createEvent',
@@ -126,12 +126,10 @@ describe('mcp-os integration', () => {
   describe('tool handlers return MCP format', () => {
     it('handlers return ToolsCallResult format through withValidation', async () => {
       const tools = createToolDefinitions();
-      // Pick a simple tool to test the format
       const listReminderLists = tools.find((t) => t.tool.name === 'listReminderLists')!;
 
       const result = await listReminderLists.handler({});
 
-      // withValidation wraps everything in MCP ToolsCallResult format
       expect(result).toHaveProperty('content');
       expect(Array.isArray(result.content)).toBe(true);
       expect(result.content[0]).toHaveProperty('type', 'text');
@@ -187,7 +185,6 @@ describe('auth enforcement', () => {
             path: options.path,
             method: options.method || 'GET',
             headers: options.headers || {},
-            // Fresh connection per request: no keep-alive socket outlives its test's server.
             agent: false,
           },
           (res) => {
@@ -224,8 +221,6 @@ describe('auth enforcement', () => {
       });
 
       await new Promise<void>((resolve, reject) => {
-        // Bind the address the client dials: host-less listen(0) is dual-stack [::], and macOS may
-        // hand it a port a foreign IPv4 127.0.0.1 listener holds, which then gets the connection.
         httpServer = server.app.listen(0, LOOPBACK, () => {
           const addr = httpServer!.address();
           if (!addr || typeof addr !== 'object' || addr.address !== LOOPBACK) {
@@ -318,7 +313,6 @@ describe('auth enforcement', () => {
       const res = await request({ path: '/health' });
       const body = JSON.parse(res.body);
 
-      // Should NOT leak version, tools list, platform, session count
       expect(body).toEqual({ status: 'ok' });
     });
 

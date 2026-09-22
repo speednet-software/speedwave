@@ -42,14 +42,9 @@ export const LOGS_TAIL_LINES = 500;
 /** Available level chips rendered in the toolbar. */
 export const LEVEL_CHIPS: readonly LogLevel[] = ['all', 'debug', 'info', 'warn', 'error'];
 
-// Polling cadence for the system health grid lives in `SystemHealthService`
-// (`services/system-health.service.ts`) — the SSOT for the polling loop.
-
 const COMPOSE_RE = /^([\w.-]+)\s*\|\s*(.*)$/;
-// `[HH:MM:SS]` or `[<ISO>]`; ISO is `mcp-shared`'s `ts()`.
 const BRACKETED_TIME_RE =
   /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]\s*(.*)$/;
-// ISO 8601 prefix (UTC, millis, or local-offset) — SSOT format: `log_ts::log_timestamp()` / `mcp-shared`'s `ts()`.
 const ISO_TIME_RE =
   /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/;
 /** A parseable ISO date+time prefix — `formatTime` parses it and re-renders in the host's local zone. */
@@ -73,7 +68,6 @@ export function parseLogLine(raw: string): LogLine {
   const source = composeMatch ? composeMatch[1] : 'log';
   const rest = composeMatch ? composeMatch[2] : trimmed;
 
-  // Head: nerdctl `--timestamps`, Rust drain, or `[<ISO>]`.
   let time = '';
   let afterTime = rest;
   const headMatch = BRACKETED_TIME_RE.exec(rest) ?? ISO_TIME_RE.exec(rest);
@@ -81,10 +75,8 @@ export function parseLogLine(raw: string): LogLine {
     time = headMatch[1];
     afterTime = headMatch[2];
   }
-  // Drop the `STDOUT: `/`STDERR: ` drain marker (capture noise only).
   const drainMatch = DRAIN_PREFIX_RE.exec(afterTime);
   let cleaned = drainMatch ? drainMatch[1] : afterTime;
-  // Inline `[<ISO>]` from the worker's `ts()` — promote to time if absent, else strip.
   const inlineMatch = BRACKETED_TIME_RE.exec(cleaned);
   if (inlineMatch) {
     if (!time) time = inlineMatch[1];
@@ -131,7 +123,6 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
     }
   }
   const keyed = lines.map((line, i) => ({ line, key: keys[i] }));
-  // Stable sort (ES2019+); NaN keys sort before timestamped lines.
   return keyed
     .sort((a, b) => {
       if (Number.isNaN(a.key) && Number.isNaN(b.key)) return 0;
@@ -711,9 +702,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    */
   async ngOnInit(): Promise<void> {
     await this.refresh();
-    // SystemHealthService owns polling and the project-settled refresh; we read its `health` signal.
     await this.systemHealth.ensurePolling();
-    // Live-tail: silent refresh on the health cadence; sticky-scroll if at bottom.
     this.logsTimer = setInterval(() => void this.refresh(true), HEALTH_REFRESH_INTERVAL_MS);
     this.unsubProjectSettled = this.projectState.onProjectSettled(() => {
       void this.refresh();
@@ -748,7 +737,7 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   /** True when the log scroll region is at (or within ~50px of) the bottom. */
   private isAtBottom(): boolean {
     const el = this.logScroll?.nativeElement;
-    if (!el) return true; // no element yet → behave like a fresh tail
+    if (!el) return true;
     return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
   }
 
@@ -757,11 +746,9 @@ export class LogsViewComponent implements OnInit, OnDestroy {
    * @param silent - True for the background poll.
    */
   protected async refresh(silent = false): Promise<void> {
-    // Skip silent ticks while a fetch is in flight — slow nerdctl shouldn't fan out.
     if (silent && this.refreshInFlight) return;
     const project = this.projectState.activeProject();
     if (!project) {
-      // Project transiently null during shell boot — quiet loading, no banner.
       if (this.projectState.status() === 'loading') {
         if (!silent) this.loading.set(true);
         this.error.set('');
@@ -775,14 +762,11 @@ export class LogsViewComponent implements OnInit, OnDestroy {
     if (!silent) this.loading.set(true);
     this.refreshInFlight = true;
     try {
-      // `get_all_logs` merges host-side logs + `compose logs`. `<source> | …` prefix
-      // is recognised by `parseLogLine` (COMPOSE_RE) — new sources auto-appear.
       const raw = await this.tauri.invoke<string>('get_all_logs', {
         project,
         tail: LOGS_TAIL_LINES,
       });
       this.error.set('');
-      // Skip the re-parse + signal write when the buffer is byte-identical (idle system).
       if (silent && raw === this.lastRaw) return;
       this.lastRaw = raw;
       const parsed = sortLogLinesByTime(
@@ -824,8 +808,6 @@ export class LogsViewComponent implements OnInit, OnDestroy {
       const path = await this.tauri.invoke<string>('export_diagnostics', { project });
       const trimmed = (path ?? '').trim();
       this.diagnosticsPath.set(trimmed);
-      // Only open the dialog when we actually have something to show — an
-      // empty path would render an empty `note` and confuse the user.
       if (trimmed.length > 0) {
         this.exportDialogOpen.set(true);
       }

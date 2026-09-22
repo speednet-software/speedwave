@@ -95,8 +95,6 @@ mod tests {
 
     #[test]
     fn inconclusive_probe_counts_as_active() {
-        // Wrongly skipping a VM stop is recoverable; powering the VM off under
-        // a live session is not — an inconclusive probe must fail toward active.
         assert!(!probe_says_active(Ok(())));
         assert!(probe_says_active(Err(std::fs::TryLockError::WouldBlock)));
         assert!(probe_says_active(Err(std::fs::TryLockError::Error(
@@ -106,7 +104,6 @@ mod tests {
 
     #[test]
     fn probe_is_false_on_stale_unlocked_file() {
-        // A crash leaves the file behind; the kernel already dropped the lock.
         let tmp = tempfile::tempdir().unwrap();
         {
             let _guard = CliSessionGuard::acquire(tmp.path()).unwrap();

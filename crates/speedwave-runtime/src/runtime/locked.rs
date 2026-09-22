@@ -72,8 +72,6 @@ impl LockedRuntime {
         Self { inner }
     }
 
-    // ----- LOCKED: every call goes through with_acquired -----
-
     /// Starts the project's compose stack (under the per-project lock). Containers may be
     /// (re)created, so the project's slash-command cache is dropped either way.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
@@ -105,8 +103,6 @@ impl LockedRuntime {
     pub fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || self.inner.compose_validate(project))
     }
-
-    // ----- PASSTHROUGH: no lock, do not touch compose.yml -----
 
     /// Lists the project's running containers.
     pub fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<serde_json::Value>> {
@@ -449,7 +445,6 @@ mod tests {
 
     #[test]
     fn builder_construction_yields_locked_wrapper() {
-        // Smoke-test that the test-support builder produces a working `LockedRuntime`.
         let (rt, _) = MockRuntimeBuilder::new().build();
         assert!(rt.is_available());
     }

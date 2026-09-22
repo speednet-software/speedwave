@@ -1,12 +1,9 @@
 #!/usr/bin/env bats
-# Tests for containers/claude-resources/statusline.sh, run on the host (macOS) — no container required.
 
 STATUSLINE="$BATS_TEST_DIRNAME/../../containers/claude-resources/statusline.sh"
 
-# Full rate-limited JSON for reuse across tests; resets_at values are Unix epoch seconds (not ISO).
 FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":"claude-opus-4-6"},"context_window":{"used_percentage":38,"context_window_size":1000000},"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120},"seven_day":{"used_percentage":82,"resets_at":1776186000}}}'
 
-# ── Happy path tests ────────────────────────────────────────────────────────────
 
 @test "empty stdin outputs default model name 'Claude'" {
     run bash "$STATUSLINE" < /dev/null
@@ -58,7 +55,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     local input='{"model":{"display_name":"Opus"},"context_window":{"used_percentage":38,"context_window_size":1000000},"total_cost_usd":1.23}'
     run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # 0.02 + 0.03 = 0.05 from the sidecar, not the CC 1.23.
     [[ "$output" == *'$0.0500'* ]]
     [[ "$output" != *'1.23'* ]]
 }
@@ -73,7 +69,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 @test "SSOT cost parses serde_json scientific-notation floats" {
     local usage_dir="$BATS_TEST_TMPDIR/usage"
     mkdir -p "$usage_dir"
-    # serde_json emits small f64 in exponent form; must not truncate at 'e'.
     printf '%s\n' \
         '{"response_id":"m1","cost_usd":2.5e-6,"cost_source":"catalog"}' \
         '{"response_id":"m2","cost_usd":0.0100,"cost_source":"catalog"}' \
@@ -81,7 +76,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     local input='{"model":{"display_name":"Opus"},"context_window":{"used_percentage":38,"context_window_size":1000000},"total_cost_usd":1.23}'
     run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # 0.0000025 + 0.01 = 0.0100 (4dp), NOT 2.5 + 0.01 = 2.51 from a truncated 'e'.
     [[ "$output" == *'$0.0100'* ]]
     [[ "$output" != *'2.51'* ]]
 }
@@ -89,7 +83,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 @test "SSOT all-zero sidecar shows \$0, not the CC fallback" {
     local usage_dir="$BATS_TEST_TMPDIR/usage"
     mkdir -p "$usage_dir"
-    # A free-local session: every priced line is 0.0 — must show the SSOT $0.
     printf '%s\n' \
         '{"response_id":"m1","cost_usd":0.0,"cost_source":"free"}' \
         '{"response_id":"m2","cost_usd":0.0,"cost_source":"free"}' \
@@ -97,14 +90,12 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     local input='{"model":{"display_name":"Local"},"context_window":{"used_percentage":38,"context_window_size":1000000},"total_cost_usd":1.23}'
     run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Priced lines exist and sum to 0 → SSOT wins, CC 1.23 is suppressed.
     [[ "$output" != *'1.23'* ]]
 }
 
 @test "SSOT dedups duplicate response_id, last write wins" {
     local usage_dir="$BATS_TEST_TMPDIR/usage"
     mkdir -p "$usage_dir"
-    # Re-enrichment appended a second line for msg_1: only the last (0.05) counts.
     printf '%s\n' \
         '{"response_id":"msg_1","cost_usd":0.0200,"cost_source":"catalog"}' \
         '{"response_id":"msg_1","cost_usd":0.0500,"cost_source":"actual"}' \
@@ -112,7 +103,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     local input='{"model":{"display_name":"Opus"},"context_window":{"used_percentage":38,"context_window_size":1000000},"total_cost_usd":1.23}'
     run bash -c "echo '$input' | STATUSLINE_USAGE_DIR='$usage_dir' bash $STATUSLINE"
     [ "$status" -eq 0 ]
-    # Last write wins: $0.05, NOT 0.02+0.05=0.07.
     [[ "$output" == *'$0.0500'* ]]
     [[ "$output" != *'0.0700'* ]]
     [[ "$output" != *'1.23'* ]]
@@ -121,8 +111,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 @test "SSOT excludes failed/null lines from the cost sum" {
     local usage_dir="$BATS_TEST_TMPDIR/usage"
     mkdir -p "$usage_dir"
-    # A failed and a subscription line carry cost_usd:null → not summed; only
-    # the priced 0.04 catalog line counts.
     printf '%s\n' \
         '{"response_id":"m_ok","cost_usd":0.0400,"cost_source":"catalog"}' \
         '{"response_id":"m_fail","cost_usd":null,"cost_source":"failed"}' \
@@ -163,7 +151,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [ "$status" -eq 0 ]
     [[ "$output" == *"5h"* ]]
     [[ "$output" == *"reset"* ]]
-    # Reset time should be HH:MM format
     [[ "$output" =~ [0-9]{2}:[0-9]{2} ]]
 }
 
@@ -173,7 +160,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [ "$status" -eq 0 ]
     [[ "$output" == *"7d"* ]]
     [[ "$output" == *"reset"* ]]
-    # Reset date should be dd.mm format
     [[ "$output" =~ [0-9]{2}\.[0-9]{2} ]]
 }
 
@@ -183,7 +169,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"│"* ]]
 }
 
-# ── Color threshold tests ───────────────────────────────────────────────────────
 
 @test "green below 50%" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":25,"context_window_size":1000000}}'
@@ -257,7 +242,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *$'\033[31m'* ]]
 }
 
-# ── Bar width tests ─────────────────────────────────────────────────────────────
 
 @test "CTX bar 40% has 2 filled, 3 empty" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":40,"context_window_size":1000000}}'
@@ -281,7 +265,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"░░░░░"* ]]
 }
 
-# ── Edge cases ──────────────────────────────────────────────────────────────────
 
 @test "completely empty JSON object does not crash" {
     run bash -c "echo '{}' | bash $STATUSLINE"
@@ -341,7 +324,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 }
 
 @test "legacy top-level used_percentage (no context_window object) hides CTX" {
-    # Pre-nesting shape never emitted by the pinned CC — must not leak a bar.
     local input='{"model":{"display_name":"Test"},"used_percentage":38,"legacy_window_size":1000000}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
@@ -349,8 +331,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 }
 
 @test "null used_percentage with rate limits shows CTX 0%, never the 5h value" {
-    # Early session: context_window.used_percentage is null (documented). The
-    # scan must not skip ahead and read rate_limits' 12% as context usage.
     local input='{"model":{"display_name":"Test"},"context_window":{"total_input_tokens":0,"context_window_size":200000,"used_percentage":null,"current_usage":null},"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
@@ -358,8 +338,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 }
 
 @test "current_usage nested before used_percentage still parses CTX" {
-    # Key order inside context_window is not contractual; a nested object
-    # ahead of used_percentage must not break the scoped scan.
     local input='{"model":{"display_name":"Test"},"context_window":{"current_usage":{"input_tokens":2,"output_tokens":1660,"cache_creation_input_tokens":4920,"cache_read_input_tokens":66844},"total_input_tokens":71766,"context_window_size":200000,"used_percentage":37,"remaining_percentage":63}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
@@ -375,8 +353,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
 }
 
 @test "rate_limits before context_window AND used_percentage absent shows CTX 0%, never a trailing key" {
-    # Reversed key order (rate_limits first) combined with a missing used_percentage in
-    # context_window: a substring-scoped scan with no jq falls through to unrelated trailing JSON.
     local input='{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}},"context_window":{"context_window_size":1000000},"trailing":{"used_percentage":77}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
     [ "$status" -eq 0 ]
@@ -405,7 +381,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *'$12.345'* ]]
 }
 
-# ── Git branch tests ────────────────────────────────────────────────────────────
 
 @test "shows git branch when workspace is a git repo" {
     [[ -n "${GIT_DIR:-}" ]] && skip "git commands unreliable inside git hooks"
@@ -469,11 +444,9 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     unset STATUSLINE_WORKSPACE_DIR
     rm -rf "$repo"
     [ "$status" -eq 0 ]
-    # Branch name must appear between model and CTX
     [[ "$output" =~ Test.*"$branch".*CTX ]]
 }
 
-# ── Float handling tests ────────────────────────────────────────────────────────
 
 @test "used_percentage as float truncated to integer" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":38.7,"context_window_size":1000000}}'
@@ -497,7 +470,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"12%"* ]]
 }
 
-# ── Malformed / broken JSON error path tests ────────────────────────────────────
 
 @test "malformed JSON with extra braces does not crash" {
     run bash -c "echo '{\"rate_limits\":{\"five_hour\":{\"used_percentage\":12}}}}' | bash $STATUSLINE"
@@ -526,7 +498,6 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [ "$status" -eq 0 ]
     [[ "$output" != *"5h"* ]]
     [[ "$output" != *"7d"* ]]
-    # rate_limits key present = subscription mode, so cost is hidden
     [[ "$output" != *'$'* ]]
 }
 
@@ -569,7 +540,6 @@ JSON
     [[ "$output" == *"82%"* ]]
 }
 
-# ── Security tests ──────────────────────────────────────────────────────────────
 
 @test "script does not use curl" {
     ! grep -q 'curl' "$STATUSLINE"

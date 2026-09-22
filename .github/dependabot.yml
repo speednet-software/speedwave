@@ -1,7 +1,5 @@
 version: 2
 updates:
-  # One cargo entry for all three workspaces: shared path-dependency manifests
-  # (crates/*) otherwise yield per-directory half-PRs that leave the other lockfiles stale.
   - package-ecosystem: cargo
     directories:
       - /
@@ -78,8 +76,6 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
-    # Angular packages peer-pin each other to the exact version: a single-package major can
-    # never install, so every Angular update (any level) travels in one PR.
     groups:
       angular:
         patterns:
@@ -91,7 +87,6 @@ updates:
           - minor
           - patch
     ignore:
-      # @angular/compiler-cli caps TypeScript (>=6.0 <6.1 for v22); lift with the next Angular major.
       - dependency-name: "typescript"
         versions: [">=6.1"]
 
@@ -109,13 +104,9 @@ updates:
           - minor
           - patch
     ignore:
-      # TypeScript 7 ships no tsserver and no JS compiler API. Nothing here typechecks — WDIO
-      # strips types via tsx/jiti — so a 7.x bump buys nothing and costs editor IntelliSense.
       - dependency-name: "typescript"
         versions: [">=7"]
 
-  # `/` scans only .github/workflows and a root action.yml, so composite actions under
-  # .github/actions need their own directory; group-by keeps one PR per action across both.
   - package-ecosystem: github-actions
     directories:
       - /

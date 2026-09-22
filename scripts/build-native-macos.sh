@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGES=(reminders calendar mail notes audio-capture)
 ARCHS="${SPEEDWAVE_SWIFT_ARCHS:-arm64 x86_64}"
 TAURI_CONF="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
@@ -18,13 +18,11 @@ for arch in "${ARCH_LIST[@]}"; do
   BUILD_ARGS+=(--arch "$arch")
 done
 
-# Read app version from tauri.conf.json (SSOT), stamp into each CLI's Info.plist.
 APP_VERSION="0.0.0"
 if [[ -f "$TAURI_CONF" ]]; then
   if command -v jq >/dev/null 2>&1; then
     APP_VERSION="$(jq -r '.version // "0.0.0"' "$TAURI_CONF")"
   else
-    # jq not available in some minimal CI images; grep the single version line.
     APP_VERSION="$(grep -E '^\s*"version"\s*:' "$TAURI_CONF" | head -1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/')"
     [[ -z "$APP_VERSION" ]] && APP_VERSION="0.0.0"
   fi
@@ -32,13 +30,20 @@ fi
 echo "Stamping native CLI Info.plist files with version $APP_VERSION"
 
 stamp_info_plist() {
-  local plist="$1"
+  local plist="$1" key actual
   if [[ ! -f "$plist" ]]; then
     echo "Missing Info.plist: $plist (each CLI must have Resources/Info.plist for embedded plist)" >&2
     exit 1
   fi
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$plist"
+  for key in CFBundleShortVersionString CFBundleVersion; do
+    sed -i '' -e "/<key>$key<\/key>/{" -e n \
+      -e "s|<string>[^<]*</string>|<string>$APP_VERSION</string>|" -e "}" "$plist"
+    actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>/dev/null || true)"
+    if [[ "$actual" != "$APP_VERSION" ]]; then
+      echo "Failed to stamp $key in $plist (found '$actual', wanted '$APP_VERSION')" >&2
+      exit 1
+    fi
+  done
 }
 
 resolve_binary_path() {
@@ -59,6 +64,10 @@ resolve_binary_path() {
 
   find "$pkg_dir/.build" -type f \( -path "*/release/$binary_name" -o -path "*/Release/$binary_name" \) | sort | tail -n 1
 }
+
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
 
 for pkg in "${PACKAGES[@]}"; do
   pkg_dir="$REPO_ROOT/native/macos/$pkg"

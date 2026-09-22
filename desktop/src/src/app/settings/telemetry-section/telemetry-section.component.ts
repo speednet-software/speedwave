@@ -501,8 +501,6 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   /** Save-specific error, shown by the Save button (not the top load banner). */
   readonly saveError = signal('');
 
-  // Section-level managed indicators: true when any field in the section is
-  // MDM-locked, so the header shows 🔒 even for fields without a per-field badge.
   readonly transportManaged = computed(() => {
     const l = this.config()?.locks;
     return !!l && (l.protocol || l.export_metrics || l.export_logs);
@@ -534,7 +532,6 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   /** Empty until a probe runs; then 'reachable' or 'unreachable from this host'. */
   readonly probeResult = signal('');
 
-  // Editable form state (signals — OnPush requires it).
   readonly enabled = signal(false);
   readonly protocol = signal<OtlpProtocol>('grpc');
   readonly exportMetrics = signal(true);
@@ -545,8 +542,6 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
   readonly logToolDetails = signal(false);
   readonly logRawApiBodies = signal(false);
 
-  // MDM-lockable tri-state fields: untouched = keep saved/managed value,
-  // touched = send the edited value (incl. null to clear).
   private readonly endpointField = new TriStateField('');
   private readonly headersField = new TriStateField('');
   private readonly resourceAttributesField = new TriStateField('');
@@ -733,8 +728,6 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
     if (!locks?.log_raw_api_bodies) {
       update.log_raw_api_bodies = this.logRawApiBodies();
     }
-    // Tri-state (headers / endpoint / resource_attributes / intervals): send only
-    // when edited; an emptied string field becomes null (clear), otherwise the value.
     const emptyToNull = (v: string): string | null => (v === '' ? null : v);
     this.headersField.applyMappedTo(update, 'headers', !!locks?.headers, emptyToNull);
     this.endpointField.applyMappedTo(update, 'endpoint', !!locks?.endpoint, emptyToNull);
@@ -758,13 +751,9 @@ export class TelemetrySectionComponent implements OnInit, OnDestroy {
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
       await this.refresh();
-      // refresh() swallows its own errors into error(), so gate success feedback
-      // on it being clear — never show "Saved" next to an error.
       if (this.error()) {
         this.saveError.set(this.error());
       } else {
-        // OTEL_* env is baked into the claude container at create time, so a saved
-        // change only takes effect after a restart (as with an LLM claude-env change).
         this.projectState.requestRestart();
         this.saved.set(true);
         if (this.savedTimer !== null) {

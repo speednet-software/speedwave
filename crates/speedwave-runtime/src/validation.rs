@@ -42,7 +42,6 @@ pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
             c
         );
     }
-    // Reject path traversal attempts
     if name.contains("..") {
         anyhow::bail!("project name '{}' contains path traversal", name);
     }
@@ -57,8 +56,6 @@ pub fn reject_control_chars(value: &str, field: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(

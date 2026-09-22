@@ -336,7 +336,6 @@ describe('oauth-state', () => {
     });
 
     it('rejects empty bearer key', async () => {
-      // Covers oauth-state.ts:104.
       await writeFile(join(dir, '.bearer-map.json'), JSON.stringify({ '': 'sharepoint' }), {
         mode: 0o600,
       });

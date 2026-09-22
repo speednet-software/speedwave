@@ -84,7 +84,6 @@ describe('timeouts', () => {
     const originalEnv = process.env.SPEEDWAVE_TIMEOUT_MS;
 
     afterEach(() => {
-      // Restore original env
       if (originalEnv !== undefined) {
         process.env.SPEEDWAVE_TIMEOUT_MS = originalEnv;
       } else {
@@ -98,11 +97,10 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // Values derived from BASE_MS should reflect the env var
       expect(freshTimeouts.EXECUTION_MS).toBe(60000);
       expect(freshTimeouts.WORKER_REQUEST_MS).toBe(60000);
-      expect(freshTimeouts.LONG_OPERATION_MS).toBe(300000); // 60000 * 5
-      expect(freshTimeouts.ASYNC_JOB_MS).toBe(450000); // 60000 * 7.5
+      expect(freshTimeouts.LONG_OPERATION_MS).toBe(300000);
+      expect(freshTimeouts.ASYNC_JOB_MS).toBe(450000);
     });
 
     it('should keep fixed values unchanged regardless of env var', async () => {
@@ -111,7 +109,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // Fixed values should not change
       expect(freshTimeouts.API_CALL_MS).toBe(30000);
       expect(freshTimeouts.TOKEN_REFRESH_MS).toBe(30000);
       expect(freshTimeouts.HEALTH_CHECK_MS).toBe(5000);
@@ -125,7 +122,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // Invalid values should fall back to default 120000
       expect(freshTimeouts.EXECUTION_MS).toBe(120000);
       expect(freshTimeouts.WORKER_REQUEST_MS).toBe(120000);
     });
@@ -136,7 +132,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // Empty string should fall back to default
       expect(freshTimeouts.EXECUTION_MS).toBe(120000);
       expect(freshTimeouts.WORKER_REQUEST_MS).toBe(120000);
     });
@@ -147,7 +142,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // Negative values are invalid and should fall back to default
       expect(freshTimeouts.EXECUTION_MS).toBe(120000);
       expect(freshTimeouts.WORKER_REQUEST_MS).toBe(120000);
     });
@@ -158,7 +152,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // Zero timeout is invalid and should fall back to default
       expect(freshTimeouts.EXECUTION_MS).toBe(120000);
       expect(freshTimeouts.WORKER_REQUEST_MS).toBe(120000);
     });
@@ -169,7 +162,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // parseInt truncates floating point values to integer
       expect(freshTimeouts.EXECUTION_MS).toBe(123);
       expect(freshTimeouts.WORKER_REQUEST_MS).toBe(123);
     });
@@ -180,7 +172,6 @@ describe('timeouts', () => {
 
       const { TIMEOUTS: freshTimeouts } = await import('./timeouts.js');
 
-      // parseInt handles whitespace
       expect(freshTimeouts.EXECUTION_MS).toBe(90000);
     });
   });

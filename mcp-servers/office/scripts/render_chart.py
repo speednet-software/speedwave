@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 
-# Force the non-interactive backend before importing pyplot — no X11, works under read-only rootfs.
 import matplotlib
 
 matplotlib.use("Agg")
@@ -55,7 +54,6 @@ def _run(argv: list[str]) -> None:
     fig, ax = plt.subplots(figsize=(width, height))
     try:
         if kind == "pie":
-            # Pie uses the first series only.
             ax.pie(series[0]["values"], labels=labels, autopct="%1.1f%%")
             ax.axis("equal")
         elif kind == "scatter":
@@ -75,7 +73,7 @@ def _run(argv: list[str]) -> None:
             ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=45, ha="right")
             ax.legend()
-        else:  # bar
+        else:
             import numpy as np
 
             x = np.arange(len(labels))

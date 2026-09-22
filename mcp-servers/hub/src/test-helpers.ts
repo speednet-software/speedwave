@@ -139,6 +139,12 @@ const MOCK_SERVICE_TOOLS: Record<string, Record<string, Partial<ToolMetadata>>> 
       osCategory: 'reminders',
       description: 'Create a reminder',
     },
+    updateReminder: {
+      deferLoading: false,
+      timeoutMs: 30_000,
+      osCategory: 'reminders',
+      description: 'Update a reminder',
+    },
     completeReminder: {
       deferLoading: false,
       timeoutMs: 30_000,

@@ -12,8 +12,6 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 const STABLE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
 
-// ── Types ──
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
     pub version: String,
@@ -54,8 +52,6 @@ impl UpdateSettings {
         self.check_interval_hours = self.check_interval_hours.clamp(1, 168);
     }
 }
-
-// ── Settings persistence ──
 
 fn settings_path() -> Option<PathBuf> {
     Some(consts::data_dir().join("update-settings.json"))
@@ -98,10 +94,6 @@ fn save_update_settings_inner(settings: &UpdateSettings) -> Result<(), String> {
     speedwave_runtime::fs_perms::write_shared_file_atomic(&path, &json).map_err(|e| e.to_string())
 }
 
-// ── Install method detection ──
-
-// ── Update check / install ──
-
 /// Returns `true` if the release body contains `[CRITICAL]` or `[SECURITY]` (case-insensitive).
 fn detect_critical(body: &Option<String>) -> bool {
     body.as_deref().is_some_and(|b| {
@@ -118,10 +110,7 @@ fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, Strin
     app.updater_builder()
         .endpoints(vec![parsed_url])
         .map_err(|e| e.to_string())?
-        .version_comparator(|current, remote| {
-            // Only update when remote version is strictly newer (no downgrades).
-            remote.version > current
-        })
+        .version_comparator(|current, remote| remote.version > current)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -163,7 +152,6 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     let update = updater.check().await.map_err(|e| e.to_string())?;
     let update = update.ok_or("No update available")?;
 
-    // Verify the version matches what the user approved (TOCTOU mitigation).
     let installing_version = update.version.clone();
     if installing_version != expected_version {
         return Err(format!(
@@ -188,7 +176,6 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
         .await
         .map_err(|e| e.to_string())?;
 
-    // Do not restart from the auto-check flow (containers may be running); emit an event for the frontend.
     use tauri::Emitter;
     if let Err(e) = app.emit(
         "update_installed",
@@ -204,8 +191,6 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     log::info!("installed version {installing_version}; waiting for frontend to confirm restart");
     Ok(())
 }
-
-// ── Background auto-check loop ──
 
 #[cfg(test)]
 #[expect(
@@ -265,7 +250,6 @@ mod tests {
 
     #[test]
     fn update_settings_ignores_unknown_fields() {
-        // Backward compat: existing update-settings.json files may have update_channel
         let json = r#"{"auto_check":true,"check_interval_hours":24,"update_channel":"beta"}"#;
         let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
         assert!(settings.auto_check);
@@ -282,11 +266,9 @@ mod tests {
             check_interval_hours: 12,
         };
 
-        // Save
         let json = serde_json::to_string_pretty(&original).expect("serialize");
         std::fs::write(&path, &json).expect("write");
 
-        // Load
         let contents = std::fs::read_to_string(&path).expect("read");
         let loaded: UpdateSettings = serde_json::from_str(&contents).expect("deserialize");
 
@@ -305,17 +287,14 @@ mod tests {
             check_interval_hours: 6,
         };
 
-        // Simulate what save_update_settings_inner does
         let json = serde_json::to_string_pretty(&settings).expect("serialize");
         std::fs::write(&tmp_path, &json).expect("write tmp");
         std::fs::rename(&tmp_path, &path).expect("rename");
 
-        // Final file exists with correct content
         let contents = std::fs::read_to_string(&path).expect("read");
         let loaded: UpdateSettings = serde_json::from_str(&contents).expect("deserialize");
         assert_eq!(loaded.check_interval_hours, 6);
 
-        // Tmp file must not exist after rename
         assert!(!tmp_path.exists(), "tmp file should not exist after rename");
     }
 
@@ -325,12 +304,10 @@ mod tests {
         let path = dir.path().join("update-settings.json");
         let tmp_path = dir.path().join("update-settings.json.tmp");
 
-        // Write initial file
         let initial = UpdateSettings::default();
         let json = serde_json::to_string_pretty(&initial).expect("serialize");
         std::fs::write(&path, &json).expect("write initial");
 
-        // Now overwrite atomically
         let updated = UpdateSettings {
             auto_check: false,
             check_interval_hours: 48,
@@ -355,7 +332,6 @@ mod tests {
             check_interval_hours: 0,
         };
 
-        // Simulate normalize + atomic write as done in save_update_settings_inner
         let mut clamped = UpdateSettings {
             check_interval_hours: settings.check_interval_hours,
             auto_check: settings.auto_check,
@@ -417,7 +393,6 @@ mod tests {
         let json = serde_json::to_string_pretty(&initial).expect("serialize");
         std::fs::write(&path, &json).expect("write");
 
-        // Simulate the modify pattern (load, mutate, save)
         let contents = std::fs::read_to_string(&path).expect("read");
         let mut settings: UpdateSettings = serde_json::from_str(&contents).expect("deserialize");
         settings.auto_check = false;
@@ -427,7 +402,6 @@ mod tests {
         std::fs::write(&tmp_path, &json2).expect("write tmp");
         std::fs::rename(&tmp_path, &path).expect("rename");
 
-        // Verify the modification was applied
         let contents = std::fs::read_to_string(&path).expect("read");
         let loaded: UpdateSettings = serde_json::from_str(&contents).expect("deserialize");
         assert!(!loaded.auto_check);
@@ -481,7 +455,6 @@ enum AutoCheckState {
 
 pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        // Delay the first check to avoid a network call at startup.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         let mut last_state: Option<AutoCheckState> = None;
 
@@ -516,7 +489,6 @@ pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHand
                 last_state = Some(state);
             }
 
-            // Sleep in 60-second increments so settings changes take effect within a minute.
             let interval_secs = (settings.check_interval_hours as u64) * 3600;
             let mut elapsed: u64 = 0;
             while elapsed < interval_secs {

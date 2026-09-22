@@ -99,6 +99,10 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   private log = inject(LoggerService);
   private pollTimer?: ReturnType<typeof setInterval>;
   private copyTimer?: ReturnType<typeof setTimeout>;
+  /** True once destroyed — drops a poll response that resolves after teardown. */
+  private destroyed = false;
+  /** True once `done` has fired — drops a still-in-flight tick's later, redundant emit. */
+  private doneEmitted = false;
 
   /** Fetches the CLI command, detects platform, and starts polling for auth status. */
   ngOnInit(): void {
@@ -119,7 +123,6 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       })
       .catch((err: unknown) => {
-        // Non-fatal: the Windows PowerShell hint just won't show.
         this.log.warn(`auth-terminal: get_platform failed: ${String(err)}`);
       });
     this.startPolling();
@@ -161,6 +164,7 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
 
   /** Cleans up timers. */
   ngOnDestroy(): void {
+    this.destroyed = true;
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
     }
@@ -172,21 +176,21 @@ export class AuthTerminalComponent implements OnInit, OnDestroy {
   /** Polls auth status every 3s to detect successful login. */
   private startPolling(): void {
     this.pollTimer = setInterval(async () => {
+      const project = this.project();
       try {
         const result = await this.tauri.invoke<{ oauth_authenticated: boolean }>(
           'get_auth_status',
-          {
-            project: this.project(),
-          }
+          { project }
         );
+        if (this.destroyed || this.project() !== project || this.doneEmitted) return;
         if (result.oauth_authenticated) {
           if (this.pollTimer) {
             clearInterval(this.pollTimer);
           }
+          this.doneEmitted = true;
           this.done.emit(true);
         }
       } catch (err: unknown) {
-        // Expected while the container is still starting; log anything else.
         const msg = typeof err === 'string' ? err : String(err);
         if (!/container|not running|starting/i.test(msg)) {
           this.log.debug(`auth-terminal: get_auth_status poll error: ${msg}`);

@@ -1,7 +1,6 @@
 import Foundation
 import SharedCLI
 
-// MARK: - CLI Entry Point
 
 /// notes-cli <command> [json-args]
 /// Commands: check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note
@@ -11,7 +10,6 @@ struct NotesCLI {
         "check_permission, list_folders, list_notes, get_note, search_notes, create_note, update_note, delete_note"
 
     static func main() {
-        // check_permission validates Notes automation via AppleEventsGate.
         runCLI(
             cliName: "notes-cli",
             commandList: commandList,
@@ -77,7 +75,6 @@ struct NotesCLI {
     ]
 }
 
-// MARK: - Error Handling
 
 enum NotesCLIError: LocalizedError {
     case missingField(String)
@@ -90,9 +87,7 @@ enum NotesCLIError: LocalizedError {
     }
 }
 
-// MARK: - Permission Helpers
 
 /// AppleScript command used by check_permission to verify Automation access. Must access actual data
 /// (not just app metadata like `name`) to trigger the macOS Automation permission prompt.
-// SYNC: permissionCheckScript rationale must match mail/Sources/MailCLI.swift
 let permissionCheckScript = "tell application \"Notes\" to count of notes"

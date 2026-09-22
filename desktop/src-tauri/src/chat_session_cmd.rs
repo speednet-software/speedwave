@@ -1,18 +1,14 @@
-// Chat session lifecycle Tauri commands wrapping `ChatSession`:
-// start/resume a session, send a message, submit an ask-user answer, interrupt.
-
 use crate::chat::{self, ChatSession, SharedChatSession};
+use crate::control_channel::{
+    self, ContextUsage, ControlHandle, ControlQuery, PlanUsage, SessionInfoState,
+};
 use crate::reconcile::SharedOauth;
 use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
-/// Serialises start/stop/start so `start_chat`/`resume_conversation` can't
-/// interleave. Poison is recovered: this guards ordering, not data invariants.
 static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Shared impl for `start_chat`/`resume_conversation`: locks + checks auth,
-/// stops the old session outside the session lock, then starts the new one under it.
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
@@ -32,10 +28,8 @@ fn start_session_inner(
         containers_cmd::recreate_project_containers_if_running(project);
     }
 
-    // Per-project compose lock serialises auth check with concurrent compose ops.
     log::info!("acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
-    // `_rt` unused: `check_claude_auth` builds its own (reentrant via HELD_LOCKS).
     rt.transaction(project, |_rt| -> anyhow::Result<()> {
         log::info!("compose lock acquired, checking auth");
         let authed = setup_wizard::check_claude_auth(project)?;
@@ -46,7 +40,6 @@ fn start_session_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    // Extract old session and stop it outside the lock.
     log::info!("extracting old session");
     let mut old_session = {
         let mut guard = session_arc
@@ -58,7 +51,6 @@ fn start_session_inner(
     old_session.stop().map_err(|e| e.to_string())?;
     drop(old_session);
 
-    // Start the new session under the lock.
     log::info!("starting new session");
     let mut session = session_arc
         .lock()
@@ -90,11 +82,11 @@ pub(crate) async fn start_chat(
 
 #[tauri::command]
 pub(crate) async fn send_message(
+    app_handle: tauri::AppHandle,
     blocks: Vec<chat::WireContentBlock>,
     display_text: String,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
-    // `display_text` is the local-bubble preview; wire-size guard is in `send_message`.
     if display_text.len() > chat::MAX_MESSAGE_LEN {
         return Err("Message too long".to_string());
     }
@@ -110,7 +102,9 @@ pub(crate) async fn send_message(
             "no active session (session is being started)".to_string()
         })?;
         log::info!("lock acquired, sending message");
-        session.send_message(&blocks).map_err(|e| e.to_string())
+        session
+            .send_message(&app_handle, &blocks)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -146,7 +140,6 @@ fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
     session.interrupt().map_err(|e| e.to_string())
 }
 
-/// Tauri command — delegates to [`ChatSession::interrupt`].
 #[tauri::command]
 pub(crate) async fn stop_chat(state: tauri::State<'_, SharedChatSession>) -> Result<(), String> {
     log::info!("interrupting chat turn");
@@ -182,7 +175,92 @@ pub(crate) async fn resume_conversation(
     .map_err(|e| e.to_string())?
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────────────────
+const MSG_SESSION_BUSY: &str = "chat session is busy";
+const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
+
+pub(crate) fn session_info_state_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> SessionInfoState {
+    match session_arc.try_lock() {
+        Ok(session) if session.project_name() == project => session.session_info_state(),
+        _ => SessionInfoState::Unavailable,
+    }
+}
+
+fn control_handle_for(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> Result<ControlHandle, String> {
+    let session = session_arc
+        .try_lock()
+        .map_err(|_| MSG_SESSION_BUSY.to_string())?;
+    if session.project_name() != project {
+        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+    }
+    session.control_handle().map_err(|e| e.to_string())
+}
+
+fn control_query_inner<T>(
+    session_arc: &SharedChatSession,
+    project: &str,
+    query: ControlQuery,
+    parse: fn(&serde_json::Value) -> Result<T, control_channel::ControlError>,
+) -> Result<T, String> {
+    let handle = control_handle_for(session_arc, project)?;
+    handle
+        .query(query)
+        .and_then(|value| parse(&value))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn get_chat_session_info(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<SessionInfoState, String> {
+    check_project(&project)?;
+    Ok(session_info_state_inner(state.inner(), &project))
+}
+
+#[tauri::command]
+pub(crate) async fn get_plan_usage(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<PlanUsage, String> {
+    check_project(&project)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        control_query_inner(
+            &session_arc,
+            &project,
+            ControlQuery::Usage,
+            control_channel::parse_plan_usage,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn get_context_usage(
+    project: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<ContextUsage, String> {
+    check_project(&project)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        control_query_inner(
+            &session_arc,
+            &project,
+            ControlQuery::ContextUsage,
+            control_channel::parse_context_usage,
+        )
+        .map(ContextUsage::without_free_space)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 #[cfg(test)]
 #[expect(
@@ -194,8 +272,86 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// Extracts a function body from source by brace-counting from the first
-    /// `split(fn_signature)` match, so `fn_signature` must be unique in the file.
+    #[test]
+    fn session_info_is_unavailable_without_a_live_session() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        assert_eq!(
+            session_info_state_inner(&session_arc, "acme"),
+            SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn session_info_is_unavailable_for_another_project_and_while_the_session_is_locked() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        assert_eq!(
+            session_info_state_inner(&session_arc, "other"),
+            SessionInfoState::Unavailable
+        );
+        let _held = session_arc.lock().unwrap();
+        assert_eq!(
+            session_info_state_inner(&session_arc, "acme"),
+            SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn control_query_without_a_live_session_errors_instead_of_waiting() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let err = control_query_inner(
+            &session_arc,
+            "acme",
+            ControlQuery::Usage,
+            control_channel::parse_plan_usage,
+        )
+        .unwrap_err();
+        assert_eq!(err, "no active session");
+    }
+
+    #[test]
+    fn control_query_rejects_a_project_the_session_does_not_belong_to() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let err = control_query_inner(
+            &session_arc,
+            "other",
+            ControlQuery::ContextUsage,
+            control_channel::parse_context_usage,
+        )
+        .unwrap_err();
+        assert_eq!(err, MSG_NO_SESSION_FOR_PROJECT);
+    }
+
+    #[test]
+    fn control_query_never_waits_for_a_session_that_is_being_started() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let _held = session_arc.lock().unwrap();
+        let err = control_query_inner(
+            &session_arc,
+            "acme",
+            ControlQuery::Usage,
+            control_channel::parse_plan_usage,
+        )
+        .unwrap_err();
+        assert_eq!(err, MSG_SESSION_BUSY);
+    }
+
+    #[test]
+    fn control_commands_release_the_session_lock_before_waiting_for_the_response() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn control_query_inner<T>(");
+        let handle_pos = body
+            .find("control_handle_for")
+            .expect("control_query_inner must take a handle");
+        let query_pos = body
+            .find(".query(")
+            .expect("control_query_inner must query");
+        assert!(handle_pos < query_pos);
+        assert!(
+            !body.contains(".lock()"),
+            "the session mutex must not be held while the control request waits"
+        );
+    }
+
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source
             .split(fn_signature)
@@ -222,8 +378,6 @@ mod tests {
         &rest[..end]
     }
 
-    // -- auth pre-flight structural tests --
-
     #[test]
     fn start_chat_delegates_to_start_session_inner() {
         let source = include_str!("chat_session_cmd.rs");
@@ -246,8 +400,6 @@ mod tests {
 
     #[test]
     fn start_session_inner_serializes_before_any_start_stop() {
-        // The serialization guard must be taken before any oauth/image/stop work,
-        // so overlapping start_chat/resume calls run strictly one at a time.
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
         let guard_pos = body
@@ -266,8 +418,6 @@ mod tests {
     fn start_serialize_mutex_admits_one_holder_at_a_time() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
-        // Two threads grab START_SERIALIZE; the concurrent-holder count never
-        // exceeds 1 — proves the guard serialises overlapping starts.
         let live = Arc::new(AtomicUsize::new(0));
         let max = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
@@ -355,8 +505,6 @@ mod tests {
         );
     }
 
-    // -- spawn_blocking guard-rail tests --
-
     #[test]
     fn start_chat_uses_spawn_blocking() {
         let source = include_str!("chat_session_cmd.rs");
@@ -429,8 +577,6 @@ mod tests {
         );
     }
 
-    // -- validation-before-spawn tests --
-
     #[test]
     fn start_chat_validates_project_before_spawn_blocking() {
         let source = include_str!("chat_session_cmd.rs");
@@ -479,8 +625,6 @@ mod tests {
         );
     }
 
-    // -- JoinError handling tests --
-
     #[test]
     fn start_chat_handles_join_error() {
         let source = include_str!("chat_session_cmd.rs");
@@ -515,11 +659,8 @@ mod tests {
         );
     }
 
-    // -- stop_chat_inner tests --
-
     #[test]
     fn stop_chat_inner_without_active_session_errors() {
-        // A fresh ChatSession has no stdin, so interrupt returns "no active session".
         let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("test-project")));
         let err = stop_chat_inner(session_arc).expect_err("expected error on idle session");
         assert!(

@@ -5,10 +5,8 @@ import { AuthTerminalComponent } from './auth-terminal.component';
 import { TauriService } from '../services/tauri.service';
 import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
+import { createDeferred } from '../testing/deferred';
 
 describe('AuthTerminalComponent', () => {
   let component: AuthTerminalComponent;
@@ -186,7 +184,6 @@ describe('AuthTerminalComponent', () => {
     expect(component.copied).toBe(true);
     component.ngOnDestroy();
     vi.advanceTimersByTime(2000);
-    // copied remains true because the timer was cleared before it could reset
     expect(component.copied).toBe(true);
   });
 
@@ -204,7 +201,6 @@ describe('AuthTerminalComponent', () => {
     const btn = (fixture.nativeElement as HTMLElement).querySelector(
       '[data-testid="auth-copy-command"]'
     );
-    // Button is not rendered when command is empty (inside @if block)
     expect(btn).toBeNull();
   });
 
@@ -296,7 +292,89 @@ describe('AuthTerminalComponent', () => {
     expect(invokeSpy).not.toHaveBeenCalled();
   });
 
-  // ── Open terminal primary button ─────────────────────────────────────────
+  it('emits done for a same-project true response', async () => {
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return { oauth_authenticated: true };
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+
+    vi.advanceTimersByTime(3000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).toHaveBeenCalledWith(true);
+  });
+
+  it('does not emit done when destroyed before the poll response resolves', async () => {
+    const pending = createDeferred<{ oauth_authenticated: boolean }>();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return pending.promise;
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(3000); // triggers the poll tick; the request is now in flight
+
+    component.ngOnDestroy();
+    pending.resolve({ oauth_authenticated: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not emit done when the project input changed while the poll was in flight', async () => {
+    const pending = createDeferred<{ oauth_authenticated: boolean }>();
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return pending.promise;
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(3000); // triggers the poll tick for 'test-project'
+
+    fixture.componentRef.setInput('project', 'other-project');
+    pending.resolve({ oauth_authenticated: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).not.toHaveBeenCalled();
+  });
+
+  it('emits done only once when two overlapping in-flight polls both resolve true', async () => {
+    const first = createDeferred<{ oauth_authenticated: boolean }>();
+    const second = createDeferred<{ oauth_authenticated: boolean }>();
+    const responses = [first.promise, second.promise];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'get_auth_status') return responses.shift();
+      if (cmd === 'get_auth_command') return SAMPLE_COMMAND;
+      if (cmd === 'get_platform') return 'macos';
+      return undefined;
+    };
+    const doneSpy = vi.fn();
+    component.done.subscribe(doneSpy);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(3000);
+    vi.advanceTimersByTime(3000);
+
+    first.resolve({ oauth_authenticated: true });
+    second.resolve({ oauth_authenticated: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(doneSpy).toHaveBeenCalledTimes(1);
+  });
 
   it('renders the primary "Open terminal" button', async () => {
     fixture.detectChanges();
@@ -333,7 +411,6 @@ describe('AuthTerminalComponent', () => {
     fixture.detectChanges();
     await vi.advanceTimersByTimeAsync(0);
     component.openTerminal();
-    // Error is cleared synchronously before the Tauri call returns.
     expect(component.error).toBe('');
   });
 
@@ -350,7 +427,6 @@ describe('AuthTerminalComponent', () => {
 
     component.openTerminal();
     await vi.advanceTimersByTimeAsync(0);
-    // Allow the .finally() microtask to flush.
     await Promise.resolve();
     await Promise.resolve();
 

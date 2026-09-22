@@ -49,8 +49,6 @@ fn create_owner_only_dir_chain(dir: &Path) -> anyhow::Result<()> {
         cursor = p.parent();
     }
     for p in to_create.into_iter().rev() {
-        // A concurrent creator (e.g. another project render) may have won the
-        // race; either way the dir now exists and gets tightened below.
         if let Err(e) = std::fs::create_dir(p) {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 return Err(e.into());
@@ -60,7 +58,6 @@ fn create_owner_only_dir_chain(dir: &Path) -> anyhow::Result<()> {
             anyhow::anyhow!("failed to restrict permissions on {}: {e}", p.display())
         })?;
     }
-    // Leaf may have pre-existed (idempotent re-render) — always re-tighten it.
     crate::fs_perms::set_owner_only_dir(dir)
         .map_err(|e| anyhow::anyhow!("failed to restrict permissions on {}: {e}", dir.display()))
 }
@@ -126,8 +123,6 @@ mod tests {
 
     #[test]
     fn intermediate_claude_managed_dir_is_owner_only_on_first_render() {
-        // The top-level `claude-managed/` dir must never pass through a
-        // default-umask window before being tightened (project-name enumeration).
         let tmp = tempfile::tempdir().unwrap();
         write_managed_settings(tmp.path(), "proj", &locked_sample()).unwrap();
         let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
@@ -142,8 +137,6 @@ mod tests {
 
     #[test]
     fn second_project_render_leaves_shared_parent_owner_only() {
-        // Two projects share the same `claude-managed/` parent; rendering the
-        // second must not weaken (or fail on) the already-tightened parent.
         let tmp = tempfile::tempdir().unwrap();
         write_managed_settings(tmp.path(), "proj-a", &locked_sample()).unwrap();
         write_managed_settings(tmp.path(), "proj-b", &locked_sample()).unwrap();
@@ -160,8 +153,6 @@ mod tests {
 
     #[test]
     fn writes_empty_env_when_nothing_locked() {
-        // Master-switch-only / all-unlocked: the file is still written with an
-        // empty `env` object, never a missing key or a non-object value.
         let mut t = locked_sample();
         t.locked_keys.clear();
         t.any_locked = false;

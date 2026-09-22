@@ -463,7 +463,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   /** True while any credential/settings mutation is in flight; disables Save. */
   saving = false;
 
-  // -- OAuth (authorization_code) flow state --
   /** Current flow status; null when idle. Passed to the credentials form. */
   oauthStatus: OAuthFlowStatus | null = null;
   oauthStatusMessage = '';
@@ -616,8 +615,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     try {
       await this.tauri.invoke('remove_plugin', { slug: this.plugin.slug });
       this.projectState.requestRestart();
-      // Navigate before clearing state so the user sees the plugins list
-      // refreshed without the removed entry.
       this.router.navigate(['/plugins']);
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
@@ -677,7 +674,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     const project = this.activeProject;
     this.error = '';
     this.success = '';
-    this.cancelSuccessFade(); // any pending fade from a prior mutation
+    this.cancelSuccessFade();
     this.saving = true;
     this.cdr.markForCheck();
     try {
@@ -690,7 +687,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     }
     this.success = successMsg;
     this.projectState.requestRestart();
-    // Refresh state (e.g. configured badge); `loadPlugin` errors downgrade to a caveat on the success line + log, not a silent stale view.
     await this.loadPlugin(slug);
     if (this.error) {
       this.log.warn(`plugin reload after mutation failed: ${this.error}`);
@@ -761,7 +757,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         slug,
       });
       this.activeOAuthRequestId = result.request_id;
-      // Replay any event buffered before the invoke resolved.
       const buffered = this.pendingOAuthEvents.get(result.request_id);
       this.pendingOAuthEvents.clear();
       if (buffered) await this.applyOAuthProgress(buffered, slug);
@@ -777,9 +772,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
   async handleCancelPluginOAuth(): Promise<void> {
     try {
       await this.tauri.invoke('cancel_plugin_oauth');
-    } catch {
-      // Best-effort — the loopback server also times out on its own.
-    }
+    } catch {}
     this.oauthStatus = null;
     this.oauthRedirectUri = null;
     this.activeOAuthRequestId = null;
@@ -797,14 +790,12 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
       .listen<OAuthProgressEvent>('plugin_oauth_progress', async (event) => {
         const payload = (event as { payload: OAuthProgressEvent }).payload;
         if (payload.request_id !== this.activeOAuthRequestId) {
-          // Buffer the newest event per request until the request_id is correlated.
           this.pendingOAuthEvents.set(payload.request_id, payload);
           return;
         }
         await this.applyOAuthProgress(payload, slug);
       })
       .catch((e: unknown) => {
-        // Without the listener the flow would look hung — leave a breadcrumb.
         this.log.warn(`plugin_oauth_progress listener registration failed: ${String(e)}`);
         return () => {};
       });
@@ -818,7 +809,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
    */
   private async applyOAuthProgress(payload: OAuthProgressEvent, slug: string): Promise<void> {
     this.oauthStatus = payload.status;
-    // The host sends the redirect URI as the message on awaiting_redirect.
     if (payload.status === 'awaiting_redirect') {
       this.oauthRedirectUri = payload.message;
     } else {
@@ -874,8 +864,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         project: this.activeProject,
       });
       this.plugin = response.plugins.find((p) => p.slug === slug) ?? null;
-      // A reload can drop the changelog (update, verification change) — don't
-      // strand the user on a tab whose button just disappeared.
       if (this.activeTab === 'changelog' && !this.changelogAvailable()) {
         this.activeTab = 'dashboard';
       }
@@ -908,7 +896,6 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         this.integrationStatuses.set(integration, svc?.configured ?? false);
       }
     } catch (e: unknown) {
-      // Non-fatal: badges fall back to "not configured"; log so the error isn't invisible.
       this.log.warn(`loadIntegrationStatuses: get_integrations failed: ${String(e)}`);
     }
   }

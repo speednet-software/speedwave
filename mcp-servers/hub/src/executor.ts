@@ -33,8 +33,6 @@ import {
 import { resolveSandboxGlobals, type SandboxGlobalResolution } from './service-list.js';
 import { toCamelCase } from './tool-discovery.js';
 
-// ── Global Bridge State ───────────────────────────────────────────────────────────────────────
-
 let bridgesInitialized = false;
 
 /** Initialize HTTP bridges to workers (called once at startup); throws on init failure. */
@@ -68,7 +66,6 @@ export interface ExecuteCodeParams {
   timeoutMs: number;
 }
 
-// Captured at module load, executor-internal not user code; FORBIDDEN_PATTERNS applies to input.
 /* c8 ignore next */
 const AsyncFunction: new (...args: string[]) => (...a: unknown[]) => Promise<unknown> =
   Object.getPrototypeOf(async function () {}).constructor;
@@ -78,37 +75,29 @@ const AsyncFunction: new (...args: string[]) => (...a: unknown[]) => Promise<unk
  * These are checked before execution
  */
 const FORBIDDEN_PATTERNS = [
-  // Code injection
   /\beval\s*\(/,
   /\bFunction\s*\(/,
-  // Module loading
   /\brequire\s*\(/,
   /\bimport\s*\(/,
-  // Process / runtime access
   /\bprocess\b/,
   /\bglobalThis\b/,
   /\bglobal\b/,
   /\b__dirname\b/,
   /\b__filename\b/,
   /\bchild_process\b/,
-  // Network / filesystem access
   /\bfs\s*\./,
   /\bnet\s*\./,
   /\bhttp[s]?\s*\./,
-  // Prototype chain traversal prevention (ADR-029)
   /\.constructor\b/,
   /\.__proto__\b/,
   /\bgetPrototypeOf\b/,
   /\bsetPrototypeOf\b/,
   /\bProxy\s*\(/,
   /\bReflect\b/,
-  // Bracket-notation bypasses (ADR-029)
   /\[\s*['"`]constructor['"`]\s*\]/,
   /\[\s*['"`]__proto__['"`]\s*\]/,
   /\[\s*['"`]prototype['"`]\s*\]/,
 ];
-
-// ── Audit Logging ─────────────────────────────────────────────────────────────────────────────
 
 /** Operation category derived from tool annotations */
 type AuditCategory = 'READ' | 'WRITE' | 'DELETE';
@@ -165,7 +154,6 @@ function createAuditContext(): AuditContext {
         params: (params ?? {}) as Record<string, unknown>,
       };
       entries.push(entry);
-      // ts() is the SSOT log prefix; the ISO timestamp stays in the structured AuditEntry.
       console.log(`${ts()} [${category}] ${service}.${tool}(${JSON.stringify(params ?? {})})`);
     },
   };
@@ -187,15 +175,12 @@ function validateCode(code: string): { valid: boolean; error?: string } {
   return { valid: true };
 }
 
-// ── Error Formatting ──────────────────────────────────────────────────────────────────────────
-
 /**
  * Formats an error to a readable string, handling object `.message` values (e.g. GitBeaker).
  * @param error - The error to format (Error object, plain object, or primitive).
  */
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    // Handle object messages (common with GitBeaker/API errors)
     if (typeof error.message === 'object' && error.message !== null) {
       return JSON.stringify(error.message);
     }
@@ -252,7 +237,6 @@ function logErrorDebug(context: string, error: unknown): void {
     };
     console.error(`${ts()} [${context}] Error:`, info);
 
-    // Only log stack traces in development mode
     if (isDev && error.stack) {
       console.error(`${ts()}`, error.stack);
     }
@@ -272,11 +256,6 @@ function createToolWrappers(
   executionStartTime: number,
   timeoutMs: number
 ) {
-  // Raw detection batches collected across every bridge call in this executeCode invocation
-  // (one batch per wrapBridgeCall), aggregated once via aggregateDetections() and flushed via
-  // writePiiAudit() after execution finishes (see executeCode's finally block). Buffering raw
-  // detections rather than pre-aggregated events lets repeated calls to the same tool collapse
-  // into a single summed row instead of one row per call.
   const detectionBatches: DetectionBatch[] = [];
 
   /** Remaining timeout for worker calls; at least MIN_TIMEOUT_MS so short operations complete. */
@@ -286,7 +265,6 @@ function createToolWrappers(
     return Math.max(TIMEOUTS.MIN_MS, remaining);
   };
 
-  // Create bridges with timeout context (bridges are created per-execution for timeout tracking)
   type ServiceBridges = Record<
     string,
     Record<string, (params?: Record<string, unknown>) => Promise<unknown>>
@@ -312,7 +290,6 @@ function createToolWrappers(
   ): Promise<T> => {
     try {
       const result = await bridgeCall();
-      // Tokenize result (replace sensitive data with tokens); buffer the raw tool-result detections.
       const { value, detections } = getEngine().tokenize(result);
       const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
       if (detections.length > 0) {
@@ -323,8 +300,6 @@ function createToolWrappers(
       logErrorDebug(serviceName, error);
       const message = formatErrorMessage(error);
       console.error(`${ts()} [${serviceName}] Bridge call failed:`, message);
-      // Tokenize before the message can reach the model: this Error's .message propagates to
-      // executeCode's outer catch (and, via batch(), into a returned result), both model-visible.
       const { value: tokenizedMessage, detections } = tokenizeErrorText(message);
       if (detections.length > 0) {
         const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
@@ -359,8 +334,6 @@ function createToolWrappers(
     };
   };
 
-  // ── Generate tool wrappers from registry (SSOT) ──────────────────────────────────────────────
-
   type ServiceTools = Record<string, (params?: Record<string, unknown>) => Promise<unknown>>;
 
   const tools: Record<string, ServiceTools> = {};
@@ -382,8 +355,6 @@ function createToolWrappers(
 
   return { tools, detectionBatches };
 }
-
-// ── Parallel Execution Helpers (Anthropic "Advanced Tool Use" pattern) ──────────────────────────
 
 /**
  * Batch result interface for partial failure handling
@@ -532,7 +503,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   const { code, timeoutMs } = params;
   const startTime = Date.now();
 
-  // Validate code
   const validation = validateCode(code);
   if (!validation.valid) {
     return {
@@ -546,14 +516,10 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     };
   }
 
-  // Create audit context for tracking tool executions
   const auditContext = createAuditContext();
 
-  // Create tool wrappers with timeout context; detectionBatches accumulates raw tool-result
-  // detections across every bridge call, aggregated once below alongside the sandbox-return scan.
   const { tools, detectionBatches } = createToolWrappers(auditContext, startTime, timeoutMs);
 
-  // Prepare sandbox context — spread all service tools (built-in + plugins) dynamically
   const sandboxContext: Record<string, unknown> = {
     ...tools,
     console: {
@@ -565,8 +531,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   };
 
   try {
-    // Auto-return transformation using AST parser (Acorn)
-    // Adds 'return' to last expression if no explicit return exists
     const autoResult = addAutoReturn(code);
     const syntaxWarning = autoResult.parseError
       ? `Code may have syntax errors: ${autoResult.parseError}. Execution may fail.`
@@ -576,28 +540,23 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     }
     const transformedCode = autoResult.code;
 
-    // Wrap code in async function
     const wrappedCode = `
       return (async () => {
         ${transformedCode}
       })();
     `;
 
-    // Create async function with sandbox context
     const contextKeys = Object.keys(sandboxContext);
     const contextValues = Object.values(sandboxContext);
 
     const fn = new AsyncFunction(...contextKeys, wrappedCode);
 
-    // Execute with timeout
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error(`Execution timeout (${timeoutMs}ms)`)), timeoutMs);
     });
 
     const result = await Promise.race([fn(...contextValues), timeoutPromise]);
 
-    // Safety-net scan: sandbox code can assemble PII from fragments that individually passed
-    // tool-result scanning untouched (an encoded/re-cased value can still slip through; accepted).
     const sandboxScan = getEngine().tokenize(result);
     if (sandboxScan.detections.length > 0) {
       detectionBatches.push({
@@ -622,12 +581,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown execution error';
 
-    // Log the error with original code for debugging
     console.error(`${ts()} ❌ Execution error: ${message}`);
     console.error(`${ts()}    Code: ${code.substring(0, 200)}${code.length > 200 ? '...' : ''}`);
 
-    // Redact every absolute POSIX/Windows host path regardless of preceding punctuation;
-    // keep user-code positions like "<anonymous>:3:7", they teach where the snippet broke.
     let sanitizedMessage = message
       .replace(
         /(?<![A-Za-z0-9_\-.\\])(?:(?:\/[a-zA-Z0-9_\-.]+)+|(?:[A-Za-z]:\\|\\\\)(?:[a-zA-Z0-9_\-.]+\\)*[a-zA-Z0-9_\-.]+)/g,
@@ -637,7 +593,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       .replace(/(\/[^\s:'"]+):\d+:\d+/g, '$1')
       .substring(0, 500);
 
-    // Smart error enhancement: at most one hint wins, so the branches stay mutually exclusive.
     const notFunctionMatch = message.match(/(\w+)\.(\w+) is not a function/);
     const underscoreMatch = message.match(/^([\w]+)_([\w_]+) is not defined$/);
     const notDefinedMatch = message.match(/^([A-Za-z_$][\w$]*) is not defined$/);
@@ -658,10 +613,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
           sanitizedMessage = `${serviceName}.${attemptedMethod} is not a function.${didYouMean} Available ${serviceName} methods: ${availableMethods.join(', ')}`;
         }
       }
-    }
-
-    // Detect underscore notation: "service_method is not defined"
-    else if (underscoreMatch) {
+    } else if (underscoreMatch) {
       const [, serviceName, methodName] = underscoreMatch;
 
       const serviceTools = sandboxContext[serviceName as keyof typeof sandboxContext];
@@ -678,11 +630,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
           sanitizedMessage = `${serviceName}_${methodName} is not defined. Use dot notation: ${serviceName}.method(). Available methods: ${availableMethods.join(', ')}`;
         }
       }
-    }
-
-    // Dashed slug used verbatim: `my-plugin.foo()` parses as `my - plugin.foo()` → `my is not defined`.
-    // The leftover name is a dash segment or the dash-free spelling, so match both, case-insensitively.
-    else if (notDefinedMatch) {
+    } else if (notDefinedMatch) {
       const [, name] = notDefinedMatch;
       const wanted = name.toLowerCase();
       const dashed = [...enabledSandboxGlobals().usable].filter(
@@ -696,9 +644,6 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       }
     }
 
-    // Last defensive tokenization layer before the message reaches the model: covers any error
-    // path that bypassed wrapBridgeCall's own tokenization (idempotent when it did not). Runs
-    // after the hint branches so a hint can never reintroduce untokenized text.
     const { value: tokenizedMessage, detections: finalDetections } =
       tokenizeErrorText(sanitizedMessage);
     if (finalDetections.length > 0) {
@@ -714,13 +659,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       },
     };
   } finally {
-    // Aggregate and flush whatever PII detections were collected, success or failure; the
-    // writer itself never throws, so this cannot turn a completed execution into a failed one.
     writePiiAudit(aggregateDetections(detectionBatches, null));
   }
 }
-
-// ── Test Exports ──────────────────────────────────────────────────────────────────────────────
 
 /**
  * Export formatErrorMessage for testing purposes only.

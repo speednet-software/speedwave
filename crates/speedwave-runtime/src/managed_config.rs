@@ -53,7 +53,6 @@ fn program_data_dir() -> anyhow::Result<PathBuf> {
     use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
 
     // SAFETY: FOLDERID_ProgramData is a valid known-folder id; on S_OK `raw` points
-    // at a CoTaskMem-allocated NUL-terminated wide string, freed before returning.
     unsafe {
         let mut raw: *mut u16 = std::ptr::null_mut();
         let hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut raw);
@@ -134,7 +133,6 @@ mod tests {
     fn unknown_root_key_is_hard_error() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("managed-config.json");
-        // `telemetery` typo at the root: valid JSON, but not the `telemetry` key.
         std::fs::write(&p, r#"{"telemetery":{"enabled":false}}"#).unwrap();
         assert!(
             load_managed_config_from(&p).is_err(),
@@ -146,7 +144,6 @@ mod tests {
     fn unknown_telemetry_key_is_hard_error() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("managed-config.json");
-        // `endpont` typo inside telemetry: the intended lock would silently vanish.
         std::fs::write(&p, r#"{"telemetry":{"endpont":"https://corp:4318"}}"#).unwrap();
         assert!(
             load_managed_config_from(&p).is_err(),

@@ -3,8 +3,6 @@
  * to prevent injection attacks.
  */
 
-// ── Protocol Version Constants ───────────────────────────────────────────────────────────────────
-
 /**
  * Protocol versions supported by this MCP implementation. SSOT for jsonrpc/transport/tool-discovery.
  * @see https://modelcontextprotocol.io/docs/specification/protocol
@@ -18,8 +16,6 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
 /** The latest (most recent) protocol version supported by this implementation; used when the hub initiates worker connections. */
 export const LATEST_PROTOCOL_VERSION: string =
   SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
-
-// ── JSON-RPC 2.0 Base Types ──────────────────────────────────────────────────────────────────────
 
 /**
  * JSON-RPC 2.0 request message structure, used for MCP client↔server communication.
@@ -95,8 +91,6 @@ export enum JSONRPCErrorCode {
   /** Custom: Session-related errors (-32001) */
   SessionError = -32001,
 }
-
-// ── MCP Protocol Types ───────────────────────────────────────────────────────────────────────────
 
 /**
  * MCP protocol initialization request from client to server; first message, establishes protocol version and capabilities.
@@ -187,8 +181,6 @@ export interface ServerCapabilities {
   experimental?: Record<string, unknown>;
 }
 
-// ── Tool Annotations ─────────────────────────────────────────────────────────────────────────────
-
 /**
  * Hints describing a tool's behavior/side effects for client UI/safety decisions. All fields
  * optional; defaults per the MCP spec.
@@ -206,8 +198,6 @@ export interface ToolAnnotations {
   /** If true, the tool may interact with external entities beyond its host (default: true) */
   openWorldHint?: boolean;
 }
-
-// ── Annotation Constants ─────────────────────────────────────────────────────────────────────────
 
 /** Annotations for tools that only read data without side effects. */
 export const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
@@ -230,8 +220,6 @@ export const DESTRUCTIVE_ANNOTATIONS: ToolAnnotations = {
   openWorldHint: true,
 };
 
-// ── Request Processing Types ─────────────────────────────────────────────────────────────────────
-
 /** Result of processing an incoming JSON-RPC request: the response (null for notifications) and an optional session ID. */
 export interface ProcessRequestResult {
   /** JSON-RPC response to send back, or null for notifications that require no response */
@@ -239,8 +227,6 @@ export interface ProcessRequestResult {
   /** Session ID associated with this request (set during initialization) */
   sessionId?: string;
 }
-
-// ── Tool Types ───────────────────────────────────────────────────────────────────────────────────
 
 /**
  * MCP tool definition describing a callable function/operation, exposed by servers and invoked by clients.
@@ -366,8 +352,6 @@ export interface ToolsCallResult {
   structuredContent?: Record<string, unknown>;
 }
 
-// ── Session Management Types ─────────────────────────────────────────────────────────────────────
-
 /** Represents an active MCP session between client and server; tracks connection state and enforces timeouts. */
 export interface Session {
   /** Unique session identifier (UUID) */
@@ -385,8 +369,6 @@ export interface Session {
   };
 }
 
-// ── SSE Types ────────────────────────────────────────────────────────────────────────────────────
-
 /**
  * Server-Sent Events (SSE) message structure, used for streaming JSON-RPC messages server→client over HTTP.
  * @see https://html.spec.whatwg.org/multipage/server-sent-events.html
@@ -401,8 +383,6 @@ export interface SSEEvent {
   /** Reconnection time in milliseconds */
   retry?: number;
 }
-
-// ── Tool Handler Types ───────────────────────────────────────────────────────────────────────────
 
 /**
  * Optional per-call context passed to tool handlers (caller id from bearer token, ADR-060).
@@ -428,8 +408,6 @@ export interface ToolDefinition {
   /** Implementation function for the tool */
   handler: ToolHandler;
 }
-
-// ── Error Handling Types ─────────────────────────────────────────────────────────────────────────
 
 /**
  * Generic error shape for catch blocks.

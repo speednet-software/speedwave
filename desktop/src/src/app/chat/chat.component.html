@@ -17,9 +17,6 @@
 }
 @if (projectState.status() === 'ready') {
   <section class="relative flex h-full overflow-hidden bg-[var(--bg)]" data-testid="chat-view">
-    <!-- Left overlay drawer: conversations history. Mounts as a singleton and
-         portals into a CDK Overlay when ui.sidebarOpen() flips to true. The
-         overlay handles its own backdrop / Escape / focus trap. -->
     <app-conversations-sidebar
       [open]="ui.sidebarOpen()"
       [conversations]="conversations"
@@ -29,7 +26,6 @@
       (deleteConversation)="deleteConversation($event.session_id)"
     />
 
-    <!-- Main column: header + body (messages or transcript) + composer. -->
     <div class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <app-chat-header
         viewTitle="Chat"
@@ -65,6 +61,9 @@
             [streaming]="chat.isStreamingFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
+            [projectId]="projectState.activeProject() ?? ''"
+            [modelError]="chat.modelSelectionError()"
+            [contextLabel]="composerContextLabel()"
             [transcriptAttached]="transcription.stagedTranscript() !== ''"
             [draftText]="transcription.chatPromptDraft()"
             (submitted)="sendMessage($event)"
@@ -73,15 +72,21 @@
             (transcriptDetached)="transcription.clearStagedTranscript()"
             (draftApplied)="transcription.clearChatPromptDraft()"
             (stopRequested)="onStopClicked()"
+            (modelSelected)="chat.applyModelSelection($event)"
+            (effortSelected)="chat.applyEffortSelection($event)"
           />
-          <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />
+          <app-session-stats
+            [stats]="chat.sessionStatsFromState()"
+            [branch]="gitBranch()"
+            [limits]="planLimits()"
+            [limitSignal]="planLimitSignal()"
+            [now]="usageClock()"
+            (usageOpened)="onUsageOpened()"
+          />
         </div>
       </div>
     </div>
 
-    <!-- Left overlay drawer: project memory. Mounts as a singleton and portals
-         into a CDK Overlay when ui.memoryOpen() flips to true. Mutually
-         exclusive with the conversations drawer (UiStateService). -->
     <app-memory-panel
       [open]="ui.memoryOpen()"
       [markdown]="projectMemory"
@@ -90,12 +95,6 @@
     />
   </section>
 } @else if (projectState.status() === 'auth_required') {
-  <!-- Auth-required is the only non-ready status that shell.component does
-       NOT cover with its own blocking overlay (the user can still navigate
-       freely to /settings to configure auth). All other transient statuses
-       — loading / starting / switching / error / check_failed — are owned
-       by the shell, so chat must stay silent for them to avoid stacking
-       two overlays on the same screen. -->
   <div class="flex h-full min-h-0 flex-col bg-[var(--bg)]">
     <app-chat-header viewTitle="Chat" [compact]="true" />
     <section

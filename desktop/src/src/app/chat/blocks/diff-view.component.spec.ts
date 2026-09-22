@@ -48,8 +48,6 @@ describe('computeLineDiff', () => {
   });
 
   it('strips trailing CR so CRLF and LF inputs compare equal', () => {
-    // Files saved on Windows arrive as CRLF; the same content from a Unix
-    // tool is LF-only. Without CRLF stripping every line would diff.
     const result = computeLineDiff('a\r\nb\r\nc', 'a\nb\nc');
     expect(result).toEqual([
       { kind: 'ctx', text: 'a' },
@@ -165,7 +163,6 @@ describe('DiffViewComponent', () => {
 
     expect(el.querySelector('[data-testid="diff-omitted"]')).toBeNull();
     expect(el.querySelector('[data-testid="diff-expand"]')).toBeNull();
-    // All 60 lines should now render (30 removes + 30 adds).
     const total =
       el.querySelectorAll('[data-testid="diff-add"]').length +
       el.querySelectorAll('[data-testid="diff-remove"]').length +
@@ -187,7 +184,6 @@ describe('DiffViewComponent', () => {
   });
 
   it('does NOT truncate when diff line count equals truncateLines exactly', () => {
-    // 6 total diff lines (3 removals + 3 additions). truncateLines = 6 — must NOT truncate.
     setInputs('a\nb\nc', 'x\ny\nz', 6);
 
     const el = fixture.nativeElement as HTMLElement;
@@ -195,7 +191,6 @@ describe('DiffViewComponent', () => {
   });
 
   it('truncates when diff line count exceeds truncateLines', () => {
-    // 8 total diff lines (4 removals + 4 additions) > truncateLines 6 — must truncate.
     setInputs('a\nb\nc\nd', 'w\nx\ny\nz', 6);
 
     const el = fixture.nativeElement as HTMLElement;
@@ -203,8 +198,6 @@ describe('DiffViewComponent', () => {
   });
 
   it('resets the user expand toggle when oldString or newString changes', () => {
-    // Truncate a long diff, expand it, then swap inputs: the new diff must
-    // start collapsed again per the OnChanges contract preserved by the effect.
     setInputs(
       Array.from({ length: 30 }, (_, i) => `old-${i}`).join('\n'),
       Array.from({ length: 30 }, (_, i) => `new-${i}`).join('\n'),
@@ -215,7 +208,6 @@ describe('DiffViewComponent', () => {
     fixture.detectChanges();
     expect(el.querySelector('[data-testid="diff-omitted"]')).toBeNull();
 
-    // Swap to a fresh diff that is again above the threshold.
     setInputs(
       Array.from({ length: 30 }, (_, i) => `old2-${i}`).join('\n'),
       Array.from({ length: 30 }, (_, i) => `new2-${i}`).join('\n'),

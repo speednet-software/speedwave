@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
+import { LlmProviderComponent } from './llm-provider/llm-provider.component';
 import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -12,11 +14,6 @@ import { MockTauriService } from '../testing/mock-tauri.service';
 function setupMockTauri(mockTauri: MockTauriService): void {
   mockTauri.invokeHandler = async (cmd: string) => {
     switch (cmd) {
-      case 'list_projects':
-        return {
-          projects: [{ name: 'test-project', dir: '/tmp/test' }],
-          active_project: 'test-project',
-        };
       case 'get_llm_config':
         return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
       case 'get_update_settings':
@@ -35,7 +32,6 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
-  // Stub the root BetaService; default "on".
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -64,13 +60,13 @@ describe('SettingsComponent', () => {
   });
 
   it('activeProject starts as null', () => {
-    expect(component.activeProject).toBeNull();
+    expect(component.activeProject()).toBeNull();
   });
 
-  it('sets activeProject after loadProjectInfo resolves', async () => {
-    component.ngOnInit();
-    await fixture.whenStable();
-    expect(component.activeProject).toBe('test-project');
+  it('activeProject reflects the project state service signal', () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject.set('test-project');
+    expect(component.activeProject()).toBe('test-project');
   });
 
   it('renders the system-health link in the header (mockup-aligned)', async () => {
@@ -81,7 +77,6 @@ describe('SettingsComponent', () => {
     const link = fixture.nativeElement.querySelector('[data-testid="settings-system-health-link"]');
     expect(link).not.toBeNull();
     expect(link.getAttribute('href')).toBe('/logs');
-    // Mockup uses an arrow glyph — keep the contract so future visual tweaks don't drop it.
     expect(link.textContent).toContain('system health');
   });
 
@@ -136,7 +131,6 @@ describe('SettingsComponent', () => {
     fixture.detectChanges();
     const section = fixture.nativeElement.querySelector('#section-transcription') as Element;
     expect(section).not.toBeNull();
-    // jsdom doesn't implement scrollIntoView — stub it so we can assert the call.
     const spy = vi.fn();
     (section as unknown as { scrollIntoView: () => void }).scrollIntoView = spy;
     (component as unknown as { scrollToFragment(id: string): void }).scrollToFragment(
@@ -149,7 +143,6 @@ describe('SettingsComponent', () => {
     fixture.detectChanges();
     const scroll = (component as unknown as { scrollToFragment(id: string | null): void })
       .scrollToFragment;
-    // Should not throw and should be a no-op for null.
     expect(() => scroll.call(component, null)).not.toThrow();
   });
 
@@ -161,13 +154,10 @@ describe('SettingsComponent', () => {
         scrollToFragment(id: string | null): void;
         scrollTimer: ReturnType<typeof setTimeout> | null;
       };
-      // A fragment with no matching section → a retry timer is armed.
       inner.scrollToFragment('section-does-not-exist');
       expect(inner.scrollTimer).not.toBeNull();
-      // Destroy must cancel the pending retry so it can't fire post-destroy.
       component.ngOnDestroy();
       expect(inner.scrollTimer).toBeNull();
-      // Advancing time triggers nothing (no throw on the detached host).
       expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
     } finally {
       vi.useRealTimers();
@@ -185,7 +175,6 @@ describe('SettingsComponent', () => {
       inner.scrollToFragment('missing-one');
       const first = inner.scrollTimer;
       expect(first).not.toBeNull();
-      // Re-entry (e.g. a new fragment) cancels the previous timer.
       inner.scrollToFragment('missing-two');
       expect(inner.scrollTimer).not.toBe(first);
     } finally {
@@ -193,59 +182,17 @@ describe('SettingsComponent', () => {
     }
   });
 
-  it('reloads project info on project_switch_succeeded event', async () => {
+  it('switching to a project that settles in auth_required updates the child project input', () => {
     const projectState = TestBed.inject(ProjectStateService);
-    await projectState.init();
-    component.ngOnInit();
-    await fixture.whenStable();
-    expect(component.activeProject).toBe('test-project');
+    projectState.activeProject.set('test-project');
+    fixture.detectChanges();
 
-    mockTauri.invokeHandler = async (cmd: string) => {
-      switch (cmd) {
-        case 'list_projects':
-          return {
-            projects: [
-              { name: 'test-project', dir: '/tmp/test' },
-              { name: 'other-project', dir: '/tmp/other' },
-            ],
-            active_project: 'other-project',
-          };
-        case 'get_auth_status':
-          return {
-            api_key_configured: false,
-            oauth_authenticated: true,
-            needs_anthropic_auth: true,
-            provider_configured: true,
-          };
-        default:
-          return undefined;
-      }
-    };
+    projectState.activeProject.set('other-project');
+    projectState.status.set('auth_required');
+    fixture.detectChanges();
 
-    mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-    // Yield a macrotask so the nested loadProjectInfo() promise settles before whenStable.
-    await new Promise<void>((r) => setTimeout(r, 0));
-    await fixture.whenStable();
-    expect(component.activeProject).toBe('other-project');
-  });
-
-  it('cleans up project ready listener on destroy', async () => {
-    const projectState = TestBed.inject(ProjectStateService);
-    await projectState.init();
-    component.ngOnInit();
-    await fixture.whenStable();
-
-    // Verify the unsub function exists before destroy
-    expect(
-      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
-    ).not.toBeNull();
-
-    component.ngOnDestroy();
-
-    // Verify unsub was called and nulled
-    expect(
-      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
-    ).toBeNull();
+    const llmProvider = fixture.debugElement.query(By.directive(LlmProviderComponent));
+    expect(llmProvider.componentInstance.activeProject()).toBe('other-project');
   });
 
   describe('terminal-minimal restyle', () => {
@@ -254,7 +201,6 @@ describe('SettingsComponent', () => {
       const title = fixture.nativeElement.querySelector('[data-testid="settings-title"]');
       expect(title).not.toBeNull();
       expect(title.textContent).toContain('Settings');
-      // Mockup uses .view-title (IBM Plex Sans, 14px) for view headers.
       expect(title.classList.contains('view-title')).toBe(true);
     });
 
@@ -275,7 +221,6 @@ describe('SettingsComponent', () => {
 
   describe('Appearance section', () => {
     beforeEach(() => {
-      // Reset accent before each test so active-state assertions start clean.
       const theme = TestBed.inject(ThemeService);
       theme.setTheme('crimson');
     });
@@ -363,7 +308,6 @@ describe('SettingsComponent', () => {
       ) as HTMLButtonElement;
       expect(active.getAttribute('aria-pressed')).toBe('true');
       expect(inactive.getAttribute('aria-pressed')).toBe('false');
-      // Reset for other tests in the same suite.
       theme.setMode('dark');
     });
 
@@ -383,9 +327,7 @@ describe('SettingsComponent', () => {
       const section: HTMLElement = fixture.nativeElement.querySelector(
         '[data-testid="settings-section-appearance"]'
       );
-      // Lower-cased mode label per mono uppercase styling.
       expect(section.textContent?.toLowerCase()).toContain('mode');
-      // The "Backgrounds stay dark" copy must be gone.
       expect(section.textContent).not.toContain('Backgrounds stay dark');
     });
   });

@@ -88,7 +88,6 @@ describe('markdownToPdf', () => {
   it('accepts inline markdown, runs pandoc then the weasyprint render script', async () => {
     const r = await markdownToPdf({ markdown: '# Hi' }, 'doc.pdf');
     expect(r).toMatchObject({ format: 'pdf', bytes: 321 });
-    // pandoc converts md→html, then weasyprint_render.py renders html→pdf.
     expect(runOk).toHaveBeenCalledWith('pandoc', [
       '-f',
       'markdown',

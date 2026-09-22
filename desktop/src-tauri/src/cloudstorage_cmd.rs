@@ -1,5 +1,3 @@
-// Tauri commands for CloudStorage detection (used by CreateProjectModal).
-
 use serde::Serialize;
 
 /// Response from `detect_cloudstorage_path`.

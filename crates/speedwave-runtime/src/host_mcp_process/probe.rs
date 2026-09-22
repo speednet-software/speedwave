@@ -18,7 +18,6 @@ pub fn is_pid_alive(pid: u32) -> bool {
 /// `true` if a process with `pid` is currently running (Windows).
 #[cfg(windows)]
 pub fn is_pid_alive(pid: u32) -> bool {
-    // `tasklist /NH` prints an "INFO:" marker when no PID matches.
     crate::binary::system_command("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()
@@ -86,7 +85,6 @@ mod tests {
 
     #[test]
     fn is_pid_alive_false_for_definitely_dead_pid() {
-        // Just verify the function does not panic for an unlikely PID.
         let _ = is_pid_alive(999_999);
     }
 

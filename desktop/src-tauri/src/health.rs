@@ -7,7 +7,6 @@ use speedwave_runtime::runtime;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct IdeScanState {
-    // Fingerprint built pre-dedupe; duplicates collapse via set semantics.
     live: BTreeSet<(String, u16)>,
     anomalies: BTreeSet<String>,
 }
@@ -248,7 +247,6 @@ pub(crate) fn build_ide_bridge_health(
     selected: Option<&speedwave_runtime::config::SelectedIde>,
 ) -> IdeBridgeHealth {
     let running = !detected_ides.is_empty();
-    // Expose first entry with a port in top-level fields for backwards compat
     let first_with_port = detected_ides.iter().find(|i| i.port.is_some());
     let port = first_with_port.and_then(|i| i.port);
     let ws_url = first_with_port.and_then(|i| i.ws_url.clone());
@@ -372,7 +370,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         })
         .collect();
 
-    // Fingerprint from the full pre-dedupe set; duplicates collapse via BTreeSet.
     let live_fingerprint: BTreeSet<(String, u16)> =
         live.iter().map(|e| (e.ide_name.clone(), e.port)).collect();
 
@@ -392,7 +389,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         }
     }
 
-    // Sort: HashMap iteration is hash-randomised, frontend needs stable order.
     let mut result: Vec<DetectedIde> = by_key
         .into_values()
         .map(|e| DetectedIde {
@@ -415,7 +411,6 @@ fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
         *last = current;
         msgs
     };
-    // Log after lock release so writes do not block concurrent callers.
     for msg in messages {
         info!("{msg}");
     }
@@ -629,8 +624,6 @@ mod tests {
         assert!(json.contains("\"healthy\":true"));
     }
 
-    // ── parse_container_entries tests ────────────────────────────────────────
-
     #[test]
     fn parse_nerdctl_state_field() {
         let entries: Vec<serde_json::Value> = serde_json::from_str(
@@ -675,7 +668,6 @@ mod tests {
 
     #[test]
     fn parse_strips_runtime_project_prefix() {
-        // Names from live `compose_prefix()`: independent of `SPEEDWAVE_DATA_DIR`.
         let prefix = speedwave_runtime::consts::compose_prefix();
         let json = format!(
             r#"[{{"Name":"{prefix}_my_proj_mcp_hub","State":"running"}},
@@ -763,7 +755,6 @@ mod tests {
 
     #[test]
     fn overall_healthy_does_not_require_ide_bridge() {
-        // IDE Bridge is optional — its absence should not affect overall_healthy
         let containers = vec![ContainerHealth {
             name: "claude".into(),
             status: "running".into(),
@@ -800,7 +791,6 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // External alive PID passes the PID guard; the port was just released, so nothing listens.
         let (external_pid, _child) = external_alive_pid();
         let port = released_loopback_port();
         std::fs::write(
@@ -822,10 +812,8 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Bind a real TCP listener so the port check passes.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        // External PID passes liveness without triggering the self-PID filter.
         let (external_pid, _child) = external_alive_pid();
         let lock_content = format!(
             r#"{{"pid":{},"port":{},"wsUrl":"ws://127.0.0.1:{}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}}"#,
@@ -849,7 +837,6 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // One VS Code process, two windows: two locks, same pid+name, diff ports.
         let (external_pid, _child) = external_alive_pid();
         let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port_a = listener_a.local_addr().unwrap().port();
@@ -872,7 +859,6 @@ mod tests {
             "two windows of the same IDE process must collapse to one entry"
         );
         assert_eq!(result[0].ide_name, "Visual Studio Code");
-        // Either port is acceptable — the dedupe keeps the latest mtime.
         assert!(result[0].port == Some(port_a) || result[0].port == Some(port_b));
         drop(listener_a);
         drop(listener_b);
@@ -883,7 +869,6 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Two distinct IDEs (different ide_name) — must NOT collapse.
         let (external_pid, _child) = external_alive_pid();
         let l_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port_a = l_a.local_addr().unwrap().port();
@@ -913,7 +898,6 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Lock file with no port in JSON and non-numeric filename — cannot verify liveness.
         std::fs::write(
             tmp.path().join("no-port.lock"),
             r#"{"wsUrl":"ws://127.0.0.1:9999","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}"#,
@@ -935,8 +919,6 @@ mod tests {
         assert_eq!(result[0].status, "running");
         assert!(result[0].healthy);
     }
-
-    // ── is_ide_lock_alive tests ───────────────────────────────────────────────
 
     #[test]
     fn test_is_ide_lock_alive_nonexistent_file() {
@@ -978,7 +960,6 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("dead-pid.lock");
-        // PID 999999999 is virtually guaranteed not to exist
         std::fs::write(&lock_path, r#"{"pid": 999999999, "port": 1234}"#).unwrap();
 
         let result = is_ide_lock_alive(&lock_path);
@@ -992,7 +973,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("live.lock");
 
-        // Bind a real TCP listener so the port check passes.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -1013,7 +993,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("dead-port.lock");
 
-        // Bind and immediately drop the listener to get a port that is no longer listening.
         let dead_port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap().port()
@@ -1030,19 +1009,15 @@ mod tests {
         );
     }
 
-    // ── port-from-filename fallback tests ────────────────────────────────────
-
     #[test]
     fn test_is_ide_lock_alive_port_from_filename() {
         use super::is_ide_lock_alive;
 
         let tmp = tempfile::tempdir().unwrap();
 
-        // Bind a real TCP listener so the port check passes.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        // Lock named <port>.lock with no JSON port field (real Cursor/VS Code shape).
         let lock_path = tmp.path().join(format!("{port}.lock"));
         let current_pid = std::process::id();
         let content = format!(
@@ -1065,13 +1040,11 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
 
-        // Bind a real TCP listener so the port check passes.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let (external_pid, _child) = external_alive_pid();
 
-        // Lock file with NO "port" in JSON — port derived from filename only.
         let lock_path = tmp.path().join(format!("{port}.lock"));
         let content = format!(
             r#"{{"pid":{external_pid},"wsUrl":"ws://127.0.0.1:{port}","authToken":"tok","workspaceFolders":["/ws"],"ideName":"Cursor","transport":"ws"}}"#,
@@ -1090,8 +1063,6 @@ mod tests {
         drop(listener);
     }
 
-    // ── port edge-case tests ─────────────────────────────────────────────────
-
     #[test]
     fn test_is_ide_lock_alive_port_overflow_in_json() {
         use super::is_ide_lock_alive;
@@ -1099,7 +1070,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("overflow.lock");
         let current_pid = std::process::id();
-        // Port 99999 exceeds u16::MAX (65535) — u16::try_from must reject it.
         let content = format!(r#"{{"pid":{current_pid},"port":99999}}"#);
         std::fs::write(&lock_path, content).unwrap();
 
@@ -1116,7 +1086,6 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let (external_pid, _child) = external_alive_pid();
-        // Port 99999 in JSON, non-numeric filename — no valid port source.
         let content =
             format!(r#"{{"pid":{external_pid},"port":99999,"ideName":"Test","transport":"ws"}}"#,);
         std::fs::write(tmp.path().join("overflow.lock"), content).unwrap();
@@ -1134,7 +1103,6 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let (external_pid, _child) = external_alive_pid();
-        // Filename "999999.lock" overflows u16, no "port" in JSON.
         let content = format!(r#"{{"pid":{external_pid},"ideName":"Test","transport":"ws"}}"#);
         std::fs::write(tmp.path().join("999999.lock"), content).unwrap();
 
@@ -1150,7 +1118,6 @@ mod tests {
         use super::is_ide_lock_alive;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Non-numeric filename, no "port" in JSON — no valid port source.
         let lock_path = tmp.path().join("no-port-anywhere.lock");
         let current_pid = std::process::id();
         let content = format!(r#"{{"pid":{current_pid},"ideName":"Test"}}"#);
@@ -1167,7 +1134,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("zero.lock");
         let current_pid = std::process::id();
-        // Port 0 is technically valid u16, but nothing listens there.
         let content = format!(r#"{{"pid":{current_pid},"port":0}}"#);
         std::fs::write(&lock_path, content).unwrap();
 
@@ -1180,13 +1146,11 @@ mod tests {
         use super::list_ides_in_dir;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Bind and immediately drop to get a dead port.
         let dead_port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap().port()
         };
         let (external_pid, _child) = external_alive_pid();
-        // No "port" in JSON — port derived from filename, but port is dead.
         let content = format!(r#"{{"pid":{external_pid},"ideName":"Cursor","transport":"ws"}}"#,);
         std::fs::write(tmp.path().join(format!("{dead_port}.lock")), content).unwrap();
 
@@ -1235,16 +1199,11 @@ mod tests {
         );
     }
 
-    // ── check_mcp_os PID-based liveness tests ─────────────────────────────
-
     #[test]
     fn check_mcp_os_returns_false_when_no_files_exist() {
-        // Verify no panic; cannot assert running because a real mcp-os may run.
         let health = HealthMonitor::check_mcp_os();
         let _ = health.running;
     }
-
-    // ── is_mcp_os_alive tests (via check_mcp_os_alive_in) ──────────────
 
     fn write_mcp_os_lock(data_dir: &std::path::Path, pid: u32, port: u16) {
         use speedwave_runtime::host_mcp_process::lock::{LockFile, LockService};
@@ -1254,10 +1213,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_mcp_os_alive_false_when_pid_alive_port_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        // PID is current process (alive); the port was just released, so nothing listens on it.
         write_mcp_os_lock(data_dir, std::process::id(), released_loopback_port());
 
         assert!(
@@ -1267,6 +1226,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_mcp_os_alive_true_when_pid_alive_port_open() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
@@ -1287,7 +1247,6 @@ mod tests {
     fn is_mcp_os_alive_false_when_pid_in_lock_is_dead() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        // PID 999_999_999 is dead; is_pid_alive short-circuits before TCP probe.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         write_mcp_os_lock(data_dir, 999_999_999, port);
@@ -1302,14 +1261,11 @@ mod tests {
     fn is_mcp_os_alive_false_when_no_lock_file() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        // No lock.json: must return false, not crash on the missing file.
         assert!(
             !super::check_mcp_os_alive_in(data_dir),
             "missing lock.json should return false"
         );
     }
-
-    // ─── build_ide_bridge_health: selected_ide resolution ───────────────
 
     fn detected(name: &str, port: u16) -> DetectedIde {
         DetectedIde {
@@ -1345,7 +1301,6 @@ mod tests {
 
     #[test]
     fn build_ide_bridge_health_drops_selected_ide_when_no_longer_detected() {
-        // Selected IDE has since exited; resolver must return None.
         let detected_ides = vec![detected("IntelliJ", 6_901)];
         let stale = selected("VSCode", 6_900);
         let report = super::build_ide_bridge_health(detected_ides, Some(&stale));
@@ -1371,7 +1326,6 @@ mod tests {
 
     #[test]
     fn build_ide_bridge_health_distinguishes_by_port_not_just_name() {
-        // Same-family IDEs on different ports; selection key includes port.
         let detected_ides = vec![detected("VSCode", 6_900), detected("VSCode", 6_902)];
         let sel = selected("VSCode", 6_902);
         let report = super::build_ide_bridge_health(detected_ides, Some(&sel));
@@ -1444,7 +1398,6 @@ mod tests {
         };
         let curr = IdeScanState::default();
         let msgs = compute_ide_state_diff(&prev, &curr);
-        // Cleared anomaly fires a "resolved" log to correlate with appearance.
         assert!(
             msgs.iter().any(|m| m.starts_with("IDE anomaly resolved")),
             "got: {msgs:?}"
@@ -1483,13 +1436,11 @@ mod tests {
         for r in [&r1, &r2, &r3] {
             assert_eq!(r.len(), 2, "two IDEs must be detected consistently");
         }
-        // Compare full Vec in input order; backend must return a stable order.
         let shape = |r: &Vec<DetectedIde>| -> Vec<(String, Option<u16>)> {
             r.iter().map(|d| (d.ide_name.clone(), d.port)).collect()
         };
         assert_eq!(shape(&r1), shape(&r2), "order must be stable across polls");
         assert_eq!(shape(&r2), shape(&r3), "order must be stable across polls");
-        // And the order is sorted by (ide_name, port), so Cursor < Visual Studio Code.
         assert_eq!(r1[0].ide_name, "Cursor");
         assert_eq!(r1[1].ide_name, "Visual Studio Code");
         drop(l_a);

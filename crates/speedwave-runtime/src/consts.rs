@@ -95,6 +95,16 @@ pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const ENTRYPOINT_LOG_FILE: &str = ".speedwave-entrypoint.log";
 /// Path to the Claude Code binary inside the container.
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
+/// Claude Code env switch that turns off background prefetches, telemetry and update checks.
+pub const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str =
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
+/// Proxy URL with no listener (closed local port): short-lived Claude Code invocations get it as
+/// `https_proxy`/`HTTPS_PROXY` so a startup OAuth refresh cannot leave the container (ADR-052).
+pub const CLAUDE_OFFLINE_HTTPS_PROXY: &str = "http://127.0.0.1:1";
+
+/// Upper bound for one in-container exec probe (`true`, `claude auth status`): a stalled container
+/// runtime surfaces as an error instead of freezing the caller (measured stalls: ~10 min).
+pub const CONTAINER_EXEC_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// PATH set inside containers for the `speedwave` user.
 /// Claude Code installs to `~/.local/bin`, so it must be on PATH.
@@ -119,16 +129,12 @@ pub const CONTAINER_USER_UNPRIVILEGED: &str = "1000:1000";
 /// (uid, gid) parsed from [`CONTAINER_USER_UNPRIVILEGED`] — SSOT for the compose
 /// `user:`, WSL drvfs `chown`, and any host-side mount owner (ADR-052).
 pub fn container_uid_gid() -> (u32, u32) {
-    // Const pinned to "1000:1000" by a unit test; fall back rather than panic
-    // on a runtime path (no expect/unwrap in production per the project rules).
     CONTAINER_USER_UNPRIVILEGED
         .split_once(':')
         .and_then(|(uid, gid)| Some((uid.parse().ok()?, gid.parse().ok()?)))
         .unwrap_or((1000, 1000))
 }
 
-/// drvfs `[automount]` options for the WSL distro (from [`container_uid_gid`]):
-/// `metadata` honors Linux mode bits; `uid`/`gid` are best-effort (ADR-052).
 #[cfg(target_os = "windows")]
 pub fn wsl_automount_options() -> String {
     let (uid, gid) = container_uid_gid();
@@ -193,7 +199,6 @@ pub const NERDCTL_DOWNLOAD_MAX_TIME_SECS: u64 = 900;
 /// untar + service readiness). Must exceed the curl `--max-time` above.
 pub const NERDCTL_INSTALL_TIMEOUT_SECS: u64 = 1200;
 
-// Compile-time invariants: connect < max-time < host-side wait < retry delay.
 const _: () = assert!(NERDCTL_DOWNLOAD_CONNECT_TIMEOUT_SECS < NERDCTL_DOWNLOAD_MAX_TIME_SECS);
 const _: () = assert!(NERDCTL_DOWNLOAD_MAX_TIME_SECS < NERDCTL_INSTALL_TIMEOUT_SECS);
 const _: () = assert!(NERDCTL_DOWNLOAD_RETRY_DELAY_SECS > NERDCTL_INSTALL_TIMEOUT_SECS);
@@ -240,8 +245,6 @@ pub const BUNDLE_RESOURCES_ENV: &str = "SPEEDWAVE_RESOURCES_DIR";
 /// Marker file name written by the Desktop app inside `~/.speedwave/`.
 /// The CLI reads it to locate bundled resources without the env var.
 pub const RESOURCES_MARKER: &str = "resources-dir";
-
-// --- Meeting transcription (ADR-056) ---------------------------------------
 
 /// Recorded meetings + transcripts (`<data_dir>/transcripts/<uuid>/...`).
 /// Dir perms `0o700`, files `0o600` — contain microphone/system audio.
@@ -346,7 +349,6 @@ pub const LIMA_VM_START_TIMEOUT_SECS: u64 = 120;
 /// downloads the guest nerdctl-full archive before boot. Matches `RECONCILE_WAIT_TIMEOUT`.
 pub const LIMA_VM_PROVISION_START_TIMEOUT_SECS: u64 = 600;
 
-// Compile-time invariant: the provisioning window must extend the normal one.
 const _: () = assert!(LIMA_VM_PROVISION_START_TIMEOUT_SECS > LIMA_VM_START_TIMEOUT_SECS);
 
 /// Cause + remedy appended to `limactl start` failures on a provisioning start.
@@ -368,8 +370,6 @@ pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 /// in `Stopping` state to finish. Used by `ensure_ready_inner`.
 pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 
-// Compile-time invariant: VM stop must complete before the exit cleanup
-// watchdog fires, otherwise the watchdog kills the process mid-stop.
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
 
 /// Physical storage tier per auth field (ADR-060).
@@ -420,6 +420,9 @@ impl McpAuthFieldDescriptor {
         self.storage == FieldStorage::WorkerMountedConfig
     }
 }
+
+/// applied when an OpenRouter entry is saved with no model chosen.
+pub const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5";
 
 /// SharePoint Device Code Flow scopes; `Sites.Manage.All` covers the narrower
 /// Sites scopes and is required by Graph `createList` (delegated).
@@ -515,8 +518,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         display_name: "Slack",
         description: "Team messaging and notifications",
         auth_fields: &[
-            // Both fields are OAuth-managed ("Sign in with Slack", ADR-071);
-            // the bundled SLACK_OAUTH_CLIENT_ID means no manual fields at all.
             McpAuthFieldDescriptor {
                 key: "access_token",
                 label: "Slack Access Token",
@@ -526,8 +527,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
-                // Mounted into the worker — rotated on every refresh by the
-                // host-side `oauth` worker (ADR-060) and re-read by slackCall.
                 storage: FieldStorage::WorkerMountedToken,
                 hint: None,
             },
@@ -540,8 +539,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
-                // Off-mount (ADR-060 §"Threat model"): a container compromise
-                // cannot exfiltrate the single-use rotating refresh token.
                 storage: FieldStorage::OAuthState,
                 hint: None,
             },
@@ -570,8 +567,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
-                // Mounted into the worker — refreshed by the host-side `oauth`
-                // worker (ADR-060) and read by the SharePoint client at runtime.
                 storage: FieldStorage::WorkerMountedToken,
                 hint: None,
             },
@@ -584,8 +579,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: true,
                 optional: false,
-                // Off-mount (ADR-060 §"Threat model"): not in `/tokens`, so a
-                // container compromise cannot exfiltrate the refresh_token.
                 storage: FieldStorage::OAuthState,
                 hint: None,
             },
@@ -622,8 +615,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 stored_in_config_json: false,
                 oauth_flow: false,
                 optional: false,
-                // Site policy by omission (ADR-060): the worker reads its
-                // stored site_id and Graph tools accept no `site_id` parameter.
                 storage: FieldStorage::WorkerMountedToken,
                 hint: Some(
                     "Path form: \"acme.sharepoint.com:/sites/Marketing:\" (mind both colons: \
@@ -634,12 +625,8 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
                 ),
             },
         ],
-        // Only files physically mounted into the worker (ADR-060); refresh_token /
-        // client_id / tenant_id are off-mount — see `oauth_state_fields` below.
         credential_files: &["access_token", "site_id"],
         oauth_state_fields: Some(&[
-            // LOGICAL allowlist of fields the UI may save into oauth.json.
-            // logical→disk mapping: `integrations_cmd::{get_oauth_field,merge_oauth_state_json}`.
             "refresh_token",
             "client_id",
             "tenant_id",
@@ -760,8 +747,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         description: "Code hosting and CI/CD platform",
         auth_fields: &[McpAuthFieldDescriptor {
             key: "token",
-            // Populated by the OAuth App device flow (`start_github_oauth`); no
-            // manual entry — UI shows a "Connect to GitHub" button (`oauth_flow: true`).
             label: "GitHub Access Token",
             field_type: "password",
             placeholder: "gho_...",
@@ -773,15 +758,11 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
             hint: None,
         }],
         credential_files: &["token"],
-        // GitHub OAuth App tokens are long-lived (no refresh) → both None/false;
-        // revocation is handled by the UI "Reconnect to GitHub" path.
         oauth_state_fields: None,
         badge: None,
         oauth_provider_label: Some("GitHub"),
         egress_less: false,
         uses_oauth_refresh: false,
-        // 256m (not 128m): Octokit + throttling/retry plugins + octokit.paginate
-        // buffer full result sets — a 128m cap OOM-kills listIssues on busy repos.
         resources: ContainerResources {
             mem_mib: 256,
             cpus: 0.5,
@@ -877,7 +858,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_OFFICE_URL",
         display_name: "Office documents",
         description: "Read, write, convert Word/Excel/PowerPoint/PDF; render charts",
-        // A pure file processor — no service credentials. Operates on /workspace files only.
         auth_fields: &[],
         credential_files: &[],
         oauth_state_fields: None,
@@ -885,7 +865,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         oauth_provider_label: None,
         egress_less: true,
         uses_oauth_refresh: false,
-        // 1g + 512m /tmp: LibreOffice headless on a non-trivial .pptx.
         resources: ContainerResources {
             mem_mib: 1024,
             cpus: 1.0,
@@ -899,7 +878,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_PLAYWRIGHT_URL",
         display_name: "Playwright",
         description: "Headless browser automation (Chromium via Playwright)",
-        // Playwright has no credentials — it scrapes public URLs only.
         auth_fields: &[],
         credential_files: &[],
         oauth_state_fields: None,
@@ -907,8 +885,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         oauth_provider_label: None,
         egress_less: false,
         uses_oauth_refresh: false,
-        // 2g + 1g /tmp + 2g shm: Chromium IPC needs shm above the 64m default
-        // (ENOMEM at page load otherwise); shm is separate from the mem cap.
         resources: ContainerResources {
             mem_mib: 2048,
             cpus: 2.0,
@@ -922,8 +898,6 @@ pub const TOGGLEABLE_MCP_SERVICES: &[McpServiceDescriptor] = &[
         worker_env: "WORKER_CONTEXT7_URL",
         display_name: "Context7",
         description: "Up-to-date library documentation (React, Spring, Django, …)",
-        // `api_key` is optional (anonymous mode works); the Tauri layer overrides
-        // the badge dynamically. Default here is the unconfigured display.
         auth_fields: &[McpAuthFieldDescriptor {
             key: "api_key",
             label: "API Key (optional — higher rate limits)",
@@ -1054,42 +1028,29 @@ pub const BUILT_IN_SERVICE_IDS: &[&str] = &[
     "playwright",
     "context7",
     "os",
-    // Host-side OAuth refresh worker (ADR-060), reserved against plugin slug
-    // collisions. Never enumerated to Claude (not in ENABLED_SERVICES).
     "oauth",
-    // Reserved for the IDE bridge (`<data_dir>/ide-bridge/`) — a plugin slug
-    // `"ide"` would collide on that directory. No compose service.
     "ide",
-    // Reserves the `llm` token-dir namespace (per-provider Proxy keys, ADR-073)
-    // against plugin slug collisions. `proxy` needs no entry (mcp-prefixed slugs).
     "llm",
 ];
 
 /// Env names plugins can't set via `extra_env` (Speedwave-reserved or hijack
 /// vectors); compared case-insensitively. SSOT for `validate_manifest()`.
 pub const RESERVED_ENV_KEYS: &[&str] = &[
-    // Reserved by Speedwave — auto-injected
     "PORT",
     "SPW_CREDENTIALS_DIGEST",
     "SPW_PLUGIN_DIGESTS",
     "SPEEDWAVE_VERSION",
-    // Bundled-plugin install list/marketplace — a repo must not redirect which
-    // plugins the container installs (defaults::BUNDLED_PLUGINS is the SSOT).
     "SPEEDWAVE_BUNDLED_PLUGINS",
     "SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE",
-    // Dynamic linker hijacks (Linux)
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "LD_AUDIT",
-    // Dynamic linker hijacks (macOS)
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
     "DYLD_FORCE_FLAT_NAMESPACE",
-    // Language-runtime hijacks
     "NODE_OPTIONS",
     "PYTHONPATH",
     "PYTHONSTARTUP",
-    // Shell / process environment
     "PATH",
     "HOME",
     "SHELL",
@@ -1122,7 +1083,6 @@ pub const PLUGIN_SETTINGS_MAX_BYTES: usize = 64 * 1024;
 /// the plugin Dashboard). 16 KiB bounds UI/`PluginStatusEntry` size, not safety.
 pub const PLUGIN_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
 
-/// Filename of the optional release-notes file shipped inside a plugin ZIP,
 /// rendered on the plugin Changelog tab. Part of the signed tree.
 pub const PLUGIN_CHANGELOG_FILE: &str = "CHANGELOG.md";
 
@@ -1226,8 +1186,6 @@ pub fn data_dir() -> &'static std::path::PathBuf {
     })
 }
 
-/// Instance name from a data-dir path, split on both separators so a Windows-shaped path
-/// resolves the same on a Unix build host. Same rule and same panics as [`derive_instance_name_from`].
 fn instance_basename_any_separator(data_dir: &std::path::Path) -> String {
     let raw = data_dir.to_string_lossy();
     let trimmed = raw.trim_end_matches(['/', '\\']);
@@ -1255,7 +1213,6 @@ pub fn derive_cli_binary_name_from(data_dir: &std::path::Path) -> String {
     format!("{CLI_BINARY}-{suffix}")
 }
 
-/// Data dir an installed CLI implies from its own path: `<data_dir>\bin\<name>.exe` on Windows,
 /// `~/.local/bin/<name>` on Unix, `None` anywhere else. Inverse of [`cli_install_path_for`].
 pub fn data_dir_from_cli_exe(
     is_windows: bool,
@@ -1340,7 +1297,6 @@ pub fn cli_install_path() -> Option<String> {
     ))
 }
 
-/// CLI binary filename for the platform: `<CLI_BINARY>.exe` on Windows,
 /// `CLI_BINARY` otherwise. Single-sourced from `CLI_BINARY`.
 pub fn cli_binary_filename(is_windows: bool) -> String {
     if is_windows {
@@ -1426,8 +1382,6 @@ mod tests {
 
     #[test]
     fn plugin_defaults_within_caps() {
-        // Omitted-field defaults must respect the caps the validator enforces
-        // for explicit values. (TMPFS has no cap constant — not checked.)
         let mem = crate::plugin::parse_mem_limit_to_mib(PLUGIN_DEFAULT_MEM)
             .expect("PLUGIN_DEFAULT_MEM must parse");
         assert!(
@@ -1445,8 +1399,6 @@ mod tests {
 
     #[test]
     fn test_reserved_env_keys_complete_and_uppercase() {
-        // Bumping this count is deliberate — a new Speedwave-injected key or a new
-        // hijack vector (grow the plugin.rs test too). Catches accidental deletions.
         assert_eq!(RESERVED_ENV_KEYS.len(), 21);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
@@ -1455,7 +1407,6 @@ mod tests {
                 "RESERVED_ENV_KEYS entries are stored uppercase; comparison is case-insensitive at the call site"
             );
         }
-        // Sanity: the dynamic-linker and Speedwave-reserved entries are present.
         for required in [
             "PORT",
             "SPW_CREDENTIALS_DIGEST",
@@ -1492,14 +1443,11 @@ mod tests {
         assert!(WSL_ROOTFS_URL_ARM64.starts_with("https://"));
     }
 
-    /// Pins nerdctl's `getAddrHash` for the default socket — the live VM dir
-    /// is `/var/lib/nerdctl/1935db59` on both platforms.
     #[test]
     fn nerdctl_addr_hash_matches_default_socket_digest() {
         assert_eq!(nerdctl_addr_hash(), "1935db59");
     }
 
-    // Lock and backoff markers are flat filenames directly under data_dir().
     #[test]
     fn nerdctl_lock_and_backoff_files_are_distinct_flat_names() {
         for name in [NERDCTL_INSTALL_LOCK_FILE, NERDCTL_DOWNLOAD_BACKOFF_FILE] {
@@ -1512,8 +1460,6 @@ mod tests {
         assert_ne!(NERDCTL_INSTALL_LOCK_FILE, NERDCTL_DOWNLOAD_BACKOFF_FILE);
     }
 
-    // TAURI_WINDOWS_RESOURCES_SUBDIR must match the Desktop's production
-    // bundle layout (setup_wizard resolves `<exe_dir>\resources\...`).
     #[test]
     fn tauri_windows_resources_subdir_matches_desktop_layout() {
         let wizard = include_str!("../../../desktop/src-tauri/src/setup_wizard.rs");
@@ -1598,13 +1544,10 @@ mod tests {
         }
     }
 
-    /// Guard against service-list drift: TOGGLEABLE_MCP_SERVICES count must match
-    /// the non-OS bool fields in ResolvedIntegrationsConfig, both directions.
     #[test]
     fn test_toggleable_count_matches_resolved_config_fields() {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
-        // Explicit field enumeration — update when adding/removing MCP fields.
-        const EXPECTED_MCP_FIELDS: usize = 9; // slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7
+        const EXPECTED_MCP_FIELDS: usize = 9;
         let _ = (
             resolved.slack,
             resolved.sharepoint,
@@ -1624,7 +1567,6 @@ mod tests {
             TOGGLEABLE_MCP_SERVICES.len(),
             EXPECTED_MCP_FIELDS
         );
-        // Verify each service config_key resolves to a known field
         for svc in TOGGLEABLE_MCP_SERVICES {
             assert!(
                 resolved.is_service_enabled(svc.config_key).is_some(),
@@ -1634,8 +1576,6 @@ mod tests {
         }
     }
 
-    /// Guard: each descriptor's `worker_env` / `compose_name` literal must equal
-    /// the derivation-fn output for its `config_key` (triple-encoded SSOT).
     #[test]
     fn test_toggleable_worker_env_vars_follow_convention() {
         for svc in TOGGLEABLE_MCP_SERVICES {
@@ -1688,14 +1628,12 @@ mod tests {
     #[test]
     fn test_container_uid_gid_parses_ssot() {
         let (uid, gid) = container_uid_gid();
-        // Derived from CONTAINER_USER_UNPRIVILEGED, not re-typed.
         let (expect_uid, expect_gid) = {
             let (u, g) = CONTAINER_USER_UNPRIVILEGED.split_once(':').unwrap();
             (u.parse::<u32>().unwrap(), g.parse::<u32>().unwrap())
         };
         assert_eq!(uid, expect_uid);
         assert_eq!(gid, expect_gid);
-        // Current value pin — changing the container user is a deliberate act.
         assert_eq!((uid, gid), (1000, 1000));
     }
 
@@ -1712,10 +1650,7 @@ mod tests {
     #[test]
     fn test_auth_fields_count_per_service() {
         let expected: &[(&str, usize)] = &[
-            // 2 = access_token, refresh_token (both OAuth-managed, ADR-071)
             ("slack", 2),
-            // 5 = access_token, refresh_token, client_id, tenant_id, site_id
-            // (base_path was dropped — site_id alone scopes the worker)
             ("sharepoint", 5),
             ("redmine", 3),
             ("gitlab", 2),
@@ -1741,8 +1676,6 @@ mod tests {
 
     #[test]
     fn test_slack_descriptor_is_oauth_shaped() {
-        // Pins the ADR-071 shape: both fields OAuth-managed, access_token
-        // worker-mounted, refresh_token off-mount, refresh worker enabled.
         let svc = find_mcp_service("slack").unwrap();
         assert!(svc.uses_oauth_refresh);
         assert_eq!(svc.credential_files, &["access_token"]);
@@ -1768,12 +1701,10 @@ mod tests {
     )]
     fn test_slack_oauth_consts_are_complete() {
         assert!(!SLACK_OAUTH_CLIENT_ID.is_empty());
-        // client_id format: <app>.<id> — two numeric segments.
         assert!(SLACK_OAUTH_CLIENT_ID
             .split('.')
             .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())));
         assert_eq!(SLACK_OAUTH_USER_SCOPES.len(), 14);
-        // DM support (ADR-071 point 10) — the six im/mpim scopes must stay present.
         for dm_scope in [
             "im:read",
             "im:history",
@@ -1798,8 +1729,6 @@ mod tests {
         assert!(SLACK_OAUTH_REDIRECT_PORT > 1024);
     }
 
-    /// Services that intentionally have no credentials (public resources only).
-    /// Explicit allowlist so a new service needing auth still fails the test.
     const CREDENTIAL_LESS_SERVICES: &[&str] = &["playwright", "office"];
 
     #[test]
@@ -1843,8 +1772,6 @@ mod tests {
 
     #[test]
     fn test_auth_field_keys_subset_of_credential_files_or_oauth_state() {
-        // Every UI field must land in one storage tier — `credential_files`
-        // (mounted) or `oauth_state_fields` (off-mount). ADR-060.
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {
                 let in_creds = svc.credential_files.contains(&field.key);
@@ -1861,7 +1788,6 @@ mod tests {
                     svc.credential_files,
                     svc.oauth_state_fields,
                 );
-                // The FieldStorage tag must agree with the SSOT lists.
                 match field.storage {
                     FieldStorage::WorkerMountedToken | FieldStorage::WorkerMountedConfig => {
                         assert!(
@@ -1882,7 +1808,6 @@ mod tests {
         }
     }
 
-    /// Pinned against TS `microsoftProvider.requiredFields`.
     #[test]
     fn microsoft_provider_data_fields_match_ts_required_fields() {
         let sharepoint = find_mcp_service("sharepoint").expect("sharepoint descriptor exists");
@@ -1936,7 +1861,6 @@ mod tests {
             "only Redmine's host_url and project_id should be stored_in_config_json"
         );
 
-        // No other service should have stored_in_config_json fields
         for svc in TOGGLEABLE_MCP_SERVICES {
             if svc.config_key == "redmine" {
                 continue;
@@ -1953,8 +1877,6 @@ mod tests {
 
     #[test]
     fn stored_in_config_json_method_matches_storage_tier() {
-        // The derived method is the SSOT; the temporary `stored_in_config_json`
-        // field must agree with it until the Desktop call sites migrate.
         for svc in TOGGLEABLE_MCP_SERVICES {
             for field in svc.auth_fields {
                 assert_eq!(
@@ -2027,15 +1949,12 @@ mod tests {
 
     #[test]
     fn test_optional_auth_fields_are_only_where_expected() {
-        // Optional auth fields are exception-listed: a service not in this map
-        // must have every auth field required.
         let expected: std::collections::HashMap<&str, Vec<&str>> = [
             ("redmine", vec!["project_id"]),
             (
                 "atlassian",
                 vec!["jira_project_keys", "confluence_space_keys"],
             ),
-            // Context7 works in anonymous mode; api_key is the only field and it is optional.
             ("context7", vec!["api_key"]),
         ]
         .into_iter()
@@ -2071,16 +1990,12 @@ mod tests {
         );
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("Files.ReadWrite.All"));
         assert!(SHAREPOINT_OAUTH_SCOPES.contains("offline_access"));
-        // Sanity: the legacy narrower scope should NOT be requested as a separate
-        // entry — Sites.Manage.All implicitly covers Sites.ReadWrite.All / Sites.Read.All.
         assert!(
             !SHAREPOINT_OAUTH_SCOPES.contains("Sites.Read.All"),
             "Sites.Read.All is a subset of Sites.Manage.All — do not list both"
         );
     }
 
-    /// Every `auth_fields[*].key` must live in `credential_files` OR
-    /// `oauth_state_fields` (ADR-060) — else it is silently dropped on save.
     #[test]
     fn test_auth_field_key_has_a_storage_tier() {
         for svc in TOGGLEABLE_MCP_SERVICES {
@@ -2121,8 +2036,6 @@ mod tests {
 
     #[test]
     fn test_built_in_service_ids_no_overlap_with_built_in_services() {
-        // Verify that no service_id in BUILT_IN_SERVICE_IDS appears in BUILT_IN_SERVICES
-        // (they use different naming: "slack" vs "mcp-slack")
         for sid in BUILT_IN_SERVICE_IDS {
             assert!(
                 !BUILT_IN_SERVICES.contains(sid),
@@ -2133,7 +2046,6 @@ mod tests {
 
     #[test]
     fn test_built_in_service_ids_covers_all_toggleable_services() {
-        // SSOT: every TOGGLEABLE_MCP_SERVICES config_key must be in BUILT_IN_SERVICE_IDS (plugin blocklist).
         for svc in TOGGLEABLE_MCP_SERVICES {
             assert!(
                 BUILT_IN_SERVICE_IDS.contains(&svc.config_key),
@@ -2209,12 +2121,10 @@ mod tests {
         }
     }
 
-    /// Guard against OS service list drift: TOGGLEABLE_OS_SERVICES count must match
-    /// the number of os_ boolean fields in ResolvedIntegrationsConfig.
     #[test]
     fn test_toggleable_os_count_matches_resolved_config_fields() {
         let resolved = crate::config::ResolvedIntegrationsConfig::default();
-        const EXPECTED_OS_FIELDS: usize = 4; // os_reminders, os_calendar, os_mail, os_notes
+        const EXPECTED_OS_FIELDS: usize = 4;
         let _ = (
             resolved.os_reminders,
             resolved.os_calendar,
@@ -2333,7 +2243,6 @@ mod tests {
         #[cfg(not(windows))]
         let (with_slash, without) = ("/tmp/foo/", "/tmp/foo");
         let result = data_dir_from(Some(with_slash), None, false, home);
-        // PathBuf preserves trailing slash but path resolution works the same
         assert!(result.starts_with(without));
     }
 
@@ -2383,7 +2292,6 @@ mod tests {
     #[test]
     fn data_dir_from_cli_exe_rejects_anything_but_the_install_location() {
         let home = std::path::Path::new("/Users/alice");
-        // An uninstalled build must not claim an instance.
         assert_eq!(
             data_dir_from_cli_exe(
                 false,
@@ -2392,13 +2300,11 @@ mod tests {
             ),
             None
         );
-        // Another binary that happens to live there is not the CLI.
         assert_eq!(
             data_dir_from_cli_exe(false, &unix_cli("/Users/alice", "speedwave-desktop"), home),
             Some(home.join(".speedwave-desktop")),
             "a name of the CLI's shape is treated as an instance; the guard is the directory"
         );
-        // Uppercase and empty suffixes are not instance names.
         assert_eq!(
             data_dir_from_cli_exe(false, &unix_cli("/Users/alice", "speedwave-Dev"), home),
             None
@@ -2407,7 +2313,6 @@ mod tests {
             data_dir_from_cli_exe(false, &unix_cli("/Users/alice", "speedwave-"), home),
             None
         );
-        // Someone else's home.
         assert_eq!(
             data_dir_from_cli_exe(false, &unix_cli("/Users/bob", "speedwave-dev"), home),
             None
@@ -2439,7 +2344,6 @@ mod tests {
             data_dir_from_cli_exe(true, std::path::Path::new("/tmp/speedwave.exe"), home),
             None
         );
-        // A directory whose basename is not an instance name must not panic.
         assert_eq!(
             data_dir_from_cli_exe(
                 true,
@@ -2472,8 +2376,6 @@ mod tests {
 
     #[test]
     fn installed_cli_filename_reads_a_windows_path_on_any_host() {
-        // cli_install_path_for builds Windows strings on the macOS CI host, so the
-        // basename must be split on both separators, not by std::path.
         assert_eq!(
             installed_cli_filename(true, std::path::Path::new("C:\\Users\\alice\\.speedwave")),
             "speedwave.exe"
@@ -2506,7 +2408,6 @@ mod tests {
     fn data_dir_from_prefers_env_then_exe_then_production() {
         let home = std::path::Path::new("/Users/alice");
         let dev_cli = unix_cli("/Users/alice", "speedwave-dev");
-        // is_absolute() is host-shaped, so the pinned value has to be too.
         #[cfg(windows)]
         let pinned = r"C:\pinned";
         #[cfg(not(windows))]
@@ -2580,7 +2481,6 @@ mod tests {
 
     #[test]
     fn test_derive_cli_binary_name_strips_speedwave_prefix() {
-        // `.speedwave-dev` → `speedwave-dev`, not `speedwave-speedwave-dev`.
         assert_eq!(
             derive_cli_binary_name_from(std::path::Path::new("/home/user/.speedwave-dev")),
             "speedwave-dev"
@@ -2641,7 +2541,6 @@ mod tests {
     fn cli_binary_filename_is_single_sourced_from_cli_binary() {
         assert_eq!(cli_binary_filename(false), CLI_BINARY);
         assert_eq!(cli_binary_filename(true), format!("{CLI_BINARY}.exe"));
-        // Concrete values today, so a rename that breaks the format is visible.
         assert_eq!(cli_binary_filename(false), "speedwave");
         assert_eq!(cli_binary_filename(true), "speedwave.exe");
     }
@@ -2702,7 +2601,6 @@ mod tests {
 
     #[test]
     fn test_derive_wsl_distro_name_strips_speedwave_prefix() {
-        // `.speedwave-anything` → `Speedwave-anything`, not `Speedwave-speedwave-anything`.
         assert_eq!(
             derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave-staging")),
             "Speedwave-staging"
@@ -2711,7 +2609,6 @@ mod tests {
 
     #[test]
     fn test_derive_instance_name_trailing_slash_normalised() {
-        // Rust Path normalises trailing slashes: "/some/path/" → basename "path"
         assert_eq!(
             derive_instance_name_from(std::path::Path::new("/some/speedwave-dev/")),
             "speedwave-dev"
@@ -2766,8 +2663,6 @@ mod tests {
         derive_instance_name_from(std::path::Path::new(&path_str));
     }
 
-    /// Guard: SYSTEM_CHECK_FAILED_PREFIX must not change without updating
-    /// the frontend match in project-state.service.ts (startsWith check).
     #[test]
     fn test_system_check_failed_prefix_is_stable() {
         assert_eq!(
@@ -2777,7 +2672,6 @@ mod tests {
         );
     }
 
-    /// Guard: CLOUDSTORAGE_TCC_PREFIX must be non-empty and end with ": ".
     #[test]
     fn test_cloudstorage_tcc_prefix_is_non_empty_and_ends_with_colon_space() {
         assert!(!CLOUDSTORAGE_TCC_PREFIX.is_empty());
@@ -2788,8 +2682,6 @@ mod tests {
         );
     }
 
-    /// Guard: the two error prefixes must be disjoint — neither is a prefix of the other.
-    /// This prevents a single `starts_with` check from accidentally matching both.
     #[test]
     fn test_cloudstorage_and_system_check_prefixes_are_disjoint() {
         assert!(
@@ -2826,8 +2718,6 @@ mod tests {
         );
     }
 
-    /// SSOT pair: the provisioning-start budget is derived from the Desktop
-    /// image-rebuild wait (`RECONCILE_WAIT_TIMEOUT` in containers_cmd.rs).
     #[test]
     fn lima_provision_start_timeout_matches_desktop_reconcile_wait_budget() {
         let src = include_str!("../../../desktop/src-tauri/src/containers_cmd.rs");
@@ -2843,8 +2733,6 @@ mod tests {
         );
     }
 
-    /// Error-path quality: the provisioning hint must name the likely cause
-    /// (tooling download) and the remedy (network + retry).
     #[test]
     fn lima_provision_hint_names_cause_and_remedy() {
         assert!(LIMA_START_PROVISION_HINT.contains("nerdctl-full"));
@@ -2860,8 +2748,6 @@ mod tests {
 
     #[test]
     fn test_credential_services_have_no_badge() {
-        // Exception: all-optional-credential services may carry an info badge
-        // ("Anonymous") overridden dynamically. See context7's descriptor.
         for svc in TOGGLEABLE_MCP_SERVICES {
             if svc.auth_fields.is_empty() {
                 continue;
@@ -2878,15 +2764,10 @@ mod tests {
         }
     }
 
-    // SSOT alignment guards (CLAUDE.md "WSL distro name" row): pin the
-    // production literal "Speedwave" across installer, E2E script, install guide.
-
     const PRODUCTION_WSL_DISTRO: &str = "Speedwave";
 
     #[test]
     fn production_wsl_distro_name_is_default() {
-        // Sanity check that the literal below matches what
-        // `derive_wsl_distro_name_from` produces for the production data_dir.
         assert_eq!(
             derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave")),
             PRODUCTION_WSL_DISTRO
@@ -2895,8 +2776,6 @@ mod tests {
 
     #[test]
     fn wsl_distro_name_appears_in_installer_hooks() {
-        // Hand-edited source. The committed installer-hooks.nsh is generated
-        // from this template + sweep.ps1 + firewall.ps1 — see CLAUDE.md.
         let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks-template.nsh");
         assert!(
             src.contains(PRODUCTION_WSL_DISTRO),
@@ -2927,8 +2806,6 @@ mod tests {
 
     #[test]
     fn data_dir_appears_in_installer_hooks_template() {
-        // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
-        // in the hand-edited template.
         let src = include_str!("../../../desktop/src-tauri/windows/installer-hooks-template.nsh");
         assert!(
             src.contains(DATA_DIR),
@@ -2939,8 +2816,6 @@ mod tests {
 
     #[test]
     fn nodejs_subdir_appears_in_sweep_script() {
-        // NODEJS_SUBDIR = "nodejs"; the sweep script filters processes whose
-        // ExecutablePath starts with $instDir\nodejs\.
         let src = include_str!("../../../desktop/src-tauri/windows/sweep.ps1");
         assert!(
             src.contains(NODEJS_SUBDIR),
@@ -2951,8 +2826,6 @@ mod tests {
 
     #[test]
     fn nerdctl_version_appears_in_e2e_vm_script() {
-        // SSOT-alignment (CLAUDE.md): the E2E script hardcodes the nerdctl-full
-        // URL (PS literal); a version bump must update it too.
         let src = include_str!("../../../scripts/e2e-vm.sh");
         let needle = format!("nerdctl-full-{NERDCTL_FULL_VERSION}-linux");
         assert!(
@@ -2966,14 +2839,10 @@ mod tests {
         );
     }
 
-    /// Lima version → bundled nerdctl-full (macOS SSOT guard). Bumping
-    /// `.lima-version` off-table fails until you add the entry + align the const.
     #[test]
     fn lima_version_and_nerdctl_full_version_are_aligned() {
-        // Known Lima release → nerdctl-full version it bundles.
-        // Source: https://github.com/lima-vm/lima/blob/vX.Y.Z/pkg/limayaml/containerd.yaml
         let known: &[(&str, &str)] = &[
-            ("2.1.2", "2.2.2"), // Lima 2.1.2 bundles nerdctl-full 2.2.2 (verified in acc2c691)
+            ("2.1.2", "2.2.2"),
             ("2.2.0", "2.2.2"),
             ("2.2.1", "2.2.2"),
             ("2.2.2", "2.2.2"),
@@ -3008,9 +2877,6 @@ mod tests {
         );
     }
 
-    // Cross-language SSOT for HOST_GATEWAY_ALIAS: TS MCP-shared mirrors it as
-    // `export const`; compose template references the literal in `extra_hosts`.
-
     #[test]
     fn host_gateway_alias_matches_mcp_shared_ts() {
         let src = include_str!("../../../mcp-servers/shared/src/security.ts");
@@ -3025,8 +2891,6 @@ mod tests {
         );
     }
 
-    // Cross-language SSOT for the settings-file name: the host writes `/tokens/_settings.json`
-    // and the TS worker reader (`loadPluginSettings`) must read the same name.
     #[test]
     fn plugin_settings_file_matches_mcp_shared_ts() {
         let src = include_str!("../../../mcp-servers/shared/src/security.ts");
@@ -3042,10 +2906,6 @@ mod tests {
         );
     }
 
-    // desktop/proxy are standalone workspaces, and pii-engine is vendored standalone into the
-    // proxy image's isolated build context (cannot inherit root `[workspace.lints]` in any of
-    // the three cases); their `[lints]` tables must stay byte-equal (mod. whitespace) or one
-    // binary runs weaker lints.
     #[test]
     fn lint_tables_are_aligned() {
         fn lint_table(src: &str, header: &str) -> Vec<String> {
@@ -3109,8 +2969,6 @@ mod tests {
 
     #[test]
     fn slack_token_url_matches_oauth_worker_provider_ts() {
-        // SSOT pair: consts::SLACK_OAUTH_TOKEN_URL (exchange side) mirrors
-        // SLACK_TOKEN_URL in mcp-servers/oauth providers/slack.ts (refresh side).
         let src = include_str!("../../../mcp-servers/oauth/src/providers/slack.ts");
         let re = regex::Regex::new(r#"const\s+SLACK_TOKEN_URL\s*=\s*['"]([^'"]+)['"]"#).unwrap();
         let cap = re.captures(src).expect(
@@ -3132,8 +2990,6 @@ mod tests {
         );
     }
 
-    // Cross-language SSOT: plugin.rs `SLUG_PATTERN` mirrored in the oauth worker
-    // as `SERVICE_SLUG_RE` — extract both literals and compare.
     #[test]
     fn plugin_slug_pattern_matches_oauth_state_ts() {
         let plugin_src = include_str!("../../../crates/speedwave-runtime/src/plugin.rs");
@@ -3154,8 +3010,6 @@ mod tests {
         );
     }
 
-    // Guard: only SharePoint `site_id` carries a hint today — a deliberate edit
-    // should be needed to change that.
     #[test]
     fn only_sharepoint_site_id_has_hint() {
         for svc in TOGGLEABLE_MCP_SERVICES {
@@ -3174,8 +3028,6 @@ mod tests {
         }
     }
 
-    // Guard: every dir under claude-resources/<type>/integrations/ must match a
-    // service key, else the entrypoint never links it.
     #[test]
     fn integrations_directories_match_known_service_keys() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3184,8 +3036,6 @@ mod tests {
             .expect("repo root resolves three levels above the runtime crate");
         let resources_root = repo_root.join("containers").join("claude-resources");
 
-        // Allowed names: TOGGLEABLE_MCP_SERVICES + OS sub-services. `oauth`/`ide`
-        // are excluded — not user-toggleable, no per-integration resources.
         let mut allowed: std::collections::HashSet<&str> = TOGGLEABLE_MCP_SERVICES
             .iter()
             .map(|s| s.config_key)
@@ -3221,8 +3071,6 @@ mod tests {
 
     #[test]
     fn strip_compose_container_prefix_removes_runtime_project_prefix() {
-        // Build the input from the live `compose_prefix()` so the test is
-        // independent of `SPEEDWAVE_DATA_DIR`.
         let prefix = compose_prefix();
         let input = format!("{prefix}_acme_mcp_hub");
         let out = strip_compose_container_prefix(&input, "acme");
@@ -3253,15 +3101,11 @@ mod tests {
         );
     }
 
-    /// SSOT guard: the Rust const and the shell producer must name the same file.
     #[test]
     fn entrypoint_log_file_matches_entrypoint_sh() {
         let sh = include_str!("../../../containers/entrypoint.sh");
         assert!(sh.contains(ENTRYPOINT_LOG_FILE));
     }
-
-    // Cross-read guards for the e2e helper/bats mirrors below: the hash pin above covers only
-    // the hash segment, not the full downstream nerdctl name-store / token-path / prefix copies.
 
     #[test]
     fn name_store_dir_literal_matches_e2e_engine_ts_and_bats_suites() {
@@ -3291,8 +3135,6 @@ mod tests {
         );
     }
 
-    /// Pins the concrete default-basename literals `derive_wsl_distro_name_from` produces,
-    /// then asserts engine.ts's hand-written composePrefix()/wslDistroName() mirror them.
     #[test]
     fn engine_ts_compose_prefix_and_wsl_distro_derivation_mirrors_consts() {
         let default_prefix =
@@ -3330,8 +3172,6 @@ mod tests {
         );
     }
 
-    /// Extracts the literal directory name / filename suffix `tokens.rs` and `workers.rs`
-    /// actually use, then asserts the dirty-state spec's serviceTokenPath() mirrors them.
     #[test]
     fn dirty_state_spec_service_token_path_matches_tokens_and_workers_shape() {
         let tokens_src = include_str!("../../../crates/speedwave-runtime/src/compose/tokens.rs");
@@ -3373,8 +3213,6 @@ mod tests {
         );
     }
 
-    /// Pins the update-dirty-state.bats PREFIX derivation against the same data-dir-basename,
-    /// leading-dot-stripped shape as `compose_prefix()`/`derive_instance_name_from`.
     #[test]
     fn update_dirty_state_bats_prefix_derivation_mirrors_compose_prefix() {
         let bats = include_str!("../../../_tests/e2e/update-dirty-state.bats");
@@ -3385,5 +3223,23 @@ mod tests {
             "update-dirty-state.bats PREFIX derivation must mirror consts::compose_prefix() \
              (data-dir basename, leading dot stripped); rename it there too"
         );
+    }
+
+    #[test]
+    fn openrouter_default_model_is_the_verified_or_shaped_sonnet_5_id() {
+        assert_eq!(OPENROUTER_DEFAULT_MODEL, "anthropic/claude-sonnet-5");
+    }
+
+    #[test]
+    fn offline_https_proxy_is_closed_ipv4_loopback_port_one() {
+        let url: url::Url = CLAUDE_OFFLINE_HTTPS_PROXY
+            .parse()
+            .expect("CLAUDE_OFFLINE_HTTPS_PROXY must be a valid URL");
+        assert_eq!(url.scheme(), "http");
+        match url.host() {
+            Some(url::Host::Ipv4(addr)) => assert!(addr.is_loopback()),
+            other => panic!("expected an IPv4 loopback host, got {other:?}"),
+        }
+        assert_eq!(url.port(), Some(1));
     }
 }

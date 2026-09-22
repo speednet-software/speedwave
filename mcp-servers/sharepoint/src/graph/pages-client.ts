@@ -57,7 +57,6 @@ export function extractHeadings(innerHtml: string): TocHeading[] {
     const idMatch = /\bid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
     let anchor = idMatch ? (idMatch[1] ?? idMatch[2] ?? idMatch[3]) : slugifyHeading(text);
     if (!anchor) anchor = `heading-${results.length + 1}`;
-    // Deduplicate within a single web part for deterministic click-through.
     let dedup = anchor;
     let i = 2;
     while (usedAnchors.has(dedup)) {
@@ -138,12 +137,10 @@ export function renderTableOfContents(headings: TocHeading[], title?: string): s
     return title ? `<h2>${escapeHtml(title)}</h2>` : '';
   }
   const titleHtml = title ? `<h2>${escapeHtml(title)}</h2>` : '';
-  // Stack of open elements: 'ul' for lists, 'li' for items.
   const stack: ('ul' | 'li')[] = [];
   let html = '';
 
   const closeUntilDepth = (targetUls: number): void => {
-    // Close <li>/<ul> pairs until the number of open <ul>s equals targetUls.
     while (stack.filter((t) => t === 'ul').length > targetUls) {
       while (stack.length > 0 && stack[stack.length - 1] === 'li') {
         stack.pop();
@@ -159,27 +156,23 @@ export function renderTableOfContents(headings: TocHeading[], title?: string): s
   for (const h of headings) {
     const currentUls = stack.filter((t) => t === 'ul').length;
     if (h.level > currentUls) {
-      // Descend: open a <ul> per level, bridging gaps with empty <li><ul>.
       let needed = h.level - currentUls;
       while (needed > 0) {
         html += '<ul>';
         stack.push('ul');
         needed--;
         if (needed > 0) {
-          // Empty wrapper li to host the next-deeper ul (level skip).
           html += '<li>';
           stack.push('li');
         }
       }
     } else if (h.level < currentUls) {
-      // Ascend: close lists to the target depth, then close the open sibling <li>.
       closeUntilDepth(h.level);
       if (stack[stack.length - 1] === 'li') {
         stack.pop();
         html += '</li>';
       }
     } else {
-      // Same level — close the previous sibling <li>.
       if (stack[stack.length - 1] === 'li') {
         stack.pop();
         html += '</li>';
@@ -189,7 +182,6 @@ export function renderTableOfContents(headings: TocHeading[], title?: string): s
     stack.push('li');
   }
 
-  // Drain.
   while (stack.length > 0) {
     const top = stack.pop();
     html += top === 'li' ? '</li>' : '</ul>';
@@ -340,17 +332,14 @@ export function buildStandardWebPartBody(
  * @returns plain-text equivalent (angle-bracket entities preserved verbatim)
  */
 export function htmlToPlainText(html: string): string {
-  return (
-    html
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      // Decode `&amp;` LAST so `&amp;lt;` decodes to `&lt;`, never to `<`.
-      .replace(/&amp;/g, '&')
-      .replace(/\s+/g, ' ')
-      .trim()
-  );
+  return html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
@@ -380,8 +369,6 @@ export class PagesClient {
    * @param graph - shared Graph requester owning the siteId + auth state
    */
   constructor(private readonly graph: GraphRequester) {}
-
-  // -- low-level URL builders ------------------------------------------------
 
   /** `/sites/{site-id}/pages` — the collection of pages on this site. */
   pagesPath(): string {
@@ -418,8 +405,6 @@ export class PagesClient {
   webpartItemPath(pageId: string, webpartId: string): string {
     return `${this.pagePath(pageId)}/webParts/${webpartId}`;
   }
-
-  // -- request helpers -------------------------------------------------------
 
   /** `GET /sites/{site-id}/pages/microsoft.graph.sitePage?$select=id,name,title,webUrl`. */
   listPages<T = unknown>(): Promise<T | undefined> {

@@ -1,7 +1,3 @@
-/**
- * State-tree types mirroring `crates/speedwave-runtime/src/stream/state_tree.rs` (ADR-042).
- */
-
 /** Conversation role. */
 export type EntryRole = 'user' | 'assistant';
 
@@ -10,47 +6,32 @@ export type UuidStatus = 'pending' | 'committed';
 
 /** Per-turn token usage. Cache fields are required (zero when missing). */
 export interface TurnUsageState {
-  /** Input tokens this turn. */
   input_tokens: number;
-  /** Output tokens this turn. */
   output_tokens: number;
-  /** Cache-read tokens this turn. */
   cache_read_tokens: number;
-  /** Cache-write tokens this turn. */
   cache_write_tokens: number;
 }
 
 /** Rolling totals for the whole session. */
 export interface SessionTotalsState {
-  /** Cumulative input tokens. */
   input_tokens: number;
-  /** Cumulative output tokens. */
   output_tokens: number;
-  /** Cumulative cache-read tokens. */
   cache_read_tokens: number;
-  /** Cumulative cache-write tokens. */
   cache_write_tokens: number;
-  /** Cumulative cost in USD. Mirrors Rust `SessionTotals.cost` (f64). */
   cost: number;
-  /** Number of completed turns in this session. */
   turn_count: number;
 }
 
 /** One-slot queued message (ADR-045). */
 export interface QueuedMessageState {
-  /** Full text content (not a preview — the UI derives previews). */
   text: string;
-  /** Unix-ms timestamp the queue slot was last set. */
   queued_at: number;
 }
 
 /** Optional per-turn metadata attached to assistant entries. */
 export interface EntryMetaState {
-  /** Model id used for this turn (e.g. `claude-opus-4-7`). */
   model?: string;
-  /** Per-turn token usage. */
   usage?: TurnUsageState;
-  /** Per-turn cost in USD. */
   cost?: number;
 }
 
@@ -84,45 +65,31 @@ export type MessageBlockState =
       answers: ReadonlyArray<string | null>;
     }
   | { kind: 'error'; content: string }
-  | { kind: 'image'; media_type: string; alt: string | null };
+  | { kind: 'image'; media_type: string; alt: string | null }
+  | { kind: 'chip'; command: string; argument: string };
 
 /** One entry in the conversation — user or assistant. */
 export interface ConversationEntryState {
-  /** Stable monotonic index, never reused within a session (ADR-044). */
   index: number;
-  /** Who authored this entry. */
   role: EntryRole;
-  /** Message UUID tracked for native resume (ADR-046). */
   uuid: string | null;
-  /** Whether `uuid` is final (committed on `Result`) or provisional. */
   uuid_status: UuidStatus;
-  /** Block contents — text, thinking, tool_use, ask_user, error. */
   blocks: MessageBlockState[];
-  /** Optional per-turn metadata for assistant entries. */
   meta: EntryMetaState | null;
-  /** Unix-ms timestamp set when a preceding retry bumped this entry. */
   edited_at: number | null;
-  /** Unix-ms timestamp of entry creation. */
   timestamp: number;
 }
 
 /** Root conversation state held by the UI as a single signal. */
 export interface ConversationStateTree {
-  /** Claude Code session identifier. `null` before the first `SystemInit`. */
   session_id: string | null;
-  /** Ordered list of conversation entries. */
   entries: ConversationEntryState[];
-  /** Rolling session totals — kept consistent with per-entry meta. */
   session_totals: SessionTotalsState;
-  /** One-slot queued message per session (ADR-045). */
   pending_queue: QueuedMessageState | null;
-  /** Model id surfaced by the latest `SystemInit` event. */
   model: string | null;
-  /** True while a turn is being streamed from Claude Code. */
   is_streaming: boolean;
 }
 
-/** The default state-tree at app startup — mirrors `ConversationState::default()`. */
 export const DEFAULT_STATE_TREE: ConversationStateTree = {
   session_id: null,
   entries: [],

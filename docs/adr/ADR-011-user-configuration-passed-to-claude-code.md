@@ -5,6 +5,8 @@
 
 > **Amendment (2026-09-02):** The env key carrying `claude.llm.model` on the Anthropic path changed from `ANTHROPIC_MODEL` to `ANTHROPIC_DEFAULT_MODEL`; the field descriptions below are corrected in place. Rationale and the binary verification behind it: ADR-073, amendment of the same date.
 
+> **Amendment (2026-09-13):** On the Anthropic path `claude.llm.model` is no longer injected at all (SPEED-541; ADR-073 amendment of the same date): the config self-heal clears the field for Anthropic entries (ADR-088 decision 7), and the persistent model pick is the container `settings.json` `model` key (ADR-088 decision 3 amendment). The `ANTHROPIC_DEFAULT_MODEL` sentences below describe the routed-provider alias remap and history only.
+
 ## Decision
 
 Users configure per-project environment variables and an LLM provider via `~/.speedwave/config.json` (personal) and an optional `<project>/.speedwave.json` (team, committed to git). These are resolved through a three-level merge and injected into the Claude Code process at startup. Both CLI and Desktop read the same resolution path.

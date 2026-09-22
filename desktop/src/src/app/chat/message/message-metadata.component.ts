@@ -1,6 +1,8 @@
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
 import type { ChatMessage } from '../../models/chat';
 import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number';
+import { ModelPickerService } from '../../services/model-picker.service';
+import { ProjectStateService } from '../../services/project-state.service';
 
 /**
  * Mono metadata line below each assistant message (`opus-4.7 · edited · 1,243 tok · cache: 4,012 · $0.018`).
@@ -39,17 +41,15 @@ import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number
   `,
 })
 export class MessageMetadataComponent {
+  private readonly labels = inject(ModelPickerService);
+  private readonly projectState = inject(ProjectStateService);
+
   readonly entry = input.required<ChatMessage>();
   readonly precedingEdited = input(false);
 
-  readonly modelLabel = computed<string>(() => {
-    const raw = this.entry().meta?.model;
-    if (!raw) return '';
-    const stripped = raw.replace(/^claude-/, '');
-    // Collapse repeated `[1m]` suffixes.
-    const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
-    return dedup.replace(/-(\d+)-(\d+)(\[1m\])?$/, '-$1.$2$3');
-  });
+  readonly modelLabel = computed<string>(() =>
+    this.labels.label(this.entry().meta?.model ?? '', this.projectState.activeProject())
+  );
 
   /**
    * Per-turn total tokens (input + output). Returns `null` when usage is
@@ -75,7 +75,6 @@ export class MessageMetadataComponent {
     return cache;
   }
 
-  /** Meta cost when it is a finite number (subscription/null → null). */
   private finiteMetaCost(): number | null {
     const cost = this.entry().meta?.cost;
     return typeof cost === 'number' && Number.isFinite(cost) ? cost : null;

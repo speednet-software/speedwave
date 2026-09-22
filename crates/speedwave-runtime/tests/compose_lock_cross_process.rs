@@ -43,7 +43,6 @@ fn second_process_blocks_until_first_releases() {
         .spawn()
         .expect("spawn holder");
 
-    // Wait until holder writes the sentinel (lock acquired).
     let deadline = std::time::Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
     while !sentinel.exists() {
         if std::time::Instant::now() >= deadline {
@@ -78,7 +77,6 @@ fn second_process_blocks_until_first_releases() {
         "waiter process failed:\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // MIN_BLOCK_MS: conservative lower bound for observed blocking time.
     assert!(
         waiter_wallclock >= Duration::from_millis(MIN_BLOCK_MS),
         "waiter returned in {waiter_wallclock:?}; expected ≥ {MIN_BLOCK_MS} ms of blocking"
@@ -97,7 +95,6 @@ fn run_child_role(role: &str) {
     let result =
         with_project_compose_lock_in(&root_path, "cross-proc-test", || -> anyhow::Result<()> {
             if role == "hold" {
-                // Signal "lock acquired" to the parent via sentinel file.
                 std::fs::write(root_path.join(READY_SENTINEL), b"ok")?;
             }
             if hold_ms > 0 {

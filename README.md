@@ -1,36 +1,53 @@
 # Speedwave
 
-**A safer way to use AI coding assistants in regulated software delivery.**
+**A controlled environment for AI coding agents.**
 
-Speedwave helps engineering teams use AI coding assistants such as [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or local LLMs inside controlled, auditable development workflows.
+Speedwave is an open-source platform for running AI coding agents inside controlled development environments.
 
-It is designed for organisations that want the speed of AI-assisted development without unmanaged access to source code, credentials, sensitive data or internal tools.
+It creates an isolated runtime on the developer workstation and controls how agents access project files, credentials, development tools and external systems.
+
+Developers keep their existing workflows and AI tools. Organisations get a consistent way to control and observe how agents interact with the development environment.
+
+Speedwave Core is available under the [Apache 2.0 license](LICENSE).
 
 ## Why Speedwave exists
 
-Developers are already using AI coding assistants to move faster. In regulated engineering environments, unmanaged AI adoption creates new risks:
+AI coding agents do more than generate code. They can read project files, execute commands and interact with repositories, issue trackers and other development tools.
 
-- sensitive data in prompts
+In enterprise engineering environments, this creates a new control boundary:
+
+- unnecessary access to source code and internal systems
 - exposed credentials
-- uncontrolled access to repositories and tools
-- no visibility into AI-assisted work
-- no audit evidence
-- shadow AI usage across teams
+- sensitive data sent to external models
+- uncontrolled access to repositories and development tools
+- inconsistent agent configurations across teams
+- limited visibility into AI-assisted activity
 
-Speedwave gives teams a controlled way to adopt AI coding assistants without blocking developers or relying on informal usage policies.
+Speedwave provides a controlled layer between AI coding agents and the development environment, without requiring teams to move development onto a new platform.
 
-## What Speedwave does
+## How Speedwave works
 
-Speedwave adds a security and governance layer around AI-assisted development. It helps teams:
+Speedwave runs on the developer workstation and creates a controlled environment around the AI coding agent.
 
-- run AI coding assistants inside controlled project environments
-- limit what AI can access
-- connect development tools through approved integrations
-- protect credentials and sensitive data
-- log AI-assisted activity for review
-- support safer rollout across regulated engineering teams
+**Developer workstation → Speedwave → AI coding agent**
+
+Speedwave controls:
+
+- the runtime environment in which the agent operates
+- access to development tools and external systems
+- how credentials are separated from the agent
+- how sensitive data is handled
+- what activity and usage can be observed
 
 ## Who it is for
+
+Speedwave is designed for organisations where:
+
+- developers are already using or evaluating AI coding agents
+- AI agents need access to source code, repositories and development tools
+- Security or Platform Engineering needs control over that access
+- teams need a consistent approach across multiple developers or projects
+- development takes place in regulated or security-sensitive environments
 
 Speedwave is built for:
 
@@ -41,9 +58,9 @@ Speedwave is built for:
 
 ## What Speedwave is not
 
-Speedwave is not another AI coding assistant. It does not replace Claude Code or local LLMs. It provides a controlled environment around AI coding tools so organisations can adopt them more safely.
+Speedwave is not an AI coding agent. It works around AI coding agents such as [Claude Code](https://docs.anthropic.com/en/docs/claude-code) rather than replacing them.
 
-Speedwave is also not a complete compliance programme by itself. It provides technical controls, visibility and evidence that can support governance and audit workflows.
+Speedwave is also not a complete compliance programme by itself. It provides technical controls, visibility and evidence that can support broader security, governance and audit processes.
 
 ## Core principles
 
@@ -138,11 +155,20 @@ Speedwave does not replace secure development practices, code review, access man
 
 It helps create safer boundaries and evidence around AI-assisted development, but it should be deployed as part of a broader engineering, security and governance model.
 
+## Core and Enterprise
+
+**Speedwave Core** is open source under the Apache 2.0 license. Organisations can inspect, deploy, modify and operate it independently.
+
+**Speedwave Enterprise** is for organisations that want to deploy and operate Speedwave as a managed standard across engineering teams, with central management, organisational rollout, lifecycle management and ongoing support.
+
+Running Speedwave at organisational scale? [Learn about Speedwave Enterprise](https://speedwave.dev/#enterprise)
+
 ## Documentation
 
 - User and developer documentation: [speedwave.dev/docs](https://speedwave.dev/docs)
 - Architectural decisions: [docs/adr/](docs/adr/README.md)
 - Contributor working rules: [.claude/rules/](.claude/rules/)
+- Product roadmap: [speedwave.dev/roadmap](https://speedwave.dev/roadmap/)
 
 ## Contributing
 

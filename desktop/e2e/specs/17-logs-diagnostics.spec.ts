@@ -46,7 +46,6 @@ describe('Logs & Diagnostics', function () {
       { timeout: 30_000, timeoutMsg: 'no log lines rendered on the logs view' }
     );
 
-    // Level chips are mutually exclusive; filtering must never error the view.
     await (await $('[data-testid="logs-level-error"]')).click();
     await browser.waitUntil(
       async () => {
@@ -73,7 +72,6 @@ describe('Logs & Diagnostics', function () {
     this.timeout(180_000);
     await (await $('[data-testid="logs-export"]')).click();
 
-    // Aggregation + sanitization + ZIP can take a while on a loaded system.
     await $('[data-testid="export-diagnostics-overlay"]').waitForExist({
       timeout: 120_000,
       timeoutMsg: 'diagnostics export never completed (no success modal)',

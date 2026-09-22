@@ -7,7 +7,6 @@ import { bootWorker, ts, makeStandardHealthCheck } from '@speedwave/mcp-shared';
 import { initializeSlackClients, type SlackClients } from './client.js';
 import { createToolDefinitions } from './tools/index.js';
 
-// `_tokensStatus === 'present'` signals configuration via isConfigured.
 bootWorker<SlackClients>({
   serverName: 'mcp-slack',
   version: '1.0.0',

@@ -136,8 +136,6 @@ describe('RecordingControlsComponent', () => {
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
       recommendedModel: vi.fn(async () => recAllDownloaded),
-      // Mirror the real service: start/stop drive the shared recording signals. `recordingLive`
-      // is left to each test, since the real value comes from the host snapshot, not the request.
       startRecording: vi.fn(async (source: AudioSource, language: Language): Promise<StartAck> => {
         recordingSessionId.set('sess-1');
         recordingSource.set(source);
@@ -179,7 +177,7 @@ describe('RecordingControlsComponent', () => {
   it('loads capabilities + sources and defaults to System', async () => {
     await component.ngOnInit();
     expect(component.sources().length).toBe(2);
-    expect(component.sourceIndex()).toBe(0); // system_wide
+    expect(component.sourceIndex()).toBe(0);
     expect(component.accel()).toBe('Acceleration: Metal (GPU)');
   });
 
@@ -213,7 +211,6 @@ describe('RecordingControlsComponent', () => {
     expect(box().checked).toBe(false);
     expect(box().disabled).toBe(false);
 
-    // A real DOM change event drives the (change) binding, not a direct method call.
     box().checked = true;
     box().dispatchEvent(new Event('change'));
     fixture.detectChanges();
@@ -221,15 +218,12 @@ describe('RecordingControlsComponent', () => {
     expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
     expect(box().checked).toBe(true);
 
-    // While recording, the choice is locked in.
     recordingSessionId.set('sess-1');
     fixture.detectChanges();
     expect(box().disabled).toBe(true);
   });
 
   it('renders the host-computed acceleration label verbatim, never re-deriving it', async () => {
-    // The label is Rust's `accel_label()` (SSOT) — the badge renders it as sent, so a
-    // gpu_class that contradicts the label changes nothing.
     svc.getCapabilities.mockResolvedValueOnce({
       ...caps,
       gpu_class: 'none' as const,
@@ -246,14 +240,12 @@ describe('RecordingControlsComponent', () => {
   it('defaults to the "Whole meeting" mixed source when the backend offers it', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();
-    expect(component.sourceIndex()).toBe(0); // the mixed entry
+    expect(component.sourceIndex()).toBe(0);
     expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
     expect(component.mixedSourceSelected()).toBe(true);
   });
 
   it('falls back to index 0 (and does not crash) when neither mixed nor system is offered', async () => {
-    // A host that only exposes mic sources. sourceIndex stays 0; the mixed
-    // computed reads sources()[0] safely (it's a microphone, not undefined).
     svc.listAudioSources.mockResolvedValueOnce([
       { source: { kind: 'microphone', device: 'mic-a' }, label: 'Mic A' },
       { source: { kind: 'microphone', device: 'mic-b' }, label: 'Mic B' },
@@ -278,7 +270,6 @@ describe('RecordingControlsComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="mixed-source-note"]')).not.toBeNull();
-    // Switch to the plain "System (everything)" entry (index 1) → note hidden.
     component.onSource(1);
     fixture.detectChanges();
     expect(component.mixedSourceSelected()).toBe(false);
@@ -306,10 +297,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
     fixture.detectChanges();
-    // Default source is mixed → picker shown.
     expect(fixture.nativeElement.querySelector('[data-testid="mic-select"]')).not.toBeNull();
-    // Switching to System (no mic source in this list) hides it — but here all
-    // non-mixed entries are mics, so assert directly via the computed instead.
     expect(component.micSelectable()).toBe(true);
   });
 
@@ -331,7 +319,7 @@ describe('RecordingControlsComponent', () => {
   it('overlays the chosen mic onto a mic-only source at start()', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
-    component.onSource(1); // the default built-in mic entry
+    component.onSource(1);
     component.onMic('AppleUSBAudioEngine:USB MIC:1');
     await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(
@@ -381,8 +369,6 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('a freshly-mounted control reflects a recording already in progress', async () => {
-    // Regression: navigating away and back destroys this component; the backend
-    // driver keeps recording, so a new instance must still show Stop, not Start.
     recordingSessionId.set('sess-live');
     await component.ngOnInit();
     fixture.detectChanges();
@@ -390,7 +376,6 @@ describe('RecordingControlsComponent', () => {
     const stopBtn = fixture.nativeElement.querySelector('[data-testid="stop-btn"]');
     expect(stopBtn).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]')).toBeNull();
-    // And Stop targets the session the service is tracking, not a lost local id.
     await component.stop();
     expect(svc.stopRecording).toHaveBeenCalledWith('sess-live');
   });
@@ -419,7 +404,6 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('a freshly-mounted control restores the live mode from the session, not the preference', async () => {
-    // The preference says live; this session is record-only, so the session must win.
     svc.liveTranscriptPreferred.mockReturnValue(true);
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     recordingSessionId.set('sess-live');
@@ -432,7 +416,6 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('a freshly-mounted control with no recording ignores the session signal', async () => {
-    // A stale `recordingLive` must not beat the preference when nothing is actually recording.
     svc.liveTranscriptPreferred.mockReturnValue(false);
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     recordingLive.set(true);
@@ -450,7 +433,6 @@ describe('RecordingControlsComponent', () => {
     recordingLive.set(false);
     await component.ngOnInit();
     expect(component.liveTranscript()).toBe(false);
-    // The service clears its recording signals in a `finally`, so the session is gone either way.
     svc.stopRecording.mockImplementationOnce(async () => {
       recordingSessionId.set(null);
       recordingSource.set(null);
@@ -473,7 +455,6 @@ describe('RecordingControlsComponent', () => {
     expect(component.liveTranscript()).toBe(false);
     await component.stop();
     fixture.detectChanges();
-    // Otherwise the finished session's record-only mode would silently start the next recording.
     expect(component.liveTranscript()).toBe(true);
   });
 
@@ -521,7 +502,6 @@ describe('RecordingControlsComponent', () => {
       expect(svc.startRecording).not.toHaveBeenCalled();
       expect(component.error()).toContain('microphone permission');
       expect(errSpy).toHaveBeenCalled();
-      // A refusal on the prompt just shown must not throw System Settings at the user.
       expect(svc.openMicrophonePrivacyPane).not.toHaveBeenCalled();
       expect(component.busy()).toBe(false);
     });
@@ -569,7 +549,6 @@ describe('RecordingControlsComponent', () => {
     expect(component.hasModel()).toBe(false);
     const note = fixture.nativeElement.querySelector('[data-testid="no-model-note"]');
     expect(note).not.toBeNull();
-    // Points users to Settings, not a removed model picker (no hardcoded size).
     expect(note.textContent).toContain('Settings');
     expect(note.textContent).not.toContain('Models panel');
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(true);
@@ -579,7 +558,6 @@ describe('RecordingControlsComponent', () => {
     svc.listModels.mockResolvedValue(modelsEmpty);
     await component.ngOnInit();
     expect(component.hasModel()).toBe(false);
-    // A download lands → the parent calls refreshModelAvailability().
     svc.listModels.mockResolvedValue(modelsWithSmall);
     await component.refreshModelAvailability();
     expect(component.hasModel()).toBe(true);
@@ -616,7 +594,6 @@ describe('RecordingControlsComponent', () => {
     fixture.detectChanges();
     const sel = '[data-testid="finalize-model-warning"]';
     expect(fixture.nativeElement.querySelector(sel)).toBeNull();
-    // Mid-download: the Settings row already shows progress — no nag here.
     svc.recommendedModel.mockResolvedValue({
       ...recAllDownloaded,
       finalize: { ...recAllDownloaded.finalize, downloaded: false, downloading: true },
@@ -624,7 +601,6 @@ describe('RecordingControlsComponent', () => {
     await component.refreshModelAvailability();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector(sel)).toBeNull();
-    // Live model serves both passes (finalize: null).
     svc.recommendedModel.mockResolvedValue({ ...recAllDownloaded, finalize: null });
     await component.refreshModelAvailability();
     fixture.detectChanges();

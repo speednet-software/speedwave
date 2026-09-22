@@ -4,7 +4,6 @@ import { createMCPServer, textResult, jsonResult, errorResult } from './server.j
 import type { MCPServerOptions } from './server.js';
 import type { Tool, ToolHandler, JSONRPCResponse } from './types.js';
 
-// Mock dependencies
 vi.mock('./session.js', () => ({
   sessionManager: {
     getActiveSessionCount: vi.fn(() => 0),
@@ -18,16 +17,13 @@ vi.mock('./session.js', () => ({
 }));
 
 vi.mock('./jsonrpc.js', () => {
-  // Define mock class inside the factory to avoid hoisting issues
   class MockJSONRPCHandler {
     processRequest = vi.fn().mockResolvedValue({ response: { jsonrpc: '2.0', id: 1, result: {} } });
     registerTool = vi.fn();
     getTools = vi.fn(() => []);
     getServerInfo = vi.fn(() => ({ name: 'test-server', version: '1.0.0' }));
 
-    constructor(_options: unknown) {
-      // Store options for later verification if needed
-    }
+    constructor(_options: unknown) {}
   }
 
   return {
@@ -59,7 +55,6 @@ vi.mock('./security.js', async () => {
   };
 });
 
-// Helper to create mock Express request
 function createMockRequest(body: unknown, headers: Record<string, string> = {}): Partial<Request> {
   return {
     body,
@@ -68,7 +63,6 @@ function createMockRequest(body: unknown, headers: Record<string, string> = {}):
   };
 }
 
-// Helper to create mock Express response
 function createMockResponse(): Partial<Response> {
   const res: any = {
     statusCode: 200,
@@ -95,12 +89,10 @@ describe('server', () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    // Suppress console output during tests
     consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    // Reset mock implementations
     vi.clearAllMocks();
   });
 
@@ -130,7 +122,6 @@ describe('server', () => {
         const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
         try {
           termHandler();
-          // close callback is async — give it a tick
           await new Promise((resolve) => setTimeout(resolve, 100));
           expect(exitSpy).toHaveBeenCalledWith(0);
         } finally {
@@ -478,7 +469,6 @@ describe('server', () => {
       });
 
       it('logs health check failures even when auth is configured', async () => {
-        // Health failures must be logged even when auth is configured.
         const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         const customHealthCheck = vi.fn().mockRejectedValue(new Error('connection refused'));
 
@@ -603,7 +593,6 @@ describe('server', () => {
 
         await mcpRoute.route.stack[0].handle(req, res);
 
-        // Session from body _meta is NOT used — only Mcp-Session-Id header
         expect(server.rpcHandler.processRequest).toHaveBeenCalledWith(expect.anything(), null);
       });
 
@@ -935,7 +924,6 @@ describe('server', () => {
       });
 
       it('DELETE route on / invokes handleMCPDelete — returns 400 when session header missing', () => {
-        // DELETE route handler invokes handleMCPDelete.
         const server = createMCPServer({
           name: 'delete-test',
           version: '1.0.0',
@@ -954,7 +942,6 @@ describe('server', () => {
 
         deleteRoute.route.stack[0].handle(req, res, vi.fn());
 
-        // handleMCPDelete returns 400 when Mcp-Session-Id header is missing
         expect(res.status).toHaveBeenCalledWith(400);
       });
     });
@@ -967,12 +954,9 @@ describe('server', () => {
           port: 3000,
         });
 
-        // Express registers app.all() routes with the internal `_all` flag set
-        // on the layer's route.methods. Verify we have POST, DELETE, and a catch-all.
         const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
         const rootRoutes = routes.filter((layer: any) => layer.route?.path === '/');
 
-        // There should be at least 3 routes on / (POST, DELETE, ALL)
         expect(rootRoutes.length).toBeGreaterThanOrEqual(3);
       });
     });
@@ -1099,7 +1083,6 @@ describe('server', () => {
     });
 
     describe('Server Lifecycle', () => {
-      // Port 0 (OS-assigned ephemeral) avoids collisions between parallel workers and worktrees.
       it('starts server successfully', async () => {
         const server = createMCPServer({
           name: 'test-server',
@@ -1216,7 +1199,6 @@ describe('server', () => {
       }, 10000);
 
       it('rejects stop() promise when server.close() calls back with an error', async () => {
-        // Covers line 343: the reject(err) branch in stop()
         const server = createMCPServer({
           name: 'stop-error-test',
           version: '1.0.0',
@@ -1225,8 +1207,7 @@ describe('server', () => {
 
         await server.start();
 
-        // Patch net.Server.close to invoke the callback with an error.
-        const httpServer = (server.app as any).listen ? null : null; // unused — we access it differently
+        const httpServer = (server.app as any).listen ? null : null;
 
         const net = await import('net');
         const originalClose = net.Server.prototype.close;
@@ -1239,7 +1220,6 @@ describe('server', () => {
           await expect(server.stop()).rejects.toThrow('forced close error');
         } finally {
           net.Server.prototype.close = originalClose;
-          // Restore so subsequent tests are unaffected; actual server may already be closed
         }
       }, 10000);
     });
@@ -1384,7 +1364,6 @@ describe('server', () => {
         authLayer.handle(req, res, next);
 
         expect(res.status).toHaveBeenCalledWith(401);
-        // Verify the logged path has control chars replaced
         const warnCall = (console.warn as any).mock.calls.find((call: string[]) =>
           call[0]?.includes('AUTH DENIED')
         );
@@ -1415,7 +1394,6 @@ describe('server', () => {
         ).toThrow('auth.token must be a non-empty string');
       });
 
-      // auth.callerTokens maps bearer → caller id; constructor rejects malformed maps.
       it('rejects empty bearer key in auth.callerTokens', () => {
         expect(() =>
           createMCPServer({
@@ -1830,7 +1808,6 @@ describe('server', () => {
         return req;
       };
 
-      // First 2 requests should pass
       for (let i = 0; i < 2; i++) {
         const res = createMockResponse();
         const next = vi.fn();
@@ -1838,7 +1815,6 @@ describe('server', () => {
         expect(next).toHaveBeenCalled();
       }
 
-      // Third request should be rate-limited
       const res = createMockResponse();
       const next = vi.fn();
       rlLayer.handle(makeReq(), res, next);
@@ -1868,10 +1844,8 @@ describe('server', () => {
         return req;
       };
 
-      // Exhaust limit
       rlLayer.handle(makeReq(), createMockResponse(), vi.fn());
 
-      // Trigger rate limit
       const res = createMockResponse();
       rlLayer.handle(makeReq(), res, vi.fn());
 
@@ -1899,10 +1873,8 @@ describe('server', () => {
         return req;
       };
 
-      // Exhaust limit
       rlLayer.handle(makeReq(), createMockResponse(), vi.fn());
 
-      // Trigger rate limit
       rlLayer.handle(makeReq(), createMockResponse(), vi.fn());
 
       expect(console.warn).toHaveBeenCalledWith(
@@ -1921,14 +1893,12 @@ describe('server', () => {
       const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
-      // Exhaust the limit
       const req1 = createMockRequest({}, {});
       (req1 as any).path = '/';
       (req1 as any).ip = '10.0.0.3';
       const res1 = createMockResponse();
       rlLayer.handle(req1, res1, vi.fn());
 
-      // /health should still pass
       const req2 = createMockRequest({}, {});
       (req2 as any).path = '/health';
       (req2 as any).ip = '10.0.0.3';
@@ -1962,8 +1932,6 @@ describe('server', () => {
       await server.start();
       await server.stop();
 
-      // If cleanup interval is not cleared, the test process would hang
-      // The fact that stop() resolves cleanly is sufficient
       expect(true).toBe(true);
     }, 10000);
 
@@ -1987,7 +1955,6 @@ describe('server', () => {
       rlLayer.handle(req, res, next);
       expect(next).toHaveBeenCalled();
 
-      // Second request from same IPv6 should be limited
       const res2 = createMockResponse();
       const next2 = vi.fn();
       rlLayer.handle(req, res2, next2);
@@ -2008,14 +1975,12 @@ describe('server', () => {
 
       const req = createMockRequest({}, {});
       (req as any).path = '/';
-      // ip is undefined — should use 'unknown'
       const res = createMockResponse();
       const next = vi.fn();
 
       rlLayer.handle(req, res, next);
       expect(next).toHaveBeenCalled();
 
-      // Second undefined-ip request should be rate-limited (same 'unknown' bucket)
       const req2 = createMockRequest({}, {});
       (req2 as any).path = '/';
       const res2 = createMockResponse();
@@ -2036,13 +2001,11 @@ describe('server', () => {
       const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
-      // Exhaust the limit
       const req1 = createMockRequest({}, {});
       (req1 as any).path = '/';
       (req1 as any).ip = '10.0.0.50';
       rlLayer.handle(req1, createMockResponse(), vi.fn());
 
-      // /healthz should NOT be skipped — should be rate limited
       const req2 = createMockRequest({}, {});
       (req2 as any).path = '/healthz';
       (req2 as any).ip = '10.0.0.50';
@@ -2065,14 +2028,12 @@ describe('server', () => {
       const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
-      // Exhaust the limit
       const req1 = createMockRequest({}, {});
       (req1 as any).path = '/';
       (req1 as any).ip = '10.0.0.99';
       (req1 as any).headers = { authorization: 'Bearer secret' };
       rlLayer.handle(req1, createMockResponse(), vi.fn());
 
-      // /status should be skipped (inherited from auth.publicPaths)
       const req2 = createMockRequest({}, {});
       (req2 as any).path = '/status';
       (req2 as any).ip = '10.0.0.99';
@@ -2102,19 +2063,15 @@ describe('server', () => {
         return req;
       };
 
-      // First request passes
       const res1 = createMockResponse();
       rlLayer.handle(makeReq(), res1, vi.fn());
 
-      // Second is rate-limited
       const res2 = createMockResponse();
       rlLayer.handle(makeReq(), res2, vi.fn());
       expect(res2.status).toHaveBeenCalledWith(429);
 
-      // Advance past window
       vi.advanceTimersByTime(1_001);
 
-      // Now should pass again
       const res3 = createMockResponse();
       const next3 = vi.fn();
       rlLayer.handle(makeReq(), res3, next3);
@@ -2124,30 +2081,25 @@ describe('server', () => {
     });
 
     it('cleanup interval deletes IP entry when all timestamps are expired (hits.delete branch)', () => {
-      // Covers line 195: hits.delete(ip) — when all timestamps for an IP are expired
       vi.useFakeTimers();
 
       const server = createMCPServer({
         name: 'rate-cleanup-delete',
         version: '1.0.0',
         port: 3000,
-        rateLimit: { maxRequests: 10, windowMs: 1_000 }, // 1-second window
+        rateLimit: { maxRequests: 10, windowMs: 1_000 },
       });
 
       const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
-      // Make a request at t=0 for IP 10.0.1.1
       const req = createMockRequest({}, {});
       (req as any).path = '/';
       (req as any).ip = '10.0.1.1';
       rlLayer.handle(req, createMockResponse(), vi.fn());
 
-      // Advance past 5-min cleanup interval. At that time the timestamp is 5*60_001ms old
-      // which is > 1s window → expired. hits.delete(ip) should fire.
       vi.advanceTimersByTime(5 * 60_000 + 1);
 
-      // After cleanup, the IP entry was deleted. Making another request should pass (new bucket).
       const resAfterCleanup = createMockResponse();
       const nextAfterCleanup = vi.fn();
       rlLayer.handle(req, resAfterCleanup, nextAfterCleanup);
@@ -2157,30 +2109,25 @@ describe('server', () => {
     });
 
     it('cleanup interval prunes expired timestamps but keeps IP when some are still valid (hits.set branch)', () => {
-      // Covers line 197: hits.set(ip, valid) — when some timestamps expired but others are still valid
-      // windowMs must be > cleanup interval (5 min) so a timestamp from t=0 is still valid at cleanup
       vi.useFakeTimers();
 
       const server = createMCPServer({
         name: 'rate-cleanup-partial',
         version: '1.0.0',
         port: 3000,
-        rateLimit: { maxRequests: 10, windowMs: 6 * 60_000 }, // 6-min window
+        rateLimit: { maxRequests: 10, windowMs: 6 * 60_000 },
       });
 
       const layers = (server.app as any).router.stack;
       const rlLayer = layers.find((layer: any) => layer.name === 'rateLimitMiddleware');
 
-      // Make a request at t=0
       const req = createMockRequest({}, {});
       (req as any).path = '/';
       (req as any).ip = '10.0.1.2';
       rlLayer.handle(req, createMockResponse(), vi.fn());
 
-      // Advance just past the 5-min cleanup interval: timestamp is 5*60_001ms old (< 6*60_000ms window, still valid).
       vi.advanceTimersByTime(5 * 60_000 + 1);
 
-      // Verify the bucket was kept (request still passes, IP still tracked)
       const resAfterCleanup = createMockResponse();
       const nextAfterCleanup = vi.fn();
       rlLayer.handle(req, resAfterCleanup, nextAfterCleanup);
@@ -2199,7 +2146,6 @@ describe('server', () => {
       });
 
       const routes = (server.app as any).router.stack.filter((layer: any) => layer.route);
-      // app.all() is the last route on '/'; catch-all for unsupported methods.
       const allRoutes = routes.filter((layer: any) => layer.route?.path === '/');
       const catchAllRoute = allRoutes[allRoutes.length - 1];
 
@@ -2208,7 +2154,6 @@ describe('server', () => {
       const req = createMockRequest({}, {});
       const res = createMockResponse();
 
-      // Call the handler directly — it receives (_req, res) so we pass req and res
       catchAllRoute.route.stack[0].handle(req, res, vi.fn());
 
       expect(res.setHeader).toHaveBeenCalledWith('Allow', 'POST, DELETE');

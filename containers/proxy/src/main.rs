@@ -68,7 +68,6 @@ fn build_router(cfg: Arc<Config>) -> Router {
 
 #[tokio::main]
 async fn main() {
-    // Default to `info` so swap-leg warnings surface; `RUST_LOG` overrides.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let config_path =
         std::env::var("SPW_CONFIG_PATH").unwrap_or_else(|_| "/config/proxy.json".to_string());
@@ -145,6 +144,33 @@ mod tests {
                         "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
                         "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
                         "data: [DONE]\n\n",
+                    );
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        sse,
+                    )
+                        .into_response()
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    /// Mock SSE backend that completes a content block, then emits an in-band `error` event
+    /// (Anthropic's mid-stream failure shape) before a normal, well-terminated stream end.
+    async fn spawn_mock_sse_backend_with_in_band_error() -> std::net::SocketAddr {
+        use axum::response::IntoResponse;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/v1/messages",
+                axum::routing::post(|| async {
+                    let sse = concat!(
+                        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_err\",\"usage\":{\"input_tokens\":10}}}\n\n",
+                        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+                        "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"}}\n\n",
                     );
                     (
                         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -262,6 +288,39 @@ mod tests {
         (addr, captured)
     }
 
+    /// Raw TCP mock: writes a chunked SSE response with a `message_start` frame, then drops
+    /// the connection without the terminating `0\r\n\r\n` — the byte stream must yield `Err`.
+    async fn spawn_aborting_chunked_backend() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut received = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                received.extend_from_slice(&buf[..n]);
+                if n == 0 || received.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/event-stream\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "\r\n",
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            let chunk = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_abort\",\"usage\":{\"input_tokens\":10}}}\n\n";
+            let framed = format!("{size:x}\r\n{chunk}\r\n", size = chunk.len());
+            socket.write_all(framed.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            drop(socket);
+        });
+        addr
+    }
+
     fn config_pointing_at(addr: &std::net::SocketAddr, usage_path: std::path::PathBuf) -> Config {
         use crate::router::{Auth, Route};
         Config {
@@ -280,13 +339,30 @@ mod tests {
         }
     }
 
+    /// Polls `path` every 10ms for up to 2s until it exists with at least one line —
+    /// avoids a race with the usage-writer task on a loaded CI runner.
+    async fn wait_for_usage_lines(path: &std::path::Path) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                let lines: Vec<String> = contents.lines().map(str::to_string).collect();
+                if !lines.is_empty() {
+                    return lines;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Vec::new();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn relays_stream_and_appends_one_usage_line() {
         let usage_dir = tempfile::tempdir().unwrap();
         let usage_path = usage_dir.path().join("usage.jsonl");
 
         let addr = spawn_mock_sse_backend().await;
-        // Give the listener a moment to be ready.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let cfg = Arc::new(config_pointing_at(&addr, usage_path.clone()));
@@ -305,14 +381,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), 200);
-        // Drain the body to let the relay complete.
         let _ = resp.into_body().collect().await.unwrap();
 
-        // Give the usage writer a tick to finish.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-        let contents = std::fs::read_to_string(&usage_path).unwrap();
-        let lines: Vec<&str> = contents.lines().collect();
+        let lines = wait_for_usage_lines(&usage_path).await;
         assert_eq!(
             lines.len(),
             1,
@@ -323,10 +394,110 @@ mod tests {
             "usage line must contain completion_tokens: {}",
             lines[0]
         );
-        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert!(
             parsed["completion_tokens"].as_u64().unwrap_or(0) > 0,
             "completion_tokens must be non-zero: {}",
+            lines[0]
+        );
+        assert_eq!(
+            parsed["status"], "success",
+            "a normal message_delta stream must not be classified as a failure: {}",
+            lines[0]
+        );
+    }
+
+    /// An in-band `{"type":"error"}` frame after a completed content block, with a proper
+    /// stream end, must still mark the usage line as a failure — not a success.
+    #[tokio::test]
+    async fn in_band_error_after_content_block_marks_usage_failure() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let usage_path = usage_dir.path().join("usage.jsonl");
+
+        let addr = spawn_mock_sse_backend_with_in_band_error().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let cfg = Arc::new(config_pointing_at(&addr, usage_path.clone()));
+        let app = build_router(cfg);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            200,
+            "Anthropic sends in-band errors under a 200, not a 4xx/5xx"
+        );
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_text = String::from_utf8_lossy(&body_bytes);
+        assert!(
+            body_text.contains(
+                r#"data: {"type":"error","error":{"type":"api_error","message":"Internal server error"}}"#
+            ),
+            "the error frame must reach the client byte-for-byte: {body_text}"
+        );
+
+        let lines = wait_for_usage_lines(&usage_path).await;
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one usage line, got: {lines:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(
+            parsed["status"], "failure",
+            "an in-band error must mark the usage line as failure: {}",
+            lines[0]
+        );
+    }
+
+    /// An aborted byte stream (upstream closes the socket mid-body without the chunked
+    /// terminator) must mark the usage line as a failure.
+    #[tokio::test]
+    async fn aborted_byte_stream_marks_usage_failure() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let usage_path = usage_dir.path().join("usage.jsonl");
+
+        let addr = spawn_aborting_chunked_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let cfg = Arc::new(config_pointing_at(&addr, usage_path.clone()));
+        let app = build_router(cfg);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await;
+
+        let lines = wait_for_usage_lines(&usage_path).await;
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one usage line, got: {lines:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(
+            parsed["status"], "failure",
+            "an aborted byte stream must mark the usage line as failure: {}",
             lines[0]
         );
     }
@@ -488,7 +659,6 @@ mod tests {
         let (addr, captured) = spawn_capturing_backend().await;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
-        // Bare "claude-opus-4-8" has no "/" prefix, so router.rs::resolve maps it to "anthropic".
         cfg.routes.push(Route {
             prefix: "anthropic".to_string(),
             base_url: format!("http://{addr}"),
@@ -633,7 +803,6 @@ mod tests {
         let policy = speedwave_pii_engine::compile_policy_v3(policy_json).unwrap();
         let key = speedwave_pii_engine::EngineKey::from_bytes([9u8; 32]);
 
-        // Exactly what the outbound scan left in the request the model actually saw.
         let mut body = serde_json::json!({"system": "Contact bob@example.com at Coca-Cola"});
         crate::pii::scan_request(&policy, &key, &mut body).unwrap();
         let upstream_echo = body["system"].as_str().unwrap().to_string();

@@ -21,8 +21,6 @@ bootstrapApplication(AppComponent, {
   providers: [
     provideZonelessChangeDetection(),
     provideAppInitializer(applyPersistedThemeOnStartup),
-    // `anchorScrolling: enabled` scrolls an `id="..."` element into view on a `fragment="..."`
-    // navigation — required for the System health → IDE Bridge `connect →` deep link.
     provideRouter(
       routes,
       withInMemoryScrolling({
@@ -34,8 +32,6 @@ bootstrapApplication(AppComponent, {
     ...(tauriNonce ? [{ provide: CSP_NONCE, useValue: tauriNonce }] : []),
   ],
 }).catch((err) => {
-  // Bootstrap failed before Angular DI exists, so route the error straight to
-  // the Rust log pipeline (the GlobalErrorHandler is the only console bridge).
   import('@tauri-apps/plugin-log')
     .then(({ error }) => error(`[Bootstrap] ${String(err)}`))
     .catch(() => {});

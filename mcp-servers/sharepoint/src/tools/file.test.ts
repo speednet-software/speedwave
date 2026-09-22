@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import {
+  createFileTools,
   handleListFileIds,
   handleGetFileFull,
   handleDownloadFile,
@@ -33,6 +34,15 @@ describe('file-tools', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('listFileIds schema', () => {
+    it('tells the model to omit path for the drive root', () => {
+      const tool = createFileTools(null).find((td) => td.tool.name === 'listFileIds')!.tool;
+      expect((tool.inputSchema.properties.path as { description: string }).description).toBe(
+        'Folder path relative to the drive root, e.g. documents/reports; omit for the root'
+      );
+    });
   });
 
   describe('handleListFileIds', () => {
@@ -268,7 +278,6 @@ describe('file-tools', () => {
       expect(result.error?.code).toBe('GET_FAILED');
     });
 
-    // A 401/403/429 must not be misread as a wrong id and steered to listFileIds.
     it.each([401, 403, 429] as const)(
       'does not append the listFileIds hint on a %s error',
       async (status) => {
@@ -335,7 +344,6 @@ describe('file-tools', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
       expect(result.error?.message).toContain('sharepointPath');
-      // Shared teaching envelope: names the received value and a next step.
       expect(result.error?.message).toContain('received:');
     });
 

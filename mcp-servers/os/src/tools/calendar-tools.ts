@@ -13,8 +13,6 @@ import {
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-// ── Types ──────────────────────────────────────────────────────────────
-
 /** Input parameters for the listCalendars tool (no params required). */
 type ListCalendarsParams = Record<string, never>;
 
@@ -75,8 +73,6 @@ interface DeleteEventParams {
   /** Event ID to delete. */
   id: string;
 }
-
-// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listCalendarsTool: Tool = {
   name: 'listCalendars',
@@ -378,8 +374,6 @@ const deleteEventTool: Tool = {
   ],
 };
 
-// ── Handlers ──────────────────────────────────────────────────────────
-
 /**
  * Lists all calendars available on this device.
  * @param _params - Unused tool input parameters.
@@ -477,8 +471,6 @@ export async function handleDeleteEvent(params: DeleteEventParams): Promise<Tool
   const result = await runCommand('calendar', 'delete_event', p);
   return { success: true, data: result.parsed };
 }
-
-// ── Export ────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all calendar operations. */
 export function createCalendarTools(): ToolDefinition[] {

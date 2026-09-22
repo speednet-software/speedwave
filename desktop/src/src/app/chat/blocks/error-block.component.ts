@@ -4,8 +4,11 @@ import type { ErrorBlockKind } from '../../models/chat';
 /** Visual shape for an error block — drives which Tailwind classes get applied. */
 type ErrorShape = 'red-timeline' | 'gray-timeline' | 'amber-timeline';
 
-/** Metadata table keyed by error kind: single source of truth for label and shape. */
-const ERROR_META: Record<ErrorBlockKind, { shape: ErrorShape; label: string; action?: string }> = {
+/** Metadata table keyed by error kind: single source of truth for label, shape, and explanation. */
+const ERROR_META: Record<
+  ErrorBlockKind,
+  { shape: ErrorShape; label: string; action?: string; explanation?: string }
+> = {
   rate_limit: { shape: 'red-timeline', label: '⚠ rate_limit' },
   network: { shape: 'red-timeline', label: '⚠ network_error' },
   session_exited: {
@@ -17,6 +20,30 @@ const ERROR_META: Record<ErrorBlockKind, { shape: ErrorShape; label: string; act
     shape: 'red-timeline',
     label: '⚠ broken_pipe',
     action: 'retry',
+  },
+  api_server_interrupted: {
+    shape: 'red-timeline',
+    label: '⚠ api_interrupted',
+    explanation:
+      'The API server interrupted the response mid-stream (an API-side error, not a Speedwave failure). The content above may be incomplete. Retry the message.',
+  },
+  connection_interrupted: {
+    shape: 'red-timeline',
+    label: '⚠ connection_interrupted',
+    explanation:
+      'The connection to the API dropped mid-response (network, VPN, or the server closed the connection). The content above may be incomplete. Retry the message.',
+  },
+  response_stalled: {
+    shape: 'red-timeline',
+    label: '⚠ response_stalled',
+    explanation:
+      'The API stopped sending the response and Claude Code stopped waiting for it. The content above may be incomplete. Retry the message.',
+  },
+  host_slept: {
+    shape: 'red-timeline',
+    label: '⚠ host_slept',
+    explanation:
+      'The computer went to sleep mid-response and the stream was interrupted. The content above may be incomplete. Retry the message.',
   },
   generic: { shape: 'red-timeline', label: '⚠ error' },
   stopped_by_user: { shape: 'gray-timeline', label: '■ stopped by user' },
@@ -67,6 +94,9 @@ const ERROR_META: Record<ErrorBlockKind, { shape: ErrorShape; label: string; act
           </button>
         }
       </div>
+      @if (explanation(); as text) {
+        <div data-testid="error-explanation" class="mt-1 opacity-70">{{ text }}</div>
+      }
     </div>
   `,
 })
@@ -108,6 +138,9 @@ export class ErrorBlockComponent {
 
   /** Action button label — empty string hides the button when no action applies. */
   readonly actionLabel = computed<string>(() => this.meta().action ?? '');
+
+  /** Second line under the content explaining the cause; absent hides the line entirely. */
+  readonly explanation = computed<string | undefined>(() => this.meta().explanation);
 
   /** Tailwind classes for the wrapper border + foreground colour. */
   readonly wrapperClass = computed<string>(() => {

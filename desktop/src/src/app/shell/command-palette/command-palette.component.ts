@@ -436,7 +436,6 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
     });
     this.dialogRef.closed.subscribe(() => {
       this.dialogRef = null;
-      // Sync signal back if closed externally (Escape, backdrop, or dialog.close).
       if (!this.closingProgrammatically && this.ui.paletteOpen()) {
         this.ui.closePalette();
       }
@@ -455,17 +454,13 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.projects.set(result.projects);
       this.activeProject.set(result.active_project);
-    } catch {
-      // Outside Tauri — leave the existing list untouched.
-    }
+    } catch {}
   }
 
   private async invokeCheckForUpdate(): Promise<void> {
     try {
       await this.tauri.invoke('check_for_update');
-    } catch {
-      // Silent fail — error surfaces in the settings/Update panel.
-    }
+    } catch {}
   }
 
   private navItem(

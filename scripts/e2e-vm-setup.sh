@@ -1,29 +1,20 @@
 #!/usr/bin/env bash
-# e2e-vm-setup.sh — Provisions E2E envs: Windows via SSH to WSL2 (SPEEDWAVE_WINDOWS_HOST) and
-# macOS via SSH (SPEEDWAVE_MACOS_HOST). Usage: scripts/e2e-vm-setup.sh [windows|macos|all]
 
 set -euo pipefail
 
-# -- Configuration (shared) ----------------------------------------------------
 
 # shellcheck source=e2e-common.sh
 source "$(dirname "$0")/e2e-common.sh"
 
-# Node.js version — read from the repo SSOT so the MSI URL never drifts.
 NODE_VERSION="$(cat "$(dirname "$0")/../.node-version")"
 
-# -- Helper functions ----------------------------------------------------------
 
-# Runs a PowerShell script on the Windows host: writes it to a .ps1 temp file via scp,
-# executes via -File — `-Command -` (stdin) ignores $ErrorActionPreference, drops exit codes.
 windows_ps() {
     local ps_script tmpname tmpfile_win tmpfile_local
     ps_script=$(cat)
     tmpname="e2e-setup-$$.ps1"
     tmpfile_win="C:\\Windows\\Temp\\${tmpname}"
     tmpfile_local=$(mktemp)
-    # UTF-8 BOM — PowerShell on Windows defaults to the system locale
-    # (e.g., Windows-1252) when reading .ps1 files without a BOM.
     printf '\xEF\xBB\xBF%s\n' "$ps_script" > "$tmpfile_local"
     # shellcheck disable=SC2086
     scp -q -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
@@ -37,7 +28,6 @@ windows_ps() {
     return $exit_code
 }
 
-# -- Ubuntu (SSH) --------------------------------------------------------------
 
 
 setup_windows() {
@@ -234,8 +224,6 @@ SCRIPT
     echo "[windows] Installing pinned Vulkan SDK (whisper-rs-sys needs VULKAN_SDK — ADR-085)..."
     local vsdk_ps1
     vsdk_ps1="$(dirname "$0")/install-vulkan-sdk.ps1"
-    # Run the repo's pinned installer verbatim (the SSOT for the SDK hashes); strip its
-    # on-disk BOM first — windows_ps prepends its own.
     if [ "$(head -c 3 "$vsdk_ps1")" = $'\xef\xbb\xbf' ]; then
         tail -c +4 "$vsdk_ps1" | windows_ps
     else
@@ -294,7 +282,6 @@ fi
 SCRIPT
 
     echo "[macos] Installing Homebrew and Node.js..."
-    # Homebrew uses major-only node formulae (node@24); derive from the SSOT.
     local node_major="${NODE_VERSION%%.*}"
     macos_ssh bash <<SCRIPT
 set -euo pipefail
@@ -344,7 +331,6 @@ SCRIPT
     echo "[macos] DONE"
 }
 
-# -- Main ----------------------------------------------------------------------
 
 TARGET="${1:-all}"
 

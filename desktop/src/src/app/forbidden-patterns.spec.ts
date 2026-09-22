@@ -1,6 +1,3 @@
-/**
- * Static guardrail — fails CI if any forbidden pattern reappears in src/.
- */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
@@ -10,19 +7,15 @@ interface ForbiddenPattern {
   readonly regex: RegExp;
   readonly extensions: readonly string[];
   readonly ignoreFiles?: readonly string[];
-  /** Lines matching any of these substrings are exempt (e.g. test fixtures). */
   readonly lineExemptions?: readonly string[];
 }
 
-/**
- * Locate the `desktop/src/src` source root, handling __dirname resolution variance under coverage.
- */
 function findSrcRoot(): string {
   const candidates: string[] = [];
   let dir = __dirname;
   for (let depth = 0; depth < 6; depth++) {
     candidates.push(dir);
-    candidates.push(join(dir, 'src')); // when __dirname == desktop/src
+    candidates.push(join(dir, 'src'));
     const parent = resolve(dir, '..');
     if (parent === dir) break;
     dir = parent;
@@ -34,9 +27,7 @@ function findSrcRoot(): string {
       if (statSync(markerSpec).isFile() && statSync(markerSvc).isDirectory()) {
         return candidate;
       }
-    } catch {
-      // missing path — try the next candidate.
-    }
+    } catch {}
   }
   throw new Error(
     `forbidden-patterns: could not locate desktop/src/src starting from ${__dirname}`
@@ -44,9 +35,6 @@ function findSrcRoot(): string {
 }
 
 const SRC_ROOT = findSrcRoot();
-/**
- * Directory names skipped during the recursive scan.
- */
 const EXCLUDED_DIRS: readonly string[] = [
   'node_modules',
   'coverage',
@@ -56,11 +44,6 @@ const EXCLUDED_DIRS: readonly string[] = [
   'src-tauri',
 ];
 
-/**
- * Recursively walks a directory, returning absolute paths of every file matching one of `extensions`.
- * @param dir - Directory to walk.
- * @param extensions - File extensions to match (e.g. `.ts`).
- */
 function walk(dir: string, extensions: readonly string[]): string[] {
   const entries = readdirSync(dir);
   const out: string[] = [];
@@ -104,19 +87,14 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
   },
   {
     label: 'TODO/FIXME/HACK/XXX marker comment',
-    // Match only as a standalone word in comments or JSDoc, not inside strings
-    // used as test fixtures. `lineExemptions` filter any accidental matches.
     regex: /\b(TODO|FIXME|HACK|XXX)\b/,
     extensions: ['.ts', '.html', '.css'],
     ignoreFiles: ['forbidden-patterns.spec.ts'],
     lineExemptions: [
-      // Test-only strings containing the word as data
       'input_json: \'{"pattern":"TODO"}\'',
       "expect(component.headerSummary).toBe('TODO')",
       'service.normalize(\'Grep\', \'{"pattern":"TODO"',
       "expect(result).toEqual({ kind: 'grep', pattern: 'TODO'",
-      // The Grep tool fixture used in tool-block tests echoes the user's
-      // search pattern; "TODO" here is data, not a marker.
       'input_json: \'{"pattern":"TODO","include":"*.rs"}\'',
       "expect(el.querySelector('[data-testid=\"pattern\"]')?.textContent?.trim()).toBe('TODO')",
     ],
@@ -127,12 +105,15 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
     extensions: ['.ts'],
     ignoreFiles: ['forbidden-patterns.spec.ts'],
   },
+  {
+    label:
+      'Save is allowed, but chat will fail (SPEED-555: a missing Messages API now blocks Save)',
+    regex: /Save is allowed, but chat/,
+    extensions: ['.ts'],
+    ignoreFiles: ['forbidden-patterns.spec.ts'],
+  },
 ];
 
-/**
- * Scans every source file under SRC_ROOT and returns lines matching `pattern` (subject to its file/line exemptions).
- * @param pattern - Forbidden pattern to scan for.
- */
 function gatherViolations(pattern: ForbiddenPattern): string[] {
   const files = walk(SRC_ROOT, pattern.extensions);
   const violations: string[] = [];

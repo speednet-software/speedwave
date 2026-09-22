@@ -1,11 +1,70 @@
-// Auth commands — extracted from main.rs. Tauri command wrappers for API-key management and
-// CLI auth command generation.
-
-use crate::types::{check_project, AuthStatusResponse};
+use crate::types::{check_project, AuthStatusResponse, OauthSignIn};
 
 use super::{auth, setup_wizard};
 
-// ── Authentication commands (API key only — OAuth is done via CLI) ─────────
+const SIGN_IN_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+type SignInVerdictEntry = (std::time::Instant, Option<bool>);
+
+static SIGN_IN_VERDICTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, SignInVerdictEntry>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+static SIGN_IN_PROBE_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn sign_in_probe_lock_for(project: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut locks = SIGN_IN_PROBE_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks
+        .entry(project.to_string())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
+fn cached_verdict_with(
+    project: &str,
+    ttl: std::time::Duration,
+    probe: impl FnOnce() -> Result<Option<bool>, String>,
+) -> Result<Option<bool>, String> {
+    let project_lock = sign_in_probe_lock_for(project);
+    let _project_guard = project_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    {
+        let verdicts = SIGN_IN_VERDICTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((fetched_at, verdict)) = verdicts.get(project) {
+            if fetched_at.elapsed() < ttl {
+                return Ok(*verdict);
+            }
+        }
+    }
+
+    let verdict = probe()?;
+    SIGN_IN_VERDICTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(project.to_string(), (std::time::Instant::now(), verdict));
+    Ok(verdict)
+}
+
+pub(crate) fn cached_sign_in_verdict(project: &str) -> Result<Option<bool>, String> {
+    cached_verdict_with(project, SIGN_IN_VERDICT_TTL, || {
+        setup_wizard::claude_sign_in_verdict(project).map_err(|e| e.to_string())
+    })
+}
+
+pub(crate) fn invalidate_sign_in_verdict(project: &str) {
+    SIGN_IN_VERDICTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(project);
+}
 
 #[tauri::command]
 pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
@@ -43,6 +102,7 @@ pub async fn anthropic_logout(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         log::info!("logging out of Anthropic for project {project}");
+        invalidate_sign_in_verdict(&project);
         speedwave_runtime::claude_home::remove_claude_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
@@ -57,8 +117,6 @@ pub async fn anthropic_logout(project: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Migrates the project's `claude.llm` (default shape when absent) so
-/// `is_unconfigured()` sees the post-migration, evidence-aware answer.
 fn migrated_llm_for(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -73,8 +131,6 @@ fn migrated_llm_for(
     llm
 }
 
-/// True when the project's migrated LLM config resolves an active provider.
-/// Shared by `get_auth_status` and the reconcile restore guard.
 pub(crate) fn project_llm_configured_in(
     data_dir: &std::path::Path,
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
@@ -84,6 +140,21 @@ pub(crate) fn project_llm_configured_in(
     !migrated_llm_for(user_config, project, evidence).is_unconfigured()
 }
 
+pub(crate) fn oauth_sign_in_from(
+    needs_anthropic_auth: bool,
+    verdict: Option<bool>,
+    saved: bool,
+) -> OauthSignIn {
+    match (needs_anthropic_auth, verdict, saved) {
+        (true, Some(true), _) => OauthSignIn::Verified,
+        (true, Some(false), _) => OauthSignIn::None,
+        (true, None, true) => OauthSignIn::SavedUnverified,
+        (true, None, false) => OauthSignIn::None,
+        (false, _, true) => OauthSignIn::SavedUnverified,
+        (false, _, false) => OauthSignIn::None,
+    }
+}
+
 #[tauri::command]
 pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, String> {
     check_project(&project)?;
@@ -91,31 +162,31 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
         crate::containers_cmd::ensure_images_ready()?;
         log::info!("resolving auth status for project {project}");
         let api_key_configured = auth::has_api_key(&project);
-        // Real OAuth state = credentials file present (provider-independent).
-        let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
+        let oauth_saved = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
         );
-        // R7: non-anthropic providers never need Anthropic auth.
         let user_config = speedwave_runtime::config::load_user_config().unwrap_or_default();
         let needs_anthropic_auth =
             setup_wizard::project_needs_anthropic_auth(&user_config, &project);
+        let verdict = if needs_anthropic_auth {
+            cached_sign_in_verdict(&project)?
+        } else {
+            None
+        };
+        let oauth_sign_in = oauth_sign_in_from(needs_anthropic_auth, verdict, oauth_saved);
         let evidence = if api_key_configured {
             speedwave_runtime::config::AnthropicEvidence::ApiKey
-        } else if oauth_authenticated {
+        } else if oauth_saved {
             speedwave_runtime::config::AnthropicEvidence::Oauth
         } else {
             speedwave_runtime::config::AnthropicEvidence::None
         };
-        // Migrated (not raw) shape — must agree with needs_anthropic_auth, which
-        // itself already evaluates the equivalent post-migration answer.
         let migrated = migrated_llm_for(&user_config, &project, evidence);
-        // False for explicit v2 logout/dangling and credential-less fresh; a
-        // blockless project WITH credentials fabricates (v0.13.3 default population).
         let provider_configured = !migrated.is_unconfigured();
         Ok(AuthStatusResponse::from_flags(
             api_key_configured,
-            oauth_authenticated,
+            oauth_sign_in,
             needs_anthropic_auth,
             provider_configured,
         ))
@@ -124,25 +195,16 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
     .map_err(|e| e.to_string())?
 }
 
-// ── CLI auth command generation ─────────────────────────────────────────────
-
-/// Shell-escape a string for use inside single quotes (POSIX standard).
-/// Each embedded single-quote becomes: close-quote, backslash-escaped quote, open-quote.
 pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// `\\?\` prefix stripper — re-export of the runtime SSOT.
 pub(crate) use speedwave_runtime::engine_path::strip_extended_length_prefix as strip_windows_extended_length_prefix;
 
-/// Escapes a string for safe interpolation inside a PowerShell single-quoted literal — only
-/// embedded single quotes need doubling.
 pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Pure command assembly. `is_windows` selects PowerShell-shaped output (Set-Location, `;`, $env:,
-/// '' escape, \\?\ stripping) vs POSIX (cd, &&, export, '\'' escape).
 pub(crate) fn build_auth_command_for_platform(
     project: &str,
     project_dir: &str,
@@ -160,7 +222,6 @@ pub(crate) fn build_auth_command_for_platform(
         let ddir = strip_windows_extended_length_prefix(&data_dir_str);
         let cli_path = strip_windows_extended_length_prefix(&cli_path);
         if needs_env_pin {
-            // Pin CLI path to <data_dir>/bin so PATH cannot resolve a foreign install.
             format!(
                 "$env:{} = '{}'; Set-Location '{}'; & '{}' login --project '{}'",
                 speedwave_runtime::consts::DATA_DIR_ENV,
@@ -170,8 +231,6 @@ pub(crate) fn build_auth_command_for_platform(
                 ps_escape_single_quoted(project),
             )
         } else {
-            // Absolute path always: a shell spawned right after the wizard
-            // (before any PATH refresh) has no `speedwave` on PATH yet.
             format!(
                 "Set-Location '{}'; & '{}' login --project '{}'",
                 ps_escape_single_quoted(pdir),
@@ -198,8 +257,6 @@ pub(crate) fn build_auth_command_for_platform(
     }
 }
 
-/// Production entry point. Reads the host platform once via `cfg!()` and delegates to
-/// `build_auth_command_for_platform`, keeping the `get_auth_command` call-site unchanged.
 fn build_auth_command(
     project: &str,
     project_dir: &str,
@@ -217,8 +274,6 @@ fn build_auth_command(
     )
 }
 
-/// Resolves the project directory, home, active data dir, and default data dir.
-/// Shared by `get_auth_command` and `start_oauth_login` to prevent drift.
 pub(crate) fn resolve_project_dirs(
     project: &str,
 ) -> Result<
@@ -242,8 +297,6 @@ pub(crate) fn resolve_project_dirs(
     Ok((project_dir, home, data_dir, default_data_dir))
 }
 
-/// Resolves the CLI install path and errors with a user-facing message if the
-/// binary is not present, so callers never emit a command that will fail.
 pub(crate) fn ensure_cli_installed() -> Result<(), String> {
     let install = speedwave_runtime::consts::cli_install_path()
         .ok_or_else(|| "cannot determine home directory".to_string())?;
@@ -261,8 +314,6 @@ fn ensure_cli_installed_at(install: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Returns a CLI command to authenticate with Claude Code. Non-default data dir prefixes
-/// `export SPEEDWAVE_DATA_DIR=...` (POSIX) or `$env:SPEEDWAVE_DATA_DIR = '...'` (PowerShell).
 #[tauri::command]
 pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
@@ -291,66 +342,210 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    // -- get_auth_status race guard --
+    #[test]
+    fn cached_verdict_probes_once_within_the_ttl() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "cached_verdict_probes_once_within_the_ttl";
+        let ttl = std::time::Duration::from_secs(10);
+
+        let first = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        let second = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(first, Some(true));
+        assert_eq!(second, Some(true));
+    }
+
+    #[test]
+    fn cached_verdict_probes_again_after_the_ttl() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "cached_verdict_probes_again_after_the_ttl";
+        let ttl = std::time::Duration::from_millis(50);
+
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cached_verdict_does_not_cache_errors() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "cached_verdict_does_not_cache_errors";
+        let ttl = std::time::Duration::from_secs(10);
+
+        let first = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("boom".to_string())
+        });
+        let second = cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(false))
+        })
+        .unwrap();
+
+        assert!(first.is_err());
+        assert_eq!(second, Some(false));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalidating_a_project_forces_the_next_probe() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let project = "invalidating_a_project_forces_the_next_probe";
+        let ttl = std::time::Duration::from_secs(10);
+
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        invalidate_sign_in_verdict(project);
+        cached_verdict_with(project, ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn concurrent_callers_share_one_probe() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let project = "concurrent_callers_share_one_probe";
+        let ttl = std::time::Duration::from_secs(10);
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let calls = std::sync::Arc::clone(&calls);
+                std::thread::spawn(move || {
+                    cached_verdict_with(project, ttl, || {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        Ok(Some(true))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(results.iter().all(|r| *r == Some(true)));
+    }
+
+    #[test]
+    fn projects_have_independent_cache_entries() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let ttl = std::time::Duration::from_secs(10);
+
+        cached_verdict_with("projects_have_independent_cache_entries_a", ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(true))
+        })
+        .unwrap();
+        cached_verdict_with("projects_have_independent_cache_entries_b", ttl, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(false))
+        })
+        .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn get_auth_status_waits_for_image_readiness() {
-        // Race guard: get_auth_status must gate on image readiness before exec.
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("// ── CLI auth command generation")
+            .find("\npub(crate) fn shell_escape_single_quoted(")
             .map(|i| fn_start + 1 + i)
-            .unwrap_or(source.len());
+            .expect("shell_escape_single_quoted must exist after get_auth_status");
         let fn_body = &source[fn_start..fn_end];
 
         let ensure_pos = fn_body
             .find("ensure_images_ready")
             .expect("get_auth_status must call ensure_images_ready");
-        let oauth_pos = fn_body
-            .find("has_anthropic_oauth_credentials")
-            .expect("get_auth_status must read real OAuth state via credentials presence");
+        let verdict_pos = fn_body
+            .find("cached_sign_in_verdict")
+            .expect("get_auth_status must resolve the container sign-in verdict");
         assert!(
-            ensure_pos < oauth_pos,
-            "ensure_images_ready must come BEFORE the OAuth state read"
+            ensure_pos < verdict_pos,
+            "ensure_images_ready must come BEFORE the container sign-in verdict"
         );
     }
 
     #[test]
-    fn get_auth_status_oauth_is_credentials_presence_not_check_claude_auth() {
-        // The badge must reflect real login, not check_claude_auth's Ok(true)
-        // skip for non-anthropic providers.
+    fn get_auth_status_takes_the_container_verdict_not_the_provider_gated_probe() {
         let source = include_str!("auth_commands.rs");
         let fn_start = source.find("pub async fn get_auth_status(").unwrap();
-        // Scan production code only — the test module below mentions
-        // check_claude_auth by design.
         let fn_end = source[fn_start..]
             .find("#[cfg(test)]")
             .map(|i| fn_start + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
+            fn_body.contains("cached_sign_in_verdict"),
+            "oauth_sign_in must be resolved from the container sign-in verdict"
+        );
+        assert!(
             !fn_body.contains("check_claude_auth"),
-            "oauth_authenticated must not come from the provider-gated check_claude_auth"
+            "oauth_sign_in must not come from the provider-gated check_claude_auth"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_takes_the_verdict_through_the_coalescing_cache() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source.find("pub async fn get_auth_status(").unwrap();
+        let fn_end = source[fn_start..]
+            .find("#[cfg(test)]")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("cached_sign_in_verdict("),
+            "get_auth_status must resolve the verdict through the coalescing cache"
+        );
+        assert!(
+            !fn_body.contains("claude_sign_in_verdict("),
+            "get_auth_status must not call the raw container probe directly"
         );
     }
 
     #[test]
     fn get_auth_status_populates_needs_anthropic_auth_from_predicate() {
-        // R7: the gate field must come from project_needs_anthropic_auth, not be
-        // hardcoded — else non-anthropic providers strand on "auth required".
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("// ── CLI auth command generation")
+            .find("\npub(crate) fn shell_escape_single_quoted(")
             .map(|i| fn_start + 1 + i)
-            .unwrap_or(source.len());
+            .expect("shell_escape_single_quoted must exist after get_auth_status");
         let fn_body = &source[fn_start..fn_end];
         assert!(
             fn_body.contains("project_needs_anthropic_auth"),
@@ -364,17 +559,15 @@ mod tests {
 
     #[test]
     fn get_auth_status_derives_provider_configured_from_is_unconfigured() {
-        // provider_configured defaults to FALSE for fresh/missing (no provider
-        // chosen yet), same as an explicit v2 logout.
         let source = include_str!("auth_commands.rs");
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("// ── CLI auth command generation")
+            .find("\npub(crate) fn shell_escape_single_quoted(")
             .map(|i| fn_start + 1 + i)
-            .unwrap_or(source.len());
+            .expect("shell_escape_single_quoted must exist after get_auth_status");
         let fn_body = &source[fn_start..fn_end];
         assert!(
             fn_body.contains("!migrated.is_unconfigured()"),
@@ -390,8 +583,88 @@ mod tests {
         );
     }
 
-    /// A never-migrated `LlmConfig::default()` must yield
-    /// `provider_configured == false` via `get_auth_status`.
+    #[test]
+    fn get_auth_status_feeds_from_flags_via_oauth_sign_in_from() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("oauth_sign_in_from("),
+            "get_auth_status must derive oauth_sign_in via oauth_sign_in_from"
+        );
+    }
+
+    #[test]
+    fn get_auth_status_never_parses_the_credentials_file() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn get_auth_status(")
+            .expect("get_auth_status Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("has_anthropic_oauth_credentials"),
+            "get_auth_status must read the credentials-file evidence via the SSOT helper"
+        );
+        assert!(
+            !fn_body.contains(".credentials.json"),
+            "get_auth_status must never hand-parse the credentials file"
+        );
+        assert!(
+            !fn_body.contains("serde_json"),
+            "get_auth_status must never read the credentials file's contents"
+        );
+    }
+
+    #[test]
+    fn oauth_sign_in_from_covers_every_table_row() {
+        assert_eq!(
+            oauth_sign_in_from(true, Some(true), false),
+            OauthSignIn::Verified
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(true), true),
+            OauthSignIn::Verified
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(false), false),
+            OauthSignIn::None
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, Some(false), true),
+            OauthSignIn::None
+        );
+        assert_eq!(
+            oauth_sign_in_from(true, None, true),
+            OauthSignIn::SavedUnverified
+        );
+        assert_eq!(oauth_sign_in_from(true, None, false), OauthSignIn::None);
+
+        for verdict in [Some(true), Some(false), None] {
+            assert_eq!(
+                oauth_sign_in_from(false, verdict, true),
+                OauthSignIn::SavedUnverified,
+                "verdict={verdict:?}"
+            );
+            assert_eq!(
+                oauth_sign_in_from(false, verdict, false),
+                OauthSignIn::None,
+                "verdict={verdict:?}"
+            );
+        }
+    }
+
     #[test]
     fn provider_configured_is_false_for_fresh_llm_default() {
         let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -408,6 +681,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -421,8 +695,6 @@ mod tests {
         );
     }
 
-    /// State transition: once an active provider is selected, the same
-    /// derivation flips to `true` — proves the expression isn't vacuously false.
     #[test]
     fn provider_configured_is_true_once_active_provider_resolves() {
         let mut llm = speedwave_runtime::config::LlmConfig::default();
@@ -441,6 +713,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -451,8 +724,6 @@ mod tests {
         assert!(provider_configured);
     }
 
-    /// Edge case: project exists but `claude` is `None` entirely — must not
-    /// panic, defaults to not-configured (no credentials, no llm block).
     #[test]
     fn provider_configured_is_false_when_claude_override_absent() {
         let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -465,6 +736,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -475,8 +747,6 @@ mod tests {
         assert!(!provider_configured);
     }
 
-    /// Legacy v1 config with a saved API key must still migrate to
-    /// "configured", not just the OAuth (no-key) path.
     #[test]
     fn migrated_llm_for_reads_configured_for_legacy_v1_with_api_key() {
         let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -496,6 +766,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -506,8 +777,6 @@ mod tests {
         assert!(provider_configured);
     }
 
-    /// Edge case: unknown project name must not panic — mirrors
-    /// `find_project` returning `None` for a name absent from `projects`.
     #[test]
     fn migrated_llm_for_returns_none_for_unknown_project() {
         let user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -519,8 +788,6 @@ mod tests {
         .is_unconfigured());
     }
 
-    /// Upgrade rescue: a project with no `claude.llm` block but on-disk
-    /// Anthropic credentials must read as configured (v0.13.3 default population).
     #[test]
     fn blockless_project_with_oauth_evidence_reads_configured() {
         let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -533,6 +800,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             });
         let migrated = migrated_llm_for(
             &user_config,
@@ -545,8 +813,6 @@ mod tests {
         assert!(!entry.has_api_key);
     }
 
-    /// An unmigrated legacy v1 raw config must not make `provider_configured`
-    /// and `needs_anthropic_auth` disagree in the same response.
     #[test]
     fn migrated_llm_for_reconciles_legacy_v1_raw_contradiction() {
         let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
@@ -566,6 +832,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             });
 
         let needs_anthropic_auth = setup_wizard::project_needs_anthropic_auth(&user_config, "proj");
@@ -583,8 +850,6 @@ mod tests {
              matching needs_anthropic_auth's already-correct 'true'"
         );
     }
-
-    // -- anthropic_logout --
 
     #[test]
     fn anthropic_logout_calls_credentials_ssot_with_check_project() {
@@ -609,7 +874,30 @@ mod tests {
         );
     }
 
-    // -- shell_escape_single_quoted tests --
+    #[test]
+    fn anthropic_logout_invalidates_the_cached_verdict() {
+        let source = include_str!("auth_commands.rs");
+        let fn_start = source
+            .find("pub async fn anthropic_logout(")
+            .expect("anthropic_logout Tauri command must exist");
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        let invalidate_pos = fn_body
+            .find("invalidate_sign_in_verdict(")
+            .expect("anthropic_logout must invalidate the cached verdict");
+        let remove_pos = fn_body
+            .find("remove_claude_credentials")
+            .expect("anthropic_logout must remove credentials");
+        assert!(
+            invalidate_pos < remove_pos,
+            "invalidate_sign_in_verdict must run BEFORE remove_claude_credentials"
+        );
+    }
 
     #[test]
     fn shell_escape_no_quotes() {
@@ -631,8 +919,6 @@ mod tests {
         assert_eq!(shell_escape_single_quoted(""), "");
     }
 
-    // -- login command path must match the install-path SSOT --
-
     #[test]
     fn login_command_path_matches_install_path() {
         let home = std::path::Path::new("/Users/test");
@@ -640,10 +926,10 @@ mod tests {
         let custom_dd = home.join(".speedwave-dev");
         let win_dd = std::path::Path::new("C:\\Users\\test\\.speedwave");
         let cases: [(bool, &std::path::Path, Option<&std::path::Path>); 4] = [
-            (false, default_dd.as_path(), Some(default_dd.as_path())), // unix, non-pin
-            (false, custom_dd.as_path(), Some(default_dd.as_path())),  // unix, env-pin
-            (true, win_dd, Some(win_dd)),                              // windows, non-pin
-            (true, win_dd, None),                                      // windows
+            (false, default_dd.as_path(), Some(default_dd.as_path())),
+            (false, custom_dd.as_path(), Some(default_dd.as_path())),
+            (true, win_dd, Some(win_dd)),
+            (true, win_dd, None),
         ];
         for (is_windows, dd, default) in cases {
             let install = speedwave_runtime::consts::cli_install_path_for(is_windows, home, dd);
@@ -655,8 +941,6 @@ mod tests {
             );
         }
     }
-
-    // -- build_auth_command tests --
 
     #[test]
     fn build_auth_command_default_data_dir() {
@@ -786,8 +1070,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_trailing_slash_does_not_cause_mismatch() {
-        // Unix path derives from home, not data_dir; a trailing slash on data_dir
-        // must neither trigger env-pin nor change the CLI path.
         let home = std::path::Path::new("/Users/test");
         let dd = std::path::Path::new("/Users/test/.speedwave/");
         let cmd = build_auth_command_for_platform(
@@ -837,7 +1119,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_includes_project_in_login_argument() {
-        // Project name must flow into the trailing `--project '<name>'`.
         let cmd = build_auth_command(
             "specific-project-name",
             "/proj",
@@ -850,7 +1131,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_escapes_single_quote_in_project_name() {
-        // Defensive escaping in case validation is relaxed.
         let cmd = build_auth_command(
             "weird'name",
             "/proj",
@@ -860,8 +1140,6 @@ mod tests {
         );
         assert!(cmd.contains("--project 'weird'\\''name'"));
     }
-
-    // -- strip_windows_extended_length_prefix tests --
 
     #[test]
     fn strip_prefix_uppercase_drive() {
@@ -931,7 +1209,6 @@ mod tests {
 
     #[test]
     fn strip_prefix_bare_drive_no_separator() {
-        // \\?\C: is six bytes — must NOT strip (would yield "C:" which is drive-relative)
         assert_eq!(strip_windows_extended_length_prefix(r"\\?\C:"), r"\\?\C:");
     }
 
@@ -940,8 +1217,6 @@ mod tests {
         let s = "プロジェクト";
         assert_eq!(strip_windows_extended_length_prefix(s), s);
     }
-
-    // -- ps_escape_single_quoted tests --
 
     #[test]
     fn ps_escape_no_quotes() {
@@ -967,8 +1242,6 @@ mod tests {
     fn ps_escape_unicode_preserved() {
         assert_eq!(ps_escape_single_quoted("プロジェクト"), "プロジェクト");
     }
-
-    // -- build_auth_command_for_platform Windows branch tests --
 
     #[test]
     fn build_auth_command_for_platform_windows_default_data_dir() {
@@ -1035,7 +1308,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_strips_extended_length_prefix_issue_612() {
-        // Regression test for GitHub issue #612 — reproduces the exact failing input
         let cmd = build_auth_command_for_platform(
             "p",
             r"\\?\C:\Users\NikodemDeja\testproject",
@@ -1083,7 +1355,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_no_double_ampersand() {
-        // Defence-in-depth: no Windows output may contain " && "
         let cmd_no_env = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -1107,7 +1378,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_data_dir() {
-        // Custom data dir must use PS doubling (''), not POSIX ('\').
         let cmd = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -1126,7 +1396,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_strips_extended_length_prefix_in_data_dir() {
-        // Defence-in-depth: if data_dir carries \\?\, env var must be cleaned.
         let cmd = build_auth_command_for_platform(
             "p",
             r"C:\proj",
@@ -1142,7 +1411,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_passthrough_bare_drive() {
-        // \\?\C: (bare drive, no separator) must pass through unchanged
         let cmd = build_auth_command_for_platform(
             "p",
             r"\\?\C:",
@@ -1156,7 +1424,6 @@ mod tests {
 
     #[test]
     fn build_auth_command_for_platform_windows_escapes_single_quote_in_project_name() {
-        // Defensive escaping in case validation changes.
         let cmd = build_auth_command_for_platform(
             "weird'name",
             r"C:\proj",
@@ -1167,8 +1434,6 @@ mod tests {
         );
         assert!(cmd.contains("--project 'weird''name'"));
     }
-
-    // -- CLI install-presence gate --
 
     #[test]
     fn cli_presence_gate_rejects_missing_and_accepts_existing() {
@@ -1185,35 +1450,43 @@ mod tests {
         assert!(super::ensure_cli_installed_at(&present).is_ok());
     }
 
-    // ── AuthStatusResponse wire-format ─────────────────────────────────────
-
     #[test]
     fn auth_status_response_serializes_all_fields() {
         let resp = crate::types::AuthStatusResponse::from_flags(
-            true,  // api_key_configured
-            false, // oauth_authenticated
+            true, // api_key_configured
+            crate::types::OauthSignIn::None,
             true,  // needs_anthropic_auth
             false, // provider_configured
         );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["api_key_configured"], true);
         assert_eq!(json["oauth_authenticated"], false);
+        assert_eq!(json["oauth_sign_in"], "none");
         assert_eq!(json["needs_anthropic_auth"], true);
         assert_eq!(json["provider_configured"], false);
-        // Derived discriminant rides the same response (snake_case wire string).
         assert_eq!(json["status"], "no_provider");
     }
 
     #[test]
     fn auth_status_response_status_ready_wire_string() {
-        let resp = crate::types::AuthStatusResponse::from_flags(true, false, true, true);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            true,
+            crate::types::OauthSignIn::None,
+            true,
+            true,
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "ready");
     }
 
     #[test]
     fn auth_status_response_status_auth_required_wire_string() {
-        let resp = crate::types::AuthStatusResponse::from_flags(false, false, true, true);
+        let resp = crate::types::AuthStatusResponse::from_flags(
+            false,
+            crate::types::OauthSignIn::None,
+            true,
+            true,
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "auth_required");
     }

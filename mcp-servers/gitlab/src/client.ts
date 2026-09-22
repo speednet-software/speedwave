@@ -83,8 +83,6 @@ export function isTeachingError(error: unknown): boolean {
   return error instanceof TeachingError;
 }
 
-// ── Types ───────────────────────────────────────────────────────────────────────────────────────
-
 /** GitLab API client configuration containing authentication token and host URL */
 export interface GitLabConfig {
   token: string;
@@ -156,8 +154,6 @@ export interface GitLabCommit {
   created_at: string;
 }
 
-// ── Client Class ────────────────────────────────────────────────────────────────────────────────
-
 /**
  * GitLab API client for projects, merge requests, pipelines, commits, branches, and issues.
  * Wraps `@gitbeaker/rest` with consistent error handling and type-safe response mapping.
@@ -185,8 +181,6 @@ export class GitLabClient {
     return this.statusTracker.getHealth();
   }
 
-  // ── Parameter Validation ──────────────────────────────────────────────────────────────────────
-
   /**
    * Validates that required parameters are provided; throws listing all missing names.
    * @param params - Object mapping parameter names to their values.
@@ -203,14 +197,11 @@ export class GitLabClient {
     }
   }
 
-  // ── Response Mappers ──────────────────────────────────────────────────────────────────────────
-
   /**
    * Maps a raw gitbeaker MR response to {@link GitLabMergeRequest}, normalizing field casing.
    * @param mr - Raw merge request response object from GitLab API.
    */
   private mapMergeRequestResponse(mr: Record<string, unknown>): GitLabMergeRequest {
-    // Warn if critical fields are missing (helps debug API response issues)
     const sourceBranch = pick(mr, 'sourceBranch', 'source_branch');
     const targetBranch = pick(mr, 'targetBranch', 'target_branch');
     const webUrl = pick(mr, 'webUrl', 'web_url');
@@ -250,20 +241,15 @@ export class GitLabClient {
     };
   }
 
-  // ── Error Handling ────────────────────────────────────────────────────────────────────────────
-
   /**
    * Formats a GitLab API error (typically from `@gitbeaker/rest`) into a user-friendly message
    * with actionable recovery guidance (auth/permission/not-found/5xx/network cases).
    * @param error - The error object from GitLab API (typically from `@gitbeaker/rest`).
    */
   static formatError(error: unknown): string {
-    // An already-translated teaching error is returned verbatim: its message is the guidance,
-    // and message-sniffing below (e.g. on "not found") must not reclassify it.
     if (isTeachingError(error)) {
       return (error as Error).message;
     }
-    // Handle ``@gitbeaker``/rest error responses
     const err = error as {
       response?: { status?: number };
       cause?: { response?: { status?: number }; description?: unknown };
@@ -293,7 +279,6 @@ export class GitLabClient {
       );
     }
 
-    // 5xx - Server errors
     if (status && status >= 500 && status < 600) {
       if (status === 500) return 'GitLab server error. Please try again later.';
       if (status === 502) return 'GitLab bad gateway. The server may be overloaded.';
@@ -320,7 +305,6 @@ export class GitLabClient {
       return withSetupGuidance('Network error. Check your GitLab URL.');
     }
 
-    // Extract meaningful part from gitbeaker errors
     if (typeof err.cause?.description === 'string') {
       return `GitLab API error: ${err.cause.description}`;
     }
@@ -371,8 +355,6 @@ export class GitLabClient {
     };
   }
 
-  // ── Projects ──────────────────────────────────────────────────────────────────────────────────
-
   /**
    * Lists GitLab projects accessible to the authenticated user, sorted by last activity
    * (most recent first). Only the first page is returned, capped by `options.limit` (default 20).
@@ -405,7 +387,6 @@ export class GitLabClient {
       archived: options.archived,
     });
 
-    // Take only first page (limit results)
     const limited = projects.slice(0, limit);
 
     return limited.map((p: Record<string, unknown>) => ({
@@ -464,7 +445,6 @@ export class GitLabClient {
     } = {}
   ): Promise<unknown[]> {
     this.validateRequired({ query });
-    // Search within project or globally
     if (options.project_id) {
       const results = await this.gitlab.Search.all('blobs' as const, query, {
         projectId: options.project_id,
@@ -479,8 +459,6 @@ export class GitLabClient {
     });
     return results as unknown[];
   }
-
-  // ── Merge Requests ────────────────────────────────────────────────────────────────────────────
 
   /**
    * Lists merge requests in a project, filterable by state, author/reviewer username,
@@ -507,7 +485,6 @@ export class GitLabClient {
   ): Promise<GitLabMergeRequest[]> {
     this.validateRequired({ project_id: projectId });
     const limit = clampPageSize(options.limit, 20, 100);
-    // Use type assertion to handle state parameter
     const queryOptions: Record<string, unknown> = {
       projectId,
       perPage: limit,
@@ -534,7 +511,6 @@ export class GitLabClient {
       queryOptions as Parameters<typeof this.gitlab.MergeRequests.all>[0]
     )) as unknown as Array<Record<string, unknown>>;
 
-    // Take only first page
     const limited = mrs.slice(0, limit);
 
     return limited.map((mr) => this.mapMergeRequestResponse(mr));
@@ -625,7 +601,6 @@ export class GitLabClient {
     } = {}
   ): Promise<GitLabMergeRequest> {
     this.validateRequired({ project_id: projectId, mr_iid: mrIid });
-    // For auto_merge, use accept with mergeWhenPipelineSucceeds option
     const mr = await this.gitlab.MergeRequests.accept(projectId, mrIid, {
       squash: options.squash,
       shouldRemoveSourceBranch: options.should_remove_source_branch,
@@ -765,8 +740,6 @@ export class GitLabClient {
     return await this.gitlab.MergeRequestNotes.create(projectId, mrIid, body);
   }
 
-  // ── Discussions ───────────────────────────────────────────────────────────────────────────────
-
   /**
    * Retrieves all discussion threads (comments, review notes, resolved status) on an MR.
    * @param projectId - Project ID or path (e.g. "group/project" or 123).
@@ -799,8 +772,6 @@ export class GitLabClient {
   ): Promise<unknown> {
     return await this.gitlab.MergeRequestDiscussions.create(projectId, mrIid, body);
   }
-
-  // ── Branches ──────────────────────────────────────────────────────────────────────────────────
 
   /**
    * Lists branches with commit details and protection status; `search` supports wildcards.
@@ -865,8 +836,6 @@ export class GitLabClient {
     return await this.gitlab.Repositories.compare(projectId, from, to);
   }
 
-  // ── Commits ───────────────────────────────────────────────────────────────────────────────────
-
   /**
    * Retrieves chronological commit history for a specific branch (default limit 20).
    * @param projectId - Project ID or path (e.g. "group/project" or 123).
@@ -886,7 +855,6 @@ export class GitLabClient {
       maxPages: 1,
     });
 
-    // Take only first page
     const limited = commits.slice(0, clamped);
 
     return limited.map((c: Record<string, unknown>) => ({
@@ -963,10 +931,9 @@ export class GitLabClient {
     query: string,
     options: { ref?: string; limit?: number } = {}
   ): Promise<GitLabCommit[]> {
-    // GitLab doesn't have direct commit search, so we filter by message
     const commits = await this.gitlab.Commits.all(projectId, {
       refName: options.ref,
-      perPage: 100, // Get more to filter
+      perPage: 100,
       maxPages: 1,
     });
     const filtered = commits
@@ -986,8 +953,6 @@ export class GitLabClient {
       created_at: String(c.createdAt || c.created_at || ''),
     }));
   }
-
-  // ── Repository ────────────────────────────────────────────────────────────────────────────────
 
   /**
    * Gets the repository file tree, optionally recursive and path-filtered (default limit 100).
@@ -1061,8 +1026,6 @@ export class GitLabClient {
     return blame;
   }
 
-  // ── Artifacts ─────────────────────────────────────────────────────────────────────────────────
-
   /**
    * Lists all artifacts from jobs in a pipeline. Only the first {@link JOB_LIST_PAGE_CAP} jobs
    * of the pipeline are scanned; `truncated` is `true` when that cap was hit.
@@ -1073,7 +1036,6 @@ export class GitLabClient {
     projectId: string | number,
     pipelineId: number
   ): Promise<{ artifacts: unknown[]; truncated: boolean }> {
-    // One row over the cap is fetched purely as a truncation sentinel.
     const jobs = await this.gitlab.Jobs.all(projectId, {
       pipelineId,
       perPage: JOB_LIST_PAGE_CAP + 1,
@@ -1121,11 +1083,8 @@ export class GitLabClient {
    * @param jobId - Job ID to erase artifacts from.
    */
   async deleteArtifacts(projectId: string | number, jobId: number): Promise<void> {
-    // Erase removes the job log and artifacts
     await this.gitlab.Jobs.erase(projectId, jobId);
   }
-
-  // ── Issues ────────────────────────────────────────────────────────────────────────────────────
 
   /**
    * Lists issues, filterable by state, comma-separated labels, assignee, and identity scope.
@@ -1157,7 +1116,6 @@ export class GitLabClient {
       perPage: limit,
       maxPages: 1,
     } as Parameters<typeof this.gitlab.Issues.all>[0]);
-    // Handle both array and paginated response
     const issues = Array.isArray(result) ? result : (result as { data: unknown[] }).data || [];
     return issues.slice(0, limit);
   }
@@ -1168,7 +1126,6 @@ export class GitLabClient {
    * @param issueIid - Issue internal ID (IID) shown in the UI.
    */
   async getIssue(projectId: string | number, issueIid: number): Promise<unknown> {
-    // Use Issues.all with specific project and iid filter
     const issues = await this.gitlab.Issues.all({
       projectId,
       iids: [issueIid],
@@ -1285,8 +1242,6 @@ export class GitLabClient {
     return await this.gitlab.IssueNotes.create(projectId, issueIid, body);
   }
 
-  // ── Labels ────────────────────────────────────────────────────────────────────────────────────
-
   /**
    * Lists all labels in a project, optionally filtered by name (default limit 50).
    * @param projectId - Project ID or path (e.g. 123 or "group/project").
@@ -1327,8 +1282,6 @@ export class GitLabClient {
       description: options.description,
     });
   }
-
-  // ── Pipelines ─────────────────────────────────────────────────────────────────────────────────
 
   /**
    * Lists CI/CD pipelines, filterable by status and branch/tag ref (default limit 5).
@@ -1390,7 +1343,6 @@ export class GitLabClient {
   async showPipeline(projectId: string | number, pipelineId: number): Promise<unknown> {
     this.validateRequired({ project_id: projectId, pipeline_id: pipelineId });
     const pipeline = await this.gitlab.Pipelines.show(projectId, pipelineId);
-    // One row over the cap is fetched purely as a truncation sentinel.
     const fetched = await this.gitlab.Jobs.all(projectId, {
       pipelineId,
       perPage: JOB_LIST_PAGE_CAP + 1,
@@ -1469,8 +1421,6 @@ export class GitLabClient {
     };
   }
 
-  // ── Tags & Releases ───────────────────────────────────────────────────────────────────────────
-
   /**
    * Lists tags in a project, newest first, optionally filtered by name (default limit 20).
    * @param projectId - Project ID or path (e.g. 123 or "group/project").
@@ -1535,7 +1485,6 @@ export class GitLabClient {
   ): Promise<{ deleted_tag?: { name: string; target: string; message?: string } }> {
     this.validateRequired({ project_id: projectId, tag_name: tagName });
 
-    // Audit: capture tag info before deletion
     let tagInfo: { name: string; target: string; message?: string } | undefined;
     try {
       const tag = (await this.gitlab.Tags.show(projectId, tagName)) as {
@@ -1545,7 +1494,6 @@ export class GitLabClient {
       };
       tagInfo = { name: tag.name, target: tag.target, message: tag.message };
     } catch (error) {
-      // Tag might not exist or we lack permissions - proceed with deletion attempt
       console.warn(`${ts()} [GitLabClient] Failed to get tag info before deletion:`, {
         project: projectId,
         tag: tagName,
@@ -1582,25 +1530,20 @@ export class GitLabClient {
   }
 }
 
-// ── Initialization ──────────────────────────────────────────────────────────────────────────────
-
 /**
  * Initializes GitLab client from /tokens/token and /tokens/host_url (or GITLAB_URL, then https://gitlab.com).
  * @returns Configured GitLabClient instance, or null if token not found/invalid
  */
 export async function initializeGitLabClient(): Promise<GitLabClient | null> {
   try {
-    // Load token from RO mount
     console.log(`${ts()} 📖 Loading GitLab token from: ${tokensDir()}/token`);
     const token = await loadTokenFile('token');
 
     if (!token) {
-      // Graceful degradation: return null, let server start
       console.warn(`${ts()} ${withSetupGuidance('GitLab token is empty or not found.')}`);
       return null;
     }
 
-    // Load host URL from /tokens/host_url or env var
     let host = 'https://gitlab.com';
 
     try {
@@ -1623,7 +1566,6 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
       }
     }
 
-    // Connection test runs async; see backgroundConnectionTest
     const client = new GitLabClient({ token, host });
     backgroundConnectionTest(
       client.statusTracker,
@@ -1639,8 +1581,6 @@ export async function initializeGitLabClient(): Promise<GitLabClient | null> {
     console.log(`${ts()} ✅ GitLab client initialized (host: ${host}), connection test scheduled`);
     return client;
   } catch (error) {
-    // Graceful degradation: log warning, return null, let server start
-    // DO NOT throw here - see JSDoc above for rationale
     console.warn(`${ts()} Failed to initialize GitLab client: ${error}`);
     return null;
   }

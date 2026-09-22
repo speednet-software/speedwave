@@ -5,11 +5,10 @@
 describe('App Lifecycle', function () {
   it('should launch with the Speedwave window title', async function () {
     this.timeout(60_000);
-    // Wait for Angular to bootstrap — title may not be set immediately.
-    await browser.waitUntil(
-      async () => (await browser.getTitle()) === 'Speedwave',
-      { timeout: 30_000, timeoutMsg: 'Window title did not become "Speedwave" within 30s' },
-    );
+    await browser.waitUntil(async () => (await browser.getTitle()) === 'Speedwave', {
+      timeout: 30_000,
+      timeoutMsg: 'Window title did not become "Speedwave" within 30s',
+    });
   });
 
   it('should render the Angular app root', async function () {

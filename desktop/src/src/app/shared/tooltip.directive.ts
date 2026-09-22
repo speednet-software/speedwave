@@ -60,7 +60,6 @@ const POSITIONS: Record<TooltipPlacement, ConnectedPosition[]> = {
       overlayY: 'bottom',
       offsetY: -OFFSET_PX,
     },
-    // Fallback: bottom
     {
       originX: 'center',
       originY: 'bottom',
@@ -77,7 +76,6 @@ const POSITIONS: Record<TooltipPlacement, ConnectedPosition[]> = {
       overlayY: 'top',
       offsetY: OFFSET_PX,
     },
-    // Fallback: top
     {
       originX: 'center',
       originY: 'top',
@@ -94,7 +92,6 @@ const POSITIONS: Record<TooltipPlacement, ConnectedPosition[]> = {
       overlayY: 'center',
       offsetX: -OFFSET_PX,
     },
-    // Fallback: right
     {
       originX: 'end',
       originY: 'center',
@@ -111,7 +108,6 @@ const POSITIONS: Record<TooltipPlacement, ConnectedPosition[]> = {
       overlayY: 'center',
       offsetX: OFFSET_PX,
     },
-    // Fallback: left
     {
       originX: 'start',
       originY: 'center',
@@ -148,13 +144,11 @@ export class TooltipDirective implements OnDestroy {
 
   /** Wires the effects that strip the native `title` and sync panel inputs. */
   constructor() {
-    // Strip native `title`; effect re-runs on label change.
     effect(() => {
       this.label();
       this.host.nativeElement.removeAttribute('title');
     });
 
-    // Sync live panel inputs (label/kbd/placement) while visible.
     effect(() => {
       const ref = this.panelRef;
       if (!ref) return;
@@ -163,7 +157,6 @@ export class TooltipDirective implements OnDestroy {
       ref.setInput('placement', this.placement());
     });
 
-    // Reposition the overlay when placement changes mid-flight.
     effect(() => {
       const positions = this.positions();
       if (this.overlayRef) {
@@ -223,7 +216,6 @@ export class TooltipDirective implements OnDestroy {
       this.overlayRef = this.overlay.create({
         positionStrategy,
         scrollStrategy: this.scrollStrategies.close(),
-        // Non-interactive panel; CSS pointer-events:none keeps host hover stable.
         hasBackdrop: false,
         disposeOnNavigation: true,
       });
@@ -238,7 +230,6 @@ export class TooltipDirective implements OnDestroy {
 
     this.panelRef = componentRef;
 
-    // Force reflow, then flip data-state to trigger the opacity transition.
     const overlayEl = this.overlayRef.overlayElement;
     void overlayEl.offsetWidth;
     componentRef.setInput('visible', true);

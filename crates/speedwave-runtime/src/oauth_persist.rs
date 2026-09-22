@@ -47,7 +47,6 @@ pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), S
     let parent = path
         .parent()
         .ok_or_else(|| "oauth state: no parent".to_string())?;
-    // Owner-only dir on both platforms (Unix 0o700 + Windows ACL).
     crate::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
 
     let now_ms = std::time::SystemTime::now()
@@ -203,7 +202,6 @@ mod tests {
 
     #[test]
     fn max_expires_in_matches_oauth_tools_ts() {
-        // Cross-language SSOT guard (cf. allowed_auth_field_types_match_ts_union).
         let src = include_str!("../../../mcp-servers/oauth/src/tools.ts");
         let re = regex::Regex::new(r"const\s+MAX_EXPIRES_IN_SECONDS\s*=\s*([^;]+);").unwrap();
         let expr = re
@@ -213,7 +211,6 @@ mod tests {
             .next()
             .unwrap()
             .replace(char::is_whitespace, "");
-        // Both sides are written as `10*365*24*60*60`; compare the evaluated value.
         let ts_value: u64 = expr
             .split('*')
             .map(|n| n.parse::<u64>().expect("numeric factor"))
@@ -234,12 +231,10 @@ mod tests {
 
     #[test]
     fn clamps_absurd_expires_in_without_overflow() {
-        // u64::MAX would overflow `now_ms + expires_in*1000` without the clamp.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("big.json");
         write_oauth_state(&path, &params_with_expires(u64::MAX)).unwrap();
         let json = read_json(&path);
-        // Clamped: expiresAt is a valid future ISO date, not a wrapped/past one.
         let exp = json["expiresAt"].as_str().unwrap();
         assert!(exp.ends_with('Z') && exp.starts_with("20"), "got: {exp}");
     }

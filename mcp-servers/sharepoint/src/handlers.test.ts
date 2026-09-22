@@ -34,7 +34,6 @@ function createMockClient(): MockClient {
     getCurrentUser: vi.fn(),
     getHealthStatus: vi.fn().mockReturnValue({ tokenSaveError: null }),
     formatError: vi.fn((error: unknown) => {
-      // Replicate SharePointClient.formatError logic for testing
       const e = error as { message?: string };
       const message = e.message || '';
       if (message.includes('401') || message.includes('Unauthorized')) {
@@ -62,21 +61,17 @@ describe('SharePoint handler integration', () => {
     vi.clearAllMocks();
   });
 
-  // ── createToolDefinitions routing ──────────────────────────────────────────────────────────────
-
   describe('createToolDefinitions', () => {
     it('returns all tool definitions with correct names', () => {
       const client = createMockClient();
       const tools = createToolDefinitions(client as unknown as SharePointClient);
 
       const names = tools.map((t) => t.tool.name);
-      // file/user tools (5)
       expect(names).toContain('listFileIds');
       expect(names).toContain('getFileFull');
       expect(names).toContain('downloadFile');
       expect(names).toContain('uploadFile');
       expect(names).toContain('getCurrentUser');
-      // page tools (8, PR4)
       expect(names).toContain('listPages');
       expect(names).toContain('getPage');
       expect(names).toContain('createPage');
@@ -85,7 +80,6 @@ describe('SharePoint handler integration', () => {
       expect(names).toContain('updateWebPart');
       expect(names).toContain('removeWebPart');
       expect(names).toContain('publishPage');
-      // list / item / column / deletion tools (13, PR5)
       expect(names).toContain('listLists');
       expect(names).toContain('getList');
       expect(names).toContain('createList');
@@ -120,8 +114,6 @@ describe('SharePoint handler integration', () => {
       });
     });
   });
-
-  // ── Not configured (null client) - withClient guard ────────────────────────────────────────────
 
   describe('not configured (null client)', () => {
     it('listFileIds returns NOT_CONFIGURED error', async () => {
@@ -187,8 +179,6 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  // ── Authentication error handling ──────────────────────────────────────────────────────────────
-
   describe('authentication errors', () => {
     it('handleListFileIds returns error on 401 Unauthorized', async () => {
       const client = createMockClient();
@@ -249,8 +239,6 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  // ── Path traversal rejection ───────────────────────────────────────────────────────────────────
-
   describe('path traversal rejection at handler level', () => {
     it('handleUploadFile rejects path with ../ traversal', async () => {
       const client = createMockClient();
@@ -292,8 +280,6 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.code).toBe('LIST_FAILED');
     });
   });
-
-  // ── Empty / malformed API responses ────────────────────────────────────────────────────────────
 
   describe('empty and malformed responses', () => {
     it('handleListFileIds handles undefined files array', async () => {
@@ -343,8 +329,6 @@ describe('SharePoint handler integration', () => {
       expect(result.error?.code).toBe('USER_FAILED');
     });
   });
-
-  // ── handleUploadFile parameter validation ──────────────────────────────────────────────────────
 
   describe('handleUploadFile parameter validation', () => {
     it('returns MISSING_PARAM when localPath is missing', async () => {
@@ -408,8 +392,6 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  // ── handleDownloadFile parameter validation ────────────────────────────────────────────────────
-
   describe('handleDownloadFile parameter validation', () => {
     it('returns MISSING_PARAM when sharepointPath is missing', async () => {
       const client = createMockClient();
@@ -448,8 +430,6 @@ describe('SharePoint handler integration', () => {
       expect(client.downloadFile).toHaveBeenCalledWith('docs/file.txt', '/workspace/file.txt');
     });
   });
-
-  // ── Rate limiting (HTTP 429) ───────────────────────────────────────────────────────────────────
 
   describe('rate limiting', () => {
     it('handleListFileIds returns error on HTTP 429', async () => {
@@ -511,8 +491,6 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  // ── Network errors ─────────────────────────────────────────────────────────────────────────────
-
   describe('network errors', () => {
     it('handleListFileIds handles ECONNREFUSED', async () => {
       const client = createMockClient();
@@ -560,8 +538,6 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  // ── Non-Error objects thrown ───────────────────────────────────────────────────────────────────
-
   describe('non-Error objects thrown', () => {
     it('handleListFileIds handles string thrown', async () => {
       const client = createMockClient();
@@ -584,8 +560,6 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  // ── withValidation wrapper (tested through createToolDefinitions) ──────────────────────────────
-
   describe('withValidation wrapper', () => {
     it('wraps successful results in ToolsCallResult format', async () => {
       const client = createMockClient();
@@ -603,7 +577,6 @@ describe('SharePoint handler integration', () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].type).toBe('text');
-      // The text should be JSON-stringified data
       const parsed = JSON.parse(result.content[0].text as string);
       expect(parsed.displayName).toBe('Test User');
     });
@@ -628,7 +601,6 @@ describe('SharePoint handler integration', () => {
       const tools = createToolDefinitions(client as unknown as SharePointClient);
       const listTool = tools.find((t) => t.tool.name === 'listFileIds')!;
 
-      // Synchronous throw exercises withValidation's outer catch.
       client.listFiles.mockImplementation(() => {
         throw new Error('Unexpected synchronous error');
       });
@@ -637,7 +609,6 @@ describe('SharePoint handler integration', () => {
 
       expect(result.isError).toBe(true);
       const parsed = JSON.parse(result.content[0].text as string);
-      // Could be LIST_FAILED or HANDLER_ERROR depending on where the catch happens
       expect(['LIST_FAILED', 'HANDLER_ERROR']).toContain(parsed.code);
     });
   });

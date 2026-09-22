@@ -19,22 +19,18 @@ defaults:
 
 jobs:
   lint:
-    # macOS runner: `cargo clippy -p speedwave-runtime` instantiates
-    # `detect_runtime()`, which compile_error!s on any target_os other than
-    # macos/windows after ADR-059. Ubuntu would fire that error before clippy
-    # ever runs. macOS-latest is the cheapest runner that satisfies the cfg.
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           components: clippy, rustfmt
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -46,7 +42,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-lint-
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: .node-version
           cache: npm
@@ -60,29 +56,20 @@ jobs:
           npm ci --ignore-scripts
           cd mcp-servers && npm ci
 
-      # policies/src/engine.ts imports the wasm-pkg artifact directly, so the `tsc` build below
-      # needs it staged first (build-wasm.sh — matches the desktop job's toolchain install).
       - name: Install wasm toolchain (PII engine)
         run: |
           rustup target add wasm32-unknown-unknown
           npm install -g wasm-pack
 
-      # cmake builds whisper.cpp for check-clippy's audio-transcription pass (ADR-056).
       - name: Install cmake
         run: brew install cmake
 
-      # `make check-clippy` is the authoritative gate: --all-targets (test code,
-      # integration binaries) plus the test-support + audio-transcription feature pass.
       - name: Rust clippy
         run: make check-clippy
 
-      # containers/proxy is its own Cargo workspace (separate lockfile) — its
-      # deny-level [lints.clippy] table needs its own clippy invocation.
       - name: Proxy clippy
         run: make check-proxy-clippy
 
-      # `make check-fmt` covers all three Rust workspaces (root, desktop/src-tauri,
-      # containers/proxy) plus Prettier — the same gate pre-push runs.
       - name: Format check
         run: make check-fmt
 
@@ -104,18 +91,16 @@ jobs:
         run: npx eslint .
 
   test:
-    # macOS runner: see comment on the `lint` job above — speedwave-runtime
-    # compile_error!s on Linux per ADR-059.
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -127,7 +112,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: .node-version
           cache: npm
@@ -141,14 +126,9 @@ jobs:
           npm ci --ignore-scripts
           cd mcp-servers && npm ci
 
-      # cmake is needed to build whisper.cpp (vendored submodule of whisper-rs)
-      # for the audio-transcription feature tests below. ADR-056.
       - name: Install cmake
         run: brew install cmake
 
-      # policies/src/engine.ts imports the wasm-pkg artifact; `build-mcp` (coverage-mcp's and
-      # test-mcp-os-bundle's prerequisite) runs policies' `build:wasm` script, so it needs this
-      # toolchain present (matches the desktop job).
       - name: Install wasm toolchain (PII engine)
         run: |
           rustup target add wasm32-unknown-unknown
@@ -163,13 +143,9 @@ jobs:
       - name: MCP tests + coverage
         run: make coverage-mcp
 
-      # Unix-only upgrade-path test against the real bundled mcp-os worker;
-      # reached locally only via `make test-desktop`, so CI is its sole gate.
       - name: mcp-os bundle upgrade-path test
         run: make test-mcp-os-bundle
 
-      # vitest above mocks the office worker's subprocesses; this is the only
-      # gate that actually runs the Python scripts against the real libraries.
       - name: Office Python script tests
         run: make test-mcp-office-py
 
@@ -183,21 +159,18 @@ jobs:
         run: make test-ci
 
   desktop:
-    # macOS runner: target_os=macos so build.rs/bundle.rs accept the target
-    # naturally. Linux runners would need a special-case linux-bundle path
-    # purely for CI — see ADR-059.
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           components: clippy
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -208,15 +181,12 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-desktop-
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: desktop/src/package-lock.json
 
-      # This job (not the prepare-desktop-bundle composite action) is what runs
-      # bundle-build-context.bats against the real script — `make test-desktop-build` below
-      # invokes it ~20 times, each rebuilding the PII engine wasm artifact.
       - name: Install wasm toolchain (PII engine)
         run: |
           rustup target add wasm32-unknown-unknown
@@ -231,8 +201,6 @@ jobs:
         run: npm ci
 
       - name: Install mcp-servers dependencies
-        # Required by `make test-desktop-build` → `build-mcp` → TypeScript
-        # compiler needs @types/node and mcp-servers workspace deps.
         working-directory: mcp-servers
         run: npm ci
 
@@ -245,8 +213,6 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo clippy -- -D warnings
 
-      # Executes the crate's macOS/cross-platform unit tests; the Windows-only
-      # ones run in the desktop-windows-check job (cfg-excluded here).
       - name: Desktop tests
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
@@ -258,17 +224,7 @@ jobs:
 
       - name: Angular tests + coverage
         working-directory: desktop/src
-        # Use `ng test` rather than `npx vitest run` directly: the
-        # `@angular/build:unit-test` builder generates the
-        # `init-testbed.js` bootstrap chunk that calls
-        # `TestBed.initTestEnvironment()` and the jsdom DOM. Calling
-        # vitest directly skips that chunk and every spec fails with
-        # "Need to call TestBed.initTestEnvironment() first" /
-        # "document is not defined".
-        # `--runner-config vitest.config.ts` opts in to `retry: 2`,
-        # which covers a hoist race in Vitest's `isolate: false` mode
-        # forced by the Angular unit-test builder. See vitest.config.ts.
-        run: npx ng test --no-watch --coverage --runner-config vitest.config.ts
+        run: npx ng test --no-watch --coverage
 
       - name: Install bats
         run: brew install bats-core
@@ -280,28 +236,24 @@ jobs:
         run: make test-release-gate
 
       - name: Desktop bats tests
-        # Runs make test-desktop-build which has build-angular + build-mcp
-        # as dependencies. desktop-build.bats checks that the Angular
-        # frontendDist contains index.html after the build — skipping the
-        # build step would defeat the purpose of that assertion.
         run: make test-desktop-build
 
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: .node-version
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -316,17 +268,14 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # Both lockfiles and the ignore list live in the Makefile target (AUDIT_IGNORE),
-      # so CI cannot drift from a local `make audit`.
       - name: Rust audit (both lockfiles)
         run: make audit-rust
 
   swift:
-    if: github.event_name == 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Build native macOS CLI binaries (universal)
         run: scripts/build-native-macos.sh
@@ -334,8 +283,12 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
-  # Windows behaviour the macos-latest lint/test jobs can't cover: the full
-  # runtime + CLI suite on a real Windows filesystem/shell.
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: Native CLI embedded-plist guards
+        run: make test-native-cli-plist
+
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 30
@@ -343,13 +296,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -359,8 +312,6 @@ jobs:
           key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
-      # Mirrors `make test-rust`'s cargo line (guard: _tests/ci/rust-coverage-gates.bats);
-      # audio-transcription (whisper.cpp) runs in the macOS `test` job instead.
       - name: cargo test (full suite incl. test-support)
         run: cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support
 
@@ -384,36 +335,24 @@ jobs:
           exit "$fail"
 
   desktop-windows-check:
-    # `desktop` job above runs on macOS-latest. This job runs `cargo check`
-    # on windows-latest with stubbed bundle resources so Windows-only compile
-    # errors (e.g. cfg-gated imports of types used in cross-platform fn
-    # signatures) are caught in PR CI without paying for a full Tauri bundle.
-    # The budget covers a cold whisper.cpp + ggml-vulkan shader build (ADR-085).
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      # The runner's D:\a\speedwave\speedwave base plus the MSBuild TryCompile scratch of the
-      # ggml-vulkan shader build crosses MAX_PATH (C1083) — the cross-platform.md escape hatch.
       CARGO_TARGET_DIR: D:\st
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
-      # The runner image carries the Visual Studio version used to build the
-      # vendored whisper.cpp (whisper-rs-sys) via CMake. Fold the image version
-      # into the cache key so a runner-image bump (e.g. VS 2022 -> VS 2026)
-      # never restores a target/ whose CMakeCache.txt names a now-absent
-      # generator — which makes cmake-rs abort the build script.
       - name: Capture runner image version
         run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -424,9 +363,6 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
 
       - name: Install Vulkan SDK
-        # The Windows whisper build carries the Vulkan backend (ADR-085); the runtime loader
-        # dir goes on PATH so `cargo test --bins` binaries (load-time vulkan-1.dll import)
-        # start on a GPU-less runner — no device is a clean CPU fallback, no loader is not.
         shell: pwsh
         run: |
           $out = scripts/install-vulkan-sdk.ps1
@@ -444,13 +380,7 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
 
-      # The runtime transcription module carries #[cfg(windows)] tests (audio_windows: WASAPI
-      # capture, drop counters) that no other job compiles — the macOS lane's
-      # `make test-transcription` skips them by target. The module filter runs every current
-      # and future windows-gated test in the module, so there is no name list to drift.
       - name: cargo test speedwave-runtime transcription (windows)
-        # --lib: the windows-gated tests live in the lib target; without it every integration
-        # target relinks libwhisper+ggml-vulkan to run zero tests. Guard pins audio_windows.
         run: |
           LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
           grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
@@ -459,10 +389,6 @@ jobs:
           # feature — check-only, so nothing links libwhisper for zero runnable tests.
           cargo check --tests -p speedwave-runtime --features audio-transcription
 
-      # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
-      # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.
-      # `_tests/ci/windows-only-test-list.bats` fails CI if a Windows-cfg test
-      # is added to the crate without a matching name added here.
       - name: cargo test speedwave-desktop (windows-only)
         working-directory: desktop/src-tauri
         env:
@@ -492,5 +418,16 @@ jobs:
           wipe_data_dir_names_failing_path_on_error
           wipe_data_dir_partial_failure_still_removes_deletable_sibling
 
-      # installer_hooks tests run on macOS; cargo check above already validates
-      # the Windows compile of every target.
+
+  ci-gate:
+    if: always()
+    needs: [lint, test, desktop, audit, swift, runtime-windows, desktop-windows-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Every job succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: scripts/ci-gate.sh

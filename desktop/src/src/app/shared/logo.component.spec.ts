@@ -17,7 +17,6 @@ describe('LogoComponent', () => {
     expect(host.getAttribute('aria-label')).toBe('Speedwave');
   });
 
-  // Inline currentColor SVG — CSS mask breaks under tauri://localhost.
   it('renders an inline SVG whose path uses currentColor', () => {
     const host = fixture.nativeElement as HTMLElement;
     const path = host.querySelector('svg path');

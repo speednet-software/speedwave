@@ -5,7 +5,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'node:path';
 
-// vi.hoisted ensures these are created before vi.mock factories execute
 const { execFileAsyncMock, existsSyncMock } = vi.hoisted(() => ({
   execFileAsyncMock: vi.fn(),
   existsSyncMock: vi.fn(() => true),
@@ -29,7 +28,6 @@ vi.mock('node:util', async () => {
   };
 });
 
-// Import after mocks are set up
 import { resolvePaths, runCommand, buildChildEnv, SAFE_ENV_KEYS } from './platform-runner.js';
 import { BASE_SAFE_ENV_KEYS } from '@speedwave/mcp-shared';
 import { ALLOWED_COMMANDS } from './tools/index.js';
@@ -128,7 +126,6 @@ describe('platform-runner', () => {
       });
     });
 
-    // Exercises resolveDarwinPaths() directly on any host platform.
     describe('macOS paths (resolveDarwinPaths)', () => {
       const originalPlatform = process.platform;
 
@@ -154,7 +151,6 @@ describe('platform-runner', () => {
         expect(paths.mail).toContain('mail-cli');
         expect(paths.notes).toContain(path.join('native', 'macos', 'notes'));
         expect(paths.notes).toContain('notes-cli');
-        // macOS uses four distinct binaries, not one shared one.
         expect(paths.calendar).not.toBe(paths.reminders);
         expect(path.isAbsolute(paths.reminders)).toBe(true);
       });
@@ -198,7 +194,7 @@ describe('platform-runner', () => {
     });
 
     it('has expected command count per domain', () => {
-      expect(ALLOWED_COMMANDS.reminders.size).toBe(5);
+      expect(ALLOWED_COMMANDS.reminders.size).toBe(6);
       expect(ALLOWED_COMMANDS.calendar.size).toBe(6);
       expect(ALLOWED_COMMANDS.mail.size).toBe(7);
       expect(ALLOWED_COMMANDS.notes.size).toBe(7);
@@ -217,7 +213,6 @@ describe('platform-runner', () => {
     });
 
     it('calls execFile with the bare-command form on macOS', async () => {
-      // Force darwin so this branch is covered on a non-darwin CI runner too.
       mockPlatform('darwin');
       execFileAsyncMock.mockResolvedValue({ stdout: '{"lists": []}', stderr: '' });
 
@@ -365,7 +360,6 @@ describe('platform-runner', () => {
     it('passes filtered env to child process (no secret leakage)', async () => {
       execFileAsyncMock.mockResolvedValue({ stdout: '{}', stderr: '' });
 
-      // Set a secret that must NOT leak
       process.env.MCP_OS_AUTH_TOKEN = 'secret-token-value';
       process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
 
@@ -383,11 +377,9 @@ describe('platform-runner', () => {
 
       for (const [domain, commands] of Object.entries(ALLOWED_COMMANDS)) {
         for (const cmd of commands) {
-          // Should not throw allowlist error — may throw binary-not-found, but that's OK
           await expect(
             runCommand(domain as any, cmd).catch((e: Error) => {
               if (e.message.includes('Unknown command')) throw e;
-              // Ignore non-allowlist errors (binary not found, etc.)
             })
           ).resolves.not.toThrow();
         }
@@ -399,7 +391,6 @@ describe('platform-runner', () => {
     const originalEnv = { ...process.env };
 
     afterEach(() => {
-      // Restore original env
       for (const key of Object.keys(process.env)) {
         if (!(key in originalEnv)) {
           delete process.env[key];
@@ -453,7 +444,6 @@ describe('platform-runner', () => {
     });
 
     it('only contains allowlisted keys', () => {
-      // Populate many env vars
       process.env.PATH = '/usr/bin';
       process.env.HOME = '/home/user';
       process.env.SECRET_KEY = 'leaked';
@@ -463,7 +453,6 @@ describe('platform-runner', () => {
       const env = buildChildEnv();
       const keys = Object.keys(env);
 
-      // Every key in the output must be from the implementation's allowlist
       const safeKeys = new Set(SAFE_ENV_KEYS);
       for (const key of keys) {
         expect(safeKeys.has(key), `Unexpected key in child env: ${key}`).toBe(true);

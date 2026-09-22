@@ -4,7 +4,6 @@ import XCTest
 
 final class NotesTests: XCTestCase {
 
-    // MARK: - Error Messages
 
     func testNotesCLIErrorMissingField() {
         let error = NotesCLIError.missingField("id")
@@ -21,7 +20,6 @@ final class NotesTests: XCTestCase {
         XCTAssertTrue(error.errorDescription!.contains("No fields to update"))
     }
 
-    // MARK: - Command Validation
 
     func testCreateNoteRequiresTitle() {
         let params: [String: Any] = ["body": "Some content"]
@@ -50,7 +48,6 @@ final class NotesTests: XCTestCase {
         XCTAssertEqual(params["limit"] as? Int, 5)
     }
 
-    // MARK: - folderClause (NotesClient)
 
     func testFolderClauseNilReturnsEmptyString() {
         XCTAssertEqual(NotesClient.folderClause(nil), "")
@@ -64,7 +61,6 @@ final class NotesTests: XCTestCase {
         XCTAssertEqual(NotesClient.folderClause("Bob\"s Notes"), "of folder \"Bob\\\"s Notes\"")
     }
 
-    // MARK: - list_notes / search_notes / create_note read folder_id (not folder)
 
     func testListNotesArgsHonorFolderIdKey() {
         let args = NotesCLI.listNotesArgs(["folder_id": "Work", "limit": 5])
@@ -73,7 +69,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testListNotesArgsIgnoreLegacyFolderKey() {
-        // The legacy "folder" key must NOT scope the query; only "folder_id" does.
         let args = NotesCLI.listNotesArgs(["folder": "Work", "limit": 5])
         XCTAssertNil(args.folder)
     }
@@ -84,7 +79,6 @@ final class NotesTests: XCTestCase {
 
     func testSearchNotesCommandAcceptsFolderIdKey() {
         let handler = NotesCLI.commands["search_notes"]!
-        // folder_id must not exempt search_notes from the required "query" field.
         XCTAssertThrowsError(try handler(["folder_id": "Work"])) { error in
             guard case NotesCLIError.missingField("query") = error else {
                 return XCTFail("expected missingField(query), got \(error)")
@@ -105,12 +99,10 @@ final class NotesTests: XCTestCase {
         let params: [String: Any] = ["id": "note-123"]
         let title = params["title"] as? String
         let body = params["body"] as? String
-        // Both nil means no fields to update
         XCTAssertNil(title)
         XCTAssertNil(body)
     }
 
-    // MARK: - runCLI command table (NotesCLI.commands)
 
     func testCommandTableHasAllExpectedKeys() {
         let expected: Set<String> = [
@@ -122,7 +114,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testCommandTableKeysAreSubsetOfCommandList() {
-        // Each dispatch key (plus check_permission) must appear in the advertised command list.
         for key in NotesCLI.commands.keys {
             XCTAssertTrue(NotesCLI.commandList.contains(key),
                           "command '\(key)' missing from advertised commandList")
@@ -131,7 +122,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testGetNoteCommandThrowsMissingIdBeforeScriptRuns() {
-        // Required-field validation must fire before any AppleScript is spawned.
         let handler = NotesCLI.commands["get_note"]!
         XCTAssertThrowsError(try handler([:])) { error in
             guard case NotesCLIError.missingField(let f) = error else {
@@ -177,10 +167,8 @@ final class NotesTests: XCTestCase {
         }
     }
 
-    // MARK: - Permission Check Script
 
     func testPermissionCheckScriptAccessesData() {
-        // script must access data to trigger TCC prompt, not 'to name'
         XCTAssertFalse(
             permissionCheckScript.hasSuffix("to name"),
             "permissionCheckScript must not use 'to name' — it does not require Automation permission"
@@ -192,12 +180,10 @@ final class NotesTests: XCTestCase {
     }
 
     func testPermissionCheckScriptDeniedIncludesGuidance() {
-        // denied error must point to System Settings > Automation
         let detail = "Notes access denied: some error\nGrant access in System Settings > Privacy & Security > Automation"
         XCTAssertTrue(detail.contains("Automation"))
     }
 
-    // MARK: - Permission Check (formatPermissionResult with domain-specific errors)
 
     func testFormatPermissionResultWithAutomationPermissionError() {
         let errorMsg = ScriptError.automationPermission("not allowed").errorDescription!
@@ -230,10 +216,8 @@ final class NotesTests: XCTestCase {
         XCTAssertTrue((parsed["error"] as! String).contains("AppleScript error"))
     }
 
-    // MARK: - runNoteScript (real function, via osascript)
 
     func testRunNoteScriptWrapsTimeoutWithHint() {
-        // osascript `delay` guarantees a real .timeout is thrown by ScriptRunner.
         let script = "delay 2"
         XCTAssertThrowsError(try runNoteScript(script, timeout: 0.05)) { error in
             guard case ScriptError.timeout(_, let hint) = error else {
@@ -244,8 +228,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptPassesThroughAutomationPermission() {
-        // Empty stderr classifies as .scriptFailed regardless of syntax; force a real
-        // permission-shaped stderr via a script guaranteed to be rejected as automation.
         XCTAssertThrowsError(try runNoteScript("error \"not allowed to send Apple events\"", timeout: 5)) { error in
             guard case ScriptError.automationPermission = error else {
                 return XCTFail("expected .automationPermission, got \(error)")
@@ -254,8 +236,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptMapsFolderNotFoundToTeachingErrorWhenProbeConfirmsMissing() {
-        // Real osascript wording (curly apostrophe) for a nonexistent folder, plus a
-        // probe confirming the folder is absent, must map to the folder teaching error.
         let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Nope\\\". (-1728)\""
         XCTAssertThrowsError(
             try runNoteScript(script, timeout: 5, folder: "Nope", folderMissing: { true })
@@ -268,8 +248,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptMapsStaleNoteIdToNoteNotFoundWhenProbeConfirmsMissing() {
-        // An id-scoped lookup (getNote/updateNote/deleteNote) whose -1728 names the id,
-        // plus a probe confirming the note is absent, must yield the note-not-found error.
         let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"stale-id\\\". (-1728)\""
         XCTAssertThrowsError(
             try runNoteScript(script, timeout: 5, noteId: "stale-id", noteMissing: { true })
@@ -283,8 +261,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptPropagatesUnscopedNotFoundMiss() {
-        // listFolders / listNotes(nil) / searchNotes(nil) pass neither folder nor noteId;
-        // a -1728 there is NOT a stale-id lookup and must surface its real message.
         let script = "error \"Notes got an error: Can\u{2019}t get count of notes of folder 1. (-1728)\""
         XCTAssertThrowsError(try runNoteScript(script, timeout: 5)) { error in
             guard case ScriptError.scriptFailed = error else {
@@ -294,8 +270,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptPropagatesFolderMissWhenNameNotNamed() {
-        // A -1728 that does not name the scoped folder is an unrelated miss and propagates,
-        // even when the (never-consulted) probe would say the folder is missing.
         let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"x\\\". (-1728)\""
         XCTAssertThrowsError(
             try runNoteScript(script, timeout: 5, folder: "Work", folderMissing: { true })
@@ -307,8 +281,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptPropagatesWhenFolderProbeSaysPresent() {
-        // A -1728 that names the scoped folder but whose probe confirms the folder still
-        // exists (e.g. a per-note property read failure) must surface its real cause.
         let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Work\\\". (-1728)\""
         XCTAssertThrowsError(
             try runNoteScript(script, timeout: 5, folder: "Work", folderMissing: { false })
@@ -320,8 +292,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptDefaultProbesNeverRewriteWithoutInjection() {
-        // The default folderMissing/noteMissing closures are `{ false }` — a caller that
-        // passes folder/noteId without wiring a real probe must still see the raw failure.
         let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Nope\\\". (-1728)\""
         XCTAssertThrowsError(try runNoteScript(script, timeout: 5, folder: "Nope")) { error in
             guard case ScriptError.scriptFailed = error else {
@@ -331,8 +301,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptPassesThroughGenericScriptFailed() {
-        // A syntax error (not -1728-shaped) must surface as the raw .scriptFailed,
-        // not get rewritten into either teaching error.
         XCTAssertThrowsError(
             try runNoteScript("this is not valid AppleScript", timeout: 5, folder: "Work", folderMissing: { true })
         ) { error in
@@ -351,7 +319,6 @@ final class NotesTests: XCTestCase {
         }
     }
 
-    // MARK: - AppleEventsGate end-to-end through performCheckPermission
 
     final class FakeNotesGate: PermissionGate {
         var initialStatus: RawAuthorizationStatus = .notDetermined
@@ -392,7 +359,6 @@ final class NotesTests: XCTestCase {
     }
 
     func testCheckPermissionTargetNotRunningOnProcNotFound() {
-        // post-status must remain .targetNotRunning — gate may auto-launch
         let gate = FakeNotesGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.Notes")
         gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.Notes")

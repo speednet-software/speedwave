@@ -83,7 +83,6 @@ enum NotesClient {
 
     static func getNote(id: String) throws -> [String: Any] {
         let idEsc = escapeAppleScript(id)
-        // Use 30s timeout - large notes with attachments can be slow
         let script = """
         tell application "Notes"
             set n to note id "\(idEsc)"
@@ -106,7 +105,6 @@ enum NotesClient {
             script, timeout: 30, noteId: id,
             noteMissing: { Self.noteDefinitelyMissing(id) }
         )
-        // Split on || but body (HTML) might contain || so we use |||| as body separator
         let mainParts = output.components(separatedBy: "||||")
         guard mainParts.count >= 2 else {
             throw NotesError.unexpectedFormat

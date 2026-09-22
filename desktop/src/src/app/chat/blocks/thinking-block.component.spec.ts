@@ -25,7 +25,6 @@ describe('ThinkingBlockComponent', () => {
     fixture.detectChanges();
   }
 
-  // happy — collapsed by default
   it('is collapsed by default (details closed, chevron not rotated)', () => {
     fixture.componentRef.setInput('content', 'thinking...');
     fixture.detectChanges();
@@ -38,7 +37,6 @@ describe('ThinkingBlockComponent', () => {
     expect(chevron?.classList.contains('rotate-90')).toBe(false);
   });
 
-  // state — toggling expands
   it('expands when the toggle is activated (chevron rotates 90°)', () => {
     fixture.componentRef.setInput('content', 'I should check the file');
     fixture.detectChanges();
@@ -77,7 +75,6 @@ describe('ThinkingBlockComponent', () => {
     expect(content?.textContent?.trim()).toBe('visible up front');
   });
 
-  // edge — empty / long content
   it('renders empty content without error', () => {
     fixture.componentRef.setInput('content', '');
     fixture.componentRef.setInput('collapsedDefault', false);
@@ -110,7 +107,6 @@ describe('ThinkingBlockComponent', () => {
     expect(content?.textContent).toContain('**not bold**');
   });
 
-  // ARIA — aria-expanded reflects state, aria-controls pairs correctly
   it('wires aria-expanded to reflect collapsed state', () => {
     fixture.componentRef.setInput('content', 'x');
     fixture.detectChanges();
@@ -134,7 +130,6 @@ describe('ThinkingBlockComponent', () => {
   });
 
   it('omits aria-controls when collapsed (details closed)', () => {
-    // aria-controls is nulled while collapsed.
     fixture.componentRef.setInput('content', 'x');
     fixture.componentRef.setInput('collapsedDefault', true);
     fixture.detectChanges();
@@ -154,7 +149,6 @@ describe('ThinkingBlockComponent', () => {
   });
 
   it('toggles the collapsed signal when the native <details> toggle event fires', () => {
-    // jsdom does not fire toggle from a summary click; dispatched manually.
     fixture.componentRef.setInput('content', 'click activates');
     fixture.detectChanges();
 

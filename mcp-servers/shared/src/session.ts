@@ -30,8 +30,8 @@ export class SessionManager {
    * @param options - Configuration for session management behavior
    */
   constructor(options: SessionManagerOptions = {}) {
-    this.sessionTimeoutMs = options.sessionTimeoutMs ?? 30 * 60 * 1000; // 30 minutes
-    const cleanupIntervalMs = options.cleanupIntervalMs ?? 5 * 60 * 1000; // 5 minutes
+    this.sessionTimeoutMs = options.sessionTimeoutMs ?? 30 * 60 * 1000;
+    const cleanupIntervalMs = options.cleanupIntervalMs ?? 5 * 60 * 1000;
     this.cleanupInterval = setInterval(() => this.cleanupExpiredSessions(), cleanupIntervalMs);
   }
 
@@ -136,5 +136,4 @@ export class SessionManager {
   }
 }
 
-// Default global session manager instance
 export const sessionManager = new SessionManager();

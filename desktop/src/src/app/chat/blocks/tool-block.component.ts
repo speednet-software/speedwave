@@ -230,14 +230,17 @@ export class ToolBlockComponent {
   /** User-toggle state keyed by tool_id; survives status transitions. */
   private readonly overrides: Record<string, boolean> = {};
 
-  /** Returns the normalized tool input — recomputes only when input_json changes. */
-  readonly normalized = computed<NormalizedToolInput>(() =>
-    this.normalizer.normalize(
-      this.tool().tool_name,
-      this.tool().input_json,
-      this.tool().status !== 'running'
-    )
+  /** Name + input compared by value, so a rebuilt-but-equal block does not re-normalize. */
+  private readonly inputKey = computed(
+    () => [this.tool().tool_name, this.tool().input_json] as const,
+    { equal: (a, b) => a[0] === b[0] && a[1] === b[1] }
   );
+
+  /** Returns the normalized tool input — recomputes only when name or input_json changes. */
+  readonly normalized = computed<NormalizedToolInput>(() => {
+    const [toolName, inputJson] = this.inputKey();
+    return this.normalizer.normalize(toolName, inputJson);
+  });
 
   /** Whether this tool's body is currently hidden. */
   isCollapsed(): boolean {
@@ -246,7 +249,6 @@ export class ToolBlockComponent {
     if (override !== undefined) {
       return override;
     }
-    // Default to collapsed regardless of status.
     return true;
   }
 
@@ -259,7 +261,6 @@ export class ToolBlockComponent {
 
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
   readonly borderClass = computed<string>(() => {
-    // Stopped tools use a muted gray rail.
     if (this.isStopped()) return 'border-[var(--ink-mute)]/50';
     return STATUS_BORDER[this.tool().status];
   });

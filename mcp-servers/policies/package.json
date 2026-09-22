@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run build:wasm && tsc",
-    "build:wasm": "bash ../../crates/pii-engine-wasm/build-wasm.sh",
+    "build:wasm": "bash ../../crates/pii-engine-wasm/build-wasm.sh --lock",
     "watch": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "eslint src",

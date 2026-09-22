@@ -108,47 +108,45 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
           </div>
         }
       }
-      @if (
+      @if (projectState.restarting) {
+        <div
+          class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Restarting containers"
+          data-testid="restart-overlay"
+        >
+          <div
+            class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
+          >
+            <div class="flex flex-col items-center">
+              <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
+              <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
+              <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
+            </div>
+          </div>
+        </div>
+      } @else if (
         projectState.needsRestart &&
         (projectState.status() === 'ready' || projectState.status() === 'auth_required')
       ) {
-        @if (projectState.restarting) {
-          <div
-            class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
-            role="alertdialog"
-            aria-modal="true"
-            aria-label="Restarting containers"
-            data-testid="restart-overlay"
-          >
-            <div
-              class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
-            >
-              <div class="flex flex-col items-center">
-                <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
-                <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
-                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
-              </div>
-            </div>
-          </div>
-        } @else {
-          <app-modal-overlay
-            [open]="true"
-            kicker="⚠ restart required"
-            kickerColor="amber"
-            modalTitle="Container config changed"
-            body="Enabling/disabling services needs a container restart. Running conversations will pause briefly."
-            [inlineError]="projectState.restartError"
-            primaryLabel="restart now"
-            secondaryLabel="later"
-            testId="restart-overlay"
-            primaryTestId="restart-now-btn"
-            secondaryTestId="restart-later-btn"
-            inlineErrorTestId="restart-error"
-            (primary)="restartContainers()"
-            (secondary)="dismissRestart()"
-            (closed)="dismissRestart()"
-          />
-        }
+        <app-modal-overlay
+          [open]="true"
+          kicker="⚠ restart required"
+          kickerColor="amber"
+          modalTitle="Container config changed"
+          body="Applying this change needs a container restart. Running conversations will pause briefly."
+          [inlineError]="projectState.restartError"
+          primaryLabel="restart now"
+          secondaryLabel="later"
+          testId="restart-overlay"
+          primaryTestId="restart-now-btn"
+          secondaryTestId="restart-later-btn"
+          inlineErrorTestId="restart-error"
+          (primary)="restartContainers()"
+          (secondary)="dismissRestart()"
+          (closed)="dismissRestart()"
+        />
       }
       <app-update-notification />
 
@@ -252,7 +250,6 @@ export class ShellComponent implements OnInit, OnDestroy {
   /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {
     const url = this.currentUrlSignal();
-    // longest-route-prefix wins so /settings beats /settings-something nonexistent etc.
     const sorted = [...this.entryCatalog].sort((a, b) => b.route.length - a.route.length);
     const match = sorted.find((v) => url.startsWith(v.route));
     return match?.id ?? '';
@@ -299,7 +296,6 @@ export class ShellComponent implements OnInit, OnDestroy {
     const cmd = event.metaKey || event.ctrlKey;
     const key = event.key;
 
-    // ⎋ closes any open overlay first — independent of cmd modifier.
     if (key === 'Escape') {
       let consumed = false;
       if (this.ui.paletteOpen()) {

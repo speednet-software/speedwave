@@ -20,7 +20,6 @@ describe('MeetingTranscriptionComponent', () => {
     subscribeToTranscript: ReturnType<typeof vi.fn>;
     resumeActiveRecording: ReturnType<typeof vi.fn>;
     recommendedModel: ReturnType<typeof vi.fn>;
-    // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
@@ -81,7 +80,6 @@ describe('MeetingTranscriptionComponent', () => {
       listAudioSources: vi.fn(async () => []),
       liveTranscriptPreferred: vi.fn(() => true),
       setLiveTranscriptPreferred: vi.fn(),
-      // Gate predicate matches recording-controls hasModel — any downloaded model lifts it.
       listModels: vi.fn(async () => models(true)),
       list: vi.fn(async () => []),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
@@ -112,7 +110,6 @@ describe('MeetingTranscriptionComponent', () => {
     expect(fixture.nativeElement.querySelector('app-live-transcript')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('app-session-list')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
-    // The model manager moved to Settings — no model UI in the tab.
     expect(fixture.nativeElement.querySelector('app-model-manager')).toBeNull();
   });
 
@@ -123,11 +120,9 @@ describe('MeetingTranscriptionComponent', () => {
     const gate = fixture.nativeElement.querySelector('[data-testid="model-required-gate"]');
     expect(gate).not.toBeNull();
     expect(gate.textContent.toLowerCase()).toContain('model required');
-    // The link points at the transcription section in Settings.
     const link = fixture.nativeElement.querySelector('[data-testid="download-model-link"]');
     expect(link).not.toBeNull();
     expect(link.getAttribute('href')).toContain('/settings');
-    // Neither the panes nor the header chrome render behind the gate.
     expect(fixture.nativeElement.querySelector('app-recording-controls')).toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="quality-disclaimer"]')).toBeNull();
     expect(fixture.nativeElement.querySelector('header')).toBeNull();
@@ -143,12 +138,10 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('clears the gate when the window regains focus after a Settings download', async () => {
-    // Start with no model → gate up.
     svc.listModels.mockResolvedValue(models(false));
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.modelReady()).toBe(false);
-    // The user downloads the model in Settings, then returns → focus re-checks.
     svc.listModels.mockResolvedValue(models(true));
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
@@ -161,7 +154,6 @@ describe('MeetingTranscriptionComponent', () => {
   it('registers the focus/visibility listeners even if resumeActiveRecording rejects', async () => {
     svc.resumeActiveRecording.mockRejectedValueOnce(new Error('subscribe_transcript failed'));
     await component.ngOnInit();
-    // A rejection above must not have prevented the listeners from being wired up.
     svc.listModels.mockClear();
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
@@ -172,7 +164,6 @@ describe('MeetingTranscriptionComponent', () => {
     await component.ngOnInit();
     await component.ngOnDestroy();
     svc.listModels.mockClear();
-    // A focus event after destroy must not trigger another model check.
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
     expect(svc.listModels).not.toHaveBeenCalled();
@@ -233,8 +224,6 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('renders the dropped-audio warning without blaming the transcriber', () => {
-    // Producers are the ingest channel and the mix buffer — record-only sessions
-    // have no live transcriber, so the copy must not name one.
     captureWarningsSig.set(['audio_dropped']);
     fixture.detectChanges();
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');

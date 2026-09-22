@@ -3,8 +3,6 @@
  * @module mcp-atlassian/types
  */
 
-// ── Configuration ────────────────────────────────────────────────────
-
 /** Resolved Atlassian worker configuration, built from the read-only `/tokens` mount. */
 export interface AtlassianConfig {
   /** Atlassian Cloud site base URL, e.g. `https://your-domain.atlassian.net`. */
@@ -18,10 +16,6 @@ export interface AtlassianConfig {
   /** Optional Confluence space key allowlist; empty = unrestricted, non-matching keys rejected. */
   confluenceSpaceKeys: string[];
 }
-
-// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT); import directly, no local variant.
-
-// ── Atlassian Document Format (minimal) ─────────────────────────────────
 
 /** A single ADF node (recursive). Only the subset Speedwave produces is typed. */
 export interface AdfNode {
@@ -38,8 +32,6 @@ export interface AdfDoc {
   type: 'doc';
   content: AdfNode[];
 }
-
-// ── Jira ─────────────────────────────────────────────────────────────────
 
 /** Jira account (reporter/assignee/author), normalised. */
 export interface JiraUser {
@@ -134,8 +126,6 @@ export interface JiraAttachment {
   author?: JiraUser | null;
 }
 
-// ── Jira Agile (boards / sprints) ───────────────────────────────────────
-
 /** Jira Agile board, normalised. */
 export interface JiraBoard {
   id: number;
@@ -164,8 +154,6 @@ export interface JiraBoardConfiguration {
   filter_id?: string;
   column_names: string[];
 }
-
-// ── Confluence ───────────────────────────────────────────────────────────
 
 /** Confluence space, normalised (v2). */
 export interface ConfluenceSpace {

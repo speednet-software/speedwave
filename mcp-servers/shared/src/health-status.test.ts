@@ -138,7 +138,6 @@ describe('makeStandardHealthCheck', () => {
     const t = new ConnectionStatusTracker();
     t.setFailed('');
     const hc = makeStandardHealthCheck(t, 'TestService');
-    // empty-string error appears in the message (`??` keeps falsy strings).
     await expect(hc()).rejects.toThrow('TestService connection failed:');
   });
 });
@@ -187,7 +186,6 @@ describe('backgroundConnectionTest', () => {
       () => new Promise((resolve) => setTimeout(resolve, 60_000)),
       'SlowService'
     );
-    // backgroundConnectionTest returns synchronously even with a 60 s test.
     expect(Date.now() - start).toBeLessThan(50);
   });
 });

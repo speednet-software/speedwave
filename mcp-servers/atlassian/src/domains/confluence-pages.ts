@@ -84,8 +84,6 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     return String(id);
   };
 
-  // Resolve the page's space key and enforce the allowlist. Skips the lookup
-  // entirely when no allowlist is configured: nothing to enforce.
   const enrich = async <T extends ConfluencePage>(page: T): Promise<T> => {
     if (client.confluenceSpaceKeys.length === 0) return page;
     const key = page.space_key ?? (await resolveSpaceKey(page.space_id, page.id));
@@ -103,7 +101,6 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       const pages = (res.results ?? [])
         .map(mapV1SearchResult)
         .filter((p): p is ConfluencePage => p !== null);
-      // Best-effort space-key enforcement on v1 search results.
       return filterByAllowlist(pages, (p) => p.space_key, client.confluenceSpaceKeys);
     },
 
@@ -144,7 +141,6 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     },
 
     async update(pageId, { title, body }) {
-      // Fetch current page (need version + status + existing title/space).
       const current = await client.get<unknown>(`/wiki/api/v2/pages/${encodeURIComponent(pageId)}`);
       const page = mapV2Page(current);
       let key = page.space_key;
@@ -167,7 +163,6 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     },
 
     async getChildren(pageId, options = {}) {
-      // Enforce the space allowlist before listing children.
       if (client.confluenceSpaceKeys.length > 0) {
         await enrich(
           mapV2Page(await client.get<unknown>(`/wiki/api/v2/pages/${encodeURIComponent(pageId)}`))
@@ -177,13 +172,10 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/children`,
         { limit: clampPageSize(options.limit, 25, 100) }
       );
-      // Children come back without spaceId/version detail; map best-effort.
       return (res.results ?? []).map(mapV2ChildPage);
     },
   };
 }
-
-// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
  * Map a v2 page object to {@link ConfluencePage}. A full page response always carries a version,

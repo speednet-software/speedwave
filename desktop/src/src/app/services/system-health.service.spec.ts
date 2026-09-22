@@ -6,10 +6,7 @@ import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { HealthReport } from '../models/health';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 function makeReport(overallHealthy = true): HealthReport {
   return {
@@ -89,8 +86,6 @@ describe('SystemHealthService', () => {
       await service.ensurePolling();
       const first = service.health();
 
-      // A subsequent identical fetch must keep the SAME object reference so
-      // OnPush descendants do not re-render between real changes.
       await service.refresh();
       expect(service.health()).toBe(first);
     });
@@ -201,7 +196,6 @@ describe('SystemHealthService', () => {
       service.ngOnDestroy();
 
       const spy = vi.spyOn(mockTauri, 'invoke');
-      // Re-running ensurePolling after destroy must be allowed (started reset).
       expect(service['started']).toBe(false);
       expect(spy).not.toHaveBeenCalled();
     });

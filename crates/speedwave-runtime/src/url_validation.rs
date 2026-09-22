@@ -6,26 +6,28 @@
 pub fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()       // 127.0.0.0/8
-            || v4.is_private()     // 10/8, 172.16/12, 192.168/16
-            || v4.is_unspecified() // 0.0.0.0
-            || v4.is_link_local()  // 169.254/16
-            || v4.octets()[0] == 0 // 0.x.x.x (RFC 1122 "This host on this network")
-            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64 // 100.64.0.0/10 (RFC 6598 shared address / CGNAT)
-            || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 2)   // 192.0.2.0/24 (RFC 5737 TEST-NET-1)
-            || (v4.octets()[0] == 198 && v4.octets()[1] == 51 && v4.octets()[2] == 100) // 198.51.100.0/24 (RFC 5737 TEST-NET-2)
-            || (v4.octets()[0] == 203 && v4.octets()[1] == 0 && v4.octets()[2] == 113)  // 203.0.113.0/24 (RFC 5737 TEST-NET-3)
-            || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18) // 198.18.0.0/15 (RFC 2544 benchmarking)
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_unspecified()
+                || v4.is_link_local()
+                || v4.octets()[0] == 0
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
+                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 2)
+                || (v4.octets()[0] == 198 && v4.octets()[1] == 51 && v4.octets()[2] == 100)
+                || (v4.octets()[0] == 203 && v4.octets()[1] == 0 && v4.octets()[2] == 113)
+                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()       // ::1
-            || v6.is_unspecified() // ::
-            || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
-            || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-            || (v6.segments()[0] & 0xffc0) == 0xfec0 // fec0::/10 deprecated site-local (RFC 3879)
-            || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8) // 2001:db8::/32 documentation (RFC 3849)
-            || (v6.segments()[0] == 0x0100 && v6.segments()[1] == 0 && v6.segments()[2] == 0 && v6.segments()[3] == 0)
-            // 100::/64 discard (RFC 6666)
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xffc0) == 0xfec0
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+                || (v6.segments()[0] == 0x0100
+                    && v6.segments()[1] == 0
+                    && v6.segments()[2] == 0
+                    && v6.segments()[3] == 0)
         }
     }
 }
@@ -64,8 +66,6 @@ pub fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
         url::Host::Ipv6(v6) => std::net::IpAddr::V6(v6),
         url::Host::Domain(_) => return false,
     };
-    // Loopback (incl. IPv6-mapped v4 loopback via is_loopback_host) is on-prem
-    // only under AllowLoopback; the rest of the allowlist applies regardless.
     if is_loopback_host(&host) {
         return allow_loopback;
     }
@@ -101,11 +101,9 @@ fn is_on_premise_allowed(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback()
                 || (v4.is_private() && !v4.is_link_local())
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64) // 100.64/10 CGNAT
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
         }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA
-        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 
@@ -131,7 +129,6 @@ fn host_block_reason(url: &url::Url, policy: PrivatePolicy) -> Option<String> {
                     ipv6
                 ));
             }
-            // Also check IPv6-mapped IPv4 addresses (::ffff:x.x.x.x).
             ipv6.to_ipv4_mapped()
                 .filter(|m| blocked(IpAddr::V4(*m)))
                 .map(|m| format!("Blocked URL host '{}': maps to private IPv4 {}", ipv6, m))
@@ -168,8 +165,6 @@ pub fn validate_collector_url(url: &str, policy: PrivatePolicy) -> Result<url::U
 mod tests {
     use super::*;
 
-    // -- is_loopback_host (loopback SSOT, shared with canonicalize_local_base_url) --
-
     fn url_host_is_loopback(url: &str) -> bool {
         let parsed = url::Url::parse(url).unwrap();
         is_loopback_host(&parsed.host().unwrap())
@@ -178,25 +173,23 @@ mod tests {
     #[test]
     fn is_loopback_host_true_for_loopback_forms() {
         assert!(url_host_is_loopback("http://127.0.0.1:1234"));
-        assert!(url_host_is_loopback("http://127.0.0.5:1234")); // whole 127/8
+        assert!(url_host_is_loopback("http://127.0.0.5:1234"));
         assert!(url_host_is_loopback("http://localhost:11434"));
-        assert!(url_host_is_loopback("http://LocalHost:8080")); // case-insensitive
+        assert!(url_host_is_loopback("http://LocalHost:8080"));
         assert!(url_host_is_loopback("http://[::1]:1234"));
-        assert!(url_host_is_loopback("http://[::ffff:127.0.0.1]:1234")); // mapped v4
+        assert!(url_host_is_loopback("http://[::ffff:127.0.0.1]:1234"));
     }
 
     #[test]
     fn is_loopback_host_false_for_non_loopback_hosts() {
-        assert!(!url_host_is_loopback("http://192.168.1.1:1234")); // private != loopback
+        assert!(!url_host_is_loopback("http://192.168.1.1:1234"));
         assert!(!url_host_is_loopback("http://8.8.8.8/"));
-        assert!(!url_host_is_loopback("http://0.0.0.0:1234")); // unspecified
+        assert!(!url_host_is_loopback("http://0.0.0.0:1234"));
         assert!(!url_host_is_loopback("https://api.example.com/"));
-        assert!(!url_host_is_loopback("http://evil.localhost/")); // exact match only
-        assert!(!url_host_is_loopback("http://[fe80::1]/")); // link-local
-        assert!(!url_host_is_loopback("http://[::ffff:10.0.0.1]/")); // mapped private
+        assert!(!url_host_is_loopback("http://evil.localhost/"));
+        assert!(!url_host_is_loopback("http://[fe80::1]/"));
+        assert!(!url_host_is_loopback("http://[::ffff:10.0.0.1]/"));
     }
-
-    // -- scheme checks --
 
     #[test]
     fn validate_url_allows_https() {
@@ -243,8 +236,6 @@ mod tests {
             .contains("Blocked URL scheme"));
     }
 
-    // -- localhost / domain blocking --
-
     #[test]
     fn validate_url_blocks_localhost() {
         assert!(validate_url("https://localhost/admin")
@@ -258,8 +249,6 @@ mod tests {
             .unwrap_err()
             .contains("localhost"));
     }
-
-    // -- IPv4 private ranges --
 
     #[test]
     fn validate_url_blocks_127_0_0_1() {
@@ -327,8 +316,6 @@ mod tests {
             .contains("private"));
     }
 
-    // -- IPv6 blocking --
-
     #[test]
     fn validate_url_blocks_ipv6_loopback() {
         assert!(validate_url("https://[::1]/secret")
@@ -356,8 +343,6 @@ mod tests {
             .unwrap_err()
             .contains("private"));
     }
-
-    // -- IPv6-mapped IPv4 bypass prevention --
 
     #[test]
     fn validate_url_blocks_ipv6_mapped_loopback() {
@@ -401,8 +386,6 @@ mod tests {
             .contains("private"));
     }
 
-    // -- allowed URLs --
-
     #[test]
     fn validate_url_allows_public_ip() {
         assert!(validate_url("https://8.8.8.8/").is_ok());
@@ -417,8 +400,6 @@ mod tests {
     fn validate_url_allows_public_ipv6() {
         assert!(validate_url("https://[2606:4700::1]/").is_ok());
     }
-
-    // -- is_private_or_reserved edge cases --
 
     #[test]
     fn private_reserved_blocks_0_x_range() {
@@ -450,8 +431,6 @@ mod tests {
         assert!(!is_private_or_reserved(ip));
     }
 
-    // -- malformed inputs --
-
     #[test]
     fn validate_url_blocks_empty_string() {
         assert!(validate_url("").is_err());
@@ -466,8 +445,6 @@ mod tests {
     fn validate_url_blocks_scheme_only() {
         assert!(validate_url("https:").is_err());
     }
-
-    // -- RFC 5737 / 2544 / CGNAT / deprecated ranges --
 
     #[test]
     fn validate_url_blocks_rfc5737_test_net_1() {
@@ -561,8 +538,6 @@ mod tests {
         assert!(result.unwrap_err().contains("private"));
     }
 
-    // -- embedded credentials rejected unconditionally (public host too) --
-
     #[test]
     fn validate_url_blocks_credentials_on_private_ip() {
         assert!(validate_url("https://user:pass@127.0.0.1/")
@@ -572,7 +547,6 @@ mod tests {
 
     #[test]
     fn validate_url_blocks_credentials_on_public_host() {
-        // userinfo has no legitimate use in an endpoint URL
         assert!(validate_url("https://user:pass@example.com/")
             .unwrap_err()
             .contains("credentials"));
@@ -585,8 +559,6 @@ mod tests {
             .contains("credentials"));
     }
 
-    // -- backslash rejected --
-
     #[test]
     fn validate_url_blocks_backslash() {
         assert!(validate_url("https://example.com\\@evil.com/")
@@ -594,11 +566,8 @@ mod tests {
             .contains("backslash"));
     }
 
-    // -- query/fragment ALLOWED (OAuth authorize_url needs them) --
-
     #[test]
     fn validate_url_allows_query_string() {
-        // OAuth authorize_url legitimately carries query parameters.
         let ok = validate_url(
             "https://idp.example.com/authorize?response_type=code&client_id=abc&scope=api",
         );
@@ -609,8 +578,6 @@ mod tests {
     fn validate_url_allows_fragment() {
         assert!(validate_url("https://idp.example.com/authorize#section").is_ok());
     }
-
-    // -- is_private_on_premise: RFC 1918 (both policies accept) --
 
     #[test]
     fn on_premise_rfc1918_10_block() {
@@ -635,8 +602,6 @@ mod tests {
         let url: url::Url = "http://192.168.1.1/".parse().unwrap();
         assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
     }
-
-    // -- loopback policy delta --
 
     #[test]
     fn on_premise_ipv4_loopback_block() {
@@ -674,8 +639,6 @@ mod tests {
         assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
     }
 
-    // -- link-local rejected under both policies --
-
     #[test]
     fn on_premise_ipv4_link_local_both() {
         let url: url::Url = "http://169.254.1.1/".parse().unwrap();
@@ -690,16 +653,12 @@ mod tests {
         assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
     }
 
-    // -- domain / public IP rejected (delegated to validate_url) --
-
     #[test]
     fn on_premise_domain_both() {
         let url: url::Url = "http://example.com/".parse().unwrap();
         assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
         assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
     }
-
-    // -- IPv6 ULA identified under both policies --
 
     #[test]
     fn on_premise_ipv6_ula_fd_both() {
@@ -736,8 +695,6 @@ mod tests {
         assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
     }
 
-    // -- CGNAT (RFC 6598): both policies accept --
-
     #[test]
     fn on_premise_cgnat_block() {
         let url: url::Url = "http://100.64.0.1:8080/".parse().unwrap();
@@ -756,8 +713,6 @@ mod tests {
         assert!(!is_private_on_premise(&url, PrivatePolicy::BlockLoopback));
         assert!(!is_private_on_premise(&url, PrivatePolicy::AllowLoopback));
     }
-
-    // -- validate_collector_url (OTLP endpoint) --
 
     #[test]
     fn collector_url_allows_public_host() {
@@ -795,7 +750,6 @@ mod tests {
 
     #[test]
     fn collector_url_localhost_dns_rejected_even_under_allow_loopback() {
-        // A `*.localhost` DNS name is NOT the loopback literal — stays blocked.
         assert!(
             validate_collector_url("http://localhost:4318", PrivatePolicy::AllowLoopback).is_err()
         );
@@ -835,7 +789,6 @@ mod tests {
 
     #[test]
     fn collector_url_link_local_blocked_under_both_policies() {
-        // 169.254.169.254 (cloud metadata) is reserved, not on-premise: never allowed.
         for policy in [PrivatePolicy::BlockLoopback, PrivatePolicy::AllowLoopback] {
             assert!(
                 validate_collector_url("http://169.254.169.254/latest/meta-data/", policy).is_err(),
@@ -847,13 +800,13 @@ mod tests {
     #[test]
     fn collector_url_reserved_ranges_blocked_even_under_allow_loopback() {
         for host in [
-            "http://192.0.2.10:4318",    // TEST-NET-1 (RFC 5737)
-            "http://198.51.100.10:4318", // TEST-NET-2
-            "http://203.0.113.10:4318",  // TEST-NET-3
-            "http://198.18.0.10:4318",   // RFC 2544 benchmarking
-            "http://0.0.0.0:4318",       // unspecified
-            "http://[fe80::1]:4318",     // IPv6 link-local
-            "http://[2001:db8::1]:4318", // IPv6 documentation
+            "http://192.0.2.10:4318",
+            "http://198.51.100.10:4318",
+            "http://203.0.113.10:4318",
+            "http://198.18.0.10:4318",
+            "http://0.0.0.0:4318",
+            "http://[fe80::1]:4318",
+            "http://[2001:db8::1]:4318",
         ] {
             assert!(
                 validate_collector_url(host, PrivatePolicy::AllowLoopback).is_err(),
@@ -864,7 +817,6 @@ mod tests {
 
     #[test]
     fn collector_url_cgnat_allowed_under_allow_loopback() {
-        // CGNAT (100.64/10) is a legitimate on-prem range: allowed only under AllowLoopback.
         assert!(
             validate_collector_url("http://100.64.0.1:4318", PrivatePolicy::AllowLoopback).is_ok()
         );
@@ -895,8 +847,6 @@ mod tests {
 
     #[test]
     fn collector_url_blocked_host_error_is_descriptive() {
-        // After sharing one host classifier, the collector path surfaces the same
-        // specific reason validate_url does, not a generic string.
         let err = validate_collector_url("http://10.0.0.5:4318", PrivatePolicy::BlockLoopback)
             .unwrap_err();
         assert!(
@@ -911,7 +861,6 @@ mod tests {
 
     #[test]
     fn validate_url_and_collector_block_loopback_agree() {
-        // The shared classifier must keep validate_url == collector(BlockLoopback).
         for u in [
             "http://127.0.0.1/",
             "http://localhost/",

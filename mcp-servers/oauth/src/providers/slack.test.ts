@@ -52,7 +52,6 @@ describe('refreshSlackToken', () => {
       expect(result.value.accessToken).toBe('xoxe.xoxp-new');
       expect(result.value.refreshToken).toBe('xoxe-1-new');
       expect(result.value.expiresIn).toBe(43200);
-      // No scope in response → falls back to requested scopes.
       expect(result.value.grantedScopes).toEqual(['chat:write', 'channels:history']);
     }
   });
@@ -225,7 +224,6 @@ describe('refreshSlackToken edge shapes', () => {
       vi.fn(
         (_url: string, init: RequestInit) =>
           new Promise((_resolve, reject) => {
-            // Reject with a plain string: exercises the String(err) arm.
             init.signal?.addEventListener('abort', () => reject('aborted by timeout'));
           })
       )

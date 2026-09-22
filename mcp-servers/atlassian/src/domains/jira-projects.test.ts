@@ -108,12 +108,10 @@ describe('get', () => {
 
 describe('listIssueTypes', () => {
   it('resolves the project (scope-checked) then lists its issue types', async () => {
-    client.get
-      .mockResolvedValueOnce(rawProject()) // get(projectIdOrKey)
-      .mockResolvedValueOnce([
-        { id: '1', name: 'Bug', description: 'A bug', subtask: false },
-        { id: '2', name: 'Sub-task', subtask: true },
-      ]);
+    client.get.mockResolvedValueOnce(rawProject()).mockResolvedValueOnce([
+      { id: '1', name: 'Bug', description: 'A bug', subtask: false },
+      { id: '2', name: 'Sub-task', subtask: true },
+    ]);
     const c = createJiraProjectsClient(client);
     const types = await c.listIssueTypes('PROJ');
     expect(client.get).toHaveBeenNthCalledWith(2, '/rest/api/3/issuetype/project', {
@@ -141,7 +139,7 @@ describe('listIssueTypes', () => {
 
 describe('normalisation of minimal payloads', () => {
   it('normalises a project with every optional field absent', async () => {
-    client.get.mockResolvedValueOnce({}); // raw project with nothing
+    client.get.mockResolvedValueOnce({});
     const c = createJiraProjectsClient(client);
     const p = await c.get('X');
     expect(p).toEqual({
