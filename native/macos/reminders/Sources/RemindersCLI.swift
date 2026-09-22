@@ -286,7 +286,7 @@ func resolveReminderList(_ filter: String, store: EKEventStore) throws -> EKCale
     return matches[0]
 }
 
-func reminderToDict(_ r: EKReminder) -> [String: Any] {
+func reminderToDict(_ r: EKReminder, timeZone: TimeZone = .current) -> [String: Any] {
     let rawNotes = r.notes ?? ""
     let tags = extractTags(from: rawNotes)
     let cleanNotes = stripTags(from: rawNotes)
@@ -304,13 +304,13 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
         dict["tags"] = tags
     }
 
-    if let due = r.dueDateComponents, let dueDate = dueDateString(from: due) {
+    if let due = r.dueDateComponents, let dueDate = dueDateString(from: due, timeZone: timeZone) {
         dict["due_date"] = dueDate
         dict["all_day"] = isAllDay(due)
     }
 
     if let completionDate = r.completionDate {
-        dict["completed_date"] = iso8601String(from: completionDate, timeZone: .current)
+        dict["completed_date"] = iso8601String(from: completionDate, timeZone: timeZone)
     }
 
     if !cleanNotes.isEmpty {
@@ -338,8 +338,8 @@ func isAllDay(_ components: DateComponents) -> Bool {
 }
 
 /// Floating Gregorian components (EventKit requires that calendar): a bare date is all-day, a time
-/// without offset is kept as typed (never DST-adjusted), a time with offset/`Z` becomes the host's wall clock.
-func dueDateComponents(from string: String) -> DateComponents? {
+/// without offset is kept as typed (never DST-adjusted), a time with offset/`Z` becomes `timeZone`'s wall clock.
+func dueDateComponents(from string: String, timeZone: TimeZone = .current) -> DateComponents? {
     func matches(_ pattern: String) -> Bool {
         string.range(of: pattern, options: .regularExpression) != nil
     }
@@ -363,13 +363,16 @@ func dueDateComponents(from string: String) -> DateComponents? {
     }
 
     guard let date = parseISO8601(string) else { return nil }
-    components = gregorian.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+    var zoned = gregorian
+    zoned.timeZone = timeZone
+    components = zoned.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
     components.calendar = gregorian
     return components
 }
 
-/// Formats due date components: all-day as `yyyy-MM-dd`, timed as local time with UTC offset.
-func dueDateString(from components: DateComponents) -> String? {
+/// Formats due date components: all-day as `yyyy-MM-dd`, timed as wall-clock time with UTC offset
+/// in the components' own zone, else `timeZone`.
+func dueDateString(from components: DateComponents, timeZone: TimeZone = .current) -> String? {
     guard let year = components.year, let month = components.month, let day = components.day else {
         return nil
     }
@@ -378,10 +381,10 @@ func dueDateString(from components: DateComponents) -> String? {
     }
     var resolved = components
     resolved.calendar = resolved.calendar ?? gregorian
-    let timeZone = components.timeZone ?? .current
-    resolved.timeZone = timeZone
+    let zone = components.timeZone ?? timeZone
+    resolved.timeZone = zone
     guard let date = resolved.date else { return nil }
-    return iso8601String(from: date, timeZone: timeZone)
+    return iso8601String(from: date, timeZone: zone)
 }
 
 

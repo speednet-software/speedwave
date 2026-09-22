@@ -4,6 +4,12 @@ import XCTest
 @testable import reminders_cli
 
 final class RemindersTests: XCTestCase {
+    private let warsaw = TimeZone(identifier: "Europe/Warsaw")!
+    private let newYork = TimeZone(identifier: "America/New_York")!
+
+    private func wallClock(_ c: DateComponents) -> [Int?] {
+        [c.year, c.month, c.day, c.hour, c.minute, c.second]
+    }
 
 
     func testCommandListAdvertisesAllCommands() {
@@ -101,23 +107,28 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(c.calendar?.identifier, .gregorian)
     }
 
-    func testDueDateWithOffsetBecomesHostWallClock() throws {
-        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T07:00:00Z"))
-        let expected = Calendar(identifier: .gregorian).dateComponents(
-            [.year, .month, .day, .hour, .minute, .second],
-            from: parseISO8601("2026-06-15T07:00:00Z")!
-        )
-        XCTAssertEqual(c.hour, expected.hour)
-        XCTAssertEqual(c.day, expected.day)
-        XCTAssertEqual(c.second, 0)
-        XCTAssertNil(c.timeZone)
-        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    func testDueDateWithOffsetBecomesTheWallClockOfEachZone() throws {
+        let inWarsaw = try XCTUnwrap(dueDateComponents(from: "2026-06-15T07:00:00Z", timeZone: warsaw))
+        let inNewYork = try XCTUnwrap(dueDateComponents(from: "2026-06-15T07:00:00Z", timeZone: newYork))
+        XCTAssertEqual(wallClock(inWarsaw), [2026, 6, 15, 9, 0, 0])
+        XCTAssertEqual(wallClock(inNewYork), [2026, 6, 15, 3, 0, 0])
+        for c in [inWarsaw, inNewYork] {
+            XCTAssertNil(c.timeZone)
+            XCTAssertEqual(c.calendar?.identifier, .gregorian)
+        }
     }
 
-    func testDueDateWithoutOffsetIsTakenAsWallClock() throws {
-        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:00"))
-        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 6, 15, 9, 30, 0])
-        XCTAssertNil(c.timeZone)
+    func testDueDateWithNumericOffsetCanLandOnThePreviousLocalDay() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T01:30:00+02:00", timeZone: newYork))
+        XCTAssertEqual(wallClock(c), [2026, 6, 14, 19, 30, 0])
+    }
+
+    func testDueDateWithoutOffsetIsTheSameWallClockInEveryZone() throws {
+        for zone in [warsaw, newYork] {
+            let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:00", timeZone: zone))
+            XCTAssertEqual(wallClock(c), [2026, 6, 15, 9, 30, 0], zone.identifier)
+            XCTAssertNil(c.timeZone)
+        }
     }
 
     func testDueDateWithoutOffsetIgnoresFractionalSeconds() throws {
@@ -152,19 +163,31 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(dueDateString(from: c), "2026-06-05")
     }
 
-    func testDueDateStringTimedUsesLocalOffsetAndRoundTrips() throws {
-        let input = "2026-06-15T09:30:00"
-        let c = try XCTUnwrap(dueDateComponents(from: input))
-        let formatted = try XCTUnwrap(dueDateString(from: c))
-        XCTAssertTrue(formatted.hasPrefix("2026-06-15T09:30:00"), formatted)
-        XCTAssertFalse(formatted.hasSuffix("Z"), "timed due dates are reported in local time with an offset")
-        XCTAssertEqual(dueDateComponents(from: formatted), c, "formatting then parsing must be lossless")
+    func testDueDateStringFormatsFloatingTimeInTheGivenZone() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:00"))
+        XCTAssertEqual(dueDateString(from: c, timeZone: warsaw), "2026-06-15T09:30:00+02:00")
+        XCTAssertEqual(dueDateString(from: c, timeZone: newYork), "2026-06-15T09:30:00-04:00")
+        XCTAssertEqual(dueDateString(from: c, timeZone: TimeZone(identifier: "UTC")!), "2026-06-15T09:30:00+00:00")
     }
 
-    func testDueDateStringHonoursExplicitTimeZone() throws {
+    func testDueDateFormatThenParseIsLosslessForEveryInputShape() throws {
+        let inputs = ["2026-06-15", "2026-06-15T09:30:00", "2026-06-15T07:00:00Z", "2026-12-31T23:30:00+02:00"]
+        for zone in [warsaw, newYork] {
+            for input in inputs {
+                let c = try XCTUnwrap(dueDateComponents(from: input, timeZone: zone), input)
+                let formatted = try XCTUnwrap(dueDateString(from: c, timeZone: zone), input)
+                XCTAssertEqual(
+                    dueDateComponents(from: formatted, timeZone: zone), c,
+                    "\(input) in \(zone.identifier) via \(formatted)"
+                )
+            }
+        }
+    }
+
+    func testDueDateStringPrefersTheZoneStoredOnTheComponents() throws {
         var c = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 1, day: 10, hour: 8)
-        c.timeZone = TimeZone(identifier: "America/New_York")
-        XCTAssertEqual(dueDateString(from: c), "2026-01-10T08:00:00-05:00")
+        c.timeZone = newYork
+        XCTAssertEqual(dueDateString(from: c, timeZone: warsaw), "2026-01-10T08:00:00-05:00")
     }
 
     func testDueDateStringWithoutDateIsNil() {
@@ -186,9 +209,9 @@ final class RemindersTests: XCTestCase {
         let reminder = EKReminder(eventStore: store)
         reminder.title = "Standup"
         reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01T10:00:00"))
-        let dict = reminderToDict(reminder)
+        let dict = reminderToDict(reminder, timeZone: warsaw)
         XCTAssertEqual(dict["all_day"] as? Bool, false)
-        XCTAssertTrue((dict["due_date"] as? String ?? "").hasPrefix("2026-07-01T10:00:00"))
+        XCTAssertEqual(dict["due_date"] as? String, "2026-07-01T10:00:00+02:00")
     }
 
     func testReminderToDictWithoutDueDateOmitsAllDay() {
@@ -387,15 +410,16 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(dict["list_name"] as? String, "", "nil calendar -> empty list_name")
     }
 
-    func testReminderToDictCompletedDateKey() {
+    func testReminderToDictCompletedDateIsLocalTimeWithOffset() throws {
         let store = EKEventStore()
         let reminder = EKReminder(eventStore: store)
         reminder.title = "Done"
         reminder.calendar = store.defaultCalendarForNewReminders()
         reminder.isCompleted = true
-        reminder.completionDate = Date()
-        let dict = reminderToDict(reminder)
-        XCTAssertNotNil(dict["completed_date"], "reminderToDict must emit completed_date (not completion_date)")
-        XCTAssertNil(dict["completion_date"], "reminderToDict must not emit old completion_date key")
+        reminder.completionDate = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        let inWarsaw = reminderToDict(reminder, timeZone: warsaw)
+        XCTAssertEqual(inWarsaw["completed_date"] as? String, "2026-06-15T09:00:00+02:00")
+        XCTAssertEqual(reminderToDict(reminder, timeZone: newYork)["completed_date"] as? String, "2026-06-15T03:00:00-04:00")
+        XCTAssertNil(inWarsaw["completion_date"], "reminderToDict must not emit old completion_date key")
     }
 }
