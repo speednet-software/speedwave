@@ -321,6 +321,10 @@ export async function waitForConversationLoaded(min = 1, timeoutMs = 30_000): Pr
 export async function openHistory(): Promise<void> {
   await (await $('[data-testid="chat-header-history"]')).click();
   await $('[data-testid="conversations-sidebar"]').waitForExist({ timeout: 10_000 });
+  await $('[data-testid="conversations-sidebar-row"]').waitForExist({
+    timeout: 15_000,
+    timeoutMsg: 'the history sidebar listed no conversation',
+  });
 }
 
 export async function resumeNewestConversation(): Promise<void> {
