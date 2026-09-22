@@ -396,6 +396,48 @@ switched to a hold model before its first effort pick. Both idle-respawn paths
 (model and effort) claim `initialized` like `startNewConversation`, so a remounted
 chat view cannot start a second session over the respawned one.
 
+**Amendment (SPEED-664, 2026-09-22: the bundled settings template stops seeding
+`effortLevel`, and the migration removes the key whether or not a pin exists).**
+Two defects kept a second effort store alive on disk, and only together do they
+explain the observation that opened the ticket: on a dev instance every project's
+`settings.json` carried `effortLevel` `high` regardless of its pin, one of them
+next to an `effort_pin` of `low`.
+
+The first is the bundled template `containers/claude-resources/settings.json`,
+which has shipped `"effortLevel": "high"` since the statusline change (#430),
+predating this decision's SPEED-538 amendment. `containers/entrypoint.sh` merges
+the template under the container's own file (`Object.assign({}, tmpl, cur)`) and
+rewrites it whenever a template key is missing from it, pinned by the entrypoint
+test "merges new template keys into existing settings.json without overwriting
+user values". So the template re-seeded the key at every container start, and
+Claude Code read `high` for any project without a pin, silently overriding the
+SPEED-538 rule that an unpinned project gets the model's own default effort
+(`high` everywhere except Opus 4.7's `xhigh`, `defaults::ANTHROPIC_MODELS`). The
+template no longer carries the key; `tests/claude_settings_template_guard.rs`
+fails if it, or a `model` default, comes back.
+
+The second is the takeover gate: `pin_cmd::ensure_effort_pin_migrated_in`
+returned before `take_legacy_effort_pin` whenever the project already had an
+`effort_pin`, so the removal half could never run for exactly the projects where
+the two values could disagree. Nothing reads the stale key while every Desktop
+spawn passes `--effort <pin>`, but a spawn path that dropped the flag, or a
+Claude Code precedence change, would have applied the file's level under a
+composer showing the pin. The migration now strips the key on every run for a
+registered project and adopts its value only when the project has no pin; with a
+pin the value is discarded, never reconciled, because the composer writes the pin
+before the wire `/effort` (`ChatStateService.applyEffortSelection`) and so the pin
+is never older than a value Speedwave caused. Unregistered projects and an
+unreadable file are left alone as before.
+
+Two residuals. An `effortLevel` written while a session runs survives until the
+next spawn or `get_effort_pin` of that project. And on an existing install the
+template's `high` is still in the file at upgrade time, so the first migration
+run for a project that has no pin adopts it as one: that preserves the level the
+user experiences today, at the cost of recording a template default as an
+explicit pick and of holding Opus 4.7 at `high` instead of its `xhigh` default.
+An interactive `/effort` in a `speedwave` CLI session, which Claude Code persists
+to the settings file[^1], reaches the pin through that same adopt path.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the
