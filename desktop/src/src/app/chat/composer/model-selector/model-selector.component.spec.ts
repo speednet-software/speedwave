@@ -228,13 +228,7 @@ describe('ModelSelectorComponent', () => {
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
     ).toBeFalsy();
-    const optionIds = fixture.debugElement
-      .queryAll(By.css('[data-testid^="model-selector-option-"]'))
-      .map((o) => o.nativeElement.getAttribute('data-testid'));
-    expect(optionIds).toEqual([
-      'model-selector-option-claude-sonnet-5',
-      'model-selector-option-claude-opus-4-1',
-    ]);
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
   });
 
   it('never renders a 1M marker in a row, whatever wire id the row carries', async () => {
@@ -476,9 +470,7 @@ describe('ModelSelectorComponent', () => {
     });
     fixture.componentRef.setInput('projectId', 'proj-pending');
     fixture.detectChanges();
-    await fixture.whenStable();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    fixture.detectChanges();
+    await settle();
 
     const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
     expect(badge.nativeElement.disabled).toBe(true);
