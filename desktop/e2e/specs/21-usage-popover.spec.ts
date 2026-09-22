@@ -28,6 +28,7 @@ interface PopoverPaint {
 
 interface UsageWindow {
   utilization: number | null;
+  resets_at: string | null;
 }
 
 interface PlanUsage {
@@ -39,6 +40,13 @@ interface PlanUsage {
     seven_day_sonnet: UsageWindow | null;
     model_scoped: UsageWindow[];
   } | null;
+}
+
+function isShownWindow(w: UsageWindow, nowMs: number): boolean {
+  if (w.utilization === null || !Number.isFinite(w.utilization)) return false;
+  if (!w.resets_at) return true;
+  const resetsAt = Date.parse(w.resets_at.replace(/(\.\d{3})\d+/, '$1'));
+  return Number.isNaN(resetsAt) || resetsAt > nowMs;
 }
 
 async function waitForRing(timeoutMs: number): Promise<void> {
@@ -269,7 +277,7 @@ describe('Usage Ring + Popover', function () {
         limits.seven_day_sonnet,
         ...limits.model_scoped,
       ];
-      if (!windows.some((w) => typeof w?.utilization === 'number')) this.skip();
+      if (!windows.some((w) => !!w && isShownWindow(w, Date.now()))) this.skip();
 
       await $('[data-testid="usage-plan"]').waitForDisplayed({
         timeout: 30_000,
