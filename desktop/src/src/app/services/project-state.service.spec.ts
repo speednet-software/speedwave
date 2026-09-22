@@ -1725,6 +1725,80 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(true);
     });
 
+    it('restartInFlight exists only while a restart runs and settles after its complete listeners', async () => {
+      const order: string[] = [];
+      service.onRestartComplete(() => order.push('complete'));
+      const pendingRestart = createDeferred();
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'restart_integration_containers') return pendingRestart.promise;
+        return Promise.resolve(undefined);
+      };
+      expect(service.restartInFlight).toBeNull();
+
+      const promise = service.restartContainers();
+      const inFlight = service.restartInFlight;
+      expect(inFlight).not.toBeNull();
+      void inFlight?.then(() => order.push('settled'));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(order).toEqual([]);
+
+      pendingRestart.resolve();
+      await promise;
+      await inFlight;
+
+      expect(order).toEqual(['complete', 'settled']);
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('restartInFlight settles when the restart fails', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+
+      const promise = service.restartContainers();
+      const inFlight = service.restartInFlight;
+
+      await expect(promise).resolves.toBe('failed');
+      await expect(inFlight).resolves.toBeUndefined();
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('a restart ending after a project switch let a newer one start leaves the newer handle', async () => {
+      const first = createDeferred();
+      const second = createDeferred();
+      const pending = [first, second];
+      mockTauri.invokeHandler = (cmd: string) => {
+        const next = cmd === 'restart_integration_containers' ? pending.shift() : undefined;
+        return next ? next.promise : Promise.resolve(undefined);
+      };
+
+      const older = service.restartContainers();
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      const newer = service.restartContainers();
+      const newerHandle = service.restartInFlight;
+      await new Promise((r) => setTimeout(r, 0));
+      first.resolve();
+      await older;
+
+      expect(newerHandle).not.toBeNull();
+      expect(service.restartInFlight).toBe(newerHandle);
+
+      second.resolve();
+      await newer;
+
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('restartInFlight stays null for a restart that never started', async () => {
+      service.restarting = true;
+
+      await expect(service.restartContainers()).resolves.toBe('skipped');
+
+      expect(service.restartInFlight).toBeNull();
+    });
+
     it('restartContainers separates a restart it ran from one it never started', async () => {
       service.requestRestart();
 

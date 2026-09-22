@@ -22,7 +22,7 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
 import { PlanUsageService } from './plan-usage.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
-import { createDeferred } from '../testing/deferred';
+import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
@@ -5134,6 +5134,27 @@ describe('ChatStateService', () => {
       expect(calls).toContain('resume_conversation');
     });
 
+    it('drops a decider answer once the chat moved to another session while the dialog was open', async () => {
+      service.seedSessionId('sess-asked');
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const answer = createDeferred<'resume' | 'fresh'>();
+      service.setResumeDecider(() => answer.promise);
+      const resumed: unknown[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'resume_conversation') resumed.push(args?.['sessionId']);
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+      await service.resumeConversation('sess-chosen');
+      answer.resolve('resume');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(resumed).toEqual(['sess-chosen']);
+      expect(service.lastKnownSessionId).toBe('sess-chosen');
+    });
+
     it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
       service.seedSessionId('sess-window');
       (service as unknown as TokensInternal)._lastContextTokens = 25229;
@@ -6031,6 +6052,205 @@ describe('ChatStateService', () => {
       ).toHaveLength(0);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
       expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    describe('when the chat is claimed while the routed re-render runs', () => {
+      let calls: string[];
+      let pendingRestart: Deferred;
+
+      const routedPick = {
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local' as const,
+        isDefault: false,
+      };
+
+      beforeEach(async () => {
+        const projectState = TestBed.inject(ProjectStateService);
+        await projectState.init();
+        projectState.activeProject.set('test');
+        await service.init();
+        await new Promise((r) => setTimeout(r, 0));
+        calls = [];
+        pendingRestart = createDeferred();
+        mockTauri.invokeHandler = (cmd: string) => {
+          calls.push(cmd);
+          if (cmd === 'restart_integration_containers') return pendingRestart.promise;
+          return Promise.resolve(undefined);
+        };
+      });
+
+      function callsAfterRestart(): string[] {
+        return calls.slice(calls.indexOf('restart_integration_containers') + 1);
+      }
+
+      it('a conversation resumed meanwhile keeps the chat: no fresh respawn replaces it', async () => {
+        const pick = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('restart_integration_containers'));
+
+        const resume = service.resumeConversation('sess-resumed');
+        pendingRestart.resolve();
+        await pick;
+        await resume;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(callsAfterRestart()).toContain('resume_conversation');
+        expect(callsAfterRestart()).not.toContain('start_chat');
+        expect(service.lastKnownSessionId).toBe('sess-resumed');
+      });
+
+      it('a turn sent meanwhile keeps its messages: the respawn does not reset them', async () => {
+        const pick = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('restart_integration_containers'));
+
+        void service.sendMessage('what number did I give you?');
+        await vi.waitFor(() => expect(calls).toContain('send_message'));
+        pendingRestart.resolve();
+        await pick;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(service.isStreaming).toBe(true);
+        expect(service.messages.map((m) => m.role)).toEqual(['user']);
+        expect(callsAfterRestart()).not.toContain('start_chat');
+      });
+    });
+  });
+
+  describe('resumeConversation while a container restart runs', () => {
+    let projectState: ProjectStateService;
+    let calls: Array<{ cmd: string; sessionId?: unknown }>;
+    let pendingRestart: Deferred;
+
+    beforeEach(async () => {
+      projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      calls = [];
+      pendingRestart = createDeferred();
+      mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, sessionId: args?.['sessionId'] });
+        if (cmd === 'restart_integration_containers') return pendingRestart.promise;
+        return Promise.resolve(undefined);
+      };
+    });
+
+    function commands(): string[] {
+      return calls.map((c) => c.cmd);
+    }
+
+    function resumedSessions(): unknown[] {
+      return calls.filter((c) => c.cmd === 'resume_conversation').map((c) => c.sessionId);
+    }
+
+    it('claims the chat at once and replaces the session only after the restart ends', async () => {
+      const restart = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-picked');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(commands()).toContain('restart_integration_containers');
+      expect(commands()).not.toContain('resume_conversation');
+      expect(commands()).not.toContain('get_conversation');
+      expect(service.newConversationBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
+
+      pendingRestart.resolve();
+      await restart;
+      await resume;
+
+      expect(commands().indexOf('resume_conversation')).toBeGreaterThan(
+        commands().indexOf('restart_integration_containers')
+      );
+      expect(service.lastKnownSessionId).toBe('sess-picked');
+    });
+
+    it('the restart-complete resume of the prior session yields to the one resumed meanwhile', async () => {
+      service.seedSessionId('sess-live');
+
+      const restart = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-picked');
+      pendingRestart.resolve();
+      await restart;
+      await resume;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(resumedSessions()).toEqual(['sess-picked']);
+      expect(service.lastKnownSessionId).toBe('sess-picked');
+    });
+
+    it('still resumes after the restart fails', async () => {
+      const restart = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-picked');
+      pendingRestart.reject(new Error('compose failed'));
+
+      await expect(restart).resolves.toBe('failed');
+      await resume;
+
+      expect(resumedSessions()).toEqual(['sess-picked']);
+      expect(service.lastKnownSessionId).toBe('sess-picked');
+    });
+
+    it('also waits out a restart that starts while it waits', async () => {
+      const second = createDeferred();
+      const restarts = [pendingRestart, second];
+      mockTauri.invokeHandler = (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, sessionId: args?.['sessionId'] });
+        const next = cmd === 'restart_integration_containers' ? restarts.shift() : undefined;
+        return next ? next.promise : Promise.resolve(undefined);
+      };
+      let chained = false;
+      projectState.onRestartComplete(() => {
+        if (chained) return;
+        chained = true;
+        void projectState.restartContainers();
+      });
+
+      const first = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-picked');
+      pendingRestart.resolve();
+      await first;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(commands().filter((c) => c === 'restart_integration_containers')).toHaveLength(2);
+      expect(resumedSessions()).toEqual([]);
+
+      second.resolve();
+      await resume;
+
+      expect(resumedSessions()).toEqual(['sess-picked']);
+    });
+
+    it('drops the resume when a project switch starts before the restart ends', async () => {
+      const restart = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-of-test');
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      pendingRestart.resolve();
+      await restart;
+      await resume;
+
+      expect(resumedSessions()).toEqual([]);
+      expect(commands()).not.toContain('get_conversation');
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+
+    it('drops the resume when the project changes before the restart ends, and frees the chat', async () => {
+      const restart = projectState.restartContainers();
+      const resume = service.resumeConversation('sess-of-test');
+      await new Promise((r) => setTimeout(r, 0));
+      projectState.activeProject.set('other');
+      pendingRestart.resolve();
+      await restart;
+      await resume;
+
+      expect(resumedSessions()).toEqual([]);
+      expect(commands()).not.toContain('get_conversation');
+      expect(service.lastKnownSessionId).toBeNull();
+
+      await service.resumeConversation('sess-of-other');
+
+      expect(resumedSessions()).toEqual(['sess-of-other']);
     });
   });
 });

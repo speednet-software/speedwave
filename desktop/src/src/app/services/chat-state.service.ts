@@ -240,11 +240,28 @@ export class ChatStateService {
       else await this.sendMessage(`/model ${wireId}`);
       return;
     }
-    if (this.isStreaming || this._resumeInProgress) return;
+    if (this.chatIsOccupied()) return;
     if (!isAnthropic && !(await this.rerenderContainersForModel())) return;
+    if (this.chatIsOccupied()) return;
     this.resetForNewConversation();
     this.initialized = true;
     await this.startChatSession();
+  }
+
+  private chatIsOccupied(): boolean {
+    return this.isStreaming || this._resumeInProgress || this.hasLiveSession();
+  }
+
+  private async outlastRestart(): Promise<boolean> {
+    const project = this.projectState.activeProject();
+    let restart = this.projectState.restartInFlight;
+    while (restart) {
+      await restart;
+      restart = this.projectState.restartInFlight;
+    }
+    return (
+      project === this.projectState.activeProject() && this.projectState.status() !== 'switching'
+    );
   }
 
   private reportSelectionFailure(what: string, cause: unknown): void {
@@ -1357,6 +1374,7 @@ export class ChatStateService {
     const id = this._lastKnownSessionId;
     if (!id) return;
     await this.refreshLlmConfigCache();
+    if (this._lastKnownSessionId !== id) return;
     const historyTokens = this._lastContextTokens;
     const windowTokens = this._persistedContextTokens;
     const fits = historyFitsTarget(historyTokens, windowTokens);
@@ -1369,6 +1387,7 @@ export class ChatStateService {
     }
     if (this._resumeDecider) {
       const choice = await this._resumeDecider();
+      if (this._lastKnownSessionId !== id) return;
       if (choice === 'resume') void this.resumeConversation(id);
       else void this.startFreshSession();
     } else {
@@ -1397,6 +1416,10 @@ export class ChatStateService {
   async resumeConversation(sessionId: string): Promise<void> {
     if (this._resumeInProgress) return;
     this._resumeInProgress = true;
+    if (this.projectState.restartInFlight && !(await this.outlastRestart())) {
+      this._resumeInProgress = false;
+      return;
+    }
     this.resetForNewConversation();
     this.beginTranscriptLoad();
     const endStartingSession = this.beginStartingSession();
