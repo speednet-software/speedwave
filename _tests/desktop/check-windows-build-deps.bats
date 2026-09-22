@@ -115,7 +115,11 @@ run_probe() {
 }
 
 wasm_pack_block() {
-    awk '/wasm-pack not found, installing/,/^\tfi; \$/' "$MAKEFILE"
+    awk '/wasm-pack not found, installing/,/^\tfi; \\$/' "$MAKEFILE"
+}
+
+@test "the wasm-pack block ends at its own closing fi" {
+    [ "$(wasm_pack_block | tail -n 1)" = "$(printf '\tfi; \\')" ]
 }
 
 @test "setup-dev falls back to cargo when the npm wasm-pack install does not yield a binary" {
