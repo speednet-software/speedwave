@@ -820,9 +820,12 @@ impl ContainerRuntime for WslRuntime {
         use std::time::Duration;
         let distro = self.distro();
 
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let wsl = format!("{system_root}\\System32\\wsl.exe");
-        let wsl = wsl.as_str();
+        #[cfg(target_os = "windows")]
+        let wsl_path = crate::binary::system32_dir().join("wsl.exe");
+        #[cfg(not(target_os = "windows"))]
+        let wsl_path = std::path::PathBuf::from("wsl.exe");
+        let wsl = wsl_path.to_string_lossy();
+        let wsl = wsl.as_ref();
 
         if let Err(e) =
             self.runner
@@ -1011,8 +1014,37 @@ mod tests {
         assert!(err.contains("setup wizard"));
     }
 
-    /// On Windows, `os_prereqs::check_os_prereqs()` catches missing WSL. On macOS/Linux
-    /// (dev/CI), prereqs return empty so `ensure_ready()` proceeds to the distro list check.
+    #[test]
+    fn ensure_ready_bails_on_an_os_prereq_violation_before_touching_the_distro() {
+        let _pin =
+            crate::os_prereqs::PinnedPrereqs::pin(vec![crate::os_prereqs::PrereqViolation {
+                rule: crate::os_prereqs::PrereqRule::WslNotAvailable,
+                message: "wsl.exe --status reports that WSL2 cannot start on this machine"
+                    .to_string(),
+                remediation: consts::WSL_NOT_AVAILABLE_MSG,
+            }]);
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err().to_string();
+        assert!(
+            err.contains("cannot start") && err.contains("dism.exe"),
+            "a prereq violation must surface with its remediation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_proceeds_when_no_prereq_violation_is_pinned() {
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Ubuntu\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err().to_string();
+        assert!(
+            err.contains("setup wizard"),
+            "no violation must fall through to the distro list check, got: {err}"
+        );
+    }
+
     #[test]
     fn test_ensure_ready_wsl_not_installed() {
         let runner = MockRunner::new().with_error("wsl.exe --list --quiet", "not found");

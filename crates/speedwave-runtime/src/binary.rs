@@ -165,16 +165,35 @@ pub fn interactive_command(program: &str) -> Command {
     command
 }
 
+/// Absolute path to the Windows `System32` directory (SSOT) — `%SystemRoot%\System32`,
+/// falling back to `C:\Windows\System32` when `SystemRoot` is unset. Windows-only: on Unix
+/// `C:\Windows` is a relative component and the result would resolve against the CWD.
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows")),
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn system32_dir() -> PathBuf {
+    windows_dir().join("System32")
+}
+
 /// Absolute path to Windows PowerShell — a bare `powershell` PATH lookup is
 /// hijackable and inconsistent across contexts (SSOT; Desktop re-exports it).
 pub fn system_powershell_path() -> PathBuf {
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
-    PathBuf::from(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe")
+    #[cfg(target_os = "windows")]
+    {
+        system32_dir()
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    }
 }
 
 /// Raw absolute-path PowerShell `Command`. Private: every spawn goes through
@@ -428,6 +447,36 @@ pub(crate) mod tests {
         )));
         assert!(!has_wsl_utf8(&system_command("powershell.exe")));
         assert!(!has_wsl_utf8(&system_command("tasklist")));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    #[serial_test::serial(system_root)]
+    fn system32_dir_reads_system_root_and_falls_back() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => env::set_var("SystemRoot", v),
+                    None => env::remove_var("SystemRoot"),
+                }
+            }
+        }
+        let _restore = Restore(env::var_os("SystemRoot"));
+
+        env::set_var("SystemRoot", r"D:\CustomWindows");
+        assert_eq!(
+            system32_dir(),
+            PathBuf::from(r"D:\CustomWindows").join("System32"),
+            "SystemRoot must win over the hardcoded fallback"
+        );
+
+        env::remove_var("SystemRoot");
+        assert_eq!(
+            system32_dir(),
+            PathBuf::from(r"C:\Windows").join("System32"),
+            "an unset SystemRoot falls back to the default install path"
+        );
     }
 
     #[test]
@@ -1043,6 +1092,7 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[serial_test::serial(system_root)]
     fn run_powershell_capture_reads_stdout() {
         use std::time::Duration;
 
@@ -1057,6 +1107,7 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[serial_test::serial(system_root)]
     fn run_powershell_kills_on_deadline() {
         use std::time::Duration;
 
