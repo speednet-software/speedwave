@@ -546,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn start_writes_lock_and_token_then_stop_removes_the_lock() {
         let tmp = tempfile::tempdir().unwrap();
         let mut service = PiiNerService::start(
@@ -579,6 +580,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn apply_state_starts_when_wanted_and_stops_when_no_project_wants_it() {
         let tmp = tempfile::tempdir().unwrap();
         let loader =
@@ -607,6 +609,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn restart_reuses_the_persistent_token_and_the_port_of_a_stale_lock() {
         let tmp = tempfile::tempdir().unwrap();
         let loader = || -> Loader { Box::new(|| Err("no model in this test".to_string())) };
