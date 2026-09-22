@@ -14,14 +14,16 @@ import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
 import { ModelPickerService } from '../../../services/model-picker.service';
+import { DiscoveredModelsService } from '../../../services/discovered-models.service';
 import { LoggerService } from '../../../services/logger.service';
-import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
+import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
 const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
+const LOAD_FAILED = 'Failed to load models.';
 
 interface ModelOption {
   id: string;
@@ -115,6 +117,22 @@ export interface ModelSelection {
               &#x2715;
             </button>
           </div>
+          @if (stale()) {
+            <div
+              data-testid="model-selector-stale"
+              class="mono flex items-center gap-2 border-b border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+            >
+              <span>Could not refresh. Showing the last known list.</span>
+              <button
+                type="button"
+                data-testid="model-selector-retry"
+                class="hover-bg rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink)]"
+                (click)="fetchOptions(true)"
+              >
+                Retry
+              </button>
+            </div>
+          }
           <div class="max-h-72 overflow-y-auto py-1">
             @if (loading()) {
               <div
@@ -223,6 +241,7 @@ export class ModelSelectorComponent {
   private readonly anthropicModels = inject(AnthropicModelsService);
   private readonly control = inject(ClaudeControlService);
   private readonly picker = inject(ModelPickerService);
+  private readonly discovered = inject(DiscoveredModelsService);
   private readonly log = inject(LoggerService);
 
   readonly projectId = input.required<string>();
@@ -240,13 +259,14 @@ export class ModelSelectorComponent {
   readonly query = signal('');
   readonly loading = signal(false);
   readonly error = signal('');
+  protected readonly stale = signal(false);
   protected readonly summary = signal<ActiveProviderSummary | null>(null);
   private summaryProjectId: string | null = null;
   private readonly options = signal<ModelOption[]>([]);
 
   private optionsFetch: Promise<void> = Promise.resolve();
 
-  private discoverCache: { key: string; options: ModelOption[] } | null = null;
+  private probedKey = '';
 
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
@@ -443,11 +463,8 @@ export class ModelSelectorComponent {
     }));
   }
 
-  private async fetchDiscoverOptions(provider: string, baseUrl: string): Promise<ModelOption[]> {
-    const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
-      args: { provider, baseUrl, apiKey: undefined },
-    });
-    return (res?.models ?? []).map((m) => ({
+  private discoveredOptionsFrom(models: DiscoveredModel[]): ModelOption[] {
+    return models.map((m) => ({
       id: m.id,
       label: m.id,
       wireId: m.id,
@@ -460,15 +477,16 @@ export class ModelSelectorComponent {
 
   /**
    * Fetches the option list for the active provider kind (badge combobox source).
-   * Local/OpenRouter results are cached per `kind|base_url`; pass `force` to bypass
-   * the cache (retry-after-error, or a fresh open must still catch a server-side change).
-   * @param force - Skip the cache and re-issue the discovery probe.
+   * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
+   * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
+   * @param force - Re-issue the discovery probe even when this instance already probed.
    */
   async fetchOptions(force = false): Promise<void> {
     const summary = this.summary();
     if (!summary) return;
     this.loading.set(true);
     this.error.set('');
+    this.stale.set(false);
     try {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
@@ -487,20 +505,27 @@ export class ModelSelectorComponent {
         }
         const provider = isOpenRouter ? 'openrouter' : 'local';
         const baseUrl = isOpenRouter ? '' : (summary.base_url as string);
-        const cacheKey = `${provider}|${baseUrl}`;
-        if (!force && this.discoverCache?.key === cacheKey) {
-          this.options.set(this.discoverCache.options);
+        const key = `${provider}|${baseUrl}`;
+        const held = this.discovered.cached(provider, baseUrl);
+        if (!force && this.probedKey === key && held) {
+          this.options.set(this.discoveredOptionsFrom(held));
         } else {
-          const opts = await this.fetchDiscoverOptions(provider, baseUrl);
-          this.discoverCache = { key: cacheKey, options: opts };
-          this.options.set(opts);
+          const res = await this.discovered.refresh(provider, baseUrl);
+          if (!res) {
+            this.options.set([]);
+            this.error.set(LOAD_FAILED);
+            return;
+          }
+          if (res.fresh) this.probedKey = key;
+          this.stale.set(!res.fresh);
+          this.options.set(this.discoveredOptionsFrom(res.models));
         }
       }
       if (this.options().length === 0) this.error.set('No models available.');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: fetch failed: ${msg}`);
-      this.error.set('Failed to load models.');
+      this.error.set(LOAD_FAILED);
     } finally {
       this.loading.set(false);
     }
