@@ -244,7 +244,7 @@ pub fn render_compose_in(
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
-    let verified_plugins = plugin::list_verified_from_dir(&data_dir.join("plugins"))?;
+    let verified_plugins = plugin::list_verified_from_dir(&plugin::plugins_base_dir_in(data_dir))?;
     let plugin_manifests: Vec<PluginManifest> = verified_plugins
         .iter()
         .map(|vp| vp.manifest().clone())
@@ -273,7 +273,9 @@ pub fn render_compose_in(
         yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
     }
 
-    std::fs::create_dir_all(claude_home.join(".claude").join("ide"))?;
+    std::fs::create_dir_all(
+        crate::claude_home::claude_config_dir(data_dir, project_name).join("ide"),
+    )?;
 
     let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
@@ -909,7 +911,7 @@ pub fn oauth_consumer_service_ids(
         .collect();
     for m in enabled_plugins {
         if m.oauth.is_some() {
-            let sid = m.service_id.as_deref().unwrap_or(&m.slug);
+            let sid = m.config_key();
             if resolved.is_plugin_enabled(sid) {
                 out.push(sid.to_string());
             }
@@ -1403,9 +1405,7 @@ mod tests {
         )
         .expect("render must succeed");
 
-        let nested = crate::claude_home::claude_home_dir(data_dir.path(), &project)
-            .join(".claude")
-            .join("ide");
+        let nested = crate::claude_home::claude_config_dir(data_dir.path(), &project).join("ide");
         assert!(
             nested.is_dir(),
             "render_compose must pre-create {nested:?} host-side"

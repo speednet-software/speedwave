@@ -16,6 +16,8 @@ const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 
+const FRONTMATTER_READ_LIMIT: u64 = 64 * 1024;
+
 /// Indicates whether the discovery result came from Claude Code itself
 /// (`Init`) or discovery could not run (`Unavailable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +81,8 @@ pub struct ProjectHandle {
     pub name: String,
     /// Absolute path to the project root, used to locate `<dir>/.claude/`.
     pub dir: PathBuf,
+    /// Config keys of the plugins enabled for the project, whose resources the container links.
+    pub enabled_plugins: Vec<String>,
 }
 
 impl ProjectHandle {
@@ -87,7 +91,14 @@ impl ProjectHandle {
         Self {
             name: name.into(),
             dir: dir.into(),
+            enabled_plugins: Vec::new(),
         }
+    }
+
+    /// Sets the enabled plugin keys (`ResolvedIntegrationsConfig::enabled_plugin_service_ids`).
+    pub fn with_enabled_plugins(mut self, keys: Vec<String>) -> Self {
+        self.enabled_plugins = keys;
+        self
     }
 }
 
@@ -117,7 +128,7 @@ fn discover_slash_commands_with_timeout(
 
     match outcome {
         Ok(raw) => {
-            let discovery = enrich_and_filter(raw, &project.dir, consts::data_dir().as_path());
+            let discovery = enrich_and_filter(raw, project, consts::data_dir().as_path());
             cache_put(&project.name, generation, discovery.clone());
             Ok(discovery)
         }
@@ -220,14 +231,6 @@ pub fn invalidate_cache(project_name: &str) {
                 .or_insert(0) += 1;
         }
         Err(e) => log_cache_poisoned("invalidate_cache", &e),
-    }
-}
-
-/// Drops every cached discovery.
-pub fn invalidate_all_caches() {
-    match cache().lock() {
-        Ok(mut state) => state.entries.clear(),
-        Err(e) => log_cache_poisoned("invalidate_all_caches", &e),
     }
 }
 
@@ -594,9 +597,25 @@ struct SlashFrontmatter {
     user_invocable: Option<bool>,
 }
 
-fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> SlashDiscovery {
-    let bundled_dir = data_dir.join("claude-resources");
-    let personal_dir = personal_claude_dir();
+fn linked_resource_dirs(data_dir: &Path, enabled_plugins: &[String]) -> Vec<PathBuf> {
+    crate::plugin::enabled_claude_resources_dirs(
+        &crate::plugin::plugins_base_dir_in(data_dir),
+        enabled_plugins,
+    )
+    .into_iter()
+    .rev()
+    .chain(std::iter::once(data_dir.join("claude-resources")))
+    .collect()
+}
+
+fn enrich_and_filter(
+    raw: RawDiscovery,
+    project: &ProjectHandle,
+    data_dir: &Path,
+) -> SlashDiscovery {
+    let project_dir = project.dir.as_path();
+    let resource_dirs = linked_resource_dirs(data_dir, &project.enabled_plugins);
+    let personal_dir = crate::claude_home::claude_config_dir(data_dir, &project.name);
     let mut commands: Vec<SlashCommand> = Vec::new();
 
     for name in raw.slash_commands {
@@ -613,8 +632,8 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
                 clean_name,
                 None,
                 project_dir,
-                None,
-                personal_dir.as_deref(),
+                &[],
+                Some(personal_dir.as_path()),
                 &raw.plugins,
             );
             if matches!(on_disk.user_invocable, Some(false)) {
@@ -637,12 +656,13 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
         }
 
         let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
+        let unprefixed = plugin.is_none();
         let (frontmatter, origin) = lookup_frontmatter(
             clean_name,
             plugin.as_deref(),
             project_dir,
-            Some(&bundled_dir),
-            personal_dir.as_deref(),
+            if unprefixed { &resource_dirs } else { &[] },
+            unprefixed.then_some(personal_dir.as_path()),
             &raw.plugins,
         );
 
@@ -724,10 +744,13 @@ fn lookup_frontmatter(
     name: &str,
     plugin: Option<&str>,
     project_dir: &Path,
-    bundled_dir: Option<&Path>,
+    resource_dirs: &[PathBuf],
     personal_dir: Option<&Path>,
     plugins: &[PluginEntry],
 ) -> (SlashFrontmatter, Option<FrontmatterOrigin>) {
+    if !is_plain_name(name) {
+        return (SlashFrontmatter::default(), None);
+    }
     let mut candidates: Vec<(PathBuf, FrontmatterOrigin)> = Vec::new();
 
     for base in [
@@ -736,11 +759,11 @@ fn lookup_frontmatter(
     ] {
         push_skill_candidates(&base, name, &mut candidates);
     }
-    if let Some(bundled) = bundled_dir {
-        push_skill_candidates(bundled, name, &mut candidates);
-    }
     if let Some(personal) = personal_dir {
         push_skill_candidates(personal, name, &mut candidates);
+    }
+    for resource_dir in resource_dirs {
+        push_skill_candidates(resource_dir, name, &mut candidates);
     }
     if let Some(plugin_name) = plugin {
         for plugin_entry in plugins.iter().filter(|p| p.name == plugin_name) {
@@ -760,7 +783,7 @@ fn lookup_frontmatter(
     }
 
     for (candidate, origin) in candidates {
-        match std::fs::read_to_string(&candidate) {
+        match read_frontmatter_head(&candidate) {
             Ok(contents) => {
                 if let Some(fm) = parse_frontmatter(&contents) {
                     return (fm, Some(origin));
@@ -770,7 +793,7 @@ fn lookup_frontmatter(
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
                     log::debug!(
-                        "slash: read_to_string('{}') failed: {err}",
+                        "cannot read slash command frontmatter from {}: {err}",
                         candidate.display()
                     );
                 }
@@ -785,6 +808,27 @@ fn lookup_frontmatter(
 enum FrontmatterOrigin {
     Skill,
     Command,
+}
+
+fn is_plain_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+fn read_frontmatter_head(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut head = Vec::new();
+    std::fs::File::open(path)?
+        .take(FRONTMATTER_READ_LIMIT)
+        .read_to_end(&mut head)?;
+    Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
 fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<(PathBuf, FrontmatterOrigin)>) {
@@ -802,6 +846,9 @@ fn lookup_integration_frontmatter(
     name: &str,
     data_dir: &Path,
 ) -> Option<(SlashFrontmatter, FrontmatterOrigin)> {
+    if !is_plain_name(name) {
+        return None;
+    }
     let base = data_dir.join("claude-resources");
     let candidates = [
         (
@@ -820,14 +867,14 @@ fn lookup_integration_frontmatter(
     ];
 
     for (candidate, origin) in candidates {
-        match std::fs::read_to_string(&candidate) {
+        match read_frontmatter_head(&candidate) {
             Ok(contents) => {
                 return Some((parse_frontmatter(&contents).unwrap_or_default(), origin));
             }
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
                     log::debug!(
-                        "slash: read_to_string('{}') failed: {err}",
+                        "cannot read slash command frontmatter from {}: {err}",
                         candidate.display()
                     );
                 }
@@ -836,10 +883,6 @@ fn lookup_integration_frontmatter(
     }
 
     None
-}
-
-fn personal_claude_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".claude"))
 }
 
 fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
@@ -1184,7 +1227,7 @@ mod tests {
             plugins: vec![],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1216,7 +1259,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["visible"]);
     }
@@ -1237,7 +1280,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "user-only");
         assert_eq!(d.commands[0].description.as_deref(), Some("user only"));
@@ -1259,7 +1302,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].description.as_deref(), Some("from project"));
     }
@@ -1280,7 +1323,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "model");
         assert_eq!(d.commands[0].kind, SlashKind::Builtin);
@@ -1299,7 +1342,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(
             d.commands[0].description.as_deref(),
@@ -1323,7 +1366,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(
             d.commands.is_empty(),
             "expected 'model' to be hidden by on-disk user-invocable: false, got {:?}",
@@ -1347,7 +1390,7 @@ mod tests {
             }],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let by_name: HashMap<&str, &SlashCommand> =
             d.commands.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -1366,7 +1409,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
     }
 
@@ -1501,7 +1544,6 @@ mod tests {
 
     #[test]
     fn failed_discovery_is_negative_cached_within_ttl() {
-        invalidate_all_caches();
         let project = ProjectHandle::new(unique_project_name("negcache"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
@@ -1531,7 +1573,6 @@ mod tests {
 
     #[test]
     fn negative_cache_expires_after_ttl_and_reprobes() {
-        invalidate_all_caches();
         let project = ProjectHandle::new(unique_project_name("negttl"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
@@ -1551,7 +1592,6 @@ mod tests {
 
     #[test]
     fn invalidate_cache_clears_a_negative_entry() {
-        invalidate_all_caches();
         let project =
             ProjectHandle::new(unique_project_name("neginvalidate"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
@@ -1571,7 +1611,6 @@ mod tests {
 
     #[test]
     fn discover_slash_commands_caches_results() {
-        invalidate_all_caches();
         let script = format!("{}\n", sample_init_json());
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join(".claude/skills/my-skill");
@@ -1793,13 +1832,6 @@ mod tests {
     }
 
     #[test]
-    fn personal_claude_dir_resolves_to_home() {
-        let home = dirs::home_dir();
-        let personal = personal_claude_dir();
-        assert_eq!(home.map(|h| h.join(".claude")), personal);
-    }
-
-    #[test]
     fn classify_kind_prefers_plugin_then_agent_then_command() {
         let agents = vec!["my-agent".to_string()];
         assert_eq!(
@@ -1830,14 +1862,13 @@ mod tests {
         }];
 
         let (fm, origin) =
-            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, None, &plugins);
+            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, &[], None, &plugins);
         assert_eq!(fm.description.as_deref(), Some("from plugin"));
         assert_eq!(origin, Some(FrontmatterOrigin::Skill));
     }
 
     #[test]
     fn concurrent_discovery_runs_exactly_one_exec_and_shares_the_result() {
-        invalidate_all_caches();
         let project = unique_project_name("single-flight");
         let (runtime, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_hang(2)
@@ -1935,7 +1966,7 @@ mod tests {
             "speedwave-grill-me",
             None,
             &project_dir,
-            Some(&bundled),
+            std::slice::from_ref(&bundled),
             None,
             &[],
         );
@@ -1970,7 +2001,7 @@ mod tests {
             "speedwave-grill-me",
             None,
             &project_dir,
-            Some(&bundled),
+            std::slice::from_ref(&bundled),
             None,
             &[],
         );
@@ -1995,7 +2026,7 @@ mod tests {
             agents: vec![],
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let discovery = enrich_and_filter(raw, &project, data_tmp.path());
+        let discovery = enrich_and_filter(raw, &test_project(&project), data_tmp.path());
         assert_eq!(discovery.commands.len(), 1);
         assert_eq!(discovery.commands[0].kind, SlashKind::Skill);
     }
@@ -2008,7 +2039,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].kind, SlashKind::Builtin);
         assert!(!d.commands[0]
@@ -2026,7 +2057,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(d.commands.is_empty());
     }
 
@@ -2038,7 +2069,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(d.commands.is_empty());
     }
 
@@ -2054,7 +2085,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"redmine:ticket"));
         assert!(names.contains(&"my-agent"));
@@ -2082,7 +2113,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(d.commands.is_empty());
     }
 
@@ -2104,9 +2135,451 @@ mod tests {
             ..RawDiscovery::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].kind, SlashKind::Skill);
         assert_eq!(d.commands[0].description.as_deref(), Some("redmine skill"));
+    }
+
+    fn test_project(dir: &Path) -> ProjectHandle {
+        ProjectHandle::new("test-project", dir)
+    }
+
+    fn with_plugins(dir: &Path, keys: &[&str]) -> ProjectHandle {
+        test_project(dir).with_enabled_plugins(keys.iter().map(|k| k.to_string()).collect())
+    }
+
+    fn install_plugin_resource(data_dir: &Path, slug: &str, relative: &str, contents: &str) {
+        let plugin_dir = crate::plugin::plugins_base_dir_in(data_dir).join(slug);
+        let file = crate::plugin::plugin_claude_resources_dir(&plugin_dir).join(relative);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, contents).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"t"}}"#),
+        )
+        .unwrap();
+    }
+
+    fn write_bundled_skill(data_dir: &Path, name: &str, frontmatter: &str) {
+        let skill_dir = data_dir.join("claude-resources/skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), frontmatter).unwrap();
+    }
+
+    fn write_personal_skill(data_dir: &Path, project: &str, name: &str, description: &str) {
+        let skill_dir = crate::claude_home::claude_config_dir(data_dir, project)
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: {description}\n---\n"),
+        )
+        .unwrap();
+    }
+
+    fn discover_names(names: &[&str]) -> RawDiscovery {
+        RawDiscovery {
+            slash_commands: names.iter().map(|n| n.to_string()).collect(),
+            ..RawDiscovery::default()
+        }
+    }
+
+    #[test]
+    fn enrich_shows_a_skill_linked_from_an_enabled_speedwave_plugin() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "glpi",
+            "skills/glpi-operations/SKILL.md",
+            "---\ndescription: GLPI tickets\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["glpi-operations"]),
+            &with_plugins(tmp.path(), &["glpi"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].name, "glpi-operations");
+        assert_eq!(d.commands[0].kind, SlashKind::Skill);
+        assert_eq!(d.commands[0].description.as_deref(), Some("GLPI tickets"));
+        assert_eq!(d.commands[0].plugin, None);
+    }
+
+    #[test]
+    fn enrich_shows_a_command_linked_from_an_enabled_speedwave_plugin() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "presale",
+            "commands/presale.md",
+            "---\ndescription: Presale pipeline\nargument-hint: <rfp>\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["presale"]),
+            &with_plugins(tmp.path(), &["presale"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].kind, SlashKind::Command);
+        assert_eq!(
+            d.commands[0].description.as_deref(),
+            Some("Presale pipeline")
+        );
+        assert_eq!(d.commands[0].argument_hint.as_deref(), Some("<rfp>"));
+    }
+
+    #[test]
+    fn enrich_hides_a_plugin_skill_declaring_user_invocable_false() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "presale",
+            "skills/presale-add/SKILL.md",
+            "---\ndescription: internal step\nuser-invocable: false\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["presale-add"]),
+            &with_plugins(tmp.path(), &["presale"]),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_ignores_a_skill_from_a_plugin_not_enabled_in_the_project() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "glpi",
+            "skills/glpi-operations/SKILL.md",
+            "---\ndescription: GLPI tickets\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["glpi-operations"]),
+            &with_plugins(tmp.path(), &["presale"]),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_keeps_a_bundled_skill_that_a_disabled_plugin_would_hide() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_bundled_skill(
+            data_tmp.path(),
+            "shared",
+            "---\ndescription: from bundle\n---\n",
+        );
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/shared/SKILL.md",
+            "---\ndescription: from plugin\nuser-invocable: false\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("from bundle"));
+    }
+
+    #[test]
+    fn enrich_prefers_a_plugin_skill_over_a_bundled_skill_of_the_same_name() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_bundled_skill(
+            data_tmp.path(),
+            "shared",
+            "---\ndescription: from bundle\n---\n",
+        );
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/shared/SKILL.md",
+            "---\ndescription: from plugin\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &with_plugins(tmp.path(), &["extra"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("from plugin"));
+    }
+
+    #[test]
+    fn enrich_takes_a_skill_two_plugins_share_from_the_plugin_linked_last() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        for slug in ["alpha", "zeta"] {
+            install_plugin_resource(
+                data_tmp.path(),
+                slug,
+                "skills/shared/SKILL.md",
+                &format!("---\ndescription: from {slug}\n---\n"),
+            );
+        }
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &with_plugins(tmp.path(), &["alpha", "zeta"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("from zeta"));
+    }
+
+    #[test]
+    fn enrich_does_not_look_up_a_prefixed_name_in_speedwave_resource_dirs() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/review/SKILL.md",
+            "---\ndescription: from a speedwave plugin\nuser-invocable: false\n---\n",
+        );
+        write_bundled_skill(
+            data_tmp.path(),
+            "review",
+            "---\ndescription: from bundle\nuser-invocable: false\n---\n",
+        );
+        write_personal_skill(data_tmp.path(), "test-project", "review", "personal");
+        let raw = RawDiscovery {
+            slash_commands: vec!["superpowers:review".into()],
+            plugins: vec![PluginEntry {
+                name: "superpowers".into(),
+                path: None,
+            }],
+            agents: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(raw, &with_plugins(tmp.path(), &["extra"]), data_tmp.path());
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].name, "superpowers:review");
+        assert_eq!(d.commands[0].kind, SlashKind::Plugin);
+        assert_eq!(d.commands[0].description, None);
+    }
+
+    #[test]
+    fn enrich_shows_a_personal_skill_from_the_projects_claude_home() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_personal_skill(
+            data_tmp.path(),
+            "test-project",
+            "my-own",
+            "made in the container",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["my-own"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].kind, SlashKind::Skill);
+        assert_eq!(
+            d.commands[0].description.as_deref(),
+            Some("made in the container")
+        );
+    }
+
+    #[test]
+    fn enrich_prefers_a_real_claude_home_skill_over_the_linked_resources() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_bundled_skill(
+            data_tmp.path(),
+            "shared",
+            "---\ndescription: from bundle\n---\n",
+        );
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/shared/SKILL.md",
+            "---\ndescription: from plugin\n---\n",
+        );
+        write_personal_skill(data_tmp.path(), "test-project", "shared", "personal copy");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &with_plugins(tmp.path(), &["extra"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("personal copy"));
+    }
+
+    #[test]
+    fn enrich_ignores_a_personal_skill_of_another_project() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_personal_skill(data_tmp.path(), "other-project", "theirs", "not ours");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["theirs"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enrich_skips_a_claude_home_link_that_resolves_only_inside_the_container() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        let skills =
+            crate::claude_home::claude_config_dir(data_tmp.path(), "test-project").join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(
+            "/speedwave/plugins/gone/skills/linked-only",
+            skills.join("linked-only"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["linked-only"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_hides_a_skill_from_a_plugin_that_fails_verification() {
+        let _g = crate::signing::test_support::unsigned_env_lock();
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "unsigned",
+            "skills/unsigned-skill/SKILL.md",
+            "---\ndescription: never shown\n---\n",
+        );
+        let listed = crate::plugin::list_for_ui_from_dir(&crate::plugin::plugins_base_dir_in(
+            data_tmp.path(),
+        ));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].verification_status,
+            crate::plugin::VerificationStatus::MissingSignature
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["unsigned-skill"]),
+            &with_plugins(tmp.path(), &["unsigned"]),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_does_not_resolve_a_name_that_climbs_out_of_its_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".claude/skills")).unwrap();
+        let outside = tmp.path().join(".claude/outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("SKILL.md"), "---\ndescription: escaped\n---\n").unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["../outside"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_reads_the_frontmatter_of_a_file_longer_than_the_read_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/long");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let body = "x".repeat(usize::try_from(FRONTMATTER_READ_LIMIT).unwrap() * 3);
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: long body\n---\n{body}"),
+        )
+        .unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["long"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("long body"));
+    }
+
+    #[test]
+    fn is_plain_name_accepts_only_a_single_normal_component() {
+        for ok in ["glpi-operations", "presale", "speedwave-grill-me"] {
+            assert!(is_plain_name(ok), "{ok}");
+        }
+        for bad in ["", ".", "..", "../x", "a/b", "/abs"] {
+            assert!(!is_plain_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn read_frontmatter_head_stops_at_the_read_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("big.md");
+        let limit = usize::try_from(FRONTMATTER_READ_LIMIT).unwrap();
+        std::fs::write(&file, "y".repeat(limit * 2)).unwrap();
+
+        assert_eq!(read_frontmatter_head(&file).unwrap().len(), limit);
+    }
+
+    #[test]
+    fn read_frontmatter_head_rejects_something_other_than_a_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = read_frontmatter_head(tmp.path()).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
