@@ -72,7 +72,7 @@ jobs:
             include="$macos_arm,$macos_x64,$windows"
           else
             files="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')"
-            if grep -qE '^(desktop/src-tauri/windows/|desktop/src-tauri/tauri\.windows\.conf\.json$|scripts/check-nsis-update-reset\.ps1$|\.github/workflows/desktop-build\.yml$)' <<< "$files"; then
+            if grep -qE '^(desktop/src-tauri/windows/|desktop/src-tauri/tauri\.windows\.conf\.json$|scripts/bundle-build-context\.(sh|ps1)$|scripts/check-nsis-update-reset\.ps1$|\.github/workflows/desktop-build\.yml$)' <<< "$files"; then
               include="$macos_arm,$windows"
             else
               include="$macos_arm"

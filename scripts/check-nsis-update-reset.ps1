@@ -30,6 +30,16 @@ Invoke-Installer -Switches '/S'
 if (-not (Test-Path -LiteralPath $shipped -PathType Leaf)) {
     throw "the first install did not lay down $shipped"
 }
+foreach ($tree in 'containers', 'mcp-servers') {
+    $treeDir = Join-Path $installDir "build-context\$tree"
+    $listed = @(Get-Content -LiteralPath (Join-Path $treeDir '.speedwave-shipped-files'))
+    $installed = @(Get-ChildItem -LiteralPath $treeDir -Recurse -Force -File |
+        ForEach-Object { $_.FullName.Substring($treeDir.Length + 1).Replace('\', '/') } |
+        Where-Object { $_ -ne '.speedwave-shipped-files' })
+    if ($listed.Count -eq 0 -or (Compare-Object $listed $installed)) {
+        throw "the files installed in $treeDir differ from its .speedwave-shipped-files"
+    }
+}
 Set-Content -LiteralPath $dropped -Value 'export {};'
 New-Item -ItemType Directory -Path $outside -Force | Out-Null
 Set-Content -LiteralPath $sentinel -Value 'outside the install dir'

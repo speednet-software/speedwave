@@ -497,6 +497,37 @@ mod tests {
     }
 
     #[test]
+    fn msi_custom_actions_run_the_scripts_where_the_msi_installs_them() {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_WINDOWS_CONF).expect("tauri.windows.conf.json must parse");
+        let targets: std::collections::BTreeSet<&str> = conf["bundle"]["resources"]
+            .as_object()
+            .expect("tauri.windows.conf.json must map bundle.resources")
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        for (name, wxs) in [("sweep.wxs", SWEEP_WXS), ("firewall.wxs", FIREWALL_WXS)] {
+            let scripts: Vec<&str> = wxs
+                .match_indices("[INSTALLDIR]")
+                .filter_map(|(at, marker)| {
+                    wxs[at + marker.len()..]
+                        .split("&quot;")
+                        .next()
+                        .filter(|path| path.ends_with(".ps1"))
+                })
+                .collect();
+            assert!(!scripts.is_empty(), "{name} must run a bundled script");
+            for script in scripts {
+                assert!(
+                    targets.contains(script.replace('\\', "/").as_str()),
+                    "{name} runs [INSTALLDIR]{script}, but the MSI installs each bundled resource \
+                     at its tauri.windows.conf.json target under INSTALLDIR"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sweep_wxs_passes_installdir_via_file_arg_not_command_literal() {
         let cmd = SWEEP_WXS
             .lines()
