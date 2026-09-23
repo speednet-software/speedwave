@@ -1028,10 +1028,21 @@ const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::f
 #[cfg(test)]
 const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_millis(1);
 const TASK_BUNDLE_DIR_FRAGMENT: &str = "io.containerd.runtime.v2.task/";
+const TASK_ALREADY_EXISTS_FRAGMENT: &str = ": already exists";
 
 fn is_task_create_collision(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
-    s.contains("mkdir ") && s.contains(TASK_BUNDLE_DIR_FRAGMENT) && s.contains("file exists")
+    (s.contains("mkdir ") && s.contains(TASK_BUNDLE_DIR_FRAGMENT) && s.contains("file exists"))
+        || names_an_existing_task(&s)
+}
+
+fn names_an_existing_task(s: &str) -> bool {
+    s.match_indices("task ").any(|(i, needle)| {
+        let rest = &s[i + needle.len()..];
+        rest.len() > 64
+            && rest.as_bytes()[..64].iter().all(u8::is_ascii_hexdigit)
+            && rest[64..].starts_with(TASK_ALREADY_EXISTS_FRAGMENT)
+    })
 }
 
 /// Shared fail-closed per-entry heal function + flock gate. The destructive `rm`
@@ -3161,6 +3172,58 @@ services:
         );
         assert!(r.is_err());
         assert_eq!(ups.load(Ordering::SeqCst), 1, "no retry for another path");
+    }
+
+    #[test]
+    fn engine_state_heal_retries_once_when_another_start_already_registered_the_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let r = with_engine_state_heal(
+            "e2e-second",
+            || {
+                if ups.fetch_add(1, Ordering::SeqCst) == 0 {
+                    anyhow::bail!(
+                        "wsl.exe failed: time=\"2026-09-23T15:19:29+02:00\" level=fatal \
+                         msg=\"1 errors:\\ntask \
+                         1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: \
+                         already exists\"\ntime=\"2026-09-23T15:19:29+02:00\" level=fatal \
+                         msg=\"error while starting existing container speedwave_e2e-second_proxy: \
+                         error while creating container speedwave_e2e-second_proxy: exit status 1\""
+                    )
+                }
+                Ok(())
+            },
+            |_e| -> anyhow::Result<()> { panic!("CNI cleanup must not run on a task collision") },
+            |_e| -> anyhow::Result<()> {
+                panic!("name-store cleanup must not run on a task collision")
+            },
+        );
+        assert!(r.is_ok(), "the retry after the collision succeeds: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
+    }
+
+    #[test]
+    fn engine_state_heal_does_not_retry_an_already_exists_that_names_no_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for raw in [
+            "level=fatal msg=\"task 1d5a4194: already exists\"",
+            "level=fatal msg=\"network speedwave_acme_network already exists\"",
+            "level=fatal msg=\"task \u{00e9}\
+             1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: already exists\"",
+        ] {
+            let ups = AtomicUsize::new(0);
+            let r = with_engine_state_heal(
+                "acme",
+                || {
+                    ups.fetch_add(1, Ordering::SeqCst);
+                    anyhow::bail!("{raw}")
+                },
+                |_e| -> anyhow::Result<()> { panic!("CNI cleanup must not run: {raw}") },
+                |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run: {raw}") },
+            );
+            assert!(r.is_err(), "{raw}");
+            assert_eq!(ups.load(Ordering::SeqCst), 1, "no retry for: {raw}");
+        }
     }
 
     #[test]
