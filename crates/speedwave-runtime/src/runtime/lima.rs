@@ -110,12 +110,12 @@ impl LimaRuntime {
         self
     }
 
-    /// One `limactl list --format <format>` read of the VM, bounded by `LIMA_LIST_TIMEOUT`.
+    /// One `limactl list --format <format>` read of the VM, bounded by `VM_LIST_TIMEOUT`.
     fn read_vm_listing(&self, format: &str) -> anyhow::Result<String> {
         self.runner.run_bounded(
             "limactl",
             &["list", "--format", format, consts::lima_vm_name()],
-            consts::LIMA_LIST_TIMEOUT,
+            consts::VM_LIST_TIMEOUT,
         )
     }
 
@@ -3303,7 +3303,7 @@ mod tests {
         );
         for (key, timeout) in reads {
             assert!(key.starts_with("limactl list --format"), "got: {key}");
-            assert_eq!(timeout, consts::LIMA_LIST_TIMEOUT, "for: {key}");
+            assert_eq!(timeout, consts::VM_LIST_TIMEOUT, "for: {key}");
         }
     }
 

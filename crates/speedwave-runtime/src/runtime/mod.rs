@@ -273,6 +273,17 @@ pub trait CommandRunner: Send + Sync {
         self.run(cmd, args)
     }
 
+    /// Like `run_raw_stdout`, but gives up after `timeout`; the default ignores the deadline, as
+    /// [`CommandRunner::run_bounded`]'s does.
+    fn run_raw_stdout_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.run_raw_stdout(cmd, args)
+    }
+
     /// Like `run`, but kills on `timeout`, captures stderr (drained on a thread), treats non-zero
     /// as `Err`.
     fn run_with_timeout(
@@ -433,10 +444,20 @@ impl CommandRunner for RealRunner {
         args: &[&str],
         timeout: std::time::Duration,
     ) -> anyhow::Result<String> {
+        self.run_raw_stdout_bounded(cmd, args, timeout)
+            .map(|stdout| String::from_utf8_lossy(&stdout).to_string())
+    }
+
+    fn run_raw_stdout_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<u8>> {
         let mut command = Self::prepare_command(cmd, args);
         let output = binary::run_with_timeout_capture(&mut command, timeout)?;
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            Ok(output.stdout)
         } else {
             Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
@@ -2764,9 +2785,26 @@ services:
             "got: {err}"
         );
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(10),
+            start.elapsed() < std::time::Duration::from_secs(20),
             "a grandchild holding the pipes must not outlast the child by its own lifetime, took {:?}",
             start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_raw_stdout_bounded_keeps_the_bytes_it_read() {
+        let out = RealRunner
+            .run_raw_stdout_bounded(
+                "printf",
+                &["\\377\\376S\\000"],
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![0xFF, 0xFE, b'S', 0],
+            "a UTF-16LE list from wsl.exe must reach its decoder unconverted"
         );
     }
 
@@ -3086,7 +3124,7 @@ services:
             .to_string();
         assert!(err.contains("exit code Some(3)"), "got: {err}");
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(10),
+            start.elapsed() < std::time::Duration::from_secs(20),
             "a grandchild holding stderr must not hold up the failure, took {:?}",
             start.elapsed()
         );

@@ -370,9 +370,9 @@ pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 /// in `Stopping` state to finish. Used by `ensure_ready_inner`.
 pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 
-/// Upper bound for one `limactl list` read of the VM's status or name; a read that outlives it
-/// is a failed read, which `ensure_ready` reports as `VmStatusUnreadable`.
-pub const LIMA_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Upper bound for one read of the VM list (`limactl list`, `wsl.exe --list`); a read that
+/// outlives it is a failed read, which `ensure_ready` reports as `VmStatusUnreadable`.
+pub const VM_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
 

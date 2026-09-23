@@ -243,7 +243,7 @@ const TIMEOUT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 
 /// How long an exited child's output may take to close: its own bytes are already in the pipe,
 /// so only a process it left behind holding the pipe open runs this out.
-const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Reads `pipe` to its end on a thread of its own; the receiver yields the bytes once it closes.
 pub(crate) fn read_on_thread(
@@ -1002,7 +1002,7 @@ pub(crate) mod tests {
             "got: {err}"
         );
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(10),
+            start.elapsed() < std::time::Duration::from_secs(20),
             "a grandchild holding the pipes must not outlast the child by its own lifetime, took {:?}",
             start.elapsed()
         );
@@ -1144,7 +1144,7 @@ pub(crate) mod tests {
             "output a leftover process keeps open is not the child's answer, got: {err}"
         );
         assert!(
-            start.elapsed() < Duration::from_secs(10),
+            start.elapsed() < Duration::from_secs(20),
             "a grandchild holding the pipes must not outlast the child by its own lifetime, took {:?}",
             start.elapsed()
         );

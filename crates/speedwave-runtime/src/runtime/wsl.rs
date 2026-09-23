@@ -105,6 +105,15 @@ impl WslRuntime {
         &self.distro_name
     }
 
+    /// Raw `wsl.exe --list --quiet` output, bounded by `VM_LIST_TIMEOUT`.
+    fn list_distributions(&self) -> anyhow::Result<Vec<u8>> {
+        self.runner.run_raw_stdout_bounded(
+            "wsl.exe",
+            &["--list", "--quiet"],
+            consts::VM_LIST_TIMEOUT,
+        )
+    }
+
     /// Runs `argv` via `sh -c` with POSIX quoting: wsl.exe re-parses the post-`--` line via the
     /// default shell, so bare splicing breaks on %USERPROFILE% metachars (`'`, `(`, `$`, backtick).
     fn run_in_distro(&self, argv: &[&str], root: bool) -> anyhow::Result<String> {
@@ -562,8 +571,7 @@ impl ContainerRuntime for WslRuntime {
 
     fn is_available(&self) -> bool {
         let distro = self.distro();
-        self.runner
-            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
+        self.list_distributions()
             .map(|raw| {
                 let output = decode_wsl_output(&raw);
                 output
@@ -840,10 +848,7 @@ impl WslRuntime {
         }
 
         let distro = self.distro();
-        let raw = match self
-            .runner
-            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
-        {
+        let raw = match self.list_distributions() {
             Ok(raw) => raw,
             Err(e) if lists_no_distributions(&e) => Vec::new(),
             Err(e) => {
@@ -1069,6 +1074,52 @@ mod tests {
         assert!(
             err.to_string().contains("not found"),
             "the error code, not the localized sentence, decides, got: {err}"
+        );
+    }
+
+    #[test]
+    fn every_distro_list_read_is_bounded_by_the_vm_list_timeout() {
+        struct ListRecorder {
+            bounded: std::sync::Arc<std::sync::Mutex<Vec<(String, std::time::Duration)>>>,
+        }
+        impl CommandRunner for ListRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--list") {
+                    anyhow::bail!("an unbounded read ran: {key}");
+                }
+                Ok(String::new())
+            }
+            fn run_raw_stdout_bounded(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<Vec<u8>> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.bounded.lock().unwrap().push((key, timeout));
+                Ok(format!("{}\n", consts::wsl_distro_name()).into_bytes())
+            }
+        }
+        let bounded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = WslRuntime::with_runner(Box::new(ListRecorder {
+            bounded: bounded.clone(),
+        }));
+        assert!(rt.is_available());
+        rt.ensure_ready().unwrap();
+        let reads = bounded.lock().unwrap().clone();
+        assert_eq!(
+            reads,
+            vec![
+                (
+                    "wsl.exe --list --quiet".to_string(),
+                    consts::VM_LIST_TIMEOUT
+                ),
+                (
+                    "wsl.exe --list --quiet".to_string(),
+                    consts::VM_LIST_TIMEOUT
+                ),
+            ]
         );
     }
 
