@@ -1,5 +1,5 @@
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { confirmRestartAndWait } from '../helpers/shell';
+import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
@@ -191,7 +191,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
   });
 
   it('write-through: local provider soft-imposes the chosen model on the next session', async function () {
-    this.timeout(240_000);
+    this.timeout(RESTART_WAIT_MS + 120_000);
     if (localLlmUnreachable()) this.skip();
     const local = requireLocalLlm();
     await openSettings();
@@ -210,14 +210,15 @@ describe('Slash Popover + Model/Effort Selector', function () {
   });
 
   it('OpenRouter: a provider save leaves a routable model before the first message', async function () {
-    this.timeout(240_000);
+    this.timeout(RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
     const restartBtn = await $('[data-testid="restart-now-btn"]');
-    try {
-      await restartBtn.waitForExist({ timeout: 10_000 });
-      await confirmRestartAndWait();
-    } catch {}
+    const restartRequested = await restartBtn.waitForExist({ timeout: 10_000 }).then(
+      () => true,
+      () => false
+    );
+    if (restartRequested) await confirmRestartAndWait();
     await openChat();
     await startNewConversation();
 
