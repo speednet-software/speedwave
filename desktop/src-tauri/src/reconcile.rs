@@ -538,12 +538,22 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             }
         }
 
-        match build::images_exist(&rt, &active_integrations, &manifest) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {
-                log::warn!("bundle unchanged but images missing, forcing rebuild");
-                prepare_rebuild(&mut state, app_handle)?;
-            }
+        match rt.ensure_ready() {
+            Ok(()) => match build::images_exist(&rt, &active_integrations, &manifest) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    log::warn!("bundle unchanged but images missing, forcing rebuild");
+                    prepare_rebuild(&mut state, app_handle)?;
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "Container engine did not answer the image check: {}",
+                        build::user_facing_engine_error(&e)
+                    );
+                    log::error!("{msg}");
+                    return Err(set_bundle_error(&mut state, msg));
+                }
+            },
             Err(e) => {
                 log::warn!("runtime not ready for reconcile: {e}");
                 return Ok(());
@@ -2595,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_does_not_rebuild_when_the_engine_cannot_answer_the_image_check() {
+    fn reconcile_fails_instead_of_rebuilding_when_the_engine_cannot_answer_the_image_check() {
         let source = include_str!("reconcile.rs");
         let inner_fn = source
             .split("fn reconcile_bundle_update_inner(")
@@ -2610,11 +2620,35 @@ mod tests {
             .nth(1)
             .expect("the image check must handle an engine that cannot answer");
         let arm_end = engine_error_arm
-            .find("return Ok(())")
-            .expect("an engine error must end the reconcile, not fall through to a rebuild");
+            .find("return Err(set_bundle_error(")
+            .expect("an engine that never answered must fail the reconcile so Retry re-runs it");
         assert!(
             !engine_error_arm[..arm_end].contains("prepare_rebuild"),
             "an engine error is not a missing image and must not force a rebuild"
+        );
+    }
+
+    #[test]
+    fn reconcile_skips_the_image_check_softly_when_the_runtime_cannot_be_readied() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+        let check_pos = inner_fn
+            .find("match build::images_exist(&rt, &active_integrations, &manifest)")
+            .expect("an unchanged bundle must match on the image check verdict");
+        let not_ready = &inner_fn[check_pos..];
+        let skip_pos = not_ready
+            .find("runtime not ready for reconcile")
+            .expect("an ensure_ready failure must stay a logged skip");
+        let skip_arm = &not_ready[skip_pos..];
+        let return_pos = skip_arm
+            .find("return Ok(())")
+            .expect("the ensure_ready skip must end the reconcile without failing it");
+        assert!(
+            !skip_arm[..return_pos].contains("set_bundle_error"),
+            "a runtime that is not provisioned yet must not turn into a failed reconcile"
         );
     }
 

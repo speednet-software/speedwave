@@ -224,15 +224,6 @@ const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duratio
 #[cfg(test)]
 const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
 
-const ENGINE_UNREACHABLE_RETRIES: u64 =
-    crate::consts::LIMA_VM_STOP_TIMEOUT_SECS.div_ceil(crate::consts::LIMA_VM_STOP_POLL_DELAY_SECS);
-
-#[cfg(not(test))]
-const ENGINE_UNREACHABLE_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(crate::consts::LIMA_VM_STOP_POLL_DELAY_SECS);
-#[cfg(test)]
-const ENGINE_UNREACHABLE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
-
 /// Tags an image name with its build-input hash (`name:hash`).
 pub fn image_ref(name: &str, hash: &str) -> String {
     format!("{name}:{hash}")
@@ -266,25 +257,49 @@ pub fn images_exist(
     integrations: &ResolvedIntegrationsConfig,
     manifest: &crate::bundle::BundleManifest,
 ) -> anyhow::Result<bool> {
-    let mut retries = 0;
+    images_exist_within(
+        rt,
+        integrations,
+        manifest,
+        std::time::Duration::from_secs(crate::consts::LIMA_VM_STOP_TIMEOUT_SECS),
+        std::time::Duration::from_secs(crate::consts::LIMA_VM_STOP_POLL_DELAY_SECS),
+    )
+}
+
+fn images_exist_within(
+    rt: &super::runtime::LockedRuntime,
+    integrations: &ResolvedIntegrationsConfig,
+    manifest: &crate::bundle::BundleManifest,
+    window: std::time::Duration,
+    poll_delay: std::time::Duration,
+) -> anyhow::Result<bool> {
+    let mut unreachable_since: Option<std::time::Instant> = None;
     loop {
         rt.ensure_ready()?;
         match probe_enabled_images(rt, integrations, manifest) {
-            Err(e) if retries < ENGINE_UNREACHABLE_RETRIES => {
-                if retries == 0 {
-                    log::warn!(
-                        "image check could not reach the container engine, re-running \
-                         ensure_ready up to {ENGINE_UNREACHABLE_RETRIES} times: {e}"
+            Ok(present) => {
+                if let Some(since) = unreachable_since {
+                    log::info!(
+                        "container engine answered the image check after {}s",
+                        since.elapsed().as_secs()
                     );
                 }
-                retries += 1;
-                std::thread::sleep(ENGINE_UNREACHABLE_RETRY_DELAY);
-            }
-            Ok(present) if retries > 0 => {
-                log::info!("container engine answered the image check after {retries} retries");
                 return Ok(present);
             }
-            verdict => return verdict,
+            Err(e) => {
+                let since = *unreachable_since.get_or_insert_with(|| {
+                    log::warn!(
+                        "image check could not reach the container engine, re-running \
+                         ensure_ready for up to {}s: {e}",
+                        window.as_secs()
+                    );
+                    std::time::Instant::now()
+                });
+                if since.elapsed() >= window {
+                    return Err(e);
+                }
+                std::thread::sleep(poll_delay);
+            }
         }
     }
 }
@@ -3104,14 +3119,44 @@ mod tests {
         const KEX_RESET: &str =
             "limactl failed: kex_exchange_identification: read: Connection reset by peer";
 
+        const OPEN_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+
         #[test]
         fn images_exist_re_runs_ensure_ready_after_an_engine_error() {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_image_exists_default(true)
                 .push_image_exists_failure(KEX_RESET)
                 .build();
-            assert!(images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
+            let present = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+            assert!(present);
             assert_eq!(handles.ensure_ready_count(), 2);
+        }
+
+        #[test]
+        fn images_exist_keeps_re_running_ensure_ready_while_the_window_is_open() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_image_exists_failure(KEX_RESET)
+                .push_image_exists_failure("Lima VM 'speedwave' is not running")
+                .push_image_exists_failure(KEX_RESET)
+                .build();
+            let present = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+            assert!(present);
+            assert_eq!(handles.ensure_ready_count(), 4);
         }
 
         #[test]
@@ -3121,24 +3166,36 @@ mod tests {
                 .with_image_missing_substring(IMAGE_CLAUDE)
                 .push_image_exists_failure(KEX_RESET)
                 .build();
-            assert!(!images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
+            let present = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+            assert!(!present);
             assert_eq!(handles.ensure_ready_count(), 2);
         }
 
         #[test]
-        fn images_exist_surfaces_the_engine_error_once_the_retry_budget_is_spent() {
+        fn images_exist_surfaces_the_engine_error_once_the_window_has_passed() {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_image_exists_error(KEX_RESET)
                 .build();
-            let err = images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap_err();
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            )
+            .unwrap_err();
             assert!(
                 err.to_string().contains("kex_exchange_identification"),
                 "an unreachable engine must surface as its error, got: {err}"
             );
-            assert_eq!(
-                handles.ensure_ready_count(),
-                1 + ENGINE_UNREACHABLE_RETRIES as usize
-            );
+            assert_eq!(handles.ensure_ready_count(), 1);
         }
 
         #[test]
