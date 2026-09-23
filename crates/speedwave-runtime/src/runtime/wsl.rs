@@ -2717,7 +2717,7 @@ mod tests {
             assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
         }
 
-        fn stale_chain_failure(chain: &str) -> anyhow::Result<String> {
+        fn stale_chain_up_failure(chain: &str) -> anyhow::Result<String> {
             Err(anyhow::anyhow!(
                 "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
             ))
@@ -2725,10 +2725,12 @@ mod tests {
 
         #[test]
         fn compose_up_self_heals_stale_cni_and_retries_to_success() {
+            const PROXY_CHAIN: &str = "CNI-d3c42d65590ae0cf2c72261f";
+            const CLAUDE_CHAIN: &str = "CNI-1be9c452999fb96d888571d2";
             let mut responses = owned_pass();
-            responses.push(stale_chain_failure("CNI-d3c42d65590ae0cf2c72261f"));
+            responses.push(stale_chain_up_failure(PROXY_CHAIN));
             responses.push(Ok("".into()));
-            responses.push(stale_chain_failure("CNI-1be9c452999fb96d888571d2"));
+            responses.push(stale_chain_up_failure(CLAUDE_CHAIN));
             responses.push(Ok("".into()));
             responses.push(Ok("".into()));
             responses.extend(owned_pass());
@@ -2750,18 +2752,26 @@ mod tests {
             for i in [2, 4, 6] {
                 assert!(last(i).contains(" up "), "up at {i}: {:?}", calls[i].1);
             }
-            for i in [3, 5] {
+            for (i, own, other) in [
+                (3, PROXY_CHAIN, CLAUDE_CHAIN),
+                (5, CLAUDE_CHAIN, PROXY_CHAIN),
+            ] {
                 assert!(
-                    last(i).contains("base64 -d | sh") && calls[i].1.contains(&"root".to_string()),
-                    "root cleanup between the failed up and the retry at {i}: {:?}",
+                    calls[i].1.contains(&"root".to_string()),
+                    "cleanup {i} runs as root between the failed up and its retry: {:?}",
                     calls[i].1
                 );
+                let argv = shlex::split(&last(i)).unwrap();
+                let script = crate::runtime::test_support::decode_payload(&argv[2]);
+                assert!(
+                    script.contains(&format!("iptables -t nat -X {own}")),
+                    "cleanup {i} flushes the chain its own failure named: {script}"
+                );
+                assert!(
+                    !script.contains(other),
+                    "cleanup {i} leaves the other chain alone: {script}"
+                );
             }
-            assert_ne!(
-                last(3),
-                last(5),
-                "each cleanup targets the chain its own failure names"
-            );
         }
 
         fn name_store_conflict_msg() -> String {

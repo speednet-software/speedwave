@@ -1559,12 +1559,12 @@ mod tests {
 
     #[test]
     fn compose_up_self_heals_stale_cni_and_retries_to_success() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        const PROXY_CHAIN: &str = "CNI-d3c42d65590ae0cf2c72261f";
+        const CLAUDE_CHAIN: &str = "CNI-1be9c452999fb96d888571d2";
 
         struct HealRunner {
             chains: Mutex<std::collections::VecDeque<&'static str>>,
-            up_calls: Arc<AtomicUsize>,
-            cleanups: Arc<Mutex<Vec<String>>>,
+            events: Arc<Mutex<Vec<String>>>,
         }
         impl CommandRunner for HealRunner {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
@@ -1579,7 +1579,7 @@ mod tests {
                     && joined.contains("compose")
                     && joined.contains(" up ")
                 {
-                    self.up_calls.fetch_add(1, Ordering::SeqCst);
+                    self.events.lock().unwrap().push("up".to_string());
                     return match self.chains.lock().unwrap().pop_front() {
                         Some(chain) => Err(anyhow::anyhow!(
                             "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
@@ -1588,40 +1588,51 @@ mod tests {
                     };
                 }
                 if joined.contains("base64 -d | sh") {
-                    self.cleanups.lock().unwrap().push(joined);
+                    let sudo = if args.contains(&"sudo") { "sudo " } else { "" };
+                    let script = crate::runtime::test_support::decode_payload(args.last().unwrap());
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .push(format!("{sudo}cleanup:\n{script}"));
                 }
                 Ok(String::new())
             }
         }
 
-        let up_calls = Arc::new(AtomicUsize::new(0));
-        let cleanups = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let rt = LimaRuntime::with_runner(Box::new(HealRunner {
-            chains: Mutex::new(
-                [
-                    "CNI-d3c42d65590ae0cf2c72261f",
-                    "CNI-1be9c452999fb96d888571d2",
-                ]
-                .into(),
-            ),
-            up_calls: Arc::clone(&up_calls),
-            cleanups: Arc::clone(&cleanups),
+            chains: Mutex::new([PROXY_CHAIN, CLAUDE_CHAIN].into()),
+            events: Arc::clone(&events),
         }));
         assert!(
             rt.compose_up("acme").is_ok(),
             "each stale chain a retry uncovers must be healed"
         );
-        assert_eq!(
-            up_calls.load(Ordering::SeqCst),
-            3,
-            "two failed ups, then success"
-        );
-        let cleanups = cleanups.lock().unwrap();
-        assert_eq!(cleanups.len(), 2, "one cleanup per stale chain");
-        assert_ne!(
-            cleanups[0], cleanups[1],
-            "each cleanup targets the chain its own failure names"
-        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 5, "up, cleanup, up, cleanup, up: {events:?}");
+        for i in [0, 2, 4] {
+            assert_eq!(events[i], "up", "event {i}: {events:?}");
+        }
+        for (i, own, other) in [
+            (1, PROXY_CHAIN, CLAUDE_CHAIN),
+            (3, CLAUDE_CHAIN, PROXY_CHAIN),
+        ] {
+            assert!(
+                events[i].starts_with("sudo cleanup:"),
+                "cleanup {i} runs via sudo between the failed up and its retry: {}",
+                events[i]
+            );
+            assert!(
+                events[i].contains(&format!("iptables -t nat -X {own}")),
+                "cleanup {i} flushes the chain its own failure named: {}",
+                events[i]
+            );
+            assert!(
+                !events[i].contains(other),
+                "cleanup {i} leaves the other chain alone: {}",
+                events[i]
+            );
+        }
     }
 
     /// Runner whose first compose `up` fails with a real nerdctl name-store conflict.
