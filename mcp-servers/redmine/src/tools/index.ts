@@ -26,14 +26,34 @@ function withNumericIds(tool: Tool, handler: ToolHandler): ToolHandler {
   return async (params, ...rest) => {
     const normalized = normalizeNumericIdParams(params, ids);
     if (!normalized.ok) {
-      return teachingErrorResult(normalized.error);
+      const { paramName, nextStep } = normalized.error;
+      return teachingErrorResult({ paramName, nextStep });
     }
     return handler(normalized.value, ...rest);
   };
 }
 
+function withoutAliasConflicts(tool: Tool, handler: ToolHandler): ToolHandler {
+  const declared = new Set(Object.keys(tool.inputSchema.properties));
+  const pairs = [...declared]
+    .filter((name) => !name.endsWith('_id') && declared.has(`${name}_id`))
+    .map((name) => [name, `${name}_id`] as const);
+  const given = (value: unknown) => value !== undefined && value !== null && value !== '';
+  return async (params, ...rest) => {
+    const conflict = pairs.find(([name, idName]) => given(params[name]) && given(params[idName]));
+    if (conflict) {
+      const [name, idName] = conflict;
+      return teachingErrorResult({
+        paramName: `${name} and ${idName}`,
+        nextStep: `${tool.name} takes either ${name} (a name) or ${idName} (an ID), not both, so the call was rejected and nothing was sent. Retry with one of them.`,
+      });
+    }
+    return handler(params, ...rest);
+  };
+}
+
 /**
- * Aggregates tool definitions from every Redmine domain module; each handler rejects an undeclared or missing required argument and any numeric ID that is not a positive integer.
+ * Aggregates tool definitions from every Redmine domain module; each handler rejects an undeclared or missing required argument, a name given with its `_id` twin, and a numeric ID that is not a positive integer.
  * @param client - Redmine client instance
  */
 export function createToolDefinitions(client: RedmineClient | null): ToolDefinition[] {
@@ -47,7 +67,7 @@ export function createToolDefinitions(client: RedmineClient | null): ToolDefinit
     ...createConfigTools(client),
   ].map(({ tool, handler }) => ({
     tool,
-    handler: withDeclaredParams(tool, withNumericIds(tool, handler)),
+    handler: withDeclaredParams(tool, withoutAliasConflicts(tool, withNumericIds(tool, handler))),
   }));
 }
 

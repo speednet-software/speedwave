@@ -54,7 +54,8 @@ Every tool rejects, before anything is sent to Redmine:
 
 - a parameter its `inputSchema` does not declare (the error names it and lists the accepted ones);
 - a missing, `null`, or empty required parameter;
-- a numeric ID parameter (`*_id` declared as a number) that is not a positive integer or its digit string;
+- a numeric ID parameter (`*_id` declared as a number) that is not a positive integer or its digit string (the error names the parameter, never the value);
+- a name together with its `_id` twin, e.g. `status` and `status_id`;
 - arguments passed as anything other than an object of named parameters.
 
 ### Issue Operations

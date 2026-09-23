@@ -1501,21 +1501,22 @@ export class RedmineClient {
    * Resolve a user identifier ('me', numeric ID, or username) to a user ID, or null if not found.
    * @param identifier - User identifier ('me', user ID, or username).
    */
-  async resolveUser(identifier: string): Promise<number | null> {
-    if (typeof identifier !== 'string' || identifier.trim() === '') {
+  async resolveUser(identifier: string | number): Promise<number | null> {
+    const value = identifier === undefined || identifier === null ? '' : String(identifier).trim();
+    if (value === '') {
       return null;
     }
-    if (identifier === 'me') {
+    if (value === 'me') {
       const user = await this.getCurrentUser();
       return user.id;
     }
 
-    if (/^\d+$/.test(identifier)) {
-      return parseInt(identifier, 10);
+    if (/^\d+$/.test(value)) {
+      return parseInt(value, 10);
     }
 
     const response = await this.client.get('/users.json', {
-      params: { name: identifier },
+      params: { name: value },
     });
 
     if (response.data.users && response.data.users.length > 0) {

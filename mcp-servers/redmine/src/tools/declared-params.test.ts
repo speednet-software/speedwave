@@ -98,6 +98,18 @@ describe('Redmine declared-parameter guard', () => {
     expect(JSON.parse(textOf(result))).toEqual({ id: 1454, login: 'kacper' });
   });
 
+  it('passes a numeric assigned_to through to user resolution', async () => {
+    const client = createMockClient();
+
+    await handlerFor(client, 'updateIssue')({ issue_id: 83432, assigned_to: 1454 });
+
+    expect(client.resolveUser).toHaveBeenCalledWith(1454);
+    expect(client.updateIssue).toHaveBeenCalledWith(83432, {
+      issue_id: 83432,
+      assigned_to_id: 1454,
+    });
+  });
+
   it('rejects resolveUser without an identifier instead of listing every user', async () => {
     const client = createMockClient();
 
@@ -105,6 +117,74 @@ describe('Redmine declared-parameter guard', () => {
 
     expect(client.resolveUser).not.toHaveBeenCalled();
     expect(textOf(result)).toContain('resolveUser requires identifier');
+  });
+
+  describe('a name given together with its _id twin', () => {
+    const aliasPairs = createToolDefinitions(null).flatMap((d) => {
+      const declared = Object.keys(d.tool.inputSchema.properties);
+      return declared
+        .filter((name) => !name.endsWith('_id') && declared.includes(`${name}_id`))
+        .map((name) => [d.tool.name, name, d] as const);
+    });
+
+    it('covers every alias pair the schemas declare', () => {
+      expect(aliasPairs.map(([tool, name]) => `${tool}.${name}`)).toEqual(
+        expect.arrayContaining([
+          'listIssueIds.status',
+          'listIssueIds.assigned_to',
+          'createIssue.tracker',
+          'createIssue.status',
+          'createIssue.priority',
+          'createIssue.assigned_to',
+          'updateIssue.tracker',
+          'updateIssue.status',
+          'updateIssue.priority',
+          'updateIssue.assigned_to',
+          'createTimeEntry.activity',
+          'updateTimeEntry.activity',
+        ])
+      );
+    });
+
+    it.each(aliasPairs.map(([tool, name, d]) => [`${tool}.${name}`, name, d] as const))(
+      '%s is rejected when both forms are given',
+      async (_label, name, d) => {
+        const required = Object.fromEntries(
+          (d.tool.inputSchema.required ?? []).map((r) => [r, r === 'subject' ? 's' : 1])
+        );
+        const result = await d.handler({ ...required, [name]: 'x', [`${name}_id`]: 2 });
+        expect(textOf(result)).toContain(`Invalid ${name} and ${name}_id.`);
+        expect(textOf(result)).toContain('not both');
+      }
+    );
+
+    it('keeps an explicit status_id instead of letting status: "*" override it', async () => {
+      const client = { ...createMockClient(), listIssues: vi.fn() };
+
+      const result = await handlerFor(
+        client,
+        'listIssueIds'
+      )({
+        fixed_version_id: 87,
+        status: '*',
+        status_id: 5,
+      });
+
+      expect(client.listIssues).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('takes either status (a name) or status_id (an ID)');
+    });
+
+    it('accepts one form with the other left empty', async () => {
+      const client = createMockClient();
+
+      await handlerFor(client, 'updateIssue')({ issue_id: 83432, tracker: '', tracker_id: 2 });
+
+      expect(client.updateIssue).toHaveBeenCalledWith(83432, {
+        issue_id: 83432,
+        tracker: '',
+        tracker_id: 2,
+      });
+    });
   });
 
   describe('numeric IDs', () => {
@@ -120,8 +200,25 @@ describe('Redmine declared-parameter guard', () => {
       });
 
       expect(client.deleteJournal).not.toHaveBeenCalled();
-      expect(textOf(result)).toContain('Invalid journal_id');
+      expect(textOf(result)).toContain('Invalid journal_id.');
       expect(textOf(result)).toContain('positive integer');
+      expect(textOf(result)).not.toContain('../');
+    });
+
+    it('never echoes a rejected ID value, which the hub may have detokenized', async () => {
+      const client = createMockClient();
+
+      const result = await handlerFor(
+        client,
+        'updateIssue'
+      )({
+        issue_id: 83432,
+        assigned_to_id: 'jan.kowalski@example.com',
+      });
+
+      expect(client.updateIssue).not.toHaveBeenCalled();
+      expect(textOf(result)).toContain('Invalid assigned_to_id.');
+      expect(textOf(result)).not.toContain('jan.kowalski');
     });
 
     it('turns a digit string into a number before the client sees it', async () => {

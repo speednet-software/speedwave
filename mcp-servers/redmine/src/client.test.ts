@@ -1407,13 +1407,24 @@ describe('RedmineClient', () => {
   });
 
   describe('resolveUser', () => {
-    it.each(['', '   ', undefined])(
+    it.each(['', '   ', undefined, null])(
       'returns null for the empty identifier %j instead of listing every user',
       async (identifier) => {
         await expect(client.resolveUser(identifier as unknown as string)).resolves.toBeNull();
         expect(mockAxiosInstance.get).not.toHaveBeenCalled();
       }
     );
+
+    it('resolves a numeric identifier passed as a JSON number without a lookup', async () => {
+      await expect(client.resolveUser(1454)).resolves.toBe(1454);
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('trims the identifier before resolving it', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { user: { id: 496, login: 'sj' } } });
+
+      await expect(client.resolveUser('  me  ')).resolves.toBe(496);
+    });
 
     it('should resolve "me" to current user id', async () => {
       mockAxiosInstance.get.mockResolvedValue({
