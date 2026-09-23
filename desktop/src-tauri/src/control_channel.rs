@@ -266,6 +266,7 @@ pub(crate) enum SessionInfoState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SessionInfoEvent {
     pub(crate) project: String,
+    pub(crate) tab_id: String,
     pub(crate) status: SessionInfoState,
 }
 
@@ -1090,6 +1091,7 @@ mod tests {
         assert_eq!(
             rust_fields(&SessionInfoEvent {
                 project: "p".to_string(),
+                tab_id: "t".to_string(),
                 status: SessionInfoState::Pending,
             }),
             ts_interface_fields(ts, "ClaudeSessionInfoEvent")

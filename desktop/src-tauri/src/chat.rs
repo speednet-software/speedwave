@@ -251,9 +251,25 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
     }
 }
 
-fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, policy: &DisplayPolicy) {
+#[derive(Serialize, Debug, Clone)]
+pub(crate) struct TabStreamChunk<'a> {
+    pub(crate) tab_id: &'a str,
+    #[serde(flatten)]
+    pub(crate) chunk: StreamChunk,
+}
+
+fn emit_sanitized_chunk(
+    app_handle: &tauri::AppHandle,
+    tab_id: &str,
+    chunk: StreamChunk,
+    policy: &DisplayPolicy,
+) {
     let chunk = detokenize_chunk(chunk, policy);
-    if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
+    let wrapped = TabStreamChunk {
+        tab_id,
+        chunk: sanitize_chunk(chunk),
+    };
+    if let Err(e) = app_handle.emit("chat_stream", wrapped) {
         log::warn!("failed to emit chat_stream event: {e}");
     }
 }
@@ -1406,9 +1422,15 @@ fn consume_control_response(control: &ControlChannel, parsed: &serde_json::Value
     true
 }
 
-fn emit_session_info(app_handle: &AppHandle, project: &str, status: SessionInfoState) {
+fn emit_session_info(
+    app_handle: &AppHandle,
+    project: &str,
+    tab_id: &str,
+    status: SessionInfoState,
+) {
     let event = SessionInfoEvent {
         project: project.to_string(),
+        tab_id: tab_id.to_string(),
         status,
     };
     if let Err(e) = app_handle.emit(control_channel::SESSION_INFO_EVENT, event) {
@@ -1685,6 +1707,7 @@ impl ChatSession {
         let pending_requests = self.pending_requests.clone();
         let control_for_reader = self.control.clone();
         let transcript_for_reader = self.transcript.clone();
+        let tab_id_for_reader = self.tab_id.clone();
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
@@ -1779,6 +1802,7 @@ impl ChatSession {
                                 );
                                 emit_sanitized_chunk(
                                     &app_handle,
+                                    &tab_id_for_reader,
                                     StreamChunk::Error {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
@@ -1791,6 +1815,7 @@ impl ChatSession {
                         }
                         emit_sanitized_chunk(
                             &app_handle,
+                            &tab_id_for_reader,
                             StreamChunk::AskUserQuestion {
                                 tool_id: ctrl.tool_use_id.clone(),
                                 questions,
@@ -1808,6 +1833,7 @@ impl ChatSession {
                                     );
                                     emit_sanitized_chunk(
                                         &app_handle,
+                                        &tab_id_for_reader,
                                         StreamChunk::Error {
                                             content: format!(
                                                 "Failed to write auto-approve to stdin: {e}"
@@ -1824,6 +1850,7 @@ impl ChatSession {
                                     );
                                     emit_sanitized_chunk(
                                         &app_handle,
+                                        &tab_id_for_reader,
                                         StreamChunk::Error {
                                             content: format!(
                                                 "Failed to flush auto-approve to stdin: {e}"
@@ -1839,6 +1866,7 @@ impl ChatSession {
                                 log::error!("stdin mutex poisoned: {e}; dropping stream");
                                 emit_sanitized_chunk(
                                     &app_handle,
+                                    &tab_id_for_reader,
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                         turn_ended: false,
@@ -1925,11 +1953,12 @@ impl ChatSession {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sid.clone());
                     }
-                    emit_sanitized_chunk(&app_handle, chunk, &display_policy);
+                    emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 }
                 if let Some(session_id) = result_session_id {
                     drain_queued_message(
                         &app_handle,
+                        &tab_id_for_reader,
                         &session_id,
                         &stdin_for_reader,
                         &display_policy,
@@ -1951,16 +1980,22 @@ impl ChatSession {
                             .to_string(),
                     turn_ended: false,
                 };
-                emit_sanitized_chunk(&app_handle, chunk, &display_policy);
+                emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
             }
         });
         self.drain_handles.push(h);
 
         if let Some((probe_app_handle, handle)) = session_info_probe {
             let project = self.project_name.clone();
+            let tab_id = self.tab_id.clone();
             let slot = self.session_info.clone();
             let stopping = self.stopping.clone();
-            emit_session_info(&probe_app_handle, &project, SessionInfoState::Pending);
+            emit_session_info(
+                &probe_app_handle,
+                &project,
+                &tab_id,
+                SessionInfoState::Pending,
+            );
             let h = std::thread::spawn(move || {
                 let status =
                     probe_session_info(|| handle.query(ControlQuery::Initialize), &slot, &stopping);
@@ -1975,7 +2010,7 @@ impl ChatSession {
                         provider_kind,
                         info,
                     );
-                    emit_session_info(&probe_app_handle, &project, status);
+                    emit_session_info(&probe_app_handle, &project, &tab_id, status);
                 }
             });
             self.drain_handles.push(h);
@@ -1992,8 +2027,9 @@ impl ChatSession {
     ) -> anyhow::Result<()> {
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
+        let tab_id = self.tab_id.clone();
         self.send_message_with_emit(blocks, |chunk| {
-            emit_sanitized_chunk(app_handle, chunk, &display_policy)
+            emit_sanitized_chunk(app_handle, &tab_id, chunk, &display_policy)
         })
     }
 
@@ -2309,6 +2345,7 @@ pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 
 fn drain_queued_message(
     app_handle: &AppHandle,
+    tab_id: &str,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
     policy: &DisplayPolicy,
@@ -2319,7 +2356,7 @@ fn drain_queued_message(
         None => return,
     };
     write_and_emit_drained_message(session_id, &drained.text, stdin, |chunk| {
-        emit_sanitized_chunk(app_handle, chunk, policy)
+        emit_sanitized_chunk(app_handle, tab_id, chunk, policy)
     });
 }
 
@@ -2460,6 +2497,20 @@ mod tests {
             "exactly one chat_stream emit allowed (inside emit_sanitized_chunk); \
              found {raw_emits} — a new raw emit bypasses sanitization"
         );
+    }
+
+    #[test]
+    fn tab_stream_chunk_serializes_tab_id_beside_the_tagged_chunk() {
+        let wrapped = TabStreamChunk {
+            tab_id: "550e8400-e29b-41d4-a716-446655440000",
+            chunk: StreamChunk::Text {
+                content: "hi".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&wrapped).unwrap();
+        assert_eq!(v["tab_id"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(v["chunk_type"], "Text");
+        assert_eq!(v["data"]["content"], "hi");
     }
 
     #[test]

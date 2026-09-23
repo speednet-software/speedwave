@@ -30,6 +30,7 @@ export const CLAUDE_SESSION_INFO_EVENT = 'chat_session_info';
 /** Payload of the session-info event. Mirror of Rust `control_channel::SessionInfoEvent`. */
 export interface ClaudeSessionInfoEvent {
   project: string;
+  tab_id: string;
   status: ClaudeSessionInfoState;
 }
 
