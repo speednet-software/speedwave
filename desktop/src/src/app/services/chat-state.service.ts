@@ -500,6 +500,10 @@ export class ChatStateService {
     return '';
   });
 
+  readonly sessionStartInFlightFromState: Signal<boolean> = computed(
+    () => this.startingSessionSignal() || this.resumeInProgressSignal()
+  );
+
   private readonly _loadingTranscript = signal<boolean>(false);
   readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
 
@@ -694,7 +698,7 @@ export class ChatStateService {
     const chatInput: ChatInput = typeof input === 'string' ? chatInputFromText(input) : input;
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
-    if (!hasContent || this.isStreaming) return;
+    if (!hasContent || this.isStreaming || this.sessionStartInFlightFromState()) return;
     if (chatInput.attachments.length === 0 && isBlankOrSlashOnly(chatInput.text)) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
@@ -1652,6 +1656,7 @@ export class ChatStateService {
   private async setupStreamListener(): Promise<void> {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
+        if (this.sessionStartInFlightFromState()) return;
         const chunk = event.payload;
         if (
           chunk.chunk_type === 'SystemInit' ||

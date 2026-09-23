@@ -173,7 +173,7 @@ export async function sendMessageNoWait(text: string): Promise<void> {
 
   const sendBtn = await $('[data-testid="chat-send"]');
   await browser.waitUntil(async () => await sendBtn.isEnabled(), {
-    timeout: 10_000,
+    timeout: 60_000,
     timeoutMsg: 'chat-send never became enabled',
   });
   await sendBtn.click();
