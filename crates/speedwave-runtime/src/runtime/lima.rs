@@ -905,6 +905,14 @@ impl ContainerRuntime for LimaRuntime {
     }
 }
 
+const LIMA_UNMATCHED_INSTANCES: &str = "unmatched instances";
+
+fn unreadable_vm_status(vm: &str, cause: &anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(super::VmStatusUnreadable::new(format!(
+        "Cannot read the state of Lima VM '{vm}': {cause}"
+    )))
+}
+
 impl LimaRuntime {
     /// Starts a Lima VM that is in the Stopped state.
     /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
@@ -948,10 +956,14 @@ impl LimaRuntime {
         }
 
         let vm = consts::lima_vm_name();
-        let status = self
+        let status = match self
             .runner
             .run("limactl", &["list", "--format", "{{.Status}}", vm])
-            .unwrap_or_default();
+        {
+            Ok(status) => status,
+            Err(e) if e.to_string().contains(LIMA_UNMATCHED_INSTANCES) => String::new(),
+            Err(e) => return Err(unreadable_vm_status(vm, &e)),
+        };
 
         match status.trim() {
             "Running" => Ok(()),
@@ -969,6 +981,9 @@ impl LimaRuntime {
                         .run("limactl", &["list", "--format", "{{.Status}}", vm])
                     {
                         Ok(s) => s,
+                        Err(e) if std::time::Instant::now() >= deadline => {
+                            return Err(unreadable_vm_status(vm, &e));
+                        }
                         Err(e) => {
                             log::warn!("Lima VM status poll failed (will retry): {e}");
                             continue;
@@ -998,10 +1013,15 @@ impl LimaRuntime {
                 }
                 self.start_stopped_vm(vm)
             }
-            _ => {
+            "" => {
                 anyhow::bail!(
                     "Lima VM '{}' not found. Run Speedwave.app setup wizard to create it.",
                     vm
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "Lima VM '{vm}' is in state '{other}', which Speedwave cannot start from."
                 );
             }
         }
@@ -2535,15 +2555,16 @@ mod tests {
             "speedwave-claude:abc123".to_string(),
             "speedwave-mcp-hub:abc123".to_string(),
         ];
-        let runner = mock_runner_with_vm_running().with_response(
-            &format!(
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(rt.remove_images(&tags, false).is_ok());
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![format!(
                 "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
                 consts::lima_vm_name()
-            ),
-            "",
+            )]
         );
-        let rt = LimaRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, false).is_ok());
     }
 
     #[test]
@@ -2566,15 +2587,16 @@ mod tests {
     #[test]
     fn test_remove_images_force_passes_force_flag() {
         let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
-        let runner = mock_runner_with_vm_running().with_response(
-            &format!(
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(rt.remove_images(&tags, true).is_ok());
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![format!(
                 "limactl shell {} -- sudo nerdctl rmi --force speedwave-mcp-example:1.0.0",
                 consts::lima_vm_name()
-            ),
-            "",
+            )]
         );
-        let rt = LimaRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, true).is_ok());
     }
 
     #[test]
@@ -3024,6 +3046,113 @@ mod tests {
         assert!(
             rt.ensure_ready().is_ok(),
             "ensure_ready should return Ok when VM recovers to Running"
+        );
+    }
+
+    fn vm_status_key() -> String {
+        format!(
+            "limactl list --format {{{{.Status}}}} {}",
+            consts::lima_vm_name()
+        )
+    }
+
+    #[test]
+    fn ensure_ready_reports_a_missing_vm_when_limactl_matches_no_instance() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 2.1.2")
+            .with_error(
+                &vm_status_key(),
+                "limactl failed: time=\"2026-09-23T13:33:20+02:00\" level=fatal \
+                 msg=\"unmatched instances\"",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "an instance limactl does not know is a missing VM, got: {err}"
+        );
+        assert!(err
+            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
+            .is_none());
+    }
+
+    #[test]
+    fn ensure_ready_reports_an_unreadable_status_instead_of_a_missing_vm() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 2.1.2")
+            .with_error(
+                &vm_status_key(),
+                "limactl failed: open lima/speedwave/ha.pid: resource temporarily unavailable",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a failed status read must stay distinguishable from a missing VM, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("resource temporarily unavailable"),
+            "the limactl failure must reach the caller, got: {err}"
+        );
+        assert!(
+            !err.to_string().contains("setup wizard"),
+            "a VM whose status could not be read is not a VM to create, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_gives_up_on_a_stopping_vm_whose_status_stops_being_readable() {
+        struct StoppingThenUnreadableRunner {
+            status_reads: std::sync::atomic::AtomicUsize,
+        }
+        impl CommandRunner for StoppingThenUnreadableRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                if key.contains("list --format") {
+                    let read = self
+                        .status_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if read == 0 {
+                        return Ok("Stopping".to_string());
+                    }
+                    anyhow::bail!("limactl failed: resource temporarily unavailable");
+                }
+                Err(anyhow::anyhow!("unexpected: {key}"))
+            }
+        }
+        let rt = LimaRuntime::with_runner(Box::new(StoppingThenUnreadableRunner {
+            status_reads: std::sync::atomic::AtomicUsize::new(0),
+        }))
+        .with_zero_vm_stop_poll_delay()
+        .with_stop_timeout(std::time::Duration::ZERO);
+        let err = rt
+            .ensure_ready()
+            .expect_err("an unreadable status past the Stopping deadline must end the wait");
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "the last status read failed, so the error must say the state is unreadable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_names_a_vm_state_it_cannot_act_on() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 2.1.2")
+            .with_response(&vm_status_key(), "Broken");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err().to_string();
+        assert!(
+            err.contains("Broken"),
+            "the state limactl reported must reach the caller, got: {err}"
+        );
+        assert!(
+            !err.contains("setup wizard"),
+            "an existing VM in another state is not a VM to create, got: {err}"
         );
     }
 

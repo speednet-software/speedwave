@@ -654,6 +654,25 @@ pub(crate) fn image_inspect_verdict(inspect: anyhow::Result<String>) -> anyhow::
     }
 }
 
+/// `ensure_ready` failed because the VM/distro status call itself failed, not because the VM is
+/// missing; unlike a missing VM it can be transient, so readiness retry loops may re-run it.
+#[derive(Debug)]
+pub struct VmStatusUnreadable(String);
+
+impl VmStatusUnreadable {
+    pub(crate) fn new(message: String) -> Self {
+        Self(message)
+    }
+}
+
+impl std::fmt::Display for VmStatusUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for VmStatusUnreadable {}
+
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {

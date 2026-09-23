@@ -137,6 +137,7 @@ pub struct MockRuntimeBuilder {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
+    ensure_ready_unreadable_queue: Arc<Mutex<VecDeque<String>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -201,6 +202,7 @@ impl MockRuntimeBuilder {
             handles: MockHandles::default(),
             is_available: true,
             ensure_ready_result: ResultCell::Ok,
+            ensure_ready_unreadable_queue: Arc::new(Mutex::new(VecDeque::new())),
             fail_on_up: HashSet::new(),
             fail_on_down: HashSet::new(),
             fail_on_recreate: HashSet::new(),
@@ -246,6 +248,15 @@ impl MockRuntimeBuilder {
     /// Makes `ensure_ready` fail with `msg`.
     pub fn with_ensure_ready_error(mut self, msg: &str) -> Self {
         self.ensure_ready_result = ResultCell::Err(msg.to_string());
+        self
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmStatusUnreadable` (FIFO); the
+    /// configured result resumes once the queue is empty.
+    pub fn push_ensure_ready_status_unreadable(self, msg: &str) -> Self {
+        self.ensure_ready_unreadable_queue
+            .lock()
+            .unwrap()
+            .push_back(msg.to_string());
         self
     }
     /// Sets the value returned by `is_available`.
@@ -415,6 +426,7 @@ impl MockRuntimeBuilder {
             handles: self.handles,
             is_available: self.is_available,
             ensure_ready_result: self.ensure_ready_result,
+            ensure_ready_unreadable_queue: self.ensure_ready_unreadable_queue,
             fail_on_up: self.fail_on_up,
             fail_on_down: self.fail_on_down,
             fail_on_recreate: self.fail_on_recreate,
@@ -458,6 +470,7 @@ struct MockRuntime {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
+    ensure_ready_unreadable_queue: Arc<Mutex<VecDeque<String>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -602,6 +615,14 @@ impl ContainerRuntime for MockRuntime {
         self.handles
             .ensure_ready_calls
             .fetch_add(1, Ordering::SeqCst);
+        let next_unreadable = self
+            .ensure_ready_unreadable_queue
+            .lock()
+            .unwrap()
+            .pop_front();
+        if let Some(msg) = next_unreadable {
+            return Err(anyhow::Error::new(super::VmStatusUnreadable::new(msg)));
+        }
         match &self.ensure_ready_result {
             ResultCell::Ok => Ok(()),
             ResultCell::Err(e) => anyhow::bail!("{e}"),
@@ -899,6 +920,20 @@ mod tests {
             .build();
         assert!(rt.image_exists("present:1").unwrap());
         assert!(!rt.image_exists("absent:1").unwrap());
+    }
+
+    #[test]
+    fn ensure_ready_unreadable_queue_drains_before_the_configured_result() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_ensure_ready_status_unreadable("status read failed")
+            .build();
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(err
+            .downcast_ref::<super::super::VmStatusUnreadable>()
+            .is_some());
+        assert!(err.to_string().contains("status read failed"));
+        assert!(rt.ensure_ready().is_ok());
+        assert_eq!(handles.ensure_ready_count(), 2);
     }
 
     #[test]

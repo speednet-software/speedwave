@@ -2,6 +2,7 @@
 
 use crate::bundle;
 use crate::config::ResolvedIntegrationsConfig;
+use crate::runtime::VmStatusUnreadable;
 use std::path::PathBuf;
 
 /// A container image definition. Build set is selected per project via [`enabled_images`].
@@ -275,8 +276,12 @@ fn images_exist_within(
 ) -> anyhow::Result<bool> {
     let mut unreachable_since: Option<std::time::Instant> = None;
     loop {
-        rt.ensure_ready()?;
-        match probe_enabled_images(rt, integrations, manifest) {
+        let verdict = match rt.ensure_ready() {
+            Ok(()) => probe_enabled_images(rt, integrations, manifest),
+            Err(e) if e.downcast_ref::<VmStatusUnreadable>().is_some() => Err(e),
+            Err(e) => return Err(e),
+        };
+        match verdict {
             Ok(present) => {
                 if let Some(since) = unreachable_since {
                     log::info!(
@@ -3126,6 +3131,26 @@ mod tests {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_image_exists_default(true)
                 .push_image_exists_failure(KEX_RESET)
+                .build();
+            let present = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+            assert!(present);
+            assert_eq!(handles.ensure_ready_count(), 2);
+        }
+
+        #[test]
+        fn images_exist_re_runs_ensure_ready_when_the_vm_status_cannot_be_read() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_ensure_ready_status_unreadable(
+                    "Cannot read the state of Lima VM 'speedwave': resource temporarily unavailable",
+                )
                 .build();
             let present = images_exist_within(
                 &rt,

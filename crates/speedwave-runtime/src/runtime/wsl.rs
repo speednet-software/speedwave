@@ -830,11 +830,11 @@ impl WslRuntime {
         let raw = self
             .runner
             .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                    distro
-                )
+            .map_err(|e| {
+                anyhow::Error::new(super::VmStatusUnreadable::new(format!(
+                    "Cannot list WSL2 distributions to find '{distro}': {e}. If WSL2 is not \
+                     installed, run the Speedwave.app setup wizard."
+                )))
             })?;
 
         let output = decode_wsl_output(&raw);
@@ -1020,6 +1020,25 @@ mod tests {
                 "error should mention distro on non-Windows, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn ensure_ready_reports_an_unreadable_distro_list_instead_of_a_missing_distro() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Catastrophic failure\nError code: Wsl/Service/E_UNEXPECTED",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a failed distro list must stay distinguishable from a missing distro, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Wsl/Service/E_UNEXPECTED"),
+            "the wsl.exe failure must reach the caller, got: {err}"
+        );
     }
 
     #[test]
@@ -2006,25 +2025,50 @@ mod tests {
         );
     }
 
+    struct SharedSequentialRunner(
+        std::sync::Arc<crate::runtime::test_support::SequentialMockRunner>,
+    );
+
+    impl CommandRunner for SharedSequentialRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            self.0.run(cmd, args)
+        }
+    }
+
+    fn rmi_command_for(tags: &[String], force: bool) -> String {
+        let runner = std::sync::Arc::new(crate::runtime::test_support::SequentialMockRunner::new(
+            vec![Ok(String::new())],
+        ));
+        let rt = WslRuntime::with_runner(Box::new(SharedSequentialRunner(runner.clone())));
+        assert!(rt.remove_images(tags, force).is_ok());
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "remove_images must run exactly one command");
+        format!("{} {}", calls[0].0, calls[0].1.join(" "))
+    }
+
     #[test]
     fn test_remove_images_happy_path() {
         let tags = vec![
             "speedwave-claude:abc123".to_string(),
             "speedwave-mcp-hub:abc123".to_string(),
         ];
-        let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
-            "",
+        assert_eq!(
+            rmi_command_for(&tags, false),
+            format!(
+                "wsl.exe -d {} -- nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
+                consts::wsl_distro_name()
+            )
         );
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, false).is_ok());
     }
 
     #[test]
     fn test_remove_images_error_is_warn_only() {
         let tags = vec!["speedwave-claude:abc123".to_string()];
         let runner = MockRunner::new().with_error(
-            "wsl.exe -d Speedwave -- nerdctl rmi speedwave-claude:abc123",
+            &format!(
+                "wsl.exe -d {} -- nerdctl rmi speedwave-claude:abc123",
+                consts::wsl_distro_name()
+            ),
             "no such image",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
@@ -2037,12 +2081,13 @@ mod tests {
     #[test]
     fn test_remove_images_force_passes_force_flag() {
         let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
-        let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
-            "",
+        assert_eq!(
+            rmi_command_for(&tags, true),
+            format!(
+                "wsl.exe -d {} -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
+                consts::wsl_distro_name()
+            )
         );
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, true).is_ok());
     }
 
     fn image_inspect_key() -> String {
