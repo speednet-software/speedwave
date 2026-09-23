@@ -670,6 +670,7 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("checking whether containers are running for project={project}");
+        crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT)?;
         let rt = speedwave_runtime::runtime::detect_runtime();
         if !rt.is_available() {
             log::warn!("runtime not available");
@@ -4591,6 +4592,27 @@ mod tests {
         assert!(
             ensure_pos < up_pos,
             "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    #[test]
+    fn check_containers_running_waits_for_the_engine_check_before_asking_the_engine() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+
+        let wait_pos = fn_body
+            .find("wait_for_image_check(")
+            .expect("check_containers_running must wait for the startup engine check");
+        let probe_pos = fn_body
+            .find("is_available()")
+            .expect("check_containers_running must probe the runtime");
+        let ps_pos = fn_body
+            .find("compose_ps(")
+            .expect("check_containers_running must list the project's containers");
+        assert!(
+            wait_pos < probe_pos && wait_pos < ps_pos,
+            "the engine check must settle before the runtime is probed, or a VM that still reports \
+             Running while it shuts down fails the check"
         );
     }
 

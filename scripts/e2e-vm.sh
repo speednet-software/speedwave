@@ -830,8 +830,7 @@ SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-APP_BUNDLE="/Applications/Speedwave.app"
-APP_PATH="$APP_BUNDLE/Contents/MacOS/speedwave-desktop"
+APP_PATH="/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop"
 if [ ! -f "$APP_PATH" ]; then
     echo "ERROR: Speedwave binary not found at $APP_PATH" >&2
     exit 1
@@ -839,11 +838,6 @@ fi
 
 # Kill any leftover Speedwave processes from previous runs
 pkill -f speedwave-desktop 2>/dev/null || true
-SPEEDWAVE_VM_NAME="$(basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//')"
-if [ -d "$SPEEDWAVE_DATA_DIR/lima/$SPEEDWAVE_VM_NAME" ]; then
-    LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" "$APP_BUNDLE/Contents/Resources/lima/bin/limactl" stop "$SPEEDWAVE_VM_NAME" || true
-fi
-pkill -9 -f limactl 2>/dev/null || true
 pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
 
