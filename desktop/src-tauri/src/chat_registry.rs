@@ -34,30 +34,49 @@ impl ChatSessions {
     }
 
     pub(crate) fn prepare(&self, tab_id: &str, project: &str) -> TabEntry {
-        let mut tabs = self.lock_tabs();
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        match tabs.get_mut(tab_id) {
-            Some(entry) if entry.project == project => {
-                entry.seq = seq;
-                entry.clone()
+        let (entry, replaced) = {
+            let mut tabs = self.lock_tabs();
+            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            match tabs.get_mut(tab_id) {
+                Some(entry) if entry.project == project => {
+                    entry.seq = seq;
+                    (entry.clone(), None)
+                }
+                _ => {
+                    let transcript = Arc::new(Mutex::new(None));
+                    let entry = TabEntry {
+                        session: Arc::new(Mutex::new(ChatSession::new(
+                            project,
+                            tab_id,
+                            transcript.clone(),
+                        ))),
+                        start_serialize: Arc::new(Mutex::new(())),
+                        project: project.to_string(),
+                        transcript,
+                        seq,
+                    };
+                    let replaced = tabs.insert(tab_id.to_string(), entry.clone());
+                    (entry, replaced)
+                }
             }
-            _ => {
-                let transcript = Arc::new(Mutex::new(None));
-                let entry = TabEntry {
-                    session: Arc::new(Mutex::new(ChatSession::new(
-                        project,
-                        tab_id,
-                        transcript.clone(),
-                    ))),
-                    start_serialize: Arc::new(Mutex::new(())),
-                    project: project.to_string(),
-                    transcript,
-                    seq,
-                };
-                tabs.insert(tab_id.to_string(), entry.clone());
-                entry
+        };
+        if let Some(old) = replaced {
+            match old.session.lock() {
+                Ok(mut session) => {
+                    if let Err(e) = session.stop() {
+                        log::warn!("failed to stop the replaced chat session for this tab: {e}");
+                    }
+                }
+                Err(poisoned) => {
+                    if let Err(e) = poisoned.into_inner().stop() {
+                        log::warn!(
+                            "failed to stop a poisoned replaced chat session for this tab: {e}"
+                        );
+                    }
+                }
             }
         }
+        entry
     }
 
     pub(crate) fn entry(&self, tab_id: &str) -> Option<TabEntry> {
@@ -260,6 +279,43 @@ mod tests {
         assert!(
             lock_pos < seq_pos,
             "the seq must be assigned under the map lock so seq order matches insertion order"
+        );
+    }
+
+    #[test]
+    fn prepare_with_a_different_project_replaces_and_stops_the_old_entry() {
+        let reg = ChatSessions::default();
+        let old = reg.prepare(TAB_A, "acme");
+        let new = reg.prepare(TAB_A, "globex");
+        assert!(!Arc::ptr_eq(&old.session, &new.session));
+        assert_eq!(new.project, "globex");
+
+        let source = include_str!("chat_registry.rs");
+        let after_sig = source
+            .split("fn prepare(")
+            .nth(1)
+            .expect("prepare must exist");
+        let body = &after_sig[..after_sig.find("\n    }").expect("prepare must close")];
+        let insert_pos = body
+            .find("tabs.insert(tab_id.to_string(), entry.clone())")
+            .expect("prepare must insert the new entry into the map");
+        let lock_scope_end = body[insert_pos..]
+            .find("\n        };")
+            .map(|p| p + insert_pos)
+            .expect("prepare must close the map-lock scope after the insert");
+        let stop_pos = body
+            .find(".stop()")
+            .expect("prepare must stop the replaced session");
+        assert!(
+            lock_scope_end < stop_pos,
+            "the replaced session must be stopped only after the map lock's scope has ended"
+        );
+        let warn_pos = body
+            .find("log::warn!")
+            .expect("prepare must log a warning when the replaced session fails to stop");
+        assert!(
+            stop_pos < warn_pos,
+            "the warning must follow the stop call it reports on"
         );
     }
 

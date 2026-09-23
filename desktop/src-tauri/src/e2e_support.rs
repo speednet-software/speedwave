@@ -85,8 +85,13 @@ pub fn wait_until_port_free(
 mod tests {
     use super::*;
 
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn spawn_args_are_recorded_per_tab_and_last_wins_globally() {
+        let _g = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         record_spawn_args("tab-a", &["one".to_string()]);
         record_spawn_args("tab-b", &["two".to_string()]);
         assert_eq!(spawn_args_for("tab-a"), Some(vec!["one".to_string()]));
@@ -97,6 +102,9 @@ mod tests {
 
     #[test]
     fn record_overwrites_the_previous_value_for_same_tab() {
+        let _g = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         record_spawn_args("tab-c", &["first".to_string()]);
         record_spawn_args("tab-c", &["second".to_string()]);
         assert_eq!(last_spawn_args(), vec!["second".to_string()]);
@@ -105,6 +113,9 @@ mod tests {
 
     #[test]
     fn record_spawn_args_accepts_an_empty_slice() {
+        let _g = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         record_spawn_args("tab-d", &["marker-nonempty".to_string()]);
         record_spawn_args("tab-d", &[]);
         assert_eq!(last_spawn_args(), Vec::<String>::new());

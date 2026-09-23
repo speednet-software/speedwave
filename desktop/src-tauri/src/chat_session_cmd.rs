@@ -152,7 +152,7 @@ pub(crate) async fn close_chat_tab(
         .map_err(|e| e.to_string())?
 }
 
-const MSG_NO_SESSION_FOR_TAB: &str = "no chat session for this tab";
+const MSG_NO_SESSION_FOR_TAB: &str = "no active session for this tab";
 
 fn tab_session(
     registry: &SharedChatSessions,
