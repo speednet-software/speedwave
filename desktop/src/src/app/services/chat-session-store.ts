@@ -423,6 +423,15 @@ export class ChatSessionStore {
   /** Per-tab scroll offset restored when a background tab is reactivated (phase 3). */
   scrollPosition: number | null = null;
 
+  private readonly _sessionEnded = signal(false);
+  /** Set for a background tab whose backend session ended without this store driving it (phase 3 surfaces this). */
+  readonly sessionEnded: Signal<boolean> = this._sessionEnded.asReadonly();
+
+  /** Marks that this tab's backend session ended while it was not the active tab. */
+  markSessionEnded(): void {
+    this._sessionEnded.set(true);
+  }
+
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
 
@@ -1209,22 +1218,7 @@ export class ChatSessionStore {
     this._pendingModelOverride.set(null);
     this._pendingEffortOverride.set(null);
     this._deferredEffort.set(null);
-    this.notifyChange();
-  }
-
-  /**
-   * Resets per-session state when the active project starts switching (ProjectStateService
-   * `switching` status); called by the service's project-state listener.
-   */
-  resetForProjectSwitch(): void {
-    this.resetCoreStreamState();
-    this._persistedContextTokens = null;
-    this._currentProvider = null;
-    this._activeKind = null;
-    this.clearSessionTracking();
-    this._pendingModelOverride.set(null);
-    this._pendingEffortOverride.set(null);
-    this._deferredEffort.set(null);
+    this._sessionEnded.set(false);
     this.notifyChange();
   }
 

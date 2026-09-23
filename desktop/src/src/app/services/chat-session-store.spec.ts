@@ -103,6 +103,33 @@ describe('ChatSessionStore', () => {
     });
   });
 
+  describe('sessionEnded (SPEED-388 phase 2)', () => {
+    it('defaults to false', () => {
+      expect(store.sessionEnded()).toBe(false);
+    });
+
+    it('markSessionEnded flips it to true', () => {
+      store.markSessionEnded();
+      expect(store.sessionEnded()).toBe(true);
+    });
+
+    it('resetForNewConversation clears a session-ended flag', () => {
+      store.markSessionEnded();
+      store.resetForNewConversation();
+      expect(store.sessionEnded()).toBe(false);
+    });
+  });
+
+  describe('dispose', () => {
+    it('clears the resume decider', () => {
+      store.setResumeDecider(() => Promise.resolve('resume'));
+
+      store.dispose();
+
+      expect((store as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
+    });
+  });
+
   describe('init', () => {
     it('surfaces a non-auth startChatSession failure to projectState and the logger', async () => {
       const projectState = TestBed.inject(ProjectStateService);

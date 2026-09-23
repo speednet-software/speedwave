@@ -1,4 +1,12 @@
-import { Injectable, computed, effect, inject, untracked, type Signal } from '@angular/core';
+import {
+  Injectable,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+  type Signal,
+} from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
@@ -9,6 +17,7 @@ import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
 import {
   ChatSessionStore,
+  MAX_CHAT_TABS,
   type ChatStoreDeps,
   type ModelSelectionInput,
 } from './chat-session-store';
@@ -75,16 +84,32 @@ export class ChatStateService {
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
 
-  private readonly store: ChatSessionStore;
+  private readonly deps: ChatStoreDeps;
 
   private unlisten: UnlistenFn | null = null;
   private listenerSetup: Promise<void> | null = null;
   private unsubProjectChange: (() => void) | null = null;
   private _sawSwitching = false;
 
+  private readonly _tabs = signal<ReadonlyMap<string, ChatSessionStore>>(new Map());
+  private readonly _activeTabId = signal<string>('');
+
+  /** Every open chat tab keyed by its tab id. */
+  readonly tabs: Signal<ReadonlyMap<string, ChatSessionStore>> = this._tabs.asReadonly();
+  /** Tab id currently shown in the UI. */
+  readonly activeTabId: Signal<string> = this._activeTabId.asReadonly();
+  /** Store backing the active tab; every facade delegation flows through this. */
+  readonly activeStore: Signal<ChatSessionStore> = computed(() => {
+    const store = this._tabs().get(this._activeTabId());
+    if (!store) throw new Error(`[chat-state] no store for active tab ${this._activeTabId()}`);
+    return store;
+  });
+  /** Whether another tab can be opened under `MAX_CHAT_TABS` (beta gating is the UI's job). */
+  readonly canOpenTab: Signal<boolean> = computed(() => this._tabs().size < MAX_CHAT_TABS);
+
   /** Reads Claude Code's control data as soon as a session answers `initialize`. */
   constructor() {
-    const deps: ChatStoreDeps = {
+    this.deps = {
       tauri: this.tauri,
       projectState: this.projectState,
       anthropicModels: this.anthropicModels,
@@ -94,49 +119,164 @@ export class ChatStateService {
       log: this.log,
       ensureListeners: () => this.ensureListeners(),
     };
-    this.store = new ChatSessionStore(crypto.randomUUID(), deps);
+    const initial = this.makeStore();
+    this._tabs.set(new Map([[initial.tabId, initial]]));
+    this._activeTabId.set(initial.tabId);
 
     effect(() => {
       const project = this.projectState.activeProject();
       if (!project || this.control.sessionInfoState(project).state !== 'ready') return;
-      untracked(() => void this.store.refreshControlData());
+      untracked(() => void this.activeStore().refreshControlData());
     });
   }
 
-  /** Stable per-tab id sent on every session-scoped Tauri command (PR 2 moves ownership to the tab registry). */
+  private makeStore(): ChatSessionStore {
+    return new ChatSessionStore(crypto.randomUUID(), this.deps);
+  }
+
+  private addStore(store: ChatSessionStore): void {
+    const map = new Map(this._tabs());
+    map.set(store.tabId, store);
+    this._tabs.set(map);
+  }
+
+  private findTabOwning(sessionId: string): ChatSessionStore | undefined {
+    for (const store of this._tabs().values()) {
+      if (store.lastKnownSessionId === sessionId || store.optimisticSessionId === sessionId) {
+        return store;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Creates a new tab, eagerly starts its backend session, and activates it.
+   * @returns The new tab's id.
+   */
+  async openTab(): Promise<string> {
+    if (!this.canOpenTab()) {
+      throw new Error(`Cannot open more than ${MAX_CHAT_TABS} chat tabs`);
+    }
+    const store = this.makeStore();
+    this.addStore(store);
+    await store.init();
+    this._activeTabId.set(store.tabId);
+    return store.tabId;
+  }
+
+  private async openTabResuming(sessionId: string): Promise<void> {
+    const store = this.makeStore();
+    this.addStore(store);
+    await this.ensureListeners();
+    await store.resumeConversation(sessionId);
+    this._activeTabId.set(store.tabId);
+  }
+
+  /**
+   * Interrupts a streaming tab, closes its backend session, and activates a neighbor;
+   * closing the last tab replaces it with a fresh one instead of leaving zero tabs.
+   * @param tabId - Id of the tab to close.
+   */
+  async closeTab(tabId: string): Promise<void> {
+    const store = this._tabs().get(tabId);
+    if (!store) return;
+    if (store.isStreaming) {
+      await store.stopConversation();
+    }
+    try {
+      await this.tauri.invoke('close_chat_tab', { tabId });
+    } catch (err) {
+      this.log.warn(`[chat-state] closeTab: close_chat_tab invoke failed: ${String(err)}`);
+    }
+    store.dispose();
+
+    const map = new Map(this._tabs());
+    map.delete(tabId);
+
+    if (map.size === 0) {
+      const fresh = this.makeStore();
+      map.set(fresh.tabId, fresh);
+      this._tabs.set(map);
+      this._activeTabId.set(fresh.tabId);
+      await fresh.init();
+      return;
+    }
+
+    this._tabs.set(map);
+    if (this._activeTabId() === tabId) {
+      const neighbor = map.keys().next().value as string;
+      this._activeTabId.set(neighbor);
+    }
+  }
+
+  /**
+   * Switches the active tab; a no-op for an unknown tab id.
+   * @param tabId - Id of the tab to activate.
+   */
+  activateTab(tabId: string): void {
+    if (!this._tabs().has(tabId)) return;
+    this._activeTabId.set(tabId);
+  }
+
+  /**
+   * Resumes a conversation, choosing among owning-tab activation, in-place resume,
+   * a new resuming tab, or (at the tab cap) a resume into the active tab.
+   * @param sessionId - Session UUID to resume.
+   */
+  async openConversation(sessionId: string): Promise<void> {
+    const owner = this.findTabOwning(sessionId);
+    if (owner) {
+      this.activateTab(owner.tabId);
+      return;
+    }
+    const active = this.activeStore();
+    if (!active.hasConversation() && !active.isStreaming) {
+      await active.resumeConversation(sessionId);
+      return;
+    }
+    if (this.canOpenTab()) {
+      await this.openTabResuming(sessionId);
+      return;
+    }
+    await active.resumeConversation(sessionId);
+  }
+
+  /** Stable per-tab id sent on every session-scoped Tauri command; the active tab's id. */
   get tabId(): string {
-    return this.store.tabId;
+    return this.activeStore().tabId;
   }
 
   /** Completed messages (immutable — replaced on each change). */
   get messages(): readonly ChatMessage[] {
-    return this.store.messages;
+    return this.activeStore().messages;
   }
 
   /** Blocks accumulating during the current streaming assistant turn. */
   get currentBlocks(): readonly MessageBlock[] {
-    return this.store.currentBlocks;
+    return this.activeStore().currentBlocks;
   }
 
   /** Whether an assistant turn is currently streaming. */
   get isStreaming(): boolean {
-    return this.store.isStreaming;
+    return this.activeStore().isStreaming;
   }
   /** Sets the streaming flag (tests and the stream listener gate). */
   set isStreaming(v: boolean) {
-    this.store.isStreaming = v;
+    this.activeStore().isStreaming = v;
   }
 
   /** Public read-only accessor for the queued slot. */
   get pendingQueue(): QueuedMessage | null {
-    return this.store.pendingQueue;
+    return this.activeStore().pendingQueue;
   }
 
   readonly pendingModelOverride: Signal<string | null> = computed(() =>
-    this.store.pendingModelOverride()
+    this.activeStore().pendingModelOverride()
   );
   /** Effort level saved for the next session because the live one holds its launch effort. */
-  readonly deferredEffort: Signal<string | null> = computed(() => this.store.deferredEffort());
+  readonly deferredEffort: Signal<string | null> = computed(() =>
+    this.activeStore().deferredEffort()
+  );
 
   /**
    * Persists the effort pin, then applies it: queued while the chat is busy, wired as `/effort` into
@@ -144,15 +284,17 @@ export class ChatStateService {
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   applyEffortSelection(level: string): Promise<void> {
-    return this.store.applyEffortSelection(level);
+    return this.activeStore().applyEffortSelection(level);
   }
 
   /** Resumes the live conversation so it launches with the deferred effort; its background tasks stop. */
   restartForDeferredEffort(): Promise<void> {
-    return this.store.restartForDeferredEffort();
+    return this.activeStore().restartForDeferredEffort();
   }
 
-  readonly modelSelectionError: Signal<string> = computed(() => this.store.modelSelectionError());
+  readonly modelSelectionError: Signal<string> = computed(() =>
+    this.activeStore().modelSelectionError()
+  );
 
   /**
    * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
@@ -160,34 +302,34 @@ export class ChatStateService {
    * @param sel - Selected model triad emitted by the model selector.
    */
   applyModelSelection(sel: ModelSelectionInput): Promise<void> {
-    return this.store.applyModelSelection(sel);
+    return this.activeStore().applyModelSelection(sel);
   }
 
   /** Session cost/usage stats from the most recent result. */
   get sessionStats(): SessionStats | null {
-    return this.store.sessionStats;
+    return this.activeStore().sessionStats;
   }
   readonly sessionStatsFromState: Signal<SessionStats | null> = computed(() =>
-    this.store.sessionStatsFromState()
+    this.activeStore().sessionStatsFromState()
   );
 
   /** Context tokens of the last main-chain API call; survives stream reset. */
   get lastContextTokens(): number | null {
-    return this.store.lastContextTokens;
+    return this.activeStore().lastContextTokens;
   }
 
   /** Test-only read access. */
   get turnId(): number {
-    return this.store.turnId;
+    return this.activeStore().turnId;
   }
 
   /** Durable session id (test/Component read). */
   get lastKnownSessionId(): string | null {
-    return this.store.lastKnownSessionId;
+    return this.activeStore().lastKnownSessionId;
   }
   /** Optimistic resume stamp (read by the view-session-id getter). */
   get optimisticSessionId(): string | null {
-    return this.store.optimisticSessionId;
+    return this.activeStore().optimisticSessionId;
   }
 
   /**
@@ -195,47 +337,47 @@ export class ChatStateService {
    * @param cb - Decider callback, or null to unregister.
    */
   setResumeDecider(cb: (() => Promise<'resume' | 'fresh'>) | null): void {
-    this.store.setResumeDecider(cb);
+    this.activeStore().setResumeDecider(cb);
   }
 
   /** Clears durable + optimistic session tracking (new conversation / delete). */
   clearSessionTracking(): void {
-    this.store.clearSessionTracking();
+    this.activeStore().clearSessionTracking();
   }
 
-  readonly state: Signal<ConversationStateTree> = computed(() => this.store.state());
+  readonly state: Signal<ConversationStateTree> = computed(() => this.activeStore().state());
 
   /** Re-reads the plan limits and the context usage on demand (the usage popover opened). */
   refreshUsage(): Promise<void> {
-    return this.store.refreshUsage();
+    return this.activeStore().refreshUsage();
   }
 
   readonly messagesFromState: Signal<readonly ChatMessage[]> = computed(() =>
-    this.store.messagesFromState()
+    this.activeStore().messagesFromState()
   );
 
   readonly isStreamingFromState: Signal<boolean> = computed(() =>
-    this.store.isStreamingFromState()
+    this.activeStore().isStreamingFromState()
   );
 
-  readonly hasConversation: Signal<boolean> = computed(() => this.store.hasConversation());
+  readonly hasConversation: Signal<boolean> = computed(() => this.activeStore().hasConversation());
 
   readonly newConversationBlockedReason: Signal<string> = computed(() =>
-    this.store.newConversationBlockedReason()
+    this.activeStore().newConversationBlockedReason()
   );
 
   readonly loadingTranscriptFromState: Signal<boolean> = computed(() =>
-    this.store.loadingTranscriptFromState()
+    this.activeStore().loadingTranscriptFromState()
   );
 
   /** Mark the start of a transcript fetch (shows the loader). */
   beginTranscriptLoad(): void {
-    this.store.beginTranscriptLoad();
+    this.activeStore().beginTranscriptLoad();
   }
 
   /** Mark the end of a transcript fetch (hides the loader). */
   endTranscriptLoad(): void {
-    this.store.endTranscriptLoad();
+    this.activeStore().endTranscriptLoad();
   }
 
   /**
@@ -243,17 +385,17 @@ export class ChatStateService {
    * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
    */
   beginStartingSession(): (outcome?: 'started' | 'skipped' | 'auth' | 'failed') => void {
-    return this.store.beginStartingSession();
+    return this.activeStore().beginStartingSession();
   }
 
-  readonly retryEnabled: Signal<boolean> = computed(() => this.store.retryEnabled());
+  readonly retryEnabled: Signal<boolean> = computed(() => this.activeStore().retryEnabled());
 
   readonly currentBlocksFromState: Signal<readonly MessageBlock[]> = computed(() =>
-    this.store.currentBlocksFromState()
+    this.activeStore().currentBlocksFromState()
   );
 
   readonly pendingQueueFromState: Signal<QueuedMessage | null> = computed(() =>
-    this.store.pendingQueueFromState()
+    this.activeStore().pendingQueueFromState()
   );
 
   /**
@@ -269,7 +411,7 @@ export class ChatStateService {
       pendingQueue: QueuedMessage | null;
     }>
   ): void {
-    this.store._setState(state);
+    this.activeStore()._setState(state);
   }
 
   private ensureListeners(): Promise<void> {
@@ -277,7 +419,7 @@ export class ChatStateService {
       await this.setupStreamListener();
       this.setupProjectStateListeners();
       this.setupRestartResumeListeners();
-      void this.store.refreshLlmConfigCache();
+      void this.activeStore().refreshLlmConfigCache();
     })().catch((err: unknown) => {
       this.listenerSetup = null;
       throw err;
@@ -287,7 +429,7 @@ export class ChatStateService {
 
   /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
   async init(): Promise<void> {
-    return this.store.init();
+    return this.activeStore().init();
   }
 
   /**
@@ -295,7 +437,7 @@ export class ChatStateService {
    * into an empty chat. Refuses before clearing; a failed start clears first, then throws.
    */
   startNewConversation(): Promise<void> {
-    return this.store.startNewConversation();
+    return this.activeStore().startNewConversation();
   }
 
   /**
@@ -304,7 +446,7 @@ export class ChatStateService {
    * @param displayText - Overrides the bubble's surface text (plan-mode prefix flow).
    */
   sendMessage(input: string | ChatInput, displayText?: string): Promise<void> {
-    return this.store.sendMessage(input, displayText);
+    return this.activeStore().sendMessage(input, displayText);
   }
 
   /**
@@ -314,7 +456,7 @@ export class ChatStateService {
    * @param value - Chosen value (multi-select labels pre-joined with `", "`).
    */
   submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
-    return this.store.submitAnswer(toolUseId, questionIdx, value);
+    return this.activeStore().submitAnswer(toolUseId, questionIdx, value);
   }
 
   /**
@@ -322,21 +464,21 @@ export class ChatStateService {
    * synchronously to re-enable input, then fires the backend stop in background.
    */
   stopConversation(): Promise<void> {
-    return this.store.stopConversation();
+    return this.activeStore().stopConversation();
   }
 
   /**
-   * Processes a streaming chunk from the Claude subprocess.
+   * Processes a streaming chunk from the Claude subprocess, into the active tab's store.
    * Uses immutable updates: currentBlocks is replaced on every mutation.
    * @param chunk - The stream chunk to handle.
    */
   handleStreamChunk(chunk: StreamChunk): void {
-    this.store.handleStreamChunk(chunk);
+    this.activeStore().handleStreamChunk(chunk);
   }
 
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
-    this.store.resetForNewConversation();
+    this.activeStore().resetForNewConversation();
   }
 
   /**
@@ -344,7 +486,7 @@ export class ChatStateService {
    * @param msgs - The messages to load.
    */
   loadMessages(msgs: ChatMessage[]): void {
-    this.store.loadMessages(msgs);
+    this.activeStore().loadMessages(msgs);
   }
 
   /**
@@ -353,7 +495,7 @@ export class ChatStateService {
    * @param sessionId - Session uuid from a resume or a SystemInit chunk.
    */
   seedSessionId(sessionId: string): void {
-    this.store.seedSessionId(sessionId);
+    this.activeStore().seedSessionId(sessionId);
   }
 
   /**
@@ -361,12 +503,12 @@ export class ChatStateService {
    * @param text - The message to queue.
    */
   queueMessage(text: string): Promise<string | null> {
-    return this.store.queueMessage(text);
+    return this.activeStore().queueMessage(text);
   }
 
   /** Cancel the queued message for the active session; no-op when empty. */
   cancelQueuedMessage(): Promise<void> {
-    return this.store.cancelQueuedMessage();
+    return this.activeStore().cancelQueuedMessage();
   }
 
   /**
@@ -375,30 +517,31 @@ export class ChatStateService {
    * @returns `true` on success, `false` on out-of-range / empty / write failure.
    */
   copyMessage(index: number): boolean {
-    return this.store.copyMessage(index);
+    return this.activeStore().copyMessage(index);
   }
 
   /** Returns whether the last assistant turn can be retried (ADR-046). */
   canRetryLastAssistant(): boolean {
-    return this.store.canRetryLastAssistant();
+    return this.activeStore().canRetryLastAssistant();
   }
 
   /** Retries the last assistant turn via the backend `retry_last_turn` command (ADR-046). */
   retryLastAssistant(): Promise<void> {
-    return this.store.retryLastAssistant();
+    return this.activeStore().retryLastAssistant();
   }
 
   /**
    * Service-level (not component-level) so it works whether or not a ChatComponent is mounted.
+   * Alias for {@link openConversation}.
    * @param sessionId - session UUID to resume.
    */
   resumeConversation(sessionId: string): Promise<void> {
-    return this.store.resumeConversation(sessionId);
+    return this.openConversation(sessionId);
   }
 
   /** Re-reads `get_llm_config()` and updates the chat fallback-chain cache. */
   refreshLlmConfigCache(): Promise<void> {
-    return this.store.refreshLlmConfigCache();
+    return this.activeStore().refreshLlmConfigCache();
   }
 
   private setupProjectStateListeners(): void {
@@ -410,23 +553,36 @@ export class ChatStateService {
       }
       if (status === 'switching') {
         this._sawSwitching = true;
-        this.store.resetForProjectSwitch();
+        this.resetTabsForProjectSwitch();
       } else if (status === 'ready') {
         void this.refreshLlmConfigCache();
         if (this._sawSwitching) {
           this._sawSwitching = false;
-          void this.store.startChatSession();
+          void this.activeStore().startChatSession();
         }
       }
     });
   }
 
+  private resetTabsForProjectSwitch(): void {
+    for (const store of this._tabs().values()) {
+      store.dispose();
+    }
+    const fresh = this.makeStore();
+    this._tabs.set(new Map([[fresh.tabId, fresh]]));
+    this._activeTabId.set(fresh.tabId);
+  }
+
   private setupRestartResumeListeners(): void {
     this.projectState.onRestartBegin(async () => {
-      if (this.isStreaming) await this.stopConversation();
+      if (this.activeStore().isStreaming) await this.stopConversation();
     });
     this.projectState.onRestartComplete(() => {
-      void this.store.decideResumeAfterRestart();
+      const activeTabId = this._activeTabId();
+      for (const [tabId, store] of this._tabs()) {
+        if (tabId !== activeTabId) store.markSessionEnded();
+      }
+      void this.activeStore().decideResumeAfterRestart();
     });
   }
 
@@ -434,17 +590,18 @@ export class ChatStateService {
     try {
       this.unlisten = await this.tauri.listen<TabStreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
-        if (chunk.tab_id !== this.store.tabId) return;
+        const store = this._tabs().get(chunk.tab_id);
+        if (!store) return;
         if (
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||
           chunk.chunk_type === 'QueueDrained'
         ) {
-          this.handleStreamChunk(chunk);
+          store.handleStreamChunk(chunk);
           return;
         }
-        if (!this.isStreaming) return;
-        this.handleStreamChunk(chunk);
+        if (!store.isStreaming) return;
+        store.handleStreamChunk(chunk);
       });
     } catch (err) {
       if (this.tauri.isRunningInTauri()) {

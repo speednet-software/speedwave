@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ChatStateService, NEW_CONVERSATION_BUSY } from './chat-state.service';
+import { ChatStateService, MAX_CHAT_TABS, NEW_CONVERSATION_BUSY } from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -222,6 +222,390 @@ describe('ChatStateService', () => {
 
       expect(projectState.status()).toBe('ready');
       expect(spy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+    });
+  });
+
+  describe('tab registry (SPEED-388 phase 2)', () => {
+    describe('demux', () => {
+      it('routes a chat_stream chunk to the store matching its tab_id and drops unknown tabs', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store1 = service.tabs().get(tab1)!;
+        const store2 = service.tabs().get(tab2)!;
+        store1.isStreaming = true;
+        store2.isStreaming = true;
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'Text',
+          data: { content: 'to tab1' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab2,
+          chunk_type: 'Text',
+          data: { content: 'to tab2' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: 'unknown-tab',
+          chunk_type: 'Text',
+          data: { content: 'nowhere' },
+        });
+
+        expect(store1.currentBlocks).toEqual([{ type: 'text', content: 'to tab1' }]);
+        expect(store2.currentBlocks).toEqual([{ type: 'text', content: 'to tab2' }]);
+      });
+
+      it('streams two tabs concurrently with no cross-talk', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store1 = service.tabs().get(tab1)!;
+        const store2 = service.tabs().get(tab2)!;
+        store1.isStreaming = true;
+        store2.isStreaming = true;
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'Text',
+          data: { content: 'a1' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab2,
+          chunk_type: 'Text',
+          data: { content: 'b1' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'Text',
+          data: { content: 'a2' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab2,
+          chunk_type: 'Text',
+          data: { content: 'b2' },
+        });
+
+        expect(store1.currentBlocks).toEqual([{ type: 'text', content: 'a1a2' }]);
+        expect(store2.currentBlocks).toEqual([{ type: 'text', content: 'b1b2' }]);
+      });
+
+      it('a background (non-active) tab keeps streaming while it is not the active tab', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+        const store2 = service.tabs().get(tab2)!;
+        store2.isStreaming = true;
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab2,
+          chunk_type: 'Text',
+          data: { content: 'still going' },
+        });
+
+        expect(service.activeTabId()).toBe(tab1);
+        expect(store2.currentBlocks).toEqual([{ type: 'text', content: 'still going' }]);
+      });
+
+      it('drops a content chunk for a tab that is not itself streaming, even bypass types still apply', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const store1 = service.tabs().get(tab1)!;
+        store1.isStreaming = false;
+
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'Text',
+          data: { content: 'dropped' },
+        });
+        mockTauri.dispatchEvent('chat_stream', {
+          tab_id: tab1,
+          chunk_type: 'SystemInit',
+          data: { model: 'm', session_id: 'sid-bypass' },
+        });
+
+        expect(store1.currentBlocks).toEqual([]);
+        expect(store1.sessionStats?.session_id).toBe('sid-bypass');
+      });
+    });
+
+    describe('openTab', () => {
+      it('creates additional tabs up to MAX_CHAT_TABS and throws beyond the cap', async () => {
+        expect(service.tabs().size).toBe(1);
+        expect(service.canOpenTab()).toBe(true);
+
+        await service.openTab();
+        expect(service.tabs().size).toBe(2);
+        await service.openTab();
+        expect(service.tabs().size).toBe(MAX_CHAT_TABS);
+        expect(service.canOpenTab()).toBe(false);
+
+        await expect(service.openTab()).rejects.toThrow();
+        expect(service.tabs().size).toBe(MAX_CHAT_TABS);
+      });
+
+      it('activates the newly created tab', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+
+        expect(tab2).not.toBe(tab1);
+        expect(service.activeTabId()).toBe(tab2);
+      });
+    });
+
+    describe('closeTab', () => {
+      it('interrupts a streaming tab, invokes close_chat_tab, disposes it, and activates a neighbor', async () => {
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+        const store1 = service.tabs().get(tab1)!;
+        store1.isStreaming = true;
+        store1.setResumeDecider(() => Promise.resolve('resume'));
+
+        await service.closeTab(tab1);
+
+        expect(invokeSpy).toHaveBeenCalledWith('stop_chat', { tabId: tab1 });
+        expect(invokeSpy).toHaveBeenCalledWith('close_chat_tab', { tabId: tab1 });
+        expect(service.tabs().has(tab1)).toBe(false);
+        expect(service.activeTabId()).toBe(tab2);
+        expect((store1 as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
+      });
+
+      it('closing a background (non-active) tab leaves the active tab unchanged', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+
+        await service.closeTab(tab2);
+
+        expect(service.activeTabId()).toBe(tab1);
+        expect(service.tabs().has(tab2)).toBe(false);
+        expect(service.tabs().size).toBe(1);
+      });
+
+      it('closing the last remaining tab replaces it with a fresh store instead of leaving zero tabs', async () => {
+        const tab1 = service.activeTabId();
+
+        await service.closeTab(tab1);
+
+        expect(service.tabs().size).toBe(1);
+        expect(service.tabs().has(tab1)).toBe(false);
+        expect(service.activeTabId()).not.toBe(tab1);
+      });
+
+      it('is a no-op for an unknown tab id', async () => {
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const tab1 = service.activeTabId();
+
+        await service.closeTab('does-not-exist');
+
+        expect(service.tabs().size).toBe(1);
+        expect(service.activeTabId()).toBe(tab1);
+        expect(invokeSpy).not.toHaveBeenCalledWith('close_chat_tab', expect.anything());
+      });
+    });
+
+    describe('activateTab', () => {
+      it('switches the active tab', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+
+        service.activateTab(tab2);
+
+        expect(service.activeTabId()).toBe(tab2);
+      });
+
+      it('is a no-op for an unknown tab id', () => {
+        const tab1 = service.activeTabId();
+
+        service.activateTab('does-not-exist');
+
+        expect(service.activeTabId()).toBe(tab1);
+      });
+
+      it('re-points facade computed signals to the newly active store', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+        store2.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hello from tab2' } });
+        store2.handleStreamChunk({
+          chunk_type: 'Result',
+          data: { session_id: 'tab2-sess', total_cost: 0 },
+        });
+        service.activateTab(tab1);
+
+        expect(service.hasConversation()).toBe(false);
+
+        service.activateTab(tab2);
+
+        expect(service.hasConversation()).toBe(true);
+        expect(service.messagesFromState()[0]?.blocks[0]).toEqual({
+          type: 'text',
+          content: 'hello from tab2',
+        });
+      });
+    });
+
+    describe('openConversation (resume rule)', () => {
+      it('branch 1: activates the tab that already owns the session instead of resuming again', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+        store2.seedSessionId('owned-session');
+        service.activateTab(tab1);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('owned-session');
+
+        expect(service.activeTabId()).toBe(tab2);
+        expect(invokeSpy).not.toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'owned-session' })
+        );
+      });
+
+      it('branch 1: also matches a tab that only optimistically claims the session', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+        (store2 as unknown as { _optimisticSessionId: string | null })._optimisticSessionId =
+          'optimistic-session';
+        service.activateTab(tab1);
+
+        await service.openConversation('optimistic-session');
+
+        expect(service.activeTabId()).toBe(tab2);
+      });
+
+      it('branch 2: resumes in place when the active tab is idle and clean', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        const tab1 = service.activeTabId();
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') return { session_id: 'resume-me', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('resume-me');
+
+        expect(service.activeTabId()).toBe(tab1);
+        expect(service.tabs().size).toBe(1);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'resume-me', tabId: tab1 })
+        );
+      });
+
+      it('branch 3: opens a new resuming tab when the active tab is busy and under cap', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        const tab1 = service.activeTabId();
+        const active = service.tabs().get(tab1)!;
+        active.isStreaming = true;
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') return { session_id: 'resume-new-tab', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('resume-new-tab');
+
+        expect(service.tabs().size).toBe(2);
+        const newTabId = service.activeTabId();
+        expect(newTabId).not.toBe(tab1);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'resume-new-tab', tabId: newTabId })
+        );
+      });
+
+      it('branch 4: resumes into the active tab once at the cap, even while busy', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        const tab1 = service.activeTabId();
+        const active = service.tabs().get(tab1)!;
+        active.isStreaming = true;
+        await service.openTab();
+        await service.openTab();
+        service.activateTab(tab1);
+        expect(service.tabs().size).toBe(MAX_CHAT_TABS);
+        expect(service.canOpenTab()).toBe(false);
+
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') return { session_id: 'cap-resume', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('cap-resume');
+
+        expect(service.tabs().size).toBe(MAX_CHAT_TABS);
+        expect(service.activeTabId()).toBe(tab1);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'cap-resume', tabId: tab1 })
+        );
+      });
+
+      it('resumeConversation is an alias for openConversation', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+        store2.seedSessionId('via-alias');
+        service.activateTab(tab1);
+
+        await service.resumeConversation('via-alias');
+
+        expect(service.activeTabId()).toBe(tab2);
+      });
+    });
+
+    describe('project switch disposes every tab', () => {
+      it('leaves exactly one fresh tab and clears every prior store', async () => {
+        const projectState = TestBed.inject(ProjectStateService);
+        await projectState.init();
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store1 = service.tabs().get(tab1)!;
+        const store2 = service.tabs().get(tab2)!;
+        store1.setResumeDecider(() => Promise.resolve('resume'));
+        store2.setResumeDecider(() => Promise.resolve('resume'));
+
+        mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+        await new Promise((r) => setTimeout(r, 10));
+
+        expect(service.tabs().size).toBe(1);
+        expect(service.tabs().has(tab1)).toBe(false);
+        expect(service.tabs().has(tab2)).toBe(false);
+        expect((store1 as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
+        expect((store2 as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
+      });
+    });
+
+    describe('restart-complete flags background tabs', () => {
+      it('flags a background tab as sessionEnded and resumes only the active tab', async () => {
+        type RestartInternal = {
+          notifyRestartBegin(): Promise<void>;
+        };
+        const projectState = TestBed.inject(ProjectStateService);
+        await projectState.init();
+        projectState.activeProject.set('test');
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+        const store2 = service.tabs().get(tab2)!;
+        store2.seedSessionId('bg-session');
+
+        await (projectState as unknown as RestartInternal).notifyRestartBegin();
+        projectState.notifyRestartComplete();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(store2.sessionEnded()).toBe(true);
+        expect(service.tabs().get(tab1)!.sessionEnded()).toBe(false);
+      });
     });
   });
 
@@ -1043,7 +1427,8 @@ describe('ChatStateService', () => {
       notifyReady(): void;
     };
     type TokensInternal = {
-      store: { _lastContextTokens: number | null; _persistedContextTokens: number | null };
+      _lastContextTokens: number | null;
+      _persistedContextTokens: number | null;
     };
 
     async function fireRestart(projectState: ProjectStateService): Promise<void> {
@@ -1197,8 +1582,8 @@ describe('ChatStateService', () => {
 
     it('auto-resumes when unmounted even if history does not fit the target window', async () => {
       service.seedSessionId('sess-2');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 8192;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
@@ -1214,8 +1599,8 @@ describe('ChatStateService', () => {
     it('starts a fresh session (not resume) when a decider returns "fresh" and history does not fit', async () => {
       projectState.status.set('ready');
       service.seedSessionId('sess-3');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 8192;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('fresh'));
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1232,8 +1617,8 @@ describe('ChatStateService', () => {
 
     it('resumes when the decider returns "resume" and history does not fit', async () => {
       service.seedSessionId('sess-4');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 8192;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('resume'));
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1249,8 +1634,8 @@ describe('ChatStateService', () => {
 
     it('drops a decider answer once the chat moved to another session while the dialog was open', async () => {
       service.seedSessionId('sess-asked');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 8192;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
       const answer = createDeferred<'resume' | 'fresh'>();
       service.setResumeDecider(() => answer.promise);
       const resumed: unknown[] = [];
@@ -1270,8 +1655,8 @@ describe('ChatStateService', () => {
 
     it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
       service.seedSessionId('sess-window');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 8192;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
       const decider = vi.fn(() => Promise.resolve('fresh' as const));
       service.setResumeDecider(decider);
       const calls: string[] = [];
@@ -1290,8 +1675,8 @@ describe('ChatStateService', () => {
 
     it('re-reads the llm config so a SHRUNK post-restart window asks instead of blind-resuming', async () => {
       service.seedSessionId('sess-shrunk');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 200_000;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 200_000;
       const decider = vi.fn(() => Promise.resolve('resume' as const));
       service.setResumeDecider(decider);
       const calls: string[] = [];
@@ -1310,8 +1695,8 @@ describe('ChatStateService', () => {
 
     it('resumes without asking when the target model has no known context window', async () => {
       service.seedSessionId('sess-unknown-window');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 200_000;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 200_000;
       const decider = vi.fn(() => Promise.resolve('fresh' as const));
       service.setResumeDecider(decider);
       const calls: string[] = [];
@@ -1334,8 +1719,8 @@ describe('ChatStateService', () => {
 
     it('logs the restart resume decision when a known window is too small and the decider is asked', async () => {
       service.seedSessionId('sess-log-ask');
-      (service as unknown as TokensInternal).store._lastContextTokens = 25229;
-      (service as unknown as TokensInternal).store._persistedContextTokens = 8192;
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
       service.setResumeDecider(() => Promise.resolve('resume'));
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') return { session_id: 'sess-log-ask', messages: [] };
