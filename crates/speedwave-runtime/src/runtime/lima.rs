@@ -152,15 +152,16 @@ impl LimaRuntime {
             .map(|_| ())
     }
 
-    /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations); see [`super::with_engine_state_heal`].
-    fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
-    where
-        U: Fn() -> anyhow::Result<()>,
-    {
+    fn up_with_heal(
+        &self,
+        project: &str,
+        compose_file: &str,
+        mode: super::UpMode<'_>,
+    ) -> anyhow::Result<()> {
+        let up_argv = super::compose_up_argv(compose_file, project, mode);
         super::with_engine_state_heal(
             project,
-            up,
+            || run_bounded_up(&*self.runner, &up_argv),
             |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
@@ -351,8 +352,7 @@ impl ContainerRuntime for LimaRuntime {
         );
 
         let compose_file = self.compose_file_path(project)?;
-        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::Diverged);
-        self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
+        self.up_with_heal(project, &compose_file, super::UpMode::Diverged)
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -650,17 +650,14 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
-        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::All);
-        self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
+        self.up_with_heal(project, &compose_file, super::UpMode::All)
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
-        let up_argv =
-            super::compose_up_argv(&compose_file, project, super::UpMode::Service(service));
-        self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
+        self.up_with_heal(project, &compose_file, super::UpMode::Service(service))
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -2029,8 +2026,7 @@ mod tests {
     #[test]
     fn every_compose_up_runs_nerdctl_under_the_up_deadline() {
         let bounded = format!(
-            "sudo timeout --kill-after={} --verbose {} nerdctl compose",
-            super::super::COMPOSE_UP_KILL_GRACE_SECS,
+            "sudo timeout --signal=KILL --verbose {} nerdctl compose",
             super::super::COMPOSE_UP_TIMEOUT_SECS
         );
         let (recorded, runner) = make_recording_runner();
@@ -2054,7 +2050,7 @@ mod tests {
     fn compose_up_names_the_deadline_when_timeout_stops_nerdctl() {
         use std::sync::atomic::Ordering;
         let runner = FirstUpFailsRunner::with_error(
-            "limactl failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}"
+            "limactl failed: timeout: sending signal KILL to command \u{2018}nerdctl\u{2019}"
                 .to_string(),
         );
         let up_calls = Arc::clone(&runner.up_calls);
@@ -2070,7 +2066,7 @@ mod tests {
             )),
             "got: {msg}"
         );
-        assert!(msg.contains("sending signal TERM"), "raw cause kept: {msg}");
+        assert!(msg.contains("sending signal KILL"), "raw cause kept: {msg}");
         assert_eq!(
             up_calls.load(Ordering::SeqCst),
             1,

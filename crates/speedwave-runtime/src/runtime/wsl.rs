@@ -131,15 +131,16 @@ impl WslRuntime {
         self.run_in_distro(&["sh", "-c", &cmd], true).map(|_| ())
     }
 
-    /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations); see [`super::with_engine_state_heal`].
-    fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
-    where
-        U: Fn() -> anyhow::Result<()>,
-    {
+    fn up_with_heal(
+        &self,
+        project: &str,
+        compose_file: &str,
+        mode: super::UpMode<'_>,
+    ) -> anyhow::Result<()> {
+        let up_argv = super::compose_up_argv(compose_file, project, mode);
         super::with_engine_state_heal(
             project,
-            up,
+            || self.run_bounded_up(&up_argv),
             |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
@@ -419,8 +420,7 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::Diverged);
-        let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
+        let result = self.up_with_heal(project, &compose_file, super::UpMode::Diverged);
         self.ensure_claude_home_writable(project);
         result
     }
@@ -619,8 +619,7 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::All);
-        let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
+        let result = self.up_with_heal(project, &compose_file, super::UpMode::All);
         self.ensure_claude_home_writable(project);
         result
     }
@@ -629,9 +628,7 @@ impl ContainerRuntime for WslRuntime {
         super::validate_builtin_service_name(service)?;
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up_argv =
-            super::compose_up_argv(&compose_file, project, super::UpMode::Service(service));
-        let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
+        let result = self.up_with_heal(project, &compose_file, super::UpMode::Service(service));
         self.ensure_claude_home_writable(project);
         result
     }
@@ -1301,14 +1298,10 @@ mod tests {
 
     fn bounded_up_key(project: &str, flags: &[&str]) -> String {
         let compose_file = wsl_compose_file_path(project).unwrap();
-        let kill_after = format!(
-            "--kill-after={}",
-            crate::runtime::COMPOSE_UP_KILL_GRACE_SECS
-        );
         let limit = crate::runtime::COMPOSE_UP_TIMEOUT_SECS.to_string();
         let mut argv = vec![
             "timeout",
-            kill_after.as_str(),
+            "--signal=KILL",
             "--verbose",
             limit.as_str(),
             "nerdctl",
@@ -1347,7 +1340,7 @@ mod tests {
     fn compose_up_names_the_deadline_when_timeout_stops_nerdctl() {
         let runner = MockRunner::new().with_error(
             &bounded_up_key("acme", &["--remove-orphans"]),
-            "wsl.exe failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}",
+            "wsl.exe failed: timeout: sending signal KILL to command \u{2018}nerdctl\u{2019}",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
         let msg = rt
@@ -1361,6 +1354,20 @@ mod tests {
             )),
             "got: {msg}"
         );
+        assert!(msg.contains("sending signal KILL"), "raw cause kept: {msg}");
+    }
+
+    #[test]
+    fn compose_up_does_not_blame_the_deadline_for_a_forwarded_term() {
+        let raw = "wsl.exe failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}";
+        let runner =
+            MockRunner::new().with_error(&bounded_up_key("acme", &["--remove-orphans"]), raw);
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let msg = rt
+            .compose_up("acme")
+            .expect_err("an interrupted up must fail")
+            .to_string();
+        assert!(!msg.contains("did not finish within"), "got: {msg}");
         assert!(msg.contains("sending signal TERM"), "raw cause kept: {msg}");
     }
 
