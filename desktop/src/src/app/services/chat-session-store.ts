@@ -394,6 +394,7 @@ export class ChatSessionStore {
     this.resumeInProgressSignal.set(v);
   }
   private _resumeDecider: (() => Promise<'resume' | 'fresh'>) | null = null;
+  private _disposed = false;
 
   /** Durable session id (test/Component read). */
   get lastKnownSessionId(): string | null {
@@ -605,6 +606,7 @@ export class ChatSessionStore {
 
   /** Starts a backend chat session unless a resume or another start already owns it. */
   async startChatSession(): Promise<StartOutcome> {
+    if (this._disposed) return 'skipped';
     const project = this.deps.projectState.activeProject();
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.deps.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
@@ -620,9 +622,9 @@ export class ChatSessionStore {
       try {
         await this.deps.tauri.invoke('start_chat', { project, tabId: this.tabId });
         this.deps.log.debug('[chat-state] startChatSession: success');
-        outcome = gen === this._sessionGeneration ? 'started' : 'skipped';
+        outcome = gen === this._sessionGeneration && !this._disposed ? 'started' : 'skipped';
       } catch (err) {
-        if (gen !== this._sessionGeneration) {
+        if (gen !== this._sessionGeneration || this._disposed) {
           this.deps.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
           outcome = 'skipped';
         } else {
@@ -722,6 +724,11 @@ export class ChatSessionStore {
         errStr.includes('no active session') ||
         errStr.includes('Broken pipe')
       ) {
+        if (this._disposed) {
+          this.isStreaming = false;
+          this.notifyChange();
+          return;
+        }
         try {
           if (this.startingSession) {
             const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
@@ -805,6 +812,11 @@ export class ChatSessionStore {
           this.notifyChange();
           return;
         } catch (retryErr) {
+          if (this._disposed) {
+            this.isStreaming = false;
+            this.notifyChange();
+            return;
+          }
           const retryMsg = String(retryErr);
           if (isNotAuthenticatedError(retryMsg)) {
             this.deps.projectState.status.set('auth_required');
@@ -1434,7 +1446,7 @@ export class ChatSessionStore {
    * @param sessionId - session UUID to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
-    if (this._resumeInProgress) return;
+    if (this._disposed || this._resumeInProgress) return;
     this._resumeInProgress = true;
     if (this.deps.projectState.restartInFlight && !(await this.outlastRestart())) {
       this._resumeInProgress = false;
@@ -1487,7 +1499,7 @@ export class ChatSessionStore {
       this.seedContextFromTranscript();
     } catch (err) {
       this._optimisticSessionId = null;
-      if (gen !== this._sessionGeneration) {
+      if (gen !== this._sessionGeneration || this._disposed) {
         this.deps.log.debug(
           `[chat-state] resumeConversation superseded by a reset: ${String(err)}`
         );
@@ -1518,7 +1530,9 @@ export class ChatSessionStore {
         void this.startChatSession();
       }
     }
-    if (outcome === 'started' && gen === this._sessionGeneration) this.flushPendingModelOverride();
+    if (outcome === 'started' && gen === this._sessionGeneration && !this._disposed) {
+      this.flushPendingModelOverride();
+    }
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
@@ -1627,8 +1641,14 @@ export class ChatSessionStore {
     }
   }
 
-  /** Unregisters the resume decider; called when the tab is closed (phase 4 registry). */
+  /**
+   * Marks the store disposed and unregisters the resume decider; called on tab close and
+   * project switch. In-flight async flows still complete against this store, but the
+   * disposed flag stops every side effect that escapes it (project-status writes,
+   * `retryAuth`, session restarts on its tab id).
+   */
   dispose(): void {
+    this._disposed = true;
     this.setResumeDecider(null);
   }
 }

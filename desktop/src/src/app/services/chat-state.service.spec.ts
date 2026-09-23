@@ -1956,6 +1956,134 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('stale in-flight session flows across a project switch', () => {
+    let projectState: ProjectStateService;
+
+    beforeEach(async () => {
+      projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    async function switchProjectMidFlight(): Promise<void> {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    it('a stale session start failing after a completed switch leaves the project status alone and the fresh store starts', async () => {
+      const startGate = createDeferred<void>();
+      const startTabs: unknown[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'start_chat') {
+          startTabs.push(args?.['tabId']);
+          return startTabs.length === 1 ? startGate.promise : undefined;
+        }
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'other', dir: '/tmp/other' }], active_project: 'other' };
+        if (cmd === 'get_auth_status')
+          return {
+            api_key_configured: false,
+            oauth_authenticated: true,
+            needs_anthropic_auth: true,
+            provider_configured: true,
+          };
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const stale = staleStore.startChatSession();
+      await new Promise((r) => setTimeout(r, 0));
+
+      await switchProjectMidFlight();
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(projectState.status()).toBe('ready');
+      expect(startTabs[1]).toBe(service.activeStore().tabId);
+
+      startGate.reject(new Error('session spawn failed'));
+      await expect(stale).resolves.toBe('skipped');
+      expect(projectState.status()).toBe('ready');
+      expect(projectState.error).toBe('');
+    });
+
+    it('a stale resume rejected as unauthenticated after a switch does not run retryAuth', async () => {
+      const resumeGate = createDeferred<void>();
+      const retryAuthSpy = vi.spyOn(projectState, 'retryAuth').mockResolvedValue(undefined);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'resume_conversation') return resumeGate.promise;
+        if (cmd === 'get_conversation') return { session_id: 'sess-stale', messages: [] };
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const stale = staleStore.resumeConversation('sess-stale');
+      await new Promise((r) => setTimeout(r, 0));
+
+      await switchProjectMidFlight();
+      resumeGate.reject(new Error('not authenticated'));
+      await stale;
+
+      expect(retryAuthSpy).not.toHaveBeenCalled();
+      expect(projectState.status()).toBe('switching');
+    });
+
+    it('resumeConversation on a disposed store is a no-op', async () => {
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      await switchProjectMidFlight();
+
+      await staleStore.resumeConversation('sess-x');
+
+      expect(calls).not.toContain('resume_conversation');
+      expect(calls).not.toContain('get_conversation');
+    });
+
+    it('a stale send failing after a switch does not restart a session on the disposed tab', async () => {
+      const sendGate = createDeferred<void>();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') return sendGate.promise;
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'other', dir: '/tmp/other' }], active_project: 'other' };
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const stale = staleStore.sendMessage('hello');
+      await new Promise((r) => setTimeout(r, 0));
+
+      await switchProjectMidFlight();
+      sendGate.reject(new Error('session exited'));
+      await stale;
+
+      expect(calls).not.toContain('start_chat');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
+
+    it('a stale send whose restart probe fails as unauthenticated does not flip the project to auth_required', async () => {
+      const listGate = createDeferred<never>();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'send_message') throw new Error('session exited');
+        if (cmd === 'list_projects') return listGate.promise;
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const stale = staleStore.sendMessage('hello');
+      await new Promise((r) => setTimeout(r, 0));
+
+      await switchProjectMidFlight();
+      listGate.reject(new Error('not authenticated'));
+      await stale;
+
+      expect(projectState.status()).toBe('switching');
+    });
+  });
+
   describe('resumeConversation while a container restart runs', () => {
     let projectState: ProjectStateService;
     let calls: Array<{ cmd: string; sessionId?: unknown }>;
