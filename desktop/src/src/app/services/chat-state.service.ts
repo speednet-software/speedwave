@@ -159,6 +159,7 @@ export class ChatStateService {
       throw new Error(`Cannot open more than ${MAX_CHAT_TABS} chat tabs`);
     }
     const store = this.makeStore();
+    store.setResumeDecider(this._resumeDecider);
     this.addStore(store);
     await store.init();
     this._activeTabId.set(store.tabId);
@@ -196,6 +197,7 @@ export class ChatStateService {
 
     if (remaining.size === 0) {
       const fresh = this.makeStore();
+      fresh.setResumeDecider(this._resumeDecider);
       const transitional = new Map(this._tabs());
       transitional.set(fresh.tabId, fresh);
       this._tabs.set(transitional);

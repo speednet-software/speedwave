@@ -352,6 +352,23 @@ describe('ChatStateService', () => {
         expect(tab2).not.toBe(tab1);
         expect(service.activeTabId()).toBe(tab2);
       });
+
+      it('applies the remembered resume decider to the freshly created store', async () => {
+        const decider = vi.fn(() => Promise.resolve('fresh' as const));
+        service.setResumeDecider(decider);
+
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+
+        expect((store2 as unknown as { _resumeDecider: unknown })._resumeDecider).toBe(decider);
+      });
+
+      it('leaves the freshly created store without a decider when none is registered', async () => {
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+
+        expect((store2 as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
+      });
     });
 
     describe('closeTab', () => {
@@ -393,6 +410,18 @@ describe('ChatStateService', () => {
         expect(service.tabs().size).toBe(1);
         expect(service.tabs().has(tab1)).toBe(false);
         expect(service.activeTabId()).not.toBe(tab1);
+      });
+
+      it('applies the remembered resume decider to the replacement store when the last tab closes', async () => {
+        const decider = vi.fn(() => Promise.resolve('fresh' as const));
+        service.setResumeDecider(decider);
+        const tab1 = service.activeTabId();
+
+        await service.closeTab(tab1);
+
+        const freshTabId = service.activeTabId();
+        const freshStore = service.tabs().get(freshTabId)!;
+        expect((freshStore as unknown as { _resumeDecider: unknown })._resumeDecider).toBe(decider);
       });
 
       it('is a no-op for an unknown tab id', async () => {

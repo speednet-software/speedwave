@@ -14,9 +14,11 @@ import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
+import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
+import { ChatTabsComponent } from '../chat/chat-tabs/chat-tabs.component';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
@@ -40,6 +42,7 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
     CommandPaletteComponent,
     SpinIconComponent,
     CloudStorageModalComponent,
+    ChatTabsComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown)': 'onKeydown($event)' },
@@ -163,6 +166,9 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
           (paletteOpened)="ui.togglePalette()"
         />
         <div class="flex flex-1 flex-col overflow-hidden">
+          @if (showChatTabs()) {
+            <app-chat-tabs />
+          }
           <main class="flex min-h-0 flex-1 flex-col overflow-hidden">
             <router-outlet />
           </main>
@@ -190,6 +196,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
   readonly beta = inject(BetaService);
+  private readonly chat = inject(ChatStateService);
   private readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
@@ -254,6 +261,14 @@ export class ShellComponent implements OnInit, OnDestroy {
     const match = sorted.find((v) => url.startsWith(v.route));
     return match?.id ?? '';
   });
+
+  /** Chat tab bar: beta-gated, chat-route-only, and only once the project is ready. */
+  readonly showChatTabs = computed(
+    () =>
+      this.beta.enabled() &&
+      this.activeViewId() === 'chat' &&
+      this.projectState.status() === 'ready'
+  );
 
   /** Human-readable copy for the blocking overlay, keyed off projectState.status. */
   get statusMessage(): string {
@@ -352,6 +367,18 @@ export class ShellComponent implements OnInit, OnDestroy {
       case 'l':
         event.preventDefault();
         void this.router.navigateByUrl('/logs');
+        return;
+      case 't':
+        if (this.beta.enabled() && this.chat.canOpenTab()) {
+          event.preventDefault();
+          void this.chat.openTab();
+        }
+        return;
+      case 'w':
+        if (this.beta.enabled() && this.chat.tabs().size > 1) {
+          event.preventDefault();
+          void this.chat.closeTab(this.chat.activeTabId());
+        }
         return;
       default:
         return;
