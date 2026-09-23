@@ -105,10 +105,10 @@ impl WslRuntime {
         self.runner.run("wsl.exe", &full)
     }
 
-    /// Flushes the stale CNI iptables chains / bridges named in `err`, as root in the
+    /// Flushes the stale CNI iptables chains / bridges in `targets`, as root in the
     /// distro. Best-effort; see [`super::cni_cleanup_command`].
-    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
-        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(err)], true)
+    fn cleanup_stale_cni(&self, targets: &super::CniTargets) -> anyhow::Result<()> {
+        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(targets)], true)
             .map(|_| ())
     }
 
@@ -132,7 +132,7 @@ impl WslRuntime {
     }
 
     /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations): clean + retry once per class.
+    /// collisions, dead name-store reservations); see [`super::with_engine_state_heal`].
     fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
     where
         U: Fn() -> anyhow::Result<()>,
@@ -140,7 +140,7 @@ impl WslRuntime {
         super::with_engine_state_heal(
             project,
             up,
-            |e| self.cleanup_stale_cni(e),
+            |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
     }
@@ -2717,12 +2717,18 @@ mod tests {
             assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
         }
 
+        fn stale_chain_failure(chain: &str) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!(
+                "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
+            ))
+        }
+
         #[test]
         fn compose_up_self_heals_stale_cni_and_retries_to_success() {
             let mut responses = owned_pass();
-            responses.push(Err(anyhow::anyhow!(
-                "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
-            )));
+            responses.push(stale_chain_failure("CNI-d3c42d65590ae0cf2c72261f"));
+            responses.push(Ok("".into()));
+            responses.push(stale_chain_failure("CNI-1be9c452999fb96d888571d2"));
             responses.push(Ok("".into()));
             responses.push(Ok("".into()));
             responses.extend(owned_pass());
@@ -2732,21 +2738,30 @@ mod tests {
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(
                 rt.compose_up("acme").is_ok(),
-                "stale-CNI up must self-heal and retry to success"
+                "each stale chain a retry uncovers must be healed"
             );
             let calls = mock_clone.calls.lock().unwrap();
             assert_eq!(
                 calls.len(),
-                7,
-                "2 pre + up(fail) + cleanup + up(retry) + 2 post"
+                9,
+                "2 pre + up(fail) + cleanup + up(fail) + cleanup + up + 2 post"
             );
-            assert!(calls[2].1.last().unwrap().contains(" up "), "first up");
-            assert!(
-                calls[3].1.last().unwrap().contains("base64 -d | sh"),
-                "cleanup must run between the failed up and the retry: {:?}",
-                calls[3].1
+            let last = |i: usize| calls[i].1.last().unwrap().clone();
+            for i in [2, 4, 6] {
+                assert!(last(i).contains(" up "), "up at {i}: {:?}", calls[i].1);
+            }
+            for i in [3, 5] {
+                assert!(
+                    last(i).contains("base64 -d | sh") && calls[i].1.contains(&"root".to_string()),
+                    "root cleanup between the failed up and the retry at {i}: {:?}",
+                    calls[i].1
+                );
+            }
+            assert_ne!(
+                last(3),
+                last(5),
+                "each cleanup targets the chain its own failure names"
             );
-            assert!(calls[4].1.last().unwrap().contains(" up "), "retry up");
         }
 
         fn name_store_conflict_msg() -> String {

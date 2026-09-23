@@ -117,11 +117,11 @@ impl LimaRuntime {
         super::parse_version(version_output)
     }
 
-    /// Flushes the stale CNI iptables chains / bridges named in `err` in the Lima VM
+    /// Flushes the stale CNI iptables chains / bridges in `targets` in the Lima VM
     /// via `sudo`. Best-effort; see [`super::cni_cleanup_command`].
-    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
+    fn cleanup_stale_cni(&self, targets: &super::CniTargets) -> anyhow::Result<()> {
         let vm = consts::lima_vm_name();
-        let cmd = super::cni_cleanup_command(err);
+        let cmd = super::cni_cleanup_command(targets);
         self.runner
             .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
             .map(|_| ())
@@ -153,7 +153,7 @@ impl LimaRuntime {
     }
 
     /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations): clean + retry once per class.
+    /// collisions, dead name-store reservations); see [`super::with_engine_state_heal`].
     fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
     where
         U: Fn() -> anyhow::Result<()>,
@@ -161,7 +161,7 @@ impl LimaRuntime {
         super::with_engine_state_heal(
             project,
             up,
-            |e| self.cleanup_stale_cni(e),
+            |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
     }
@@ -1562,8 +1562,9 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct HealRunner {
+            chains: Mutex<std::collections::VecDeque<&'static str>>,
             up_calls: Arc<AtomicUsize>,
-            cleanup_calls: Arc<AtomicUsize>,
+            cleanups: Arc<Mutex<Vec<String>>>,
         }
         impl CommandRunner for HealRunner {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
@@ -1578,36 +1579,49 @@ mod tests {
                     && joined.contains("compose")
                     && joined.contains(" up ")
                 {
-                    if self.up_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        anyhow::bail!(
-                            "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
-                        );
-                    }
-                    return Ok(String::new());
+                    self.up_calls.fetch_add(1, Ordering::SeqCst);
+                    return match self.chains.lock().unwrap().pop_front() {
+                        Some(chain) => Err(anyhow::anyhow!(
+                            "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
+                        )),
+                        None => Ok(String::new()),
+                    };
                 }
                 if joined.contains("base64 -d | sh") {
-                    self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+                    self.cleanups.lock().unwrap().push(joined);
                 }
                 Ok(String::new())
             }
         }
 
         let up_calls = Arc::new(AtomicUsize::new(0));
-        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let cleanups = Arc::new(Mutex::new(Vec::new()));
         let rt = LimaRuntime::with_runner(Box::new(HealRunner {
+            chains: Mutex::new(
+                [
+                    "CNI-d3c42d65590ae0cf2c72261f",
+                    "CNI-1be9c452999fb96d888571d2",
+                ]
+                .into(),
+            ),
             up_calls: Arc::clone(&up_calls),
-            cleanup_calls: Arc::clone(&cleanup_calls),
+            cleanups: Arc::clone(&cleanups),
         }));
         assert!(
             rt.compose_up("acme").is_ok(),
-            "stale-CNI up must self-heal and retry to success"
+            "each stale chain a retry uncovers must be healed"
         );
         assert_eq!(
             up_calls.load(Ordering::SeqCst),
-            2,
-            "up runs twice (fail + retry)"
+            3,
+            "two failed ups, then success"
         );
-        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "cleanup runs once");
+        let cleanups = cleanups.lock().unwrap();
+        assert_eq!(cleanups.len(), 2, "one cleanup per stale chain");
+        assert_ne!(
+            cleanups[0], cleanups[1],
+            "each cleanup targets the chain its own failure names"
+        );
     }
 
     /// Runner whose first compose `up` fails with a real nerdctl name-store conflict.
