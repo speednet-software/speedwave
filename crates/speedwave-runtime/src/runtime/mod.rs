@@ -975,6 +975,18 @@ pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(Str
     out
 }
 
+#[cfg(not(test))]
+const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_millis(1);
+
+fn is_task_create_collision(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains("mkdir ")
+        && s.contains("io.containerd.runtime.v2.task/")
+        && s.contains("file exists")
+}
+
 /// Shared fail-closed per-entry heal function + flock gate. The destructive `rm`
 /// runs under the store's own flock (the lock nerdctl's name-store uses).
 fn name_store_script_header(layout: &NameStoreLayout) -> String {
@@ -1080,8 +1092,8 @@ pub(crate) fn registered_compose_projects() -> Vec<String> {
         .collect()
 }
 
-/// Runs `up`; heals and retries: name-store once, CNI on its first failure and on each
-/// `Chain already exists` naming a chain not targeted yet (capped). Else error = latest `up`'s.
+/// Runs `up`; heals and retries: name-store and task collision once, CNI on its first failure
+/// and on each `Chain already exists` for an untargeted chain (capped). Else error = latest `up`'s.
 pub(crate) fn with_engine_state_heal<U, C, N>(
     project: &str,
     up: U,
@@ -1096,6 +1108,7 @@ where
     let mut cni_heals = 0;
     let mut cni_targeted = std::collections::BTreeSet::new();
     let mut name_store_cleanup = Some(name_store_cleanup);
+    let mut task_collision_retried = false;
     loop {
         let Err(e) = up() else {
             return Ok(());
@@ -1137,6 +1150,11 @@ where
                 }
                 None => false,
             }
+        } else if is_task_create_collision(&e) && !task_collision_retried {
+            task_collision_retried = true;
+            log::warn!("compose up raced another start of the same container ({e}); retrying once in {TASK_CREATE_COLLISION_SETTLE:?}");
+            std::thread::sleep(TASK_CREATE_COLLISION_SETTLE);
+            true
         } else {
             false
         };
@@ -3024,6 +3042,78 @@ services:
             delay_ms, COMPOSE_VALIDATE_MAX_DELAY_MS,
             "delay must hit cap"
         );
+    }
+
+    fn task_bundle_collision_err() -> anyhow::Error {
+        anyhow::anyhow!(
+            "limactl failed: time=\"2026-09-23T00:31:30+02:00\" level=fatal \
+             msg=\"mkdir /run/containerd/io.containerd.runtime.v2.task/default/\
+             572494980b1f1310f4fae98c7648e2058a1c19c047af6749bfc549f363e2e7de: file exists\"\n\
+             time=\"2026-09-23T00:31:30+02:00\" level=fatal msg=\"error while creating container \
+             speedwave_acme_proxy: error while creating container speedwave_acme_proxy: exit status 1\""
+        )
+    }
+
+    #[test]
+    fn engine_state_heal_retries_once_when_another_start_holds_the_task_bundle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let r = with_engine_state_heal(
+            "acme",
+            || {
+                if ups.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(task_bundle_collision_err())
+                } else {
+                    Ok(())
+                }
+            },
+            |_e| -> anyhow::Result<()> { panic!("CNI cleanup must not run on a task collision") },
+            |_e| -> anyhow::Result<()> {
+                panic!("name-store cleanup must not run on a task collision")
+            },
+        );
+        assert!(r.is_ok(), "the retry after the collision succeeds: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
+    }
+
+    #[test]
+    fn engine_state_heal_retries_a_task_bundle_collision_only_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let r = with_engine_state_heal(
+            "acme",
+            || {
+                ups.fetch_add(1, Ordering::SeqCst);
+                Err(task_bundle_collision_err())
+            },
+            |_e| -> anyhow::Result<()> { panic!("CNI cleanup must not run on a task collision") },
+            |_e| -> anyhow::Result<()> {
+                panic!("name-store cleanup must not run on a task collision")
+            },
+        );
+        let err = r.expect_err("a collision that persists must propagate");
+        assert!(err.to_string().contains("file exists"), "got: {err}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "exactly one retry");
+    }
+
+    #[test]
+    fn engine_state_heal_does_not_retry_a_file_exists_outside_the_task_bundles() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let r = with_engine_state_heal(
+            "acme",
+            || {
+                ups.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!(
+                    "level=fatal msg=\"mkdir /var/lib/nerdctl/1935db59/containers/default/\
+                     572494980b1f1310f4fae98c7648e2058a1c19c047af6749bfc549f363e2e7de: file exists\""
+                )
+            },
+            |_e| -> anyhow::Result<()> { panic!("CNI cleanup must not run") },
+            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run") },
+        );
+        assert!(r.is_err());
+        assert_eq!(ups.load(Ordering::SeqCst), 1, "no retry for another path");
     }
 
     #[test]
