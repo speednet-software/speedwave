@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// Adaptive from [`crate::resources`]: host_ram / 2, clamped 4–32 GiB.
 #[cfg(any(target_os = "macos", test))]
 pub fn desired_lima_vm_memory() -> String {
-    let gib = crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
+    let gib = crate::resources::resolved_vm_memory_gib();
     format!("{gib}GiB")
 }
 
@@ -108,8 +108,7 @@ const LIMA_TIMESYNC_PROVISION_SENTINEL: &str = "99-speedwave-no-settime.conf";
 /// missing, or `memory`/`cpus` drifted. Unparseable = no-drift (never touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
 pub fn lima_vm_config_needs_update(config_content: &str) -> bool {
-    use crate::resources;
-    let desired_gib = resources::desired_vm_memory_gib(resources::host_total_memory_gib());
+    let desired_gib = crate::resources::resolved_vm_memory_gib();
     lima_vm_config_needs_update_with(config_content, desired_gib, desired_lima_vm_cpus())
 }
 
@@ -237,8 +236,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    let desired_gib =
-        crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
+    let desired_gib = crate::resources::resolved_vm_memory_gib();
     let desired_cpus = desired_lima_vm_cpus();
     let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL)
         && content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)

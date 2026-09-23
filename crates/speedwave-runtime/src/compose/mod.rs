@@ -332,7 +332,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
-    yaml = apply_container_resources(&yaml);
+    yaml = apply_container_resources(
+        &yaml,
+        &crate::resources::claude_resources(crate::resources::resolved_vm_memory_gib()),
+    );
 
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
@@ -489,8 +492,8 @@ fn format_cpus(cpus: f32) -> String {
     format!("{cpus:.1}")
 }
 
-fn apply_container_resources(yaml: &str) -> String {
-    use crate::resources::{ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, PROXY_RESOURCES};
+fn apply_container_resources(yaml: &str, claude: &crate::resources::ContainerResources) -> String {
+    use crate::resources::{ContainerResources, HUB_RESOURCES, PROXY_RESOURCES};
 
     fn apply(out: &mut String, prefix: &str, r: &ContainerResources) {
         *out = out.replace(&format!("${{{prefix}_MEM}}"), &format_mib(r.mem_mib));
@@ -503,8 +506,8 @@ fn apply_container_resources(yaml: &str) -> String {
 
     let mut out = yaml.to_string();
 
-    out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
-    apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
+    out = out.replace("${CLAUDE_MEMORY}", &format_mib(claude.mem_mib));
+    apply(&mut out, "CLAUDE", claude);
     apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
     apply(&mut out, "PROXY", &PROXY_RESOURCES);
 
@@ -5031,7 +5034,8 @@ services:
             );
         }
         let yaml =
-            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+            apply_container_resources(COMPOSE_TEMPLATE, &crate::resources::claude_resources(8))
+                .replace("${HOST_GATEWAY}", "127.0.0.1");
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let violations = SecurityCheck::check_no_tokens_in_hub(&doc);
         assert!(
@@ -5085,22 +5089,25 @@ services:
 
     #[test]
     fn resources_render_from_ssot() {
-        let yaml =
-            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
-        let doc: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&yaml).expect("rendered template must be valid YAML");
+        for vm_gib in [8u32, 16] {
+            let claude = crate::resources::claude_resources(vm_gib);
+            let yaml = apply_container_resources(COMPOSE_TEMPLATE, &claude)
+                .replace("${HOST_GATEWAY}", "127.0.0.1");
+            let doc: serde_yaml_ng::Value =
+                serde_yaml_ng::from_str(&yaml).expect("rendered template must be valid YAML");
 
-        assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
-        assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
-        assert_resources_from_ssot(&doc, "proxy", &crate::resources::PROXY_RESOURCES);
-        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
-            assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
-        }
-        for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
-            assert!(
-                !yaml.contains(marker),
-                "unsubstituted resource placeholder containing {marker}"
-            );
+            assert_resources_from_ssot(&doc, "claude", &claude);
+            assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
+            assert_resources_from_ssot(&doc, "proxy", &crate::resources::PROXY_RESOURCES);
+            for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+                assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
+            }
+            for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
+                assert!(
+                    !yaml.contains(marker),
+                    "unsubstituted resource placeholder containing {marker}"
+                );
+            }
         }
 
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {

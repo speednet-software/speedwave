@@ -2,8 +2,18 @@
 //! consts.rs); drift-tested vs compose.template.yml. Plugin/WSL2 VM limits stay outside by design.
 use std::process::ExitStatus;
 
-/// Fixed Claude container memory ceiling in GiB. See ADR-068.
-pub const CLAUDE_MEMORY_GIB: u32 = 6;
+/// Maximum number of parallel chat tabs; TS mirror in
+/// `desktop/src/src/app/services/chat-session-store.ts` (cross-read-tested).
+pub const MAX_CHAT_TABS: u32 = 3;
+
+/// Claude container memory base in GiB, the one-tab ceiling. See ADR-091.
+pub const CLAUDE_BASE_MEMORY_GIB: u32 = 6;
+
+/// GiB added to the Claude ceiling per chat tab beyond the first. See ADR-091.
+pub const CLAUDE_PER_EXTRA_TAB_GIB: u32 = 3;
+
+/// VM GiB held out of the Claude ceiling for the hub and tmpfs. See ADR-091.
+pub const CLAUDE_VM_HEADROOM_GIB: u32 = 2;
 
 /// Resource limits for one container. Sizes in MiB, except `cpus` (fractional
 /// cores); `shm_mib` is `None` unless above the 64 MiB default.
@@ -19,13 +29,32 @@ pub struct ContainerResources {
     pub shm_mib: Option<u32>,
 }
 
-/// Claude container: 6 GiB cap, 2 cores, 512 MiB /tmp.
-pub const CLAUDE_RESOURCES: ContainerResources = ContainerResources {
-    mem_mib: CLAUDE_MEMORY_GIB * 1024,
-    cpus: 2.0,
-    tmpfs_mib: 512,
-    shm_mib: None,
-};
+/// Claude container memory ceiling in GiB for a VM of `vm_gib`: tab capacity
+/// clamped to the VM budget, never below the base. See ADR-091.
+pub fn claude_memory_gib(vm_gib: u32) -> u32 {
+    let tab_capacity = CLAUDE_BASE_MEMORY_GIB + CLAUDE_PER_EXTRA_TAB_GIB * (MAX_CHAT_TABS - 1);
+    let vm_budget = vm_gib
+        .saturating_sub(CLAUDE_VM_HEADROOM_GIB)
+        .max(CLAUDE_BASE_MEMORY_GIB);
+    tab_capacity.min(vm_budget)
+}
+
+/// Claude container limits for a VM of `vm_gib`: memory per [`claude_memory_gib`],
+/// 2 cores, 512 MiB /tmp.
+pub fn claude_resources(vm_gib: u32) -> ContainerResources {
+    ContainerResources {
+        mem_mib: claude_memory_gib(vm_gib) * 1024,
+        cpus: 2.0,
+        tmpfs_mib: 512,
+        shm_mib: None,
+    }
+}
+
+/// VM memory in GiB the render path and Lima provisioning assume:
+/// [`desired_vm_memory_gib`] over detected host RAM (Windows falls back to 16).
+pub fn resolved_vm_memory_gib() -> u32 {
+    desired_vm_memory_gib(host_total_memory_gib())
+}
 
 /// MCP hub: on every MCP request's path, does real CPU work (sandboxed exec, PII regex,
 /// aggregation) → 1 full core; limits are ceilings, so overcommit on a 4-vCPU VM is fine.
@@ -112,12 +141,12 @@ pub fn desired_vm_cpus(host_cores: u32) -> u32 {
     (host_cores / 2).clamp(4, 8)
 }
 
-/// Memory the always-on containers (Claude + hub) request: hard limit +
-/// RAM-backed tmpfs. Excludes toggleable workers and plugins. See ADR-068.
+/// Memory the always-on containers (Claude + hub) request on a `vm_gib` VM: hard
+/// limit + RAM-backed tmpfs. Excludes toggleable workers and plugins. See ADR-068.
 #[cfg(test)]
-fn always_on_memory_mib() -> u32 {
+fn always_on_memory_mib(vm_gib: u32) -> u32 {
     let one = |r: &ContainerResources| r.mem_mib + r.tmpfs_mib + r.shm_mib.unwrap_or(0);
-    one(&CLAUDE_RESOURCES) + one(&HUB_RESOURCES)
+    one(&claude_resources(vm_gib)) + one(&HUB_RESOURCES)
 }
 
 /// Returns `true` if the exit status likely indicates an OOM kill: code 137 or
@@ -248,9 +277,67 @@ mod tests {
     }
 
     #[test]
-    fn claude_memory_is_fixed_6_everywhere() {
-        assert_eq!(CLAUDE_MEMORY_GIB, 6);
-        assert_eq!(CLAUDE_RESOURCES.mem_mib, 6 * 1024);
+    fn claude_memory_formula_table() {
+        for (vm, claude) in [
+            (0u32, 6u32),
+            (4, 6),
+            (8, 6),
+            (10, 8),
+            (12, 10),
+            (14, 12),
+            (16, 12),
+            (32, 12),
+        ] {
+            assert_eq!(claude_memory_gib(vm), claude, "vm {vm} GiB");
+        }
+    }
+
+    #[test]
+    fn claude_memory_never_below_base_and_caps_at_tab_capacity() {
+        let cap = CLAUDE_BASE_MEMORY_GIB + CLAUDE_PER_EXTRA_TAB_GIB * (MAX_CHAT_TABS - 1);
+        for vm in 0..=64u32 {
+            let gib = claude_memory_gib(vm);
+            assert!(gib >= CLAUDE_BASE_MEMORY_GIB, "vm {vm}: below base");
+            assert!(gib <= cap, "vm {vm}: above tab capacity");
+        }
+    }
+
+    #[test]
+    fn claude_memory_is_monotonic_in_vm_size() {
+        for vm in 0..64u32 {
+            assert!(
+                claude_memory_gib(vm + 1) >= claude_memory_gib(vm),
+                "vm {vm} -> {}: ceiling must not shrink as the VM grows",
+                vm + 1
+            );
+        }
+    }
+
+    #[test]
+    fn claude_resources_keep_fixed_cpus_and_tmpfs() {
+        for vm in [8u32, 16] {
+            let r = claude_resources(vm);
+            assert_eq!(r.mem_mib, claude_memory_gib(vm) * 1024);
+            assert_eq!(r.cpus, 2.0);
+            assert_eq!(r.tmpfs_mib, 512);
+            assert_eq!(r.shm_mib, None);
+        }
+    }
+
+    #[test]
+    fn smallest_supported_vm_keeps_todays_six_gib() {
+        assert_eq!(desired_vm_memory_gib(MIN_SUPPORTED_HOST_GIB), 8);
+        assert_eq!(claude_memory_gib(8), 6);
+        assert_eq!(claude_resources(8).mem_mib, 6 * 1024);
+    }
+
+    #[test]
+    fn max_chat_tabs_matches_ts_mirror() {
+        let ts = include_str!("../../../desktop/src/src/app/services/chat-session-store.ts");
+        assert!(
+            ts.contains(&format!("export const MAX_CHAT_TABS = {MAX_CHAT_TABS};")),
+            "chat-session-store.ts MAX_CHAT_TABS must equal resources::MAX_CHAT_TABS ({MAX_CHAT_TABS})"
+        );
     }
 
     #[test]
@@ -300,7 +387,8 @@ mod tests {
                 assert!(shm > 0, "{who}: shm_mib, when set, must be > 0");
             }
         };
-        check(&CLAUDE_RESOURCES, "claude");
+        check(&claude_resources(8), "claude@8GiB");
+        check(&claude_resources(16), "claude@16GiB");
         check(&HUB_RESOURCES, "hub");
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             check(&svc.resources, svc.config_key);
@@ -309,14 +397,36 @@ mod tests {
 
     #[test]
     fn always_on_fits_smallest_supported_vm() {
-        let vm_mib = desired_vm_memory_gib(MIN_SUPPORTED_HOST_GIB) * 1024;
+        let vm_gib = desired_vm_memory_gib(MIN_SUPPORTED_HOST_GIB);
+        assert_eq!(
+            vm_gib, 8,
+            "the minimum supported host must yield an 8 GiB VM"
+        );
+        let vm_mib = vm_gib * 1024;
         assert!(
-            always_on_memory_mib() < vm_mib,
+            always_on_memory_mib(vm_gib) < vm_mib,
             "always-on (claude+hub) = {} MiB must fit the {} GiB VM of the {} GiB minimum host",
-            always_on_memory_mib(),
-            vm_mib / 1024,
+            always_on_memory_mib(vm_gib),
+            vm_gib,
             MIN_SUPPORTED_HOST_GIB
         );
+    }
+
+    #[test]
+    fn always_on_fits_every_vm_size() {
+        for vm_gib in [8u32, 10, 12, 16, 32] {
+            assert!(
+                always_on_memory_mib(vm_gib) < vm_gib * 1024,
+                "always-on set must fit a {vm_gib} GiB VM, got {} MiB",
+                always_on_memory_mib(vm_gib)
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_vm_memory_is_within_the_clamp() {
+        let vm = resolved_vm_memory_gib();
+        assert!((4..=32).contains(&vm), "vm {vm} GiB outside the 4-32 clamp");
     }
 
     #[test]
