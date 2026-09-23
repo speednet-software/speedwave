@@ -120,6 +120,13 @@ impl LimaRuntime {
         )
     }
 
+    fn read_vm_status(&self) -> anyhow::Result<String> {
+        match self.read_vm_listing("{{.Status}}") {
+            Err(e) if e.to_string().contains(LIMA_UNMATCHED_INSTANCES) => Ok(String::new()),
+            status => status,
+        }
+    }
+
     fn require_running(&self) -> anyhow::Result<()> {
         if self.is_available() {
             Ok(())
@@ -881,7 +888,7 @@ impl ContainerRuntime for LimaRuntime {
         {
             log::info!("Lima VM '{vm}' may still be booting from a start that did not finish");
         } else if let Ok(status) = self
-            .read_vm_listing("{{.Status}}")
+            .read_vm_status()
             .inspect_err(|e| log::warn!("Lima VM status check failed, stopping it anyway: {e}"))
         {
             let trimmed = status.trim();
@@ -891,6 +898,8 @@ impl ContainerRuntime for LimaRuntime {
                         "Lima VM '{}' is in Stopping state, will be stopped on next ensure_ready",
                         vm,
                     );
+                } else if trimmed.is_empty() {
+                    log::debug!("Lima VM '{vm}' does not exist, skipping stop");
                 } else {
                     log::debug!(
                         "Lima VM '{}' is not running (status: '{}'), skipping stop",
@@ -1013,11 +1022,9 @@ impl LimaRuntime {
         }
 
         let vm = consts::lima_vm_name();
-        let status = match self.read_vm_listing("{{.Status}}") {
-            Ok(status) => status,
-            Err(e) if e.to_string().contains(LIMA_UNMATCHED_INSTANCES) => String::new(),
-            Err(e) => return Err(unreadable_vm_status(vm, &e)),
-        };
+        let status = self
+            .read_vm_status()
+            .map_err(|e| unreadable_vm_status(vm, &e))?;
 
         match status.trim() {
             "Running" => Ok(()),
@@ -3068,6 +3075,19 @@ mod tests {
                 .unwrap()
                 .contains(&format!("limactl stop --force {}", consts::lima_vm_name())),
             "a failed status read must not skip the teardown"
+        );
+    }
+
+    #[test]
+    fn stop_vm_leaves_a_vm_that_does_not_exist_alone() {
+        let (recorded, runner) = make_status_recording_runner(Err(
+            "time=\"2026-09-23T22:54:04+02:00\" level=fatal msg=\"unmatched instances\"",
+        ));
+        let rt = LimaRuntime::with_runner(runner);
+        rt.stop_vm().unwrap();
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "a VM limactl does not know has nothing to stop"
         );
     }
 
