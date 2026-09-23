@@ -117,11 +117,11 @@ impl LimaRuntime {
         super::parse_version(version_output)
     }
 
-    /// Flushes the stale CNI iptables chains / bridges named in `err` in the Lima VM
+    /// Flushes the stale CNI iptables chains / bridges in `targets` in the Lima VM
     /// via `sudo`. Best-effort; see [`super::cni_cleanup_command`].
-    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
+    fn cleanup_stale_cni(&self, targets: &super::CniTargets) -> anyhow::Result<()> {
         let vm = consts::lima_vm_name();
-        let cmd = super::cni_cleanup_command(err);
+        let cmd = super::cni_cleanup_command(targets);
         self.runner
             .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
             .map(|_| ())
@@ -161,7 +161,7 @@ impl LimaRuntime {
         super::with_engine_state_heal(
             project,
             up,
-            |e| self.cleanup_stale_cni(e),
+            |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
     }
@@ -1562,64 +1562,11 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct HealRunner {
-            up_calls: Arc<AtomicUsize>,
-            cleanup_calls: Arc<AtomicUsize>,
-        }
-        impl CommandRunner for HealRunner {
-            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-                if cmd == "limactl" && args.first() == Some(&"--version") {
-                    return Ok("limactl version 1.0.0".to_string());
-                }
-                if cmd == "limactl" && args.first() == Some(&"list") {
-                    return Ok("Running".to_string());
-                }
-                let joined = args.join(" ");
-                if joined.contains("nerdctl")
-                    && joined.contains("compose")
-                    && joined.contains(" up ")
-                {
-                    if self.up_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        anyhow::bail!(
-                            "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
-                        );
-                    }
-                    return Ok(String::new());
-                }
-                if joined.contains("base64 -d | sh") {
-                    self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
-                }
-                Ok(String::new())
-            }
-        }
-
-        let up_calls = Arc::new(AtomicUsize::new(0));
-        let cleanup_calls = Arc::new(AtomicUsize::new(0));
-        let rt = LimaRuntime::with_runner(Box::new(HealRunner {
-            up_calls: Arc::clone(&up_calls),
-            cleanup_calls: Arc::clone(&cleanup_calls),
-        }));
-        assert!(
-            rt.compose_up("acme").is_ok(),
-            "stale-CNI up must self-heal and retry to success"
-        );
-        assert_eq!(
-            up_calls.load(Ordering::SeqCst),
-            2,
-            "up runs twice (fail + retry)"
-        );
-        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "cleanup runs once");
-    }
-
-    #[test]
-    fn compose_up_heals_each_stale_chain_its_retries_uncover() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        struct StaleChainsRunner {
             chains: Mutex<std::collections::VecDeque<&'static str>>,
             up_calls: Arc<AtomicUsize>,
             cleanups: Arc<Mutex<Vec<String>>>,
         }
-        impl CommandRunner for StaleChainsRunner {
+        impl CommandRunner for HealRunner {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
                 if cmd == "limactl" && args.first() == Some(&"--version") {
                     return Ok("limactl version 1.0.0".to_string());
@@ -1649,7 +1596,7 @@ mod tests {
 
         let up_calls = Arc::new(AtomicUsize::new(0));
         let cleanups = Arc::new(Mutex::new(Vec::new()));
-        let rt = LimaRuntime::with_runner(Box::new(StaleChainsRunner {
+        let rt = LimaRuntime::with_runner(Box::new(HealRunner {
             chains: Mutex::new(
                 [
                     "CNI-d3c42d65590ae0cf2c72261f",

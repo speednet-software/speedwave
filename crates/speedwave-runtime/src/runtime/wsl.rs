@@ -105,10 +105,10 @@ impl WslRuntime {
         self.runner.run("wsl.exe", &full)
     }
 
-    /// Flushes the stale CNI iptables chains / bridges named in `err`, as root in the
+    /// Flushes the stale CNI iptables chains / bridges in `targets`, as root in the
     /// distro. Best-effort; see [`super::cni_cleanup_command`].
-    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
-        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(err)], true)
+    fn cleanup_stale_cni(&self, targets: &super::CniTargets) -> anyhow::Result<()> {
+        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(targets)], true)
             .map(|_| ())
     }
 
@@ -140,7 +140,7 @@ impl WslRuntime {
         super::with_engine_state_heal(
             project,
             up,
-            |e| self.cleanup_stale_cni(e),
+            |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
     }
@@ -2717,38 +2717,6 @@ mod tests {
             assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
         }
 
-        #[test]
-        fn compose_up_self_heals_stale_cni_and_retries_to_success() {
-            let mut responses = owned_pass();
-            responses.push(Err(anyhow::anyhow!(
-                "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
-            )));
-            responses.push(Ok("".into()));
-            responses.push(Ok("".into()));
-            responses.extend(owned_pass());
-            let mock = Arc::new(SequentialMockRunner::new(responses));
-            let mock_clone = Arc::clone(&mock);
-            let rt =
-                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
-            assert!(
-                rt.compose_up("acme").is_ok(),
-                "stale-CNI up must self-heal and retry to success"
-            );
-            let calls = mock_clone.calls.lock().unwrap();
-            assert_eq!(
-                calls.len(),
-                7,
-                "2 pre + up(fail) + cleanup + up(retry) + 2 post"
-            );
-            assert!(calls[2].1.last().unwrap().contains(" up "), "first up");
-            assert!(
-                calls[3].1.last().unwrap().contains("base64 -d | sh"),
-                "cleanup must run between the failed up and the retry: {:?}",
-                calls[3].1
-            );
-            assert!(calls[4].1.last().unwrap().contains(" up "), "retry up");
-        }
-
         fn stale_chain_failure(chain: &str) -> anyhow::Result<String> {
             Err(anyhow::anyhow!(
                 "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
@@ -2756,7 +2724,7 @@ mod tests {
         }
 
         #[test]
-        fn compose_up_heals_each_stale_chain_its_retries_uncover() {
+        fn compose_up_self_heals_stale_cni_and_retries_to_success() {
             let mut responses = owned_pass();
             responses.push(stale_chain_failure("CNI-d3c42d65590ae0cf2c72261f"));
             responses.push(Ok("".into()));
@@ -2785,7 +2753,7 @@ mod tests {
             for i in [3, 5] {
                 assert!(
                     last(i).contains("base64 -d | sh") && calls[i].1.contains(&"root".to_string()),
-                    "root cleanup at {i}: {:?}",
+                    "root cleanup between the failed up and the retry at {i}: {:?}",
                     calls[i].1
                 );
             }
