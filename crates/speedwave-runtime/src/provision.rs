@@ -336,7 +336,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
     let status_str = String::from_utf8_lossy(&info_output.stdout);
 
     if !status_str.trim().eq_ignore_ascii_case("running") {
-        use crate::runtime::CommandRunner as _;
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
             "starting Lima VM '{}' — a one-time download of container tooling \
@@ -344,14 +343,22 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
             consts::lima_vm_name(),
             timeout.as_secs()
         );
-        crate::runtime::RealRunner
-            .run_with_timeout("limactl", &["start", consts::lima_vm_name()], timeout)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "limactl start failed: {e}. {}",
-                    consts::LIMA_START_PROVISION_HINT
-                )
-            })?;
+        let started = crate::runtime::lima::start_vm_unless_torn_down(
+            &crate::runtime::RealRunner,
+            &crate::runtime::lima::VM_START_GATE,
+            consts::lima_vm_name(),
+            timeout,
+            crate::runtime::engine_teardown_started,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "limactl start failed: {e}. {}",
+                consts::LIMA_START_PROVISION_HINT
+            )
+        })?;
+        if !started {
+            return Err(anyhow::Error::new(crate::runtime::EngineTearingDown));
+        }
     }
 
     let mut ready = false;
@@ -741,7 +748,8 @@ pub(crate) fn wsl_setup_action(
         return WslSetupAction::Report(v.to_string());
     }
     match v.rule {
-        crate::os_prereqs::PrereqRule::WslCannotStart => WslSetupAction::Report(v.to_string()),
+        crate::os_prereqs::PrereqRule::WslCannotStart
+        | crate::os_prereqs::PrereqRule::WslUnresponsive => WslSetupAction::Report(v.to_string()),
         crate::os_prereqs::PrereqRule::WslNotAvailable => WslSetupAction::Install,
     }
 }
@@ -1966,6 +1974,30 @@ mod tests {
     }
 
     #[test]
+    fn init_vm_macos_starts_the_vm_through_the_engine_teardown_gate() {
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn init_vm_macos")
+            .expect("init_vm_macos must exist");
+        let tail = &src[start + 1..];
+        let body = &src[start..start + 1 + tail.find("\npub fn ").unwrap_or(tail.len())];
+        let call = body
+            .split("start_vm_unless_torn_down(")
+            .nth(1)
+            .expect("the provisioning start must be one app exit or factory reset can cut short");
+        let args = &call[..call.find(".map_err(").expect("the start error is mapped")];
+        assert!(
+            args.contains("&crate::runtime::lima::VM_START_GATE")
+                && args.contains("crate::runtime::engine_teardown_started"),
+            "the provisioning start must share the process-wide gate and teardown flag, got: {args}"
+        );
+        assert!(
+            !body.contains(".run_with_timeout(\"limactl\", &[\"start\""),
+            "a bare limactl start would outlive the app and boot the VM after exit"
+        );
+    }
+
+    #[test]
     fn download_backoff_active_only_within_retry_delay() {
         assert!(!download_backoff_active(None, 1_000), "no marker = fresh");
         let s = NerdctlDownloadBackoff {
@@ -2635,6 +2667,23 @@ mod tests {
                 ),
                 WslSetupAction::Install
             );
+        }
+
+        #[test]
+        fn an_unresponsive_wsl_is_reported_instead_of_reinstalled() {
+            match wsl_setup_action(
+                &[violation(PrereqRule::WslUnresponsive)],
+                ServicingState::Clean,
+            ) {
+                WslSetupAction::Report(msg) => assert!(
+                    msg.contains("diagnosis body"),
+                    "the diagnosis must reach the user: {msg}"
+                ),
+                other => panic!(
+                    "WSL that ran but did not answer is installed, so an elevated install \
+                     cannot help, got {other:?}"
+                ),
+            }
         }
 
         #[test]

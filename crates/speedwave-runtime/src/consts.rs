@@ -279,6 +279,10 @@ pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
        - Check 'Virtual Machine Platform'\n\n\
     Then restart your computer and run Speedwave again.";
 
+/// Remediation for a `wsl.exe --status` that ran but did not answer (`PrereqRule::WslUnresponsive`).
+pub const WSL_UNRESPONSIVE_MSG: &str = "WSL did not respond. Run `wsl --shutdown` in a terminal, \
+     or restart Windows, then try again.";
+
 /// Non-blocking warning when nested virtualization is detected (e.g. WSL2 inside VMware).
 /// Used by `os_prereqs::check_os_warnings()`.
 pub const NESTED_VIRT_WARNING_MSG: &str = "\
@@ -370,7 +374,23 @@ pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 /// in `Stopping` state to finish. Used by `ensure_ready_inner`.
 pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 
-const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
+/// Upper bound for one VM-list read by the runtimes (`limactl list`, `wsl.exe --list`); a read
+/// that outlives it is a failed read, which `ensure_ready` reports as `VmStatusUnreadable`.
+pub const VM_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub(crate) const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+const _: () = assert!(
+    VM_LIST_TIMEOUT.as_secs() + LIMA_VM_STOP_TIMEOUT_SECS + 3 * PIPE_DRAIN_GRACE.as_secs()
+        < EXIT_CLEANUP_TIMEOUT_SECS
+);
+
+/// Seconds a readiness check keeps re-running `ensure_ready` after the engine first fails to answer;
+/// twice the VM stop wait, since a Lima VM reports Running until its guest has stopped.
+pub const ENGINE_UNREACHABLE_WINDOW_SECS: u64 = 2 * LIMA_VM_STOP_TIMEOUT_SECS;
+
+/// Delay in seconds between those `ensure_ready` re-runs.
+pub const ENGINE_UNREACHABLE_POLL_DELAY_SECS: u64 = LIMA_VM_STOP_POLL_DELAY_SECS;
 
 /// Physical storage tier per auth field (ADR-060).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

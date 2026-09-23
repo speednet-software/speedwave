@@ -65,16 +65,32 @@ where
 /// queries (`ps`, `logs`) and non-compose ops are passthrough. See ADR-066.
 pub struct LockedRuntime {
     inner: Box<dyn ContainerRuntime>,
+    engine_teardown_started: fn() -> bool,
 }
 
 impl LockedRuntime {
-    pub(crate) fn new(inner: Box<dyn ContainerRuntime>) -> Self {
-        Self { inner }
+    pub(crate) fn new(
+        inner: Box<dyn ContainerRuntime>,
+        engine_teardown_started: fn() -> bool,
+    ) -> Self {
+        Self {
+            inner,
+            engine_teardown_started,
+        }
     }
 
-    /// Starts the project's compose stack (under the per-project lock).
+    fn refuse_during_engine_teardown(&self) -> anyhow::Result<()> {
+        if (self.engine_teardown_started)() {
+            return Err(anyhow::Error::new(super::EngineTearingDown));
+        }
+        Ok(())
+    }
+
+    /// Starts the project's compose stack (under the per-project lock); refused once
+    /// [`super::begin_engine_teardown`] ran.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
+            self.refuse_during_engine_teardown()?;
             let result = self.inner.compose_up(project);
             crate::slash::invalidate_cache(project);
             result
@@ -86,19 +102,22 @@ impl LockedRuntime {
         with_acquired(project, || self.inner.compose_down(project))
     }
 
-    /// Recreates the project's compose stack (under the per-project lock).
+    /// Recreates the project's compose stack (under the per-project lock); refused once
+    /// [`super::begin_engine_teardown`] ran.
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
+            self.refuse_during_engine_teardown()?;
             let result = self.inner.compose_up_recreate(project);
             crate::slash::invalidate_cache(project);
             result
         })
     }
 
-    /// Recreates one built-in compose service without touching the rest of
-    /// the stack (under the per-project lock) — ADR-073 proxy hot-reload.
+    /// Recreates one built-in compose service without touching the rest of the stack (under
+    /// the per-project lock, refused once the engine teardown began) — ADR-073 proxy hot-reload.
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
+            self.refuse_during_engine_teardown()?;
             let result = self.inner.compose_up_service(project, service);
             if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
                 crate::slash::invalidate_cache(project);
@@ -176,7 +195,8 @@ impl LockedRuntime {
         self.inner.container_logs(container, tail)
     }
 
-    /// `true` if an image with this tag exists.
+    /// `Ok(true)` if an image with this tag exists; `Ok(false)` only when the engine answers that it
+    /// is absent, while an engine that cannot answer is `Err`.
     pub fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         self.inner.image_exists(tag)
     }
@@ -244,6 +264,76 @@ mod tests {
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn no_compose_stack_starts_once_the_engine_teardown_began() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_engine_teardown_check(|| true)
+            .build();
+        for started in [
+            rt.compose_up("torn"),
+            rt.compose_up_recreate("torn"),
+            rt.compose_up_service("torn", crate::consts::CLAUDE_COMPOSE_SERVICE),
+        ] {
+            let err = started.unwrap_err();
+            assert!(
+                err.downcast_ref::<crate::runtime::EngineTearingDown>()
+                    .is_some(),
+                "got: {err}"
+            );
+        }
+        assert!(handles.up_projects().is_empty());
+        assert!(!handles.was_recreated());
+    }
+
+    #[test]
+    fn a_compose_stack_still_goes_down_during_the_engine_teardown() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_engine_teardown_check(|| true)
+            .build();
+        rt.compose_down("torn").unwrap();
+        assert_eq!(handles.down_projects(), vec!["torn".to_string()]);
+    }
+
+    #[test]
+    fn compose_up_reads_the_engine_teardown_under_the_project_lock() {
+        static TEARDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn teardown_started() -> bool {
+            TEARDOWN.load(Ordering::SeqCst)
+        }
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_engine_teardown_check(teardown_started)
+            .build();
+        let rt = Arc::new(rt);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || {
+                rt.transaction("race", |_| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+            })
+        };
+        held_rx.recv().unwrap();
+        let starter = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || rt.compose_up("race"))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        TEARDOWN.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+        let err = starter.join().unwrap().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::EngineTearingDown>()
+                .is_some(),
+            "a start waiting on the lock while exit took the stack down must not bring it back, got: {err}"
+        );
+        assert!(handles.up_projects().is_empty());
+    }
 
     #[test]
     fn reentrant_call_on_same_project_does_not_redacquire() {

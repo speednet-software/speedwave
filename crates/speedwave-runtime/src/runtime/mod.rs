@@ -185,17 +185,13 @@ impl VmExecOutput {
     }
 }
 
-/// Shared `vm_exec` impl for Lima/WSL: spawns the command, pipes `stdin`, waits
-/// with a timeout (kills child on overrun), captures stdout+stderr.
 pub(crate) fn vm_exec_run(
     mut command: Command,
     stdin: &[u8],
     timeout: std::time::Duration,
 ) -> anyhow::Result<VmExecOutput> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::Stdio;
-    use std::sync::mpsc;
-    use std::thread;
 
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -209,54 +205,11 @@ pub(crate) fn vm_exec_run(
         }
     }
 
-    let Some(mut out_pipe) = child.stdout.take() else {
-        anyhow::bail!("vm_exec: stdout pipe missing on '{program}'");
-    };
-    let Some(mut err_pipe) = child.stderr.take() else {
-        anyhow::bail!("vm_exec: stderr pipe missing on '{program}'");
-    };
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
-    let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
-    let out_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = out_pipe.read_to_end(&mut buf);
-        let _ = out_tx.send(buf);
-    });
-    let err_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = err_pipe.read_to_end(&mut buf);
-        let _ = err_tx.send(buf);
-    });
-
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait()? {
-            Some(s) => break s,
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = out_thread.join();
-                    let _ = err_thread.join();
-                    anyhow::bail!(
-                        "vm_exec: '{}' timed out after {}s",
-                        program,
-                        timeout.as_secs()
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-    };
-
-    let _ = out_thread.join();
-    let _ = err_thread.join();
-    let stdout = out_rx.recv().unwrap_or_default();
-    let stderr = err_rx.recv().unwrap_or_default();
+    let output = binary::wait_for_piped_child(child, timeout, &format!("command '{program}'"))?;
     Ok(VmExecOutput {
-        status,
-        stdout,
-        stderr,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
     })
 }
 
@@ -277,63 +230,107 @@ pub trait CommandRunner: Send + Sync {
         self.run(cmd, args).map(|s| s.into_bytes())
     }
 
-    /// Like `run`, but kills on `timeout`, captures stderr, treats non-zero as `Err`.
-    /// Limited-stderr commands only — verbose output deadlocks the 64 KB pipe.
+    /// Like `run`, but gives up after `timeout`. The default ignores the deadline so test runners
+    /// never spawn a process; [`RealRunner`] bounds the real child and captures both streams.
+    fn run_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        self.run(cmd, args)
+    }
+
+    /// Like `run_raw_stdout`, but gives up after `timeout`; the default ignores the deadline, as
+    /// [`CommandRunner::run_bounded`]'s does.
+    fn run_raw_stdout_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.run_raw_stdout(cmd, args)
+    }
+
+    /// Like `run`, but kills on `timeout`, captures stderr (drained on a thread), treats non-zero
+    /// as `Err`.
     fn run_with_timeout(
         &self,
         cmd: &str,
         args: &[&str],
         timeout: std::time::Duration,
     ) -> anyhow::Result<()> {
-        let mut command = binary::command(cmd);
-        command.args(args);
-        command.stderr(std::process::Stdio::piped());
+        run_until(cmd, args, timeout, &|| false).map(|_| ())
+    }
 
-        let program = command.get_program().to_string_lossy().to_string();
-        let mut child = command.spawn()?;
-        let start = std::time::Instant::now();
-        loop {
-            match child.try_wait()? {
-                Some(status) => {
-                    if status.success() {
-                        return Ok(());
-                    }
-                    let stderr = child
-                        .stderr
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                            decode_wsl_output(&buf)
-                        })
-                        .unwrap_or_default();
-                    let detail = stderr.trim();
-                    if detail.is_empty() {
-                        anyhow::bail!("{} failed with exit code {:?}", program, status.code());
-                    } else {
-                        anyhow::bail!(
-                            "{} failed with exit code {:?}: {}",
-                            program,
-                            status.code(),
-                            user_facing_failure_text(&program, detail)
-                        );
-                    }
+    /// Like `run_with_timeout`, but kills the command once `stop()` turns true: `Ok(false)` then,
+    /// `Ok(true)` when it succeeded. The default ignores `stop` and calls `run_with_timeout`.
+    fn run_with_timeout_until(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> anyhow::Result<bool> {
+        let _ = stop;
+        self.run_with_timeout(cmd, args, timeout).map(|()| true)
+    }
+}
+
+fn run_until(
+    cmd: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+    stop: &dyn Fn() -> bool,
+) -> anyhow::Result<bool> {
+    let mut command = binary::command(cmd);
+    command.args(args);
+    command.stderr(std::process::Stdio::piped());
+
+    let program = command.get_program().to_string_lossy().to_string();
+    let mut child = command.spawn()?;
+    let stderr_reader = child.stderr.take().map(binary::read_on_thread);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(status) if status.success() => return Ok(true),
+            Some(_) if stop() => return Ok(false),
+            Some(status) => {
+                let stderr = stderr_reader
+                    .as_ref()
+                    .and_then(|r| binary::exited_child_output(r, &program).ok())
+                    .map(|buf| decode_wsl_output(&buf))
+                    .unwrap_or_default();
+                let detail = stderr.trim();
+                if detail.is_empty() {
+                    anyhow::bail!("{} failed with exit code {:?}", program, status.code());
                 }
-                None => {
-                    if start.elapsed() >= timeout {
-                        if let Err(e) = child.kill() {
-                            log::warn!("failed to kill timed-out command: {e}");
-                        }
-                        let _ = child.wait();
-                        anyhow::bail!(
-                            "command '{}' timed out after {}s",
-                            program,
-                            timeout.as_secs()
-                        );
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
+                anyhow::bail!(
+                    "{} failed with exit code {:?}: {}",
+                    program,
+                    status.code(),
+                    user_facing_failure_text(&program, detail)
+                );
             }
+            None if stop() => {
+                if let Err(e) = child.kill() {
+                    log::warn!("failed to kill the stopped command '{program}': {e}");
+                }
+                let _ = child.wait();
+                return Ok(false);
+            }
+            None if start.elapsed() >= timeout => {
+                if let Err(e) = child.kill() {
+                    log::warn!("failed to kill timed-out command: {e}");
+                }
+                let _ = child.wait();
+                anyhow::bail!(
+                    "command '{}' timed out after {}s",
+                    program,
+                    timeout.as_secs()
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
         }
     }
 }
@@ -427,6 +424,41 @@ impl CommandRunner for RealRunner {
 
     fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
         let output = Self::prepare_command(cmd, args).output()?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
+        }
+    }
+
+    fn run_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        self.run_raw_stdout_bounded(cmd, args, timeout)
+            .map(|stdout| String::from_utf8_lossy(&stdout).to_string())
+    }
+
+    fn run_with_timeout_until(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+        stop: &dyn Fn() -> bool,
+    ) -> anyhow::Result<bool> {
+        run_until(cmd, args, timeout, stop)
+    }
+
+    fn run_raw_stdout_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut command = Self::prepare_command(cmd, args);
+        let output = binary::run_with_timeout_capture(&mut command, timeout)?;
         if output.status.success() {
             Ok(output.stdout)
         } else {
@@ -641,6 +673,85 @@ fn is_stopped_container_error(message: &str) -> bool {
     lower.contains("cannot exec in a stopped state")
 }
 
+const NO_SUCH_IMAGE_FRAGMENT: &str = "no such image";
+
+pub(crate) fn image_inspect_verdict(inspect: anyhow::Result<String>) -> anyhow::Result<bool> {
+    let Err(e) = inspect else {
+        return Ok(true);
+    };
+    let lower = e.to_string().to_ascii_lowercase();
+    if lower.contains(NO_SUCH_IMAGE_FRAGMENT) {
+        Ok(false)
+    } else {
+        Err(e)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct VmStatusUnreadable(String);
+
+impl VmStatusUnreadable {
+    pub(crate) fn error(message: String) -> anyhow::Error {
+        anyhow::Error::new(Self(message))
+    }
+}
+
+impl std::fmt::Display for VmStatusUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for VmStatusUnreadable {}
+
+#[derive(Debug)]
+pub(crate) struct VmNotFound(String);
+
+impl VmNotFound {
+    pub(crate) fn error(message: String) -> anyhow::Error {
+        anyhow::Error::new(Self(message))
+    }
+}
+
+impl std::fmt::Display for VmNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for VmNotFound {}
+
+static ENGINE_TEARDOWN_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// From here on this process starts neither a stopped Lima VM nor a compose stack; app exit and
+/// factory reset call it before they stop the engine.
+pub fn begin_engine_teardown() {
+    ENGINE_TEARDOWN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `true` once [`begin_engine_teardown`] ran in this process.
+pub fn engine_teardown_started() -> bool {
+    ENGINE_TEARDOWN_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Undoes [`begin_engine_teardown`] for a test that ran exit cleanup in its own process.
+#[cfg(any(test, feature = "test-support"))]
+pub fn undo_engine_teardown() {
+    ENGINE_TEARDOWN_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[derive(Debug)]
+pub(crate) struct EngineTearingDown;
+
+impl std::fmt::Display for EngineTearingDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Speedwave is shutting the container engine down and starts nothing on it")
+    }
+}
+
+impl std::error::Error for EngineTearingDown {}
+
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
@@ -742,7 +853,7 @@ pub fn ensure_exec_healthy(
     }
     runtime.compose_up_recreate(project).map_err(|e| {
         let msg = e.to_string().to_ascii_lowercase();
-        if msg.contains("no such image") || msg.contains("image not found") {
+        if msg.contains(NO_SUCH_IMAGE_FRAGMENT) || msg.contains("image not found") {
             anyhow::anyhow!(
                 "Container images are missing — restarting the app \
                  will trigger an automatic rebuild. ({e})"
@@ -1480,7 +1591,7 @@ pub(crate) fn compose_down_and_cleanup(
 /// SSOT entry point: the only way to obtain a runtime handle outside this
 /// crate. Returns `LockedRuntime` so callers cannot bypass per-project locks.
 pub fn detect_runtime() -> LockedRuntime {
-    LockedRuntime::new(detect_runtime_inner())
+    LockedRuntime::new(detect_runtime_inner(), engine_teardown_started)
 }
 
 pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {
@@ -2671,6 +2782,114 @@ services:
         assert!(!is_stopped_container_error(""));
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn vm_exec_run_returns_on_deadline_while_a_grandchild_holds_the_pipes() {
+        let start = std::time::Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & sleep 30"]);
+        let err = vm_exec_run(command, b"", std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "an orphaned grandchild still holding stdout must not stretch the deadline, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vm_exec_run_returns_once_the_child_exits_while_a_grandchild_holds_the_pipes() {
+        let start = std::time::Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & exit 0"]);
+        let err = vm_exec_run(command, b"", std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(
+            err.to_string().contains("still holds its output open"),
+            "got: {err}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "a grandchild holding the pipes must not outlast the child by its own lifetime, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_raw_stdout_bounded_keeps_the_bytes_it_read() {
+        let out = RealRunner
+            .run_raw_stdout_bounded(
+                "printf",
+                &["\\377\\376S\\000"],
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![0xFF, 0xFE, b'S', 0],
+            "a UTF-16LE list from wsl.exe must reach its decoder unconverted"
+        );
+    }
+
+    #[test]
+    fn run_bounded_falls_back_to_run_for_runners_that_only_implement_run() {
+        struct RunOnly;
+        impl CommandRunner for RunOnly {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                Ok(format!("{cmd} {}", args.join(" ")))
+            }
+        }
+        let out = RunOnly
+            .run_bounded("limactl", &["list"], std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(out, "limactl list");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_bounded_returns_stdout() {
+        let out = RealRunner
+            .run_bounded(
+                "sh",
+                &["-c", "printf ok"],
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_bounded_keeps_stderr_in_the_error() {
+        let err = RealRunner
+            .run_bounded(
+                "sh",
+                &["-c", "echo 'no such image: x:1' >&2; exit 1"],
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no such image: x:1"),
+            "the verdict reads stderr, so it must survive, got: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_bounded_gives_up_at_the_deadline() {
+        let start = std::time::Instant::now();
+        let err = RealRunner
+            .run_bounded(
+                "sh",
+                &["-c", "sleep 30"],
+                std::time::Duration::from_millis(200),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
     /// Stderr classified as stale-mount by `is_stale_container_error`; single
     /// fixture so a classifier change reaches every test in one edit.
     const STALE_MOUNT_STDERR: &str = "current working directory is outside of container mount namespace root -- possible container breakout detected";
@@ -2913,6 +3132,157 @@ services:
             err_msg.contains("diagnostic"),
             "error should include stderr output, got: {err_msg}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_reports_a_failure_while_a_grandchild_holds_stderr() {
+        let start = std::time::Instant::now();
+        let err = RealRunner
+            .run_with_timeout(
+                "sh",
+                &["-c", "sleep 30 & exit 3"],
+                std::time::Duration::from_secs(20),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exit code Some(3)"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "a grandchild holding stderr must not hold up the failure, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_drains_stderr_that_outgrows_the_pipe_buffer() {
+        let result = RealRunner.run_with_timeout(
+            "sh",
+            &["-c", "head -c 300000 /dev/zero >&2"],
+            std::time::Duration::from_secs(20),
+        );
+        assert!(
+            result.is_ok(),
+            "a child must not block on a full stderr pipe, got: {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_until_kills_the_command_once_told_to_stop() {
+        let start = std::time::Instant::now();
+        let finished = RealRunner
+            .run_with_timeout_until(
+                "sleep",
+                &["30"],
+                std::time::Duration::from_secs(20),
+                &|| start.elapsed() >= std::time::Duration::from_millis(200),
+            )
+            .unwrap();
+        assert!(
+            !finished,
+            "a command stopped early must not read as finished"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "the command must die once told to stop, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_until_reports_how_the_command_ended() {
+        assert!(RealRunner
+            .run_with_timeout_until("true", &[], std::time::Duration::from_secs(10), &|| false)
+            .unwrap());
+        let err = RealRunner
+            .run_with_timeout_until(
+                "sh",
+                &["-c", "echo refused >&2; exit 3"],
+                std::time::Duration::from_secs(10),
+                &|| false,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exit code Some(3)") && err.contains("refused"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_until_leaves_the_output_of_a_command_stopped_as_it_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let exited = dir.path().join("exited");
+        let script = format!("sleep 30 & touch '{}'; exit 3", exited.display());
+        let start = std::time::Instant::now();
+        let finished = RealRunner
+            .run_with_timeout_until(
+                "sh",
+                &["-c", &script],
+                std::time::Duration::from_secs(20),
+                &|| exited.exists(),
+            )
+            .unwrap();
+        assert!(!finished);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "a command stopped during a teardown must not hold it up for its output, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_until_still_gives_up_at_the_deadline() {
+        let err = RealRunner
+            .run_with_timeout_until(
+                "sleep",
+                &["30"],
+                std::time::Duration::from_millis(300),
+                &|| false,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    #[test]
+    fn run_with_timeout_until_falls_back_to_run_with_timeout_for_test_runners() {
+        struct TimedOnly {
+            calls: Mutex<Vec<String>>,
+        }
+        impl CommandRunner for TimedOnly {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                anyhow::bail!("unexpected run: {cmd} {}", args.join(" "))
+            }
+            fn run_with_timeout(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                _timeout: std::time::Duration,
+            ) -> anyhow::Result<()> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{cmd} {}", args.join(" ")));
+                Ok(())
+            }
+        }
+        let runner = TimedOnly {
+            calls: Mutex::new(Vec::new()),
+        };
+        assert!(runner
+            .run_with_timeout_until(
+                "limactl",
+                &["start", "vm"],
+                std::time::Duration::from_secs(1),
+                &|| true
+            )
+            .unwrap());
+        assert_eq!(*runner.calls.lock().unwrap(), vec!["limactl start vm"]);
     }
 
     #[test]

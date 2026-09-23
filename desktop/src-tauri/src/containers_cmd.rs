@@ -670,6 +670,12 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("checking whether containers are running for project={project}");
+        if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT) {
+            log::warn!(
+                "container engine check still running after {}s, reading the engine as it is",
+                RECONCILE_WAIT_TIMEOUT.as_secs()
+            );
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         if !rt.is_available() {
             log::warn!("runtime not available");
@@ -786,6 +792,7 @@ pub async fn factory_reset(
     oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
+    speedwave_runtime::runtime::begin_engine_teardown();
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -820,7 +827,7 @@ pub async fn factory_reset(
         drop(guard.take());
     }
 
-    let result = tokio::task::spawn_blocking(|| {
+    let wipe = tokio::task::spawn_blocking(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             drain_pending_teardowns();
@@ -830,16 +837,14 @@ pub async fn factory_reset(
             log::warn!("background teardown drain did not finish within 30s, continuing with wipe");
         }
         log::info!("starting factory reset wipe");
-        setup_wizard::factory_reset().map_err(|e| {
-            log::error!("factory reset failed: {e}");
-            e.to_string()
-        })
+        setup_wizard::factory_reset()
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await;
 
-    if let Err(ref e) = result {
-        log::error!("factory reset wipe failed ({e}), restarting to recover");
+    match wipe {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error!("factory reset wipe failed ({e:#}), restarting to recover"),
+        Err(e) => log::error!("factory reset wipe did not finish ({e}), restarting to recover"),
     }
     app.restart();
 }
@@ -4591,6 +4596,87 @@ mod tests {
         assert!(
             ensure_pos < up_pos,
             "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    #[test]
+    fn factory_reset_marks_the_engine_teardown_before_stopping_anything() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
+        let teardown = fn_body
+            .find("speedwave_runtime::runtime::begin_engine_teardown()")
+            .expect("factory_reset must keep the runtime from starting the VM again");
+        let first_stop = fn_body
+            .find("WATCHDOG_STOP")
+            .expect("factory_reset stops the watchdogs");
+        assert!(
+            teardown < first_stop,
+            "a startup image check must not restart the VM a factory reset deletes"
+        );
+    }
+
+    #[test]
+    fn factory_reset_restarts_even_when_the_wipe_task_does_not_finish() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
+        let wipe = fn_body
+            .find("spawn_blocking(")
+            .expect("factory_reset wipes on a blocking task");
+        let after_wipe = &fn_body[wipe..];
+        for exit in [")?", "return"] {
+            assert!(
+                !after_wipe.contains(exit),
+                "a process that stopped its workers and may not start its VM again must restart, \
+                 never return and keep running (`{exit}`)"
+            );
+        }
+        assert!(
+            after_wipe
+                .trim_end()
+                .trim_end_matches('}')
+                .trim_end()
+                .ends_with("app.restart();"),
+            "every outcome of the wipe must end in the restart"
+        );
+    }
+
+    #[test]
+    fn check_containers_running_answers_from_the_engine_once_the_wait_runs_out() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+        let wait = fn_body
+            .split("if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT) {")
+            .nth(1)
+            .expect("check_containers_running must branch on the wait running out");
+        let ran_out = &wait[..wait.find("\n        }\n").expect("the branch must end")];
+        assert!(ran_out.contains("log::warn!("));
+        for exit in ["return", "Err(", "?;"] {
+            assert!(
+                !ran_out.contains(exit),
+                "a first VM start may provision for as long as the wait lasts, so running out of \
+                 it must not end the container check (`{exit}`)"
+            );
+        }
+    }
+
+    #[test]
+    fn check_containers_running_waits_for_the_engine_check_before_asking_the_engine() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+
+        let wait_pos = fn_body
+            .find("wait_for_image_check(")
+            .expect("check_containers_running must wait for the startup engine check");
+        let probe_pos = fn_body
+            .find("is_available()")
+            .expect("check_containers_running must probe the runtime");
+        let ps_pos = fn_body
+            .find("compose_ps(")
+            .expect("check_containers_running must list the project's containers");
+        assert!(
+            wait_pos < probe_pos && wait_pos < ps_pos,
+            "the engine check must settle before the runtime is probed, or a VM that still reports \
+             Running while it shuts down fails the check"
         );
     }
 

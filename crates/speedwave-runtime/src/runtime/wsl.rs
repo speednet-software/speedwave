@@ -40,6 +40,18 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
 }
 
 #[cfg(any(target_os = "windows", test))]
+const WSL_NO_DISTRIBUTIONS_CODE: &str = "WSL_E_DEFAULT_DISTRO_NOT_FOUND";
+
+#[cfg(any(target_os = "windows", test))]
+const WSL_NO_DISTRIBUTIONS_MESSAGE: &str = "has no installed distributions";
+
+#[cfg(any(target_os = "windows", test))]
+fn lists_no_distributions(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains(WSL_NO_DISTRIBUTIONS_CODE) || msg.contains(WSL_NO_DISTRIBUTIONS_MESSAGE)
+}
+
+#[cfg(any(target_os = "windows", test))]
 pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
     retry_delay: std::time::Duration,
@@ -91,6 +103,14 @@ impl WslRuntime {
 
     fn distro(&self) -> &str {
         &self.distro_name
+    }
+
+    fn list_distributions(&self) -> anyhow::Result<Vec<u8>> {
+        self.runner.run_raw_stdout_bounded(
+            "wsl.exe",
+            &["--list", "--quiet"],
+            consts::VM_LIST_TIMEOUT,
+        )
     }
 
     /// Runs `argv` via `sh -c` with POSIX quoting: wsl.exe re-parses the post-`--` line via the
@@ -550,8 +570,7 @@ impl ContainerRuntime for WslRuntime {
 
     fn is_available(&self) -> bool {
         let distro = self.distro();
-        self.runner
-            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
+        self.list_distributions()
             .map(|raw| {
                 let output = decode_wsl_output(&raw);
                 output
@@ -658,11 +677,11 @@ impl ContainerRuntime for WslRuntime {
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         let distro = self.distro();
-        let result = self.runner.run(
+        super::image_inspect_verdict(self.runner.run_bounded(
             "wsl.exe",
             &["-d", distro, "--", "nerdctl", "image", "inspect", tag],
-        );
-        Ok(result.is_ok())
+            consts::CONTAINER_EXEC_PROBE_TIMEOUT,
+        ))
     }
 
     fn system_prune(&self) -> anyhow::Result<()> {
@@ -824,19 +843,23 @@ impl WslRuntime {
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         let violations = crate::os_prereqs::check_os_prereqs();
         if let Some(v) = violations.first() {
+            if v.rule == crate::os_prereqs::PrereqRule::WslUnresponsive {
+                return Err(super::VmStatusUnreadable::error(v.to_string()));
+            }
             anyhow::bail!("{v}");
         }
 
         let distro = self.distro();
-        let raw = self
-            .runner
-            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                    distro
-                )
-            })?;
+        let raw = match self.list_distributions() {
+            Ok(raw) => raw,
+            Err(e) if lists_no_distributions(&e) => Vec::new(),
+            Err(e) => {
+                return Err(super::VmStatusUnreadable::error(format!(
+                    "Cannot list WSL2 distributions to find '{distro}': {e}. If WSL2 is not \
+                     installed, run the Speedwave.app setup wizard."
+                )));
+            }
+        };
 
         let output = decode_wsl_output(&raw);
         let distro_exists = output
@@ -844,10 +867,9 @@ impl WslRuntime {
             .any(|line| line.trim().trim_matches('\0') == distro);
 
         if !distro_exists {
-            anyhow::bail!(
-                "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                distro
-            );
+            return Err(super::VmNotFound::error(format!(
+                "WSL2 distribution '{distro}' not found. Run Speedwave.app setup wizard to import it."
+            )));
         }
 
         crate::provision::ensure_windows_invariants();
@@ -992,6 +1014,27 @@ mod tests {
     }
 
     #[test]
+    fn ensure_ready_reads_an_unresponsive_wsl_as_an_unreadable_state() {
+        let _pin =
+            crate::os_prereqs::PinnedPrereqs::pin(vec![crate::os_prereqs::PrereqViolation {
+                rule: crate::os_prereqs::PrereqRule::WslUnresponsive,
+                message: "wsl.exe --status did not answer: child process timed out after 10s"
+                    .to_string(),
+                remediation: consts::WSL_UNRESPONSIVE_MSG,
+            }]);
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a wedged WSL must be retried like an unreadable VM, not reported as missing, got: {err}"
+        );
+        assert!(err.to_string().contains("did not answer"), "got: {err}");
+    }
+
+    #[test]
     fn ensure_ready_proceeds_when_no_prereq_violation_is_pinned() {
         let rt = WslRuntime::with_runner(Box::new(
             MockRunner::new().with_response("wsl.exe --list --quiet", "Ubuntu\n"),
@@ -1021,6 +1064,102 @@ mod tests {
                 "error should mention distro on non-Windows, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn ensure_ready_reports_a_missing_distro_when_wsl_lists_no_distributions() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Windows Subsystem for Linux has no installed distributions.\n\
+             Error code: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "wsl.exe answered that no distribution exists, got: {err}"
+        );
+        assert!(err.downcast_ref::<crate::runtime::VmNotFound>().is_some());
+    }
+
+    #[test]
+    fn ensure_ready_reads_the_no_distributions_code_in_any_display_language() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Podsystem Windows dla systemu Linux nie ma zainstalowanych \
+             dystrybucji.\nKod błędu: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "the error code, not the localized sentence, decides, got: {err}"
+        );
+    }
+
+    #[test]
+    fn every_distro_list_read_is_bounded_by_the_vm_list_timeout() {
+        struct ListRecorder {
+            bounded: std::sync::Arc<std::sync::Mutex<Vec<(String, std::time::Duration)>>>,
+        }
+        impl CommandRunner for ListRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--list") {
+                    anyhow::bail!("an unbounded read ran: {key}");
+                }
+                Ok(String::new())
+            }
+            fn run_raw_stdout_bounded(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<Vec<u8>> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.bounded.lock().unwrap().push((key, timeout));
+                Ok(format!("{}\n", consts::wsl_distro_name()).into_bytes())
+            }
+        }
+        let bounded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = WslRuntime::with_runner(Box::new(ListRecorder {
+            bounded: bounded.clone(),
+        }));
+        assert!(rt.is_available());
+        rt.ensure_ready().unwrap();
+        let reads = bounded.lock().unwrap().clone();
+        assert_eq!(
+            reads,
+            vec![
+                (
+                    "wsl.exe --list --quiet".to_string(),
+                    consts::VM_LIST_TIMEOUT
+                ),
+                (
+                    "wsl.exe --list --quiet".to_string(),
+                    consts::VM_LIST_TIMEOUT
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_ready_reports_an_unreadable_distro_list_instead_of_a_missing_distro() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Catastrophic failure\nError code: Wsl/Service/E_UNEXPECTED",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a failed distro list must stay distinguishable from a missing distro, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Wsl/Service/E_UNEXPECTED"),
+            "the wsl.exe failure must reach the caller, got: {err}"
+        );
     }
 
     #[test]
@@ -1997,14 +2136,45 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("prune failed"));
     }
 
+    struct ArcRunner(std::sync::Arc<crate::runtime::test_support::SequentialMockRunner>);
+
+    impl CommandRunner for ArcRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            self.0.run(cmd, args)
+        }
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.0.run_with_timeout(cmd, args, timeout)
+        }
+    }
+
+    fn remove_images_commands(
+        tags: &[String],
+        force: bool,
+        rmi: anyhow::Result<String>,
+    ) -> Vec<String> {
+        let runner = std::sync::Arc::new(crate::runtime::test_support::SequentialMockRunner::new(
+            vec![rmi],
+        ));
+        let rt = WslRuntime::with_runner(Box::new(ArcRunner(runner.clone())));
+        assert!(
+            rt.remove_images(tags, force).is_ok(),
+            "remove_images only warns on a failed rmi"
+        );
+        let calls = runner.calls.lock().unwrap();
+        calls
+            .iter()
+            .map(|(cmd, args, _)| format!("{cmd} {}", args.join(" ")))
+            .collect()
+    }
+
     #[test]
     fn test_remove_images_empty_tags_is_noop() {
-        let runner = MockRunner::new();
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(
-            rt.remove_images(&[], false).is_ok(),
-            "empty tags should return Ok without calling runner"
-        );
+        assert!(remove_images_commands(&[], false, Ok(String::new())).is_empty());
     }
 
     #[test]
@@ -2013,37 +2183,110 @@ mod tests {
             "speedwave-claude:abc123".to_string(),
             "speedwave-mcp-hub:abc123".to_string(),
         ];
-        let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
-            "",
+        assert_eq!(
+            remove_images_commands(&tags, false, Ok(String::new())),
+            vec![format!(
+                "wsl.exe -d {} -- nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
+                consts::wsl_distro_name()
+            )]
         );
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, false).is_ok());
     }
 
     #[test]
     fn test_remove_images_error_is_warn_only() {
         let tags = vec!["speedwave-claude:abc123".to_string()];
-        let runner = MockRunner::new().with_error(
-            "wsl.exe -d Speedwave -- nerdctl rmi speedwave-claude:abc123",
-            "no such image",
-        );
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(
-            rt.remove_images(&tags, false).is_ok(),
-            "rmi failure should not propagate"
+        assert_eq!(
+            remove_images_commands(&tags, false, Err(anyhow::anyhow!("no such image"))),
+            vec![format!(
+                "wsl.exe -d {} -- nerdctl rmi speedwave-claude:abc123",
+                consts::wsl_distro_name()
+            )],
+            "the rmi must run even though its failure is only a warning"
         );
     }
 
     #[test]
     fn test_remove_images_force_passes_force_flag() {
         let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
-        let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
-            "",
+        assert_eq!(
+            remove_images_commands(&tags, true, Ok(String::new())),
+            vec![format!(
+                "wsl.exe -d {} -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
+                consts::wsl_distro_name()
+            )]
+        );
+    }
+
+    fn image_inspect_key() -> String {
+        format!(
+            "wsl.exe -d {} -- nerdctl image inspect speedwave-claude:abc123",
+            consts::wsl_distro_name()
+        )
+    }
+
+    #[test]
+    fn image_exists_is_true_for_a_tag_nerdctl_inspects() {
+        let runner = MockRunner::new().with_response(&image_inspect_key(), "[{}]");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_is_false_when_nerdctl_answers_no_such_image() {
+        let runner = MockRunner::new().with_error(
+            &image_inspect_key(),
+            "wsl.exe failed: time=\"2026-09-23T12:15:48+02:00\" level=fatal \
+             msg=\"1 errors:\\nno such image: speedwave-claude:abc123\"",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, true).is_ok());
+        assert!(!rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_bounds_the_probe_by_the_exec_probe_timeout() {
+        struct BoundedProbeRecorder {
+            timeouts: std::sync::Arc<std::sync::Mutex<Vec<std::time::Duration>>>,
+        }
+        impl CommandRunner for BoundedProbeRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                anyhow::bail!(
+                    "the image probe must go through run_bounded, got run: {cmd} {}",
+                    args.join(" ")
+                )
+            }
+            fn run_bounded(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<String> {
+                self.timeouts.lock().unwrap().push(timeout);
+                Ok("[{}]".to_string())
+            }
+        }
+        let timeouts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = WslRuntime::with_runner(Box::new(BoundedProbeRecorder {
+            timeouts: timeouts.clone(),
+        }));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+        assert_eq!(
+            *timeouts.lock().unwrap(),
+            vec![consts::CONTAINER_EXEC_PROBE_TIMEOUT]
+        );
+    }
+
+    #[test]
+    fn image_exists_surfaces_a_wsl_transport_failure_instead_of_an_absent_image() {
+        let runner = MockRunner::new().with_error(
+            &image_inspect_key(),
+            "wsl.exe failed: Catastrophic failure\nError code: Wsl/Service/E_UNEXPECTED",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.image_exists("speedwave-claude:abc123").unwrap_err();
+        assert!(
+            err.to_string().contains("Wsl/Service/E_UNEXPECTED"),
+            "the engine error must reach the caller, got: {err}"
+        );
     }
 
     #[test]
@@ -2549,22 +2792,6 @@ mod tests {
         use super::*;
         use crate::runtime::test_support::SequentialMockRunner;
         use std::sync::Arc;
-        use std::time::Duration;
-
-        struct ArcRunner(Arc<SequentialMockRunner>);
-        impl crate::runtime::CommandRunner for ArcRunner {
-            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-                self.0.run(cmd, args)
-            }
-            fn run_with_timeout(
-                &self,
-                cmd: &str,
-                args: &[&str],
-                timeout: Duration,
-            ) -> anyhow::Result<()> {
-                self.0.run_with_timeout(cmd, args, timeout)
-            }
-        }
 
         /// Engine-side claude-home path exactly as the runtime derives it.
         fn engine_home(project: &str) -> String {
@@ -2891,21 +3118,6 @@ mod tests {
         use crate::runtime::test_support::SequentialMockRunner;
         use std::sync::Arc;
         use std::time::Duration;
-
-        struct ArcRunner(Arc<SequentialMockRunner>);
-        impl crate::runtime::CommandRunner for ArcRunner {
-            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-                self.0.run(cmd, args)
-            }
-            fn run_with_timeout(
-                &self,
-                cmd: &str,
-                args: &[&str],
-                timeout: Duration,
-            ) -> anyhow::Result<()> {
-                self.0.run_with_timeout(cmd, args, timeout)
-            }
-        }
 
         #[test]
         fn reset_vm_happy_path() {

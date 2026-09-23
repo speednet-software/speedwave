@@ -927,6 +927,7 @@ fn main() {
 
             // Post-setup migrations, off the main thread.
             if setup_started {
+                reconcile::mark_image_check_pending();
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     let migrations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
