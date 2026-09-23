@@ -744,7 +744,7 @@ export class ChatStateService {
           const retryBlocked = this.sessionStartInFlightFromState()
             ? 'Session is still starting (containers may be restarting). Please try again in a moment.'
             : result.active_project && project !== null && result.active_project !== project
-              ? 'The active project changed outside this window. Select the project again, then resend the message.'
+              ? `The active project is now '${result.active_project}', not '${project}'. Switch projects in the project list, then resend the message.`
               : null;
           if (retryBlocked) {
             this.isStreaming = false;

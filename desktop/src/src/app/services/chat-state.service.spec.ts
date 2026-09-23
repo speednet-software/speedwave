@@ -940,7 +940,7 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
       const lastMsg = service.messages[service.messages.length - 1];
       expect((lastMsg.blocks[0] as { content: string }).content).toContain(
-        'The active project changed'
+        "The active project is now 'other', not 'test'"
       );
     });
 
@@ -966,12 +966,12 @@ describe('ChatStateService', () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       const pendingRestart = createDeferred();
+      projectState.restartInFlight = pendingRestart.promise;
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
         switch (cmd) {
           case 'send_message':
-            projectState.restartInFlight = pendingRestart.promise;
             void service.resumeConversation('sess-resumed');
             throw new Error('session exited (exit status: 1)');
           case 'get_conversation':
@@ -1003,7 +1003,7 @@ describe('ChatStateService', () => {
       });
     });
 
-    it('gives up when the dying session reports its end before the retry looks up the project', async () => {
+    it('gives up when the dying session reports its end while the retry looks up the project', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       const pendingLookup = createDeferred();
