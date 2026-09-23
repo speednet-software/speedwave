@@ -293,17 +293,21 @@ mod tests {
     fn sweep_ps1_kills_all_three_target_categories() {
         let stem = desktop_exe_stem();
         assert!(
-            SWEEP_PS1.contains(&format!(r"'\{stem}.exe'")),
+            SWEEP_PS1.contains(&format!("Combine($instDir, '{stem}.exe')")),
             "sweep.ps1 must target $INSTDIR\\{stem}.exe, the binary Tauri installs"
         );
+        let nodejs = speedwave_runtime::consts::NODEJS_SUBDIR;
         assert!(
-            SWEEP_PS1.contains(r"\nodejs\"),
-            "sweep.ps1 must target $instDir\\nodejs\\ workers"
+            SWEEP_PS1.contains(&format!("Combine($instDir, '{nodejs}')")),
+            "sweep.ps1 must target $instDir\\{nodejs}\\ workers"
         );
-        let cli_dir = format!(r"'\{}\'", speedwave_runtime::consts::CLI_BIN_SUBDIR);
+        let cli_dir = format!(
+            "Combine($dataDir, '{}', $cliName)",
+            speedwave_runtime::consts::CLI_BIN_SUBDIR
+        );
         assert!(
             SWEEP_PS1.contains(&cli_dir),
-            "sweep.ps1 must target $dataDir{cli_dir} (CLI)"
+            "sweep.ps1 must target the CLI through {cli_dir}"
         );
         let prod = speedwave_runtime::consts::installed_cli_filename(
             true,
@@ -667,10 +671,14 @@ mod tests {
     }
 
     #[test]
-    fn sweep_ps1_uses_string_concat_not_join_path() {
+    fn sweep_ps1_builds_paths_with_path_combine_not_join_path() {
         assert!(
-            !SWEEP_PS1.contains("Join-Path $instDir"),
-            "sweep.ps1 must use string concat, not Join-Path (ADR-048)"
+            !SWEEP_PS1.contains("Join-Path"),
+            "sweep.ps1 must not build paths with the provider-bound Join-Path (ADR-048)"
+        );
+        assert!(
+            !SWEEP_PS1.contains(r"+ '\"),
+            "sweep.ps1 must build paths with [System.IO.Path]::Combine, not '\\' concatenation (ADR-048)"
         );
     }
 

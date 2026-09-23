@@ -570,7 +570,8 @@ test-desktop-config:
 	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
 	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
-	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats
+	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \
+	  _tests/desktop/installer-sweep.bats
 	@echo "✅ Desktop config tests passed"
 
 test-release-gate:

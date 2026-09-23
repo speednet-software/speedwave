@@ -21,15 +21,16 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$instDir = if ($$InstDir) { $$InstDir } else { $$env:SPW_INSTDIR }$\r$\n`
-  FileWrite $0 `if (-not $$instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }$\r$\n`
+  FileWrite $0 `if (-not $$instDir) { [Console]::Error.WriteLine('SPW_INSTDIR not set'); exit 2 }$\r$\n`
   FileWrite $0 `$$dataDir = if ($$DataDir) { $$DataDir } else { $$env:SPW_DATA_DIR }$\r$\n`
-  FileWrite $0 `if (-not $$dataDir) { Write-Error 'SPW_DATA_DIR not set'; exit 2 }$\r$\n`
+  FileWrite $0 `if (-not $$dataDir) { [Console]::Error.WriteLine('SPW_DATA_DIR not set'); exit 2 }$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `$$instDir = $$instDir.TrimEnd('\')$\r$\n`
-  FileWrite $0 `$$dataDir = $$dataDir.TrimEnd('\')$\r$\n`
+  FileWrite $0 `$$separators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)$\r$\n`
+  FileWrite $0 `$$dataDir = $$dataDir.TrimEnd($$separators)$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
-  FileWrite $0 `$$desktopExe = $$instDir + '\speedwave-desktop.exe'$\r$\n`
+  FileWrite $0 `$$nodePrefix = [System.IO.Path]::Combine($$instDir, 'nodejs') + [System.IO.Path]::DirectorySeparatorChar$\r$\n`
+  FileWrite $0 `$$nodeExe = [System.IO.Path]::Combine($$instDir, 'nodejs', 'node.exe')$\r$\n`
+  FileWrite $0 `$$desktopExe = [System.IO.Path]::Combine($$instDir, 'speedwave-desktop.exe')$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$instance = (Split-Path $$dataDir -Leaf) -replace '^\.+', ''$\r$\n`
   FileWrite $0 `if ($$instance -eq 'speedwave') {$\r$\n`
@@ -37,7 +38,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `} else {$\r$\n`
   FileWrite $0 `  $$cliName = 'speedwave-' + ($$instance -replace '^speedwave-', '') + '.exe'$\r$\n`
   FileWrite $0 `}$\r$\n`
-  FileWrite $0 `$$cliExe = $$dataDir + '\bin\' + $$cliName$\r$\n`
+  FileWrite $0 `$$cliExe = [System.IO.Path]::Combine($$dataDir, 'bin', $$cliName)$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$includeWorkers = ($$Mode -eq 'full')$\r$\n`
   FileWrite $0 `$\r$\n`
@@ -55,12 +56,12 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `    Stop-Process -Id $$v.ProcessId -Force -ErrorAction SilentlyContinue$\r$\n`
   FileWrite $0 `  }$\r$\n`
   FileWrite $0 `} catch {$\r$\n`
-  FileWrite $0 `  Write-Error ('sweep enumeration failed: ' + $$_)$\r$\n`
+  FileWrite $0 `  [Console]::Error.WriteLine('sweep enumeration failed: ' + $$_)$\r$\n`
   FileWrite $0 `  exit 3$\r$\n`
   FileWrite $0 `}$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `if ($$includeWorkers) {$\r$\n`
-  FileWrite $0 `  $$targets = @($$desktopExe, $$nodePrefix + 'node.exe', $$cliExe)$\r$\n`
+  FileWrite $0 `  $$targets = @($$desktopExe, $$nodeExe, $$cliExe)$\r$\n`
   FileWrite $0 `} else {$\r$\n`
   FileWrite $0 `  $$targets = @($$cliExe)$\r$\n`
   FileWrite $0 `}$\r$\n`
@@ -79,7 +80,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  if (-not $$locked) { Write-Output 'all targets unlocked'; exit 0 }$\r$\n`
   FileWrite $0 `  Start-Sleep -Milliseconds 1000$\r$\n`
   FileWrite $0 `}$\r$\n`
-  FileWrite $0 `Write-Error 'targets still locked after 20 s'$\r$\n`
+  FileWrite $0 `[Console]::Error.WriteLine('targets still locked after 20 s')$\r$\n`
   FileWrite $0 `exit 4$\r$\n`
   FileClose $0
   sw_SWEEP_write_done_${SW_SWEEP_ID}:
