@@ -2101,14 +2101,16 @@ mod tests {
         let fn_start = source
             .find("fn restart_integration_containers(")
             .expect("restart_integration_containers must exist");
-        let body = &source[fn_start..];
-        let rollback = body
-            .find("rollback_containers(rt, &project)")
-            .expect("rollback call must exist");
-        let rolled_back = body
+        let fn_len = source[fn_start..]
+            .find("#[cfg(test)]")
+            .expect("the test module must follow restart_integration_containers");
+        let body = &source[fn_start..fn_start + fn_len];
+        let after_rollback_failure = &body[body
+            .find("Rollback also failed")
+            .expect("rollback-failure arm must exist")..];
+        let arm = &after_rollback_failure[..after_rollback_failure
             .find("Rolled back to previous configuration.")
-            .expect("rolled-back arm must exist");
-        let arm = &body[rollback..rolled_back];
+            .expect("rolled-back arm must follow the rollback-failure arm")];
         assert!(
             arm.contains("log::warn!(")
                 && arm.contains("rolled back to the previous configuration"),
