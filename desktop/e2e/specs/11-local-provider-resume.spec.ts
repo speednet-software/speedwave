@@ -15,6 +15,7 @@ import {
   startNewConversation,
   requireLocalLlm,
   requireOpenrouterKey,
+  useCheapOpenRouterModel,
   isUnpriced,
   modelRowsUnpriced,
 } from '../helpers/llm';
@@ -76,11 +77,12 @@ describe('Local Provider + Resume', function () {
   });
 
   it('switches back to OpenRouter (provider change works both ways)', async function () {
-    this.timeout(RESTART_WAIT_MS + 60_000);
+    this.timeout(2 * RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
     await confirmRestartAndWait();
     await openChat();
+    await useCheapOpenRouterModel();
     await sendMessageAndWait('Reply with the single word: ok.');
     expect((await lastAssistantText()).toLowerCase()).toContain('ok');
   });

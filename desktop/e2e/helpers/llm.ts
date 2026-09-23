@@ -1,3 +1,5 @@
+import { RESTART_WAIT_MS } from './shell';
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -104,6 +106,23 @@ export async function pickComposerModel(catalogId: string): Promise<void> {
     timeout: 10_000,
     timeoutMsg: 'model selector never closed after the pick',
   });
+}
+
+export async function useCheapOpenRouterModel(): Promise<void> {
+  const model = requireOpenrouterModel();
+  await pickComposerModel(model);
+  const overlay = await $('[data-testid="restart-overlay"]');
+  await overlay.waitForExist({ timeout: 15_000 }).catch(() => undefined);
+  await overlay.waitForExist({
+    timeout: RESTART_WAIT_MS,
+    reverse: true,
+    timeoutMsg: `restart-overlay still visible after ${RESTART_WAIT_MS}ms: the re-render for ${model} never finished`,
+  });
+  await browser.waitUntil(
+    async () =>
+      (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() === model,
+    { timeout: 30_000, timeoutMsg: `composer-model-badge never settled on ${model}` }
+  );
 }
 
 export async function saveProvider(): Promise<void> {

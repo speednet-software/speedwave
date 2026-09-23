@@ -26,6 +26,7 @@ import {
   requireLocalLlm,
   requireOpenrouterKey,
   requireOpenrouterModel,
+  useCheapOpenRouterModel,
   queueMessageViaEnter,
   waitForTurnStart,
   waitForTurnComplete,
@@ -210,7 +211,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
   });
 
   it('OpenRouter: a provider save leaves a routable model before the first message', async function () {
-    this.timeout(RESTART_WAIT_MS + 60_000);
+    this.timeout(2 * RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
     const restartBtn = await $('[data-testid="restart-now-btn"]');
@@ -224,6 +225,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
     const badgeText = await (await $('[data-testid="composer-model-badge"]')).getText();
     expect(badgeText.trim().length).toBeGreaterThan(0);
+    await useCheapOpenRouterModel();
   });
 
   describe('Anthropic model + effort persistence (SPEED-535)', function () {
