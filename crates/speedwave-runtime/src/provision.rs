@@ -336,7 +336,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
     let status_str = String::from_utf8_lossy(&info_output.stdout);
 
     if !status_str.trim().eq_ignore_ascii_case("running") {
-        use crate::runtime::CommandRunner as _;
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
             "starting Lima VM '{}' — a one-time download of container tooling \
@@ -344,14 +343,22 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
             consts::lima_vm_name(),
             timeout.as_secs()
         );
-        crate::runtime::RealRunner
-            .run_with_timeout("limactl", &["start", consts::lima_vm_name()], timeout)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "limactl start failed: {e}. {}",
-                    consts::LIMA_START_PROVISION_HINT
-                )
-            })?;
+        let started = crate::runtime::lima::start_vm_unless_torn_down(
+            &crate::runtime::RealRunner,
+            &crate::runtime::lima::VM_START_GATE,
+            consts::lima_vm_name(),
+            timeout,
+            crate::runtime::engine_teardown_started,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "limactl start failed: {e}. {}",
+                consts::LIMA_START_PROVISION_HINT
+            )
+        })?;
+        if !started {
+            return Err(anyhow::Error::new(crate::runtime::EngineTearingDown));
+        }
     }
 
     let mut ready = false;
@@ -1963,6 +1970,24 @@ mod tests {
         assert!(
             body.contains("LIMA_START_PROVISION_HINT"),
             "start failure must carry the download cause + remedy hint"
+        );
+    }
+
+    #[test]
+    fn init_vm_macos_starts_the_vm_through_the_engine_teardown_gate() {
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn init_vm_macos")
+            .expect("init_vm_macos must exist");
+        let tail = &src[start + 1..];
+        let body = &src[start..start + 1 + tail.find("\npub fn ").unwrap_or(tail.len())];
+        assert!(
+            body.contains("start_vm_unless_torn_down("),
+            "the provisioning start must be one app exit or factory reset can cut short"
+        );
+        assert!(
+            !body.contains(".run_with_timeout(\"limactl\", &[\"start\""),
+            "a bare limactl start would outlive the app and boot the VM after exit"
         );
     }
 

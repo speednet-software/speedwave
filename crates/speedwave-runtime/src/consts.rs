@@ -378,8 +378,6 @@ pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 /// that outlives it is a failed read, which `ensure_ready` reports as `VmStatusUnreadable`.
 pub const VM_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How long an exited child's output may take to close: its own bytes are already in the pipe,
-/// so only a process it left behind holding the pipe open runs this out.
 pub(crate) const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 const _: () = assert!(

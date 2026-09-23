@@ -241,7 +241,6 @@ fn apply_wsl_utf8(command: &mut Command, program: &str) {
 /// each loop checks `child.try_wait()` against the deadline.
 const TIMEOUT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Reads `pipe` to its end on a thread of its own; the receiver yields the bytes once it closes.
 pub(crate) fn read_on_thread(
     mut pipe: impl std::io::Read + Send + 'static,
 ) -> std::sync::mpsc::Receiver<Vec<u8>> {
@@ -254,8 +253,6 @@ pub(crate) fn read_on_thread(
     rx
 }
 
-/// What [`read_on_thread`] read from the exited child `label` names, awaited for at most
-/// [`consts::PIPE_DRAIN_GRACE`], since a process the child started can keep the pipe open.
 pub(crate) fn exited_child_output(
     reader: &std::sync::mpsc::Receiver<Vec<u8>>,
     label: &str,
@@ -335,8 +332,6 @@ pub fn wait_with_output_timeout(
     wait_for_piped_child(child, timeout, "child process")
 }
 
-/// The deadline wait behind every capturing helper: kills `child` once `timeout` passes, else
-/// returns its streams through [`exited_child_output`]; `label` names the child in errors.
 pub(crate) fn wait_for_piped_child(
     mut child: std::process::Child,
     timeout: std::time::Duration,

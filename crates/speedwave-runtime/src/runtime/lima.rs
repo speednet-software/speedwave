@@ -12,6 +12,7 @@ pub struct LimaRuntime {
     /// `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
     vm_stop_timeout: Option<std::time::Duration>,
     engine_teardown_started: fn() -> bool,
+    start_gate: &'static VmStartGate,
     /// `None` means use `consts::data_dir()`. Test-only override so compose-path
     /// resolution never touches the shared data dir during a test run.
     #[cfg(test)]
@@ -43,6 +44,7 @@ impl LimaRuntime {
             ),
             vm_stop_timeout: None,
             engine_teardown_started: super::engine_teardown_started,
+            start_gate: &VM_START_GATE,
             #[cfg(test)]
             data_dir_override: None,
         }
@@ -60,6 +62,7 @@ impl LimaRuntime {
             ),
             vm_stop_timeout: None,
             engine_teardown_started: || false,
+            start_gate: Box::leak(Box::new(VmStartGate::new())),
             data_dir_override: None,
         }
     }
@@ -103,14 +106,12 @@ impl LimaRuntime {
         self
     }
 
-    /// Acts as if [`super::begin_engine_teardown`] ran, without touching the process-wide flag.
     #[cfg(test)]
-    fn with_engine_teardown_started(mut self) -> Self {
-        self.engine_teardown_started = || true;
+    fn with_engine_teardown_check(mut self, started: fn() -> bool) -> Self {
+        self.engine_teardown_started = started;
         self
     }
 
-    /// One `limactl list --format <format>` read of the VM, bounded by `VM_LIST_TIMEOUT`.
     fn read_vm_listing(&self, format: &str) -> anyhow::Result<String> {
         self.runner.run_bounded(
             "limactl",
@@ -873,29 +874,38 @@ impl ContainerRuntime for LimaRuntime {
     }
 
     fn stop_vm(&self) -> anyhow::Result<()> {
+        let _held = self.start_gate.hold();
         let vm = consts::lima_vm_name();
-        let status = match self.read_vm_listing("{{.Status}}") {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("Lima VM status check failed, skipping stop: {e}");
+        if self
+            .start_gate
+            .cut_short
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            log::info!("Lima VM '{vm}' may still be booting from a start the teardown cut short");
+        } else {
+            let status = match self.read_vm_listing("{{.Status}}") {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Lima VM status check failed, skipping stop: {e}");
+                    return Ok(());
+                }
+            };
+            let trimmed = status.trim();
+            if trimmed != "Running" {
+                if trimmed == "Stopping" {
+                    log::debug!(
+                        "Lima VM '{}' is in Stopping state, will be stopped on next ensure_ready",
+                        vm,
+                    );
+                } else {
+                    log::debug!(
+                        "Lima VM '{}' is not running (status: '{}'), skipping stop",
+                        vm,
+                        trimmed,
+                    );
+                }
                 return Ok(());
             }
-        };
-        let trimmed = status.trim();
-        if trimmed != "Running" {
-            if trimmed == "Stopping" {
-                log::debug!(
-                    "Lima VM '{}' is in Stopping state, will be stopped on next ensure_ready",
-                    vm,
-                );
-            } else {
-                log::debug!(
-                    "Lima VM '{}' is not running (status: '{}'), skipping stop",
-                    vm,
-                    trimmed,
-                );
-            }
-            return Ok(());
         }
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS);
         log::info!(
@@ -913,6 +923,48 @@ impl ContainerRuntime for LimaRuntime {
 
 const LIMA_UNMATCHED_INSTANCES: &str = "unmatched instances";
 
+pub(crate) struct VmStartGate {
+    held: std::sync::Mutex<()>,
+    cut_short: std::sync::atomic::AtomicBool,
+}
+
+impl VmStartGate {
+    pub(crate) const fn new() -> Self {
+        Self {
+            held: std::sync::Mutex::new(()),
+            cut_short: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+pub(crate) static VM_START_GATE: VmStartGate = VmStartGate::new();
+
+pub(crate) fn start_vm_unless_torn_down(
+    runner: &dyn CommandRunner,
+    gate: &VmStartGate,
+    vm: &str,
+    timeout: std::time::Duration,
+    teardown_started: fn() -> bool,
+) -> anyhow::Result<bool> {
+    let _held = gate.hold();
+    if teardown_started() {
+        return Ok(false);
+    }
+    let started =
+        runner.run_with_timeout_until("limactl", &["start", vm], timeout, &teardown_started)?;
+    if !started {
+        gate.cut_short
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(started)
+}
+
 fn unreadable_vm_status(vm: &str, cause: &anyhow::Error) -> anyhow::Error {
     super::VmStatusUnreadable::error(format!("Cannot read the state of Lima VM '{vm}': {cause}"))
 }
@@ -921,10 +973,6 @@ impl LimaRuntime {
     /// Starts a Lima VM that is in the Stopped state.
     /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
     fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
-        if (self.engine_teardown_started)() {
-            log::info!("Lima VM '{vm}' is stopped and stays stopped while the engine shuts down");
-            return Err(anyhow::Error::new(super::EngineTearingDown));
-        }
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
             "Lima VM '{}' is stopped, starting (timeout: {}s; a one-time \
@@ -932,14 +980,23 @@ impl LimaRuntime {
             vm,
             timeout.as_secs()
         );
-        self.runner
-            .run_with_timeout("limactl", &["start", vm], timeout)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to start Lima VM '{vm}': {e}. {}",
-                    consts::LIMA_START_PROVISION_HINT
-                )
-            })?;
+        let started = start_vm_unless_torn_down(
+            self.runner.as_ref(),
+            self.start_gate,
+            vm,
+            timeout,
+            self.engine_teardown_started,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start Lima VM '{vm}': {e}. {}",
+                consts::LIMA_START_PROVISION_HINT
+            )
+        })?;
+        if !started {
+            log::info!("Lima VM '{vm}' stays stopped while the engine shuts down");
+            return Err(anyhow::Error::new(super::EngineTearingDown));
+        }
         log::info!("Lima VM '{}' started successfully", vm);
         Ok(())
     }
@@ -3221,7 +3278,7 @@ mod tests {
         let runner = MockRunner::new()
             .with_response("limactl --version", "limactl version 2.1.2")
             .with_response(&vm_status_key(), "Stopped");
-        let rt = LimaRuntime::with_runner(Box::new(runner)).with_engine_teardown_started();
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_engine_teardown_check(|| true);
         let err = rt.ensure_ready().unwrap_err();
         assert!(
             err.downcast_ref::<crate::runtime::EngineTearingDown>()
@@ -3237,7 +3294,7 @@ mod tests {
             .with_sequence(&vm_status_key(), vec!["Stopping", "Stopped"]);
         let rt = LimaRuntime::with_runner(Box::new(runner))
             .with_zero_vm_stop_poll_delay()
-            .with_engine_teardown_started();
+            .with_engine_teardown_check(|| true);
         let err = rt.ensure_ready().unwrap_err();
         assert!(
             err.downcast_ref::<crate::runtime::EngineTearingDown>()
@@ -3249,8 +3306,166 @@ mod tests {
     #[test]
     fn ensure_ready_accepts_a_running_vm_during_the_engine_teardown() {
         let rt = LimaRuntime::with_runner(Box::new(mock_runner_with_vm_running()))
-            .with_engine_teardown_started();
+            .with_engine_teardown_check(|| true);
         assert!(rt.ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn a_vm_start_the_engine_teardown_cuts_short_is_force_stopped_on_exit() {
+        static TEARDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn teardown_started() -> bool {
+            TEARDOWN.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        struct StartCutShortRunner {
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for StartCutShortRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                self.calls.lock().unwrap().push(key.clone());
+                if key.contains("{{.Status}}") {
+                    return Ok("Stopped".to_string());
+                }
+                anyhow::bail!("unexpected: {key}")
+            }
+            fn run_with_timeout_until(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                _timeout: std::time::Duration,
+                stop: &dyn Fn() -> bool,
+            ) -> anyhow::Result<bool> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {}", cmd, args.join(" ")));
+                TEARDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(!stop())
+            }
+            fn run_with_timeout(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                _timeout: std::time::Duration,
+            ) -> anyhow::Result<()> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {}", cmd, args.join(" ")));
+                Ok(())
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let rt = LimaRuntime::with_runner(Box::new(StartCutShortRunner {
+            calls: calls.clone(),
+        }))
+        .with_engine_teardown_check(teardown_started);
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::EngineTearingDown>()
+                .is_some(),
+            "a start the teardown cut short must not read as a started VM, got: {err}"
+        );
+        rt.stop_vm().unwrap();
+        rt.stop_vm().unwrap();
+        let vm = consts::lima_vm_name();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                format!("limactl list --format {{{{.Status}}}} {vm}"),
+                format!("limactl start {vm}"),
+                format!("limactl stop --force {vm}"),
+                format!("limactl list --format {{{{.Status}}}} {vm}"),
+            ],
+            "the VM a cut-short start left booting must be stopped whatever limactl list says, \
+             and only once"
+        );
+    }
+
+    #[test]
+    fn stop_vm_waits_for_a_vm_start_in_flight_to_end() {
+        static TEARDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn teardown_started() -> bool {
+            TEARDOWN.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        struct BlockingStartRunner {
+            events: Arc<Mutex<Vec<&'static str>>>,
+            started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        }
+        impl CommandRunner for BlockingStartRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                if key.contains("{{.Status}}") {
+                    return Ok("Stopped".to_string());
+                }
+                anyhow::bail!("unexpected: {key}")
+            }
+            fn run_with_timeout_until(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                _timeout: std::time::Duration,
+                stop: &dyn Fn() -> bool,
+            ) -> anyhow::Result<bool> {
+                self.events.lock().unwrap().push("start began");
+                if let Some(started) = self.started.lock().unwrap().take() {
+                    started.send(()).unwrap();
+                }
+                while !stop() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                self.events.lock().unwrap().push("start cut short");
+                Ok(false)
+            }
+            fn run_with_timeout(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                _timeout: std::time::Duration,
+            ) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push("force stop");
+                Ok(())
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let rt = Arc::new(
+            LimaRuntime::with_runner(Box::new(BlockingStartRunner {
+                events: events.clone(),
+                started: Mutex::new(Some(started_tx)),
+            }))
+            .with_zero_vm_stop_poll_delay()
+            .with_engine_teardown_check(teardown_started),
+        );
+        let starter = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || rt.ensure_ready())
+        };
+        started_rx.recv().unwrap();
+        let stopper = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || rt.stop_vm())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["start began"],
+            "stop_vm must wait for the start in flight instead of reading a status it cannot trust"
+        );
+        TEARDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+        let started = starter.join().unwrap();
+        stopper.join().unwrap().unwrap();
+        assert!(started.is_err());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["start began", "start cut short", "force stop"]
+        );
     }
 
     #[test]

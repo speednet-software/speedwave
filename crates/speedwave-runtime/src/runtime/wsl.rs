@@ -105,7 +105,6 @@ impl WslRuntime {
         &self.distro_name
     }
 
-    /// Raw `wsl.exe --list --quiet` output, bounded by `VM_LIST_TIMEOUT`.
     fn list_distributions(&self) -> anyhow::Result<Vec<u8>> {
         self.runner.run_raw_stdout_bounded(
             "wsl.exe",
