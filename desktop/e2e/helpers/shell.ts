@@ -15,9 +15,8 @@ export async function waitForShellReady(timeoutMs = 60_000): Promise<void> {
 }
 
 /**
- * Confirms the restart-required overlay (provider/integration change) and
- * waits for the container restart to finish. requestRestart() only sets
- * needsRestart — the user must click restart-now-btn to actually restart.
+ * Confirms the restart-required overlay and waits for the container restart; a failed
+ * restart throws the inline `restart-error` text instead of waiting out the timeout.
  * @param timeoutMs - How long to wait for the restart to complete.
  */
 export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> {
@@ -27,12 +26,22 @@ export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> 
     timeoutMsg: 'restart-now-btn never appeared — provider change did not request a restart',
   });
   await btn.click();
-  const overlay = await $('[data-testid="restart-overlay"]');
-  await overlay.waitForExist({
-    timeout: timeoutMs,
-    reverse: true,
-    timeoutMsg: `restart-overlay still visible after ${timeoutMs}ms — restart did not complete`,
-  });
+  let restartError = '';
+  await browser.waitUntil(
+    async () => {
+      const error = await $('[data-testid="restart-error"]');
+      if (await error.isExisting()) {
+        restartError = await error.getText();
+        return true;
+      }
+      return !(await $('[data-testid="restart-overlay"]').isExisting());
+    },
+    {
+      timeout: timeoutMs,
+      timeoutMsg: `restart-overlay still visible after ${timeoutMs}ms — restart did not complete`,
+    }
+  );
+  if (restartError) throw new Error(`restart failed: ${restartError}`);
 }
 
 /**
