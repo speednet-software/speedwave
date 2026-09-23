@@ -2096,6 +2096,27 @@ mod tests {
     }
 
     #[test]
+    fn restart_logs_a_rolled_back_failure_before_returning_it() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers must exist");
+        let body = &source[fn_start..];
+        let rollback = body
+            .find("rollback_containers(rt, &project)")
+            .expect("rollback call must exist");
+        let rolled_back = body
+            .find("Rolled back to previous configuration.")
+            .expect("rolled-back arm must exist");
+        let arm = &body[rollback..rolled_back];
+        assert!(
+            arm.contains("log::warn!(")
+                && arm.contains("rolled back to the previous configuration"),
+            "a restart that rolled back must be logged before its error returns"
+        );
+    }
+
+    #[test]
     fn rollback_helper_handles_plugin_keys() {
         let source = include_str!("integrations_cmd.rs");
         let fn_start = source
