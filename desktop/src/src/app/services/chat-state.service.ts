@@ -168,6 +168,7 @@ export class ChatStateService {
 
   private async openTabResuming(sessionId: string): Promise<void> {
     const store = this.makeStore();
+    store.setResumeDecider(this._resumeDecider);
     this.addStore(store);
     await this.ensureListeners();
     await store.resumeConversation(sessionId);
@@ -225,7 +226,9 @@ export class ChatStateService {
   }
 
   /**
-   * Resumes a conversation. A tab already owning the session is activated; with several
+   * Resumes a conversation. A tab already owning the session is activated; if that tab's
+   * backend session already ended (e.g. a container restart while it was backgrounded), the
+   * activation is followed by a real reconnect instead of a silent no-op. With several
    * tabs open, an idle+clean active tab resumes in place, an occupied one opens a new
    * resuming tab under the cap; otherwise (single tab, or at the cap) the active tab
    * resumes in place — today's replace semantics until the phase 3 tab UI lands.
@@ -235,6 +238,9 @@ export class ChatStateService {
     const owner = this.findTabOwning(sessionId);
     if (owner) {
       this.activateTab(owner.tabId);
+      if (owner.sessionEnded()) {
+        await owner.resumeConversation(sessionId);
+      }
       return;
     }
     const active = this.activeStore();

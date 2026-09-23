@@ -48,6 +48,8 @@ describe('ChatComponent', () => {
           return undefined;
         case 'send_message':
           return undefined;
+        case 'get_active_provider_summary':
+          return { provider_id: 'anthropic', kind: 'anthropic_oauth', model: '', base_url: null };
         default:
           return undefined;
       }
@@ -1371,6 +1373,143 @@ describe('ChatComponent', () => {
       fixture.detectChanges();
 
       expect((restart().nativeElement as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
+
+  describe('per-tab composer draft and scroll restore (SPEED-388 phase 3)', () => {
+    function composerInstance(): ComposerComponent {
+      return fixture.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+    }
+
+    function scrollEl(): HTMLDivElement {
+      return fixture.nativeElement.querySelector(
+        '[data-testid="chat-message-list"]'
+      ) as HTMLDivElement;
+    }
+
+    it('saves the outgoing tab draft/scroll on switch and restores the incoming tab values', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('draft on tab one');
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      el.scrollTop = 250;
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await Promise.resolve();
+
+      const store1 = chatState.tabs().get(tab1)!;
+      expect(store1.composerDraft()).toBe('draft on tab one');
+      expect(store1.scrollPosition).toBe(250);
+      expect(composer.text.value).toBe('');
+      expect(el.scrollTop).toBe(1000);
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await Promise.resolve();
+
+      expect(composer.text.value).toBe('draft on tab one');
+      expect(el.scrollTop).toBe(250);
+    });
+
+    it('leaves the composer untouched on a no-op re-activation of the already-active tab', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('typing');
+      const tab1 = chatState.activeTabId();
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await Promise.resolve();
+
+      expect(composer.text.value).toBe('typing');
+    });
+  });
+
+  describe('session-ended banner (SPEED-388 phase 3)', () => {
+    const banner = () => fixture.debugElement.query(By.css('[data-testid="session-ended-banner"]'));
+    const resumeBtn = () =>
+      fixture.debugElement.query(By.css('[data-testid="session-ended-resume"]'));
+    const newBtn = () => fixture.debugElement.query(By.css('[data-testid="session-ended-new"]'));
+
+    it('stays hidden for the default single tab', () => {
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      expect(banner()).toBeNull();
+    });
+
+    it('shows a Resume button for a known session and reconnects it on click', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      const tab2 = await chatState.openTab();
+      const store2 = chatState.tabs().get(tab2)!;
+      store2.seedSessionId('ended-session');
+      chatState.activateTab(tab1);
+      store2.markSessionEnded();
+      chatState.activateTab(tab2);
+      fixture.detectChanges();
+
+      expect(banner()).toBeTruthy();
+      expect((banner().nativeElement as HTMLElement).textContent).toContain(
+        'Session ended by a restart'
+      );
+      expect(resumeBtn()).toBeTruthy();
+      expect(newBtn()).toBeNull();
+
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'ended-session', messages: [] };
+        return undefined;
+      };
+
+      (resumeBtn().nativeElement as HTMLButtonElement).click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(invokeCalls).toContain('resume_conversation');
+      expect(store2.sessionEnded()).toBe(false);
+      expect(banner()).toBeNull();
+    });
+
+    it('shows "Start new conversation" instead of Resume when no session id is known', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      const tab2 = await chatState.openTab();
+      const store2 = chatState.tabs().get(tab2)!;
+      chatState.activateTab(tab1);
+      store2.markSessionEnded();
+      chatState.activateTab(tab2);
+      fixture.detectChanges();
+
+      expect(banner()).toBeTruthy();
+      expect(resumeBtn()).toBeNull();
+      expect(newBtn()).toBeTruthy();
+
+      const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
+      (newBtn().nativeElement as HTMLButtonElement).click();
+      await fixture.whenStable();
+
+      expect(resetSpy).toHaveBeenCalled();
     });
   });
 });

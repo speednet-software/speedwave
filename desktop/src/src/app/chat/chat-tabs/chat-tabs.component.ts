@@ -15,6 +15,12 @@ interface ChatTabRow {
   readonly streaming: boolean;
   readonly ended: boolean;
   readonly active: boolean;
+  readonly ariaLabel: string;
+}
+
+function tabAriaLabel(title: string, streaming: boolean, ended: boolean): string {
+  const suffix = ended ? ', session ended' : streaming ? ', streaming' : '';
+  return `Switch to tab: ${title}${suffix}`;
 }
 
 function truncateTitle(text: string): string {
@@ -61,7 +67,7 @@ function tabTitle(store: ChatSessionStore): string {
               role="tab"
               data-testid="chat-tab-activate"
               [attr.aria-selected]="row.active ? 'true' : 'false'"
-              [attr.aria-label]="'Switch to tab: ' + row.title"
+              [attr.aria-label]="row.ariaLabel"
             >
               @if (row.streaming) {
                 <span
@@ -116,13 +122,19 @@ export class ChatTabsComponent {
   protected readonly tabRows: Signal<readonly ChatTabRow[]> = computed(() => {
     const tabs = this.chat.tabs();
     const activeId = this.chat.activeTabId();
-    return Array.from(tabs.entries()).map(([id, store]) => ({
-      id,
-      title: tabTitle(store),
-      streaming: store.isStreamingFromState(),
-      ended: store.sessionEnded(),
-      active: id === activeId,
-    }));
+    return Array.from(tabs.entries()).map(([id, store]) => {
+      const title = tabTitle(store);
+      const streaming = store.isStreamingFromState();
+      const ended = store.sessionEnded();
+      return {
+        id,
+        title,
+        streaming,
+        ended,
+        active: id === activeId,
+        ariaLabel: tabAriaLabel(title, streaming, ended),
+      };
+    });
   });
 
   /**

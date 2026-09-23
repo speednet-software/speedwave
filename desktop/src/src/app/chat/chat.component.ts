@@ -9,6 +9,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
@@ -88,7 +89,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly contextOverflowOpen = signal(false);
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
-  @ViewChild('composer') private composer?: { focusInput: () => void };
+  @ViewChild('composer') private composer?: ComposerComponent;
+  @ViewChild(ChatMessageListComponent) private messageList?: ChatMessageListComponent;
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
@@ -133,6 +135,47 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
     effect(() => {
       if (this.ui.memoryOpen()) void this.loadProjectMemory();
+    });
+
+    effect(() => {
+      const activeId = this.chat.activeTabId();
+      untracked(() => {
+        const outgoingId = this.previousTabId;
+        this.previousTabId = activeId;
+        if (outgoingId === null || outgoingId === activeId) return;
+        this.saveOutgoingTabState(outgoingId);
+        this.restoreIncomingTabState(activeId);
+      });
+    });
+  }
+
+  private previousTabId: string | null = null;
+
+  /**
+   * Snapshots the outgoing tab's composer draft and scroll offset before the view rebinds.
+   * @param tabId - Id of the tab being switched away from.
+   */
+  private saveOutgoingTabState(tabId: string): void {
+    const store = this.chat.tabs().get(tabId);
+    if (!store) return;
+    store.composerDraft.set(this.composer?.text.value ?? '');
+    const el = this.messageList?.scrollContainer?.nativeElement;
+    store.scrollPosition = el ? el.scrollTop : null;
+  }
+
+  /**
+   * Restores the incoming tab's composer draft immediately and its scroll offset on the next
+   * microtask, after the view has rebound, so the list's auto-scroll cannot overwrite it.
+   * @param tabId - Id of the tab being switched to.
+   */
+  private restoreIncomingTabState(tabId: string): void {
+    const store = this.chat.tabs().get(tabId);
+    if (!store) return;
+    this.composer?.setText(store.composerDraft());
+    queueMicrotask(() => {
+      const el = this.messageList?.scrollContainer?.nativeElement;
+      if (!el) return;
+      el.scrollTop = store.scrollPosition ?? el.scrollHeight;
     });
   }
 

@@ -496,6 +496,34 @@ describe('ChatStateService', () => {
         );
       });
 
+      it('branch 1: reconnects an owning tab whose backend session already ended, instead of only reactivating it', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store2 = service.tabs().get(tab2)!;
+        store2.seedSessionId('ended-owned-session');
+        service.activateTab(tab1);
+        store2.markSessionEnded();
+        expect(store2.sessionEnded()).toBe(true);
+
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') {
+            return { session_id: 'ended-owned-session', messages: [] };
+          }
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('ended-owned-session');
+
+        expect(service.activeTabId()).toBe(tab2);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'ended-owned-session', tabId: tab2 })
+        );
+        expect(store2.sessionEnded()).toBe(false);
+      });
+
       it('branch 1: also matches a tab that only optimistically claims the session', async () => {
         const tab1 = service.activeTabId();
         const tab2 = await service.openTab();
@@ -571,6 +599,28 @@ describe('ChatStateService', () => {
           'resume_conversation',
           expect.objectContaining({ sessionId: 'resume-new-tab', tabId: newTabId })
         );
+      });
+
+      it('branch 3: applies the remembered resume decider to the freshly opened resuming tab', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        const decider = vi.fn(() => Promise.resolve('fresh' as const));
+        service.setResumeDecider(decider);
+        const tab2 = await service.openTab();
+        const active = service.tabs().get(tab2)!;
+        active.isStreaming = true;
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') {
+            return { session_id: 'resume-new-tab-decider', messages: [] };
+          }
+          return undefined;
+        };
+
+        await service.openConversation('resume-new-tab-decider');
+
+        const newTabId = service.activeTabId();
+        expect(newTabId).not.toBe(tab2);
+        const newStore = service.tabs().get(newTabId)!;
+        expect((newStore as unknown as { _resumeDecider: unknown })._resumeDecider).toBe(decider);
       });
 
       it('branch 4: resumes into the active tab once at the cap, even while busy', async () => {

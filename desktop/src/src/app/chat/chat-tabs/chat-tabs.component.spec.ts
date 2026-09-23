@@ -299,12 +299,41 @@ describe('ChatTabsComponent', () => {
     const activateBtn = tab.querySelector('[data-testid="chat-tab-activate"]') as HTMLElement;
     expect(activateBtn.getAttribute('role')).toBe('tab');
     expect(activateBtn.getAttribute('aria-selected')).toBe('true');
+    expect(activateBtn.getAttribute('aria-label')).toBe('Switch to tab: New chat');
     const closeBtn = tab.querySelector('[data-testid="chat-tab-close"]') as HTMLElement;
     expect(closeBtn.getAttribute('aria-label')).toBeTruthy();
     const plus = fixture.nativeElement.querySelector(
       '[data-testid="chat-tabs-new"]'
     ) as HTMLElement;
     expect(plus.getAttribute('aria-label')).toBeTruthy();
+  });
+
+  it('folds the streaming state into the tab button aria-label', () => {
+    const store = new FakeStore();
+    chat.setTabs([['t1', store]]);
+    fixture.detectChanges();
+
+    const activateBtn = () =>
+      tabEls()[0].querySelector('[data-testid="chat-tab-activate"]') as HTMLElement;
+    expect(activateBtn().getAttribute('aria-label')).toBe('Switch to tab: New chat');
+
+    store.setStreaming(true);
+    fixture.detectChanges();
+
+    expect(activateBtn().getAttribute('aria-label')).toBe('Switch to tab: New chat, streaming');
+  });
+
+  it('folds the ended state into the tab button aria-label, taking priority over streaming', () => {
+    const store = new FakeStore();
+    chat.setTabs([['t1', store]]);
+    store.setStreaming(true);
+    store.setEnded(true);
+    fixture.detectChanges();
+
+    const activateBtn = tabEls()[0].querySelector(
+      '[data-testid="chat-tab-activate"]'
+    ) as HTMLElement;
+    expect(activateBtn.getAttribute('aria-label')).toBe('Switch to tab: New chat, session ended');
   });
 
   it('marks an inactive tab unselected on its tab button', () => {

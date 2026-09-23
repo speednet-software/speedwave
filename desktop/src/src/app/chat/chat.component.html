@@ -56,6 +56,34 @@
       />
       <div class="shrink-0 border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pb-3 pt-3 md:px-6">
         <div class="relative mx-auto max-w-3xl">
+          @if (chat.activeStore().sessionEnded()) {
+            <div
+              class="mono mb-2 flex items-center gap-2 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
+              data-testid="session-ended-banner"
+              role="status"
+            >
+              <span>Session ended by a restart.</span>
+              @if (chat.activeStore().lastKnownSessionId; as endedSessionId) {
+                <button
+                  type="button"
+                  class="mono ml-auto underline"
+                  data-testid="session-ended-resume"
+                  (click)="resumeConversation(endedSessionId)"
+                >
+                  Resume
+                </button>
+              } @else {
+                <button
+                  type="button"
+                  class="mono ml-auto underline"
+                  data-testid="session-ended-new"
+                  (click)="newConversation()"
+                >
+                  Start new conversation
+                </button>
+              }
+            </div>
+          }
           @if (deferredEffortLabel()) {
             <div
               class="mono mb-2 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
