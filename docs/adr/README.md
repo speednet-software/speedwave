@@ -74,7 +74,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-065](ADR-065-image-attachments-structured-input.md)               | Image attachments via structured `WireContentBlock[]` user input                                                            | Accepted                                                |
 | [ADR-066](ADR-066-locked-runtime-per-project-compose-lock.md)          | `LockedRuntime` wrapper enforcing per-project compose transaction lock                                                      | Accepted                                                |
 | [ADR-067](ADR-067-host-addressing-ssot-windows-wsl2-mirrored.md)       | `HostAddressing` SSOT — host bind / container gateway under WSL2 mirrored networking                                        | Accepted (mirrored-mode addressing revised by ADR-080)  |
-| [ADR-068](ADR-068-resource-budget-ssot.md)                             | Resource budget SSOT — container memory/CPU + adaptive VM sizing (fixed 6 GiB Claude)                                       | Accepted                                                |
+| [ADR-068](ADR-068-resource-budget-ssot.md)                             | Resource budget SSOT — container memory/CPU + adaptive VM sizing (fixed 6 GiB Claude)                                       | Superseded in part by ADR-091                           |
 | [ADR-069](ADR-069-generic-plugin-oauth2.md)                            | Generic plugin OAuth2 via host-side worker — per-human identity, PKCE loopback                                              | Accepted                                                |
 | [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md)               | AppleEvents permission gate via `typeKernelProcessID` addressing                                                            | Accepted                                                |
 | [ADR-071](ADR-071-slack-oauth-pkce-user-tokens.md)                     | Slack OAuth2 PKCE — tokenless sign-in with rotating user tokens                                                             | Accepted                                                |
@@ -97,6 +97,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-088](ADR-088-chat-slash-commands-and-model-control.md)            | Chat UI Slash-Command Allowlist and Composer Model/Effort Control                                                           | Accepted (model sources amended by ADR-089)             |
 | [ADR-089](ADR-089-claude-code-control-channel-as-source-of-truth.md)   | Claude Code's control channel as the source of truth for Anthropic models, context and plan limits                          | Accepted                                                |
 | [ADR-090](ADR-090-tab-keyed-chat-sessions.md)                          | Tab-keyed chat session registry replacing the single-session singleton                                                      | Accepted                                                |
+| [ADR-091](ADR-091-tab-aware-claude-memory-ceiling.md)                  | Tab-aware Claude memory ceiling: a formula over tab capacity and VM size                                                    | Accepted                                                |
 
 ## Creating a New ADR
 
