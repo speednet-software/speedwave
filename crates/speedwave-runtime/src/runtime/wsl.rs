@@ -138,9 +138,12 @@ impl WslRuntime {
         mode: super::UpMode<'_>,
     ) -> anyhow::Result<()> {
         let up_argv = super::compose_up_argv(compose_file, project, mode);
+        let rejoin_argv =
+            super::compose_up_argv(compose_file, project, mode.after_task_collision());
         super::with_engine_state_heal(
             project,
             || self.run_bounded_up(&up_argv),
+            || self.run_bounded_up(&rejoin_argv),
             |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
@@ -1355,6 +1358,21 @@ mod tests {
             "got: {msg}"
         );
         assert!(msg.contains("sending signal KILL"), "raw cause kept: {msg}");
+    }
+
+    #[test]
+    fn compose_up_service_rejoins_a_raced_proxy_without_recreating_it_again() {
+        let runner = MockRunner::new()
+            .with_error(
+                &bounded_up_key("acme", &["--force-recreate", "proxy"]),
+                "wsl.exe failed: level=fatal msg=\"1 errors:\\ntask \
+                 1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: \
+                 already exists\"",
+            )
+            .with_response(&bounded_up_key("acme", &["proxy"]), "");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        rt.compose_up_service("acme", "proxy")
+            .expect("the rejoin finds the proxy the restart monitor started");
     }
 
     #[test]

@@ -159,9 +159,12 @@ impl LimaRuntime {
         mode: super::UpMode<'_>,
     ) -> anyhow::Result<()> {
         let up_argv = super::compose_up_argv(compose_file, project, mode);
+        let rejoin_argv =
+            super::compose_up_argv(compose_file, project, mode.after_task_collision());
         super::with_engine_state_heal(
             project,
             || run_bounded_up(&*self.runner, &up_argv),
+            || run_bounded_up(&*self.runner, &rejoin_argv),
             |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
@@ -1580,6 +1583,7 @@ mod tests {
     struct FirstUpFailsRunner {
         first_up_error: String,
         up_calls: Arc<std::sync::atomic::AtomicUsize>,
+        up_argvs: Arc<Mutex<Vec<String>>>,
         cleanup_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl FirstUpFailsRunner {
@@ -1587,6 +1591,7 @@ mod tests {
             Self {
                 first_up_error,
                 up_calls: Arc::default(),
+                up_argvs: Arc::default(),
                 cleanup_calls: Arc::default(),
             }
         }
@@ -1611,6 +1616,7 @@ mod tests {
             }
             let joined = args.join(" ");
             if joined.contains("nerdctl") && joined.contains("compose") && joined.contains(" up ") {
+                self.up_argvs.lock().unwrap().push(joined);
                 if self.up_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     anyhow::bail!("{}", self.first_up_error);
                 }
@@ -1648,6 +1654,43 @@ mod tests {
         assert!(rt.compose_up_service("acme", "proxy").is_ok());
         assert_eq!(up_calls.load(Ordering::SeqCst), 2, "up fail + retry");
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "one heal payload");
+    }
+
+    #[test]
+    fn compose_up_service_rejoins_a_raced_proxy_without_recreating_it_again() {
+        let runner = FirstUpFailsRunner::with_error(
+            "limactl failed: level=fatal msg=\"1 errors:\\ntask \
+             1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: already exists\""
+                .to_string(),
+        );
+        let up_argvs = Arc::clone(&runner.up_argvs);
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        rt.compose_up_service("acme", "proxy")
+            .expect("the rejoin finds the proxy the restart monitor started");
+        let up_argvs = up_argvs.lock().unwrap();
+        assert_eq!(up_argvs.len(), 2, "{up_argvs:?}");
+        assert!(
+            up_argvs[0].ends_with(" up -d --force-recreate proxy"),
+            "{up_argvs:?}"
+        );
+        assert!(up_argvs[1].ends_with(" up -d proxy"), "{up_argvs:?}");
+    }
+
+    #[test]
+    fn compose_up_service_recreates_again_after_a_name_store_heal() {
+        let runner = FirstUpFailsRunner::name_store_conflict();
+        let up_argvs = Arc::clone(&runner.up_argvs);
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        rt.compose_up_service("acme", "proxy")
+            .expect("a dead name-store reservation must self-heal and retry to success");
+        let up_argvs = up_argvs.lock().unwrap();
+        assert_eq!(up_argvs.len(), 2, "{up_argvs:?}");
+        assert!(
+            up_argvs
+                .iter()
+                .all(|argv| argv.ends_with(" up -d --force-recreate proxy")),
+            "{up_argvs:?}"
+        );
     }
 
     #[test]
