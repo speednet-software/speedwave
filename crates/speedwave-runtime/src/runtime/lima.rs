@@ -972,6 +972,10 @@ fn unreadable_vm_status(vm: &str, cause: &anyhow::Error) -> anyhow::Error {
     super::VmStatusUnreadable::error(format!("Cannot read the state of Lima VM '{vm}': {cause}"))
 }
 
+fn missing_vm(vm: &str) -> anyhow::Error {
+    anyhow::anyhow!("Lima VM '{vm}' not found. Run Speedwave.app setup wizard to create it.")
+}
+
 impl LimaRuntime {
     fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
@@ -1038,7 +1042,7 @@ impl LimaRuntime {
                 let mut status_poll_failing = false;
                 loop {
                     std::thread::sleep(self.vm_stop_poll_delay);
-                    let s = match self.read_vm_listing("{{.Status}}") {
+                    let s = match self.read_vm_status() {
                         Ok(s) => {
                             status_poll_failing = false;
                             s
@@ -1063,6 +1067,7 @@ impl LimaRuntime {
                             log::info!("Lima VM '{}' is running again", vm);
                             return Ok(());
                         }
+                        "" => return Err(missing_vm(vm)),
                         _ if std::time::Instant::now() >= deadline => {
                             anyhow::bail!(
                                 "Lima VM '{}' stuck in Stopping state for {}s. \
@@ -1078,12 +1083,7 @@ impl LimaRuntime {
                 }
                 self.start_stopped_vm(vm)
             }
-            "" => {
-                anyhow::bail!(
-                    "Lima VM '{}' not found. Run Speedwave.app setup wizard to create it.",
-                    vm
-                );
-            }
+            "" => Err(missing_vm(vm)),
             other => {
                 anyhow::bail!(
                     "Lima VM '{vm}' is in state '{other}', which Speedwave cannot start from."
@@ -3351,6 +3351,53 @@ mod tests {
             err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
                 .is_some(),
             "the last status read failed, so the error must say the state is unreadable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_reports_a_vm_deleted_while_it_stops_as_missing() {
+        struct StoppingThenDeletedRunner {
+            status_reads: std::sync::atomic::AtomicUsize,
+        }
+        impl CommandRunner for StoppingThenDeletedRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                if key.contains("list --format") {
+                    let read = self
+                        .status_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if read == 0 {
+                        return Ok("Stopping".to_string());
+                    }
+                    anyhow::bail!(
+                        "limactl failed: time=\"2026-09-23T22:54:04+02:00\" level=fatal \
+                         msg=\"unmatched instances\""
+                    );
+                }
+                Err(anyhow::anyhow!("unexpected: {key}"))
+            }
+        }
+        let runner = StoppingThenDeletedRunner {
+            status_reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let rt = LimaRuntime::with_runner(Box::new(runner))
+            .with_zero_vm_stop_poll_delay()
+            .with_stop_timeout(std::time::Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "a VM limactl stopped knowing while it stopped is a missing VM, got: {err}"
+        );
+        assert!(err
+            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
+            .is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a missing VM ends the wait at once, not at the Stopping deadline"
         );
     }
 
