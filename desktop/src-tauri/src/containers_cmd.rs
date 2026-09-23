@@ -792,7 +792,7 @@ pub async fn factory_reset(
     oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
-    speedwave_runtime::runtime::inhibit_vm_start();
+    speedwave_runtime::runtime::begin_engine_teardown();
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4604,7 +4604,7 @@ mod tests {
         let source = include_str!("containers_cmd.rs");
         let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
         let teardown = fn_body
-            .find("speedwave_runtime::runtime::inhibit_vm_start()")
+            .find("speedwave_runtime::runtime::begin_engine_teardown()")
             .expect("factory_reset must keep the runtime from starting the VM again");
         let first_stop = fn_body
             .find("WATCHDOG_STOP")
@@ -4623,23 +4623,40 @@ mod tests {
             .find("spawn_blocking(")
             .expect("factory_reset wipes on a blocking task");
         let after_wipe = &fn_body[wipe..];
+        for exit in [")?", "return"] {
+            assert!(
+                !after_wipe.contains(exit),
+                "a process that stopped its workers and may not start its VM again must restart, \
+                 never return and keep running (`{exit}`)"
+            );
+        }
         assert!(
-            !after_wipe.contains(")?"),
-            "a process that stopped its workers and may not start its VM again must restart, \
-             never return an error and keep running"
+            after_wipe
+                .trim_end()
+                .trim_end_matches('}')
+                .trim_end()
+                .ends_with("app.restart();"),
+            "every outcome of the wipe must end in the restart"
         );
-        assert!(after_wipe.contains("app.restart()"));
     }
 
     #[test]
     fn check_containers_running_answers_from_the_engine_once_the_wait_runs_out() {
         let source = include_str!("containers_cmd.rs");
         let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
-        assert!(
-            fn_body.contains("if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT)"),
-            "a first VM start may provision for as long as the wait lasts, so running out of it \
-             must not fail the container check"
-        );
+        let wait = fn_body
+            .split("if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT) {")
+            .nth(1)
+            .expect("check_containers_running must branch on the wait running out");
+        let ran_out = &wait[..wait.find("\n        }\n").expect("the branch must end")];
+        assert!(ran_out.contains("log::warn!("));
+        for exit in ["return", "Err(", "?;"] {
+            assert!(
+                !ran_out.contains(exit),
+                "a first VM start may provision for as long as the wait lasts, so running out of \
+                 it must not end the container check (`{exit}`)"
+            );
+        }
     }
 
     #[test]

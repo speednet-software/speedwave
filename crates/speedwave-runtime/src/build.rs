@@ -2,7 +2,7 @@
 
 use crate::bundle;
 use crate::config::ResolvedIntegrationsConfig;
-use crate::runtime::{VmStartInhibited, VmStatusUnreadable};
+use crate::runtime::{EngineTearingDown, VmStatusUnreadable};
 use std::path::PathBuf;
 
 /// A container image definition. Build set is selected per project via [`enabled_images`].
@@ -251,8 +251,8 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
-/// Context on an image check whose engine never answered; unlike an `ensure_ready` failure it is
-/// not a skip, so reconcile fails on it and Retry re-runs the check.
+/// Context on an image check whose engine did not answer within its window; reconcile fails on it,
+/// never skips or rebuilds, so Retry re-runs the check.
 #[derive(Debug)]
 pub struct EngineDidNotAnswer;
 
@@ -309,7 +309,7 @@ fn images_exist_within(
         }
         let verdict = match rt.ensure_ready() {
             Ok(()) => probe_enabled_images(rt, integrations, manifest),
-            Err(e) if e.downcast_ref::<VmStartInhibited>().is_some() => {
+            Err(e) if e.downcast_ref::<EngineTearingDown>().is_some() => {
                 return Err(e.context(ImageCheckCancelled));
             }
             Err(e)
@@ -1170,6 +1170,21 @@ pub fn user_facing_engine_error(err: &anyhow::Error) -> String {
     condense_engine_error(&crate::log_sanitizer::sanitize(&format!("{err:#}")))
 }
 
+/// [`user_facing_engine_error`] of the error `images_exist` marks [`EngineDidNotAnswer`]: only the
+/// cause is condensed, so a long or multi-line cause cannot cut the headline.
+pub fn user_facing_silent_engine_error(err: &anyhow::Error) -> String {
+    let cause = err
+        .chain()
+        .skip(1)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+    format!(
+        "{EngineDidNotAnswer}: {}",
+        condense_engine_error(&crate::log_sanitizer::sanitize(&cause))
+    )
+}
+
 /// Condenses a raw engine failure (BuildKit log or nerdctl `level=fatal`) into an
 /// actionable banner; module-private — callers go through [`user_facing_engine_error`].
 fn condense_engine_error(raw: &str) -> String {
@@ -1234,6 +1249,57 @@ mod tests {
     /// All built-in images as a slice — the pre-lazy-build "build everything" set.
     fn all_images() -> Vec<&'static ImageDef> {
         IMAGES.iter().collect()
+    }
+
+    const SILENT_ENGINE_HEADLINE: &str = "Container engine did not answer the image check: ";
+
+    fn silent_engine(cause: &str) -> anyhow::Error {
+        anyhow::anyhow!("{cause}").context(EngineDidNotAnswer)
+    }
+
+    #[test]
+    fn silent_engine_error_reads_as_its_headline_and_cause() {
+        let message = user_facing_silent_engine_error(&silent_engine(
+            "limactl failed: kex_exchange_identification: read: Connection reset by peer",
+        ));
+        assert_eq!(
+            message,
+            format!(
+                "{SILENT_ENGINE_HEADLINE}limactl failed: kex_exchange_identification: read: \
+                 Connection reset by peer"
+            )
+        );
+    }
+
+    #[test]
+    fn silent_engine_error_keeps_its_headline_over_a_multi_line_cause() {
+        let message = user_facing_silent_engine_error(&silent_engine(
+            "limactl failed: ssh: connect to host 127.0.0.1 port 60022: Connection refused\n\
+             time=\"2026-09-23T15:33:31+02:00\" level=fatal msg=\"exit status 255\"",
+        ));
+        assert!(
+            message.starts_with(SILENT_ENGINE_HEADLINE),
+            "the condensed cause must not replace what failed, got: {message}"
+        );
+        assert!(message.contains("level=fatal"), "got: {message}");
+        assert_eq!(
+            message.matches(SILENT_ENGINE_HEADLINE).count(),
+            1,
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn silent_engine_error_keeps_its_headline_over_a_cause_past_the_tail_limit() {
+        let message = user_facing_silent_engine_error(&silent_engine(&format!(
+            "limactl failed: {}",
+            "x".repeat(BUILD_ERROR_TAIL_CHARS * 2)
+        )));
+        assert!(
+            message.starts_with(SILENT_ENGINE_HEADLINE),
+            "clamping the cause must keep what failed, got: {message}"
+        );
+        assert!(message.ends_with("(full output in Logs)"), "got: {message}");
     }
 
     #[test]
@@ -3345,10 +3411,10 @@ mod tests {
         }
 
         #[test]
-        fn images_exist_stops_when_ensure_ready_may_not_start_the_vm() {
+        fn images_exist_stops_when_ensure_ready_meets_the_engine_teardown() {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_image_exists_default(true)
-                .push_ensure_ready_start_inhibited()
+                .push_ensure_ready_during_teardown()
                 .build();
             let err = images_exist_within(
                 &rt,

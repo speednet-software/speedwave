@@ -172,6 +172,7 @@ pub struct MockRuntimeBuilder {
     buildkit_prune_result: Result<(), String>,
     remove_images_result: Result<(), String>,
     prepare_build_context_root: Option<std::path::PathBuf>,
+    engine_teardown_check: fn() -> bool,
 }
 
 #[derive(Clone)]
@@ -183,7 +184,7 @@ enum ResultCell {
 enum ScriptedEnsureReady {
     StatusUnreadable(String),
     Fails(String),
-    StartInhibited,
+    DuringTeardown,
 }
 
 #[derive(Clone)]
@@ -243,6 +244,7 @@ impl MockRuntimeBuilder {
             buildkit_prune_result: Ok(()),
             remove_images_result: Ok(()),
             prepare_build_context_root: None,
+            engine_teardown_check: || false,
         }
     }
 
@@ -261,13 +263,19 @@ impl MockRuntimeBuilder {
     pub fn push_ensure_ready_status_unreadable(self, msg: &str) -> Self {
         self.push_ensure_ready(ScriptedEnsureReady::StatusUnreadable(msg.to_string()))
     }
+    /// Makes the runtime ask `started` whether the engine teardown began, as
+    /// [`super::engine_teardown_started`] does in production.
+    pub fn with_engine_teardown_check(mut self, started: fn() -> bool) -> Self {
+        self.engine_teardown_check = started;
+        self
+    }
     /// Push a scripted plain `ensure_ready` failure with `msg`.
     pub fn push_ensure_ready_failure(self, msg: &str) -> Self {
         self.push_ensure_ready(ScriptedEnsureReady::Fails(msg.to_string()))
     }
-    /// Push a scripted `ensure_ready` failure carrying `VmStartInhibited`.
-    pub fn push_ensure_ready_start_inhibited(self) -> Self {
-        self.push_ensure_ready(ScriptedEnsureReady::StartInhibited)
+    /// Push a scripted `ensure_ready` failure carrying `EngineTearingDown`.
+    pub fn push_ensure_ready_during_teardown(self) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::DuringTeardown)
     }
     fn push_ensure_ready(self, outcome: ScriptedEnsureReady) -> Self {
         self.ensure_ready_script.lock().unwrap().push_back(outcome);
@@ -476,7 +484,10 @@ impl MockRuntimeBuilder {
             remove_images_result: self.remove_images_result,
             prepare_build_context_root: self.prepare_build_context_root,
         };
-        (LockedRuntime::new(Box::new(mock)), handles)
+        (
+            LockedRuntime::new(Box::new(mock), self.engine_teardown_check),
+            handles,
+        )
     }
 }
 
@@ -635,8 +646,8 @@ impl ContainerRuntime for MockRuntime {
                 return Err(super::VmStatusUnreadable::error(msg));
             }
             Some(ScriptedEnsureReady::Fails(msg)) => anyhow::bail!("{msg}"),
-            Some(ScriptedEnsureReady::StartInhibited) => {
-                return Err(anyhow::Error::new(super::VmStartInhibited));
+            Some(ScriptedEnsureReady::DuringTeardown) => {
+                return Err(anyhow::Error::new(super::EngineTearingDown));
             }
             None => {}
         }
@@ -944,7 +955,7 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new()
             .push_ensure_ready_status_unreadable("status read failed")
             .push_ensure_ready_failure("stuck in Stopping")
-            .push_ensure_ready_start_inhibited()
+            .push_ensure_ready_during_teardown()
             .build();
         let unreadable = rt.ensure_ready().unwrap_err();
         assert!(unreadable
@@ -958,7 +969,7 @@ mod tests {
             .is_none());
         let inhibited = rt.ensure_ready().unwrap_err();
         assert!(inhibited
-            .downcast_ref::<super::super::VmStartInhibited>()
+            .downcast_ref::<super::super::EngineTearingDown>()
             .is_some());
         assert!(rt.ensure_ready().is_ok());
         assert_eq!(handles.ensure_ready_count(), 4);

@@ -657,6 +657,7 @@ export class ProjectStateService {
           this.status() === 'starting' ||
           this.status() === 'checking' ||
           this.status() === 'system_check' ||
+          this.status() === 'check_failed' ||
           this.status() === 'loading' ||
           this.status() === 'auth_required'
         ) {

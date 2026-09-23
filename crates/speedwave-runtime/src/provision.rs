@@ -741,7 +741,8 @@ pub(crate) fn wsl_setup_action(
         return WslSetupAction::Report(v.to_string());
     }
     match v.rule {
-        crate::os_prereqs::PrereqRule::WslCannotStart => WslSetupAction::Report(v.to_string()),
+        crate::os_prereqs::PrereqRule::WslCannotStart
+        | crate::os_prereqs::PrereqRule::WslUnresponsive => WslSetupAction::Report(v.to_string()),
         crate::os_prereqs::PrereqRule::WslNotAvailable => WslSetupAction::Install,
     }
 }
@@ -2635,6 +2636,23 @@ mod tests {
                 ),
                 WslSetupAction::Install
             );
+        }
+
+        #[test]
+        fn an_unresponsive_wsl_is_reported_instead_of_reinstalled() {
+            match wsl_setup_action(
+                &[violation(PrereqRule::WslUnresponsive)],
+                ServicingState::Clean,
+            ) {
+                WslSetupAction::Report(msg) => assert!(
+                    msg.contains("diagnosis body"),
+                    "the diagnosis must reach the user: {msg}"
+                ),
+                other => panic!(
+                    "WSL that ran but did not answer is installed, so an elevated install \
+                     cannot help, got {other:?}"
+                ),
+            }
         }
 
         #[test]

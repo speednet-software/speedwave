@@ -207,41 +207,11 @@ pub(crate) fn vm_exec_run(
         }
     }
 
-    let Some(out_pipe) = child.stdout.take() else {
-        anyhow::bail!("vm_exec: stdout pipe missing on '{program}'");
-    };
-    let Some(err_pipe) = child.stderr.take() else {
-        anyhow::bail!("vm_exec: stderr pipe missing on '{program}'");
-    };
-    let out_reader = binary::read_on_thread(out_pipe);
-    let err_reader = binary::read_on_thread(err_pipe);
-
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait()? {
-            Some(s) => break s,
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    anyhow::bail!(
-                        "vm_exec: '{}' timed out after {}s",
-                        program,
-                        timeout.as_secs()
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-    };
-
-    let label = format!("vm_exec: '{program}'");
-    let stdout = binary::exited_child_output(&out_reader, &label)?;
-    let stderr = binary::exited_child_output(&err_reader, &label)?;
+    let output = binary::wait_for_piped_child(child, timeout, &format!("command '{program}'"))?;
     Ok(VmExecOutput {
-        status,
-        stdout,
-        stderr,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
     })
 }
 
@@ -701,32 +671,36 @@ impl std::fmt::Display for VmStatusUnreadable {
 
 impl std::error::Error for VmStatusUnreadable {}
 
-static VM_START_INHIBITED: std::sync::atomic::AtomicBool =
+static ENGINE_TEARDOWN_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Keeps every later `ensure_ready` in this process from starting a stopped Lima VM; app exit and
-/// factory reset call it before they stop the engine. WSL starts its distro on demand, so it ignores it.
-pub fn inhibit_vm_start() {
-    VM_START_INHIBITED.store(true, std::sync::atomic::Ordering::SeqCst);
+/// From here on this process starts neither a stopped Lima VM nor a compose stack; app exit and
+/// factory reset call it before they stop the engine.
+pub fn begin_engine_teardown() {
+    ENGINE_TEARDOWN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// `true` once [`inhibit_vm_start`] ran in this process.
-pub fn vm_start_inhibited() -> bool {
-    VM_START_INHIBITED.load(std::sync::atomic::Ordering::SeqCst)
+/// `true` once [`begin_engine_teardown`] ran in this process.
+pub fn engine_teardown_started() -> bool {
+    ENGINE_TEARDOWN_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Undoes [`begin_engine_teardown`] for a test that ran exit cleanup in its own process.
+#[cfg(any(test, feature = "test-support"))]
+pub fn undo_engine_teardown() {
+    ENGINE_TEARDOWN_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[derive(Debug)]
-pub(crate) struct VmStartInhibited;
+pub(crate) struct EngineTearingDown;
 
-impl std::fmt::Display for VmStartInhibited {
+impl std::fmt::Display for EngineTearingDown {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "Speedwave is shutting the container engine down and does not start the VM again",
-        )
+        f.write_str("Speedwave is shutting the container engine down and starts nothing on it")
     }
 }
 
-impl std::error::Error for VmStartInhibited {}
+impl std::error::Error for EngineTearingDown {}
 
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
@@ -1567,7 +1541,7 @@ pub(crate) fn compose_down_and_cleanup(
 /// SSOT entry point: the only way to obtain a runtime handle outside this
 /// crate. Returns `LockedRuntime` so callers cannot bypass per-project locks.
 pub fn detect_runtime() -> LockedRuntime {
-    LockedRuntime::new(detect_runtime_inner())
+    LockedRuntime::new(detect_runtime_inner(), engine_teardown_started)
 }
 
 pub(crate) fn detect_runtime_inner() -> Box<dyn ContainerRuntime> {
@@ -2779,7 +2753,7 @@ services:
         let start = std::time::Instant::now();
         let mut command = Command::new("sh");
         command.args(["-c", "sleep 30 & exit 0"]);
-        let err = vm_exec_run(command, b"", std::time::Duration::from_millis(200)).unwrap_err();
+        let err = vm_exec_run(command, b"", std::time::Duration::from_secs(10)).unwrap_err();
         assert!(
             err.to_string().contains("still holds its output open"),
             "got: {err}"

@@ -241,10 +241,6 @@ fn apply_wsl_utf8(command: &mut Command, program: &str) {
 /// each loop checks `child.try_wait()` against the deadline.
 const TIMEOUT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// How long an exited child's output may take to close: its own bytes are already in the pipe,
-/// so only a process it left behind holding the pipe open runs this out.
-const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Reads `pipe` to its end on a thread of its own; the receiver yields the bytes once it closes.
 pub(crate) fn read_on_thread(
     mut pipe: impl std::io::Read + Send + 'static,
@@ -259,14 +255,16 @@ pub(crate) fn read_on_thread(
 }
 
 /// What [`read_on_thread`] read from the exited child `label` names, awaited for at most
-/// [`PIPE_DRAIN_GRACE`], since a process the child started can keep the pipe open after it exits.
+/// [`consts::PIPE_DRAIN_GRACE`], since a process the child started can keep the pipe open.
 pub(crate) fn exited_child_output(
     reader: &std::sync::mpsc::Receiver<Vec<u8>>,
     label: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    reader.recv_timeout(PIPE_DRAIN_GRACE).map_err(|_| {
-        anyhow::anyhow!("{label} exited, but a process it started still holds its output open")
-    })
+    reader
+        .recv_timeout(crate::consts::PIPE_DRAIN_GRACE)
+        .map_err(|_| {
+            anyhow::anyhow!("{label} exited, but a process it started still holds its output open")
+        })
 }
 
 /// Runs a command with a timeout, killing the process if it exceeds the deadline. Polls
@@ -323,10 +321,10 @@ pub fn run_wsl_bounded(
     wait_with_output_timeout(child, timeout)
 }
 
-/// Waits for a spawned `child` (piped stdout/stderr) at most `timeout`, draining pipes on
-/// threads; kills + errors on expiry. For callers that must feed stdin before waiting.
+/// Waits at most `timeout` for a spawned `child` (piped stdout/stderr), killing it on expiry, then
+/// [`exited_child_output`] for each stream. For callers that must feed stdin before waiting.
 pub fn wait_with_output_timeout(
-    mut child: std::process::Child,
+    child: std::process::Child,
     timeout: std::time::Duration,
 ) -> anyhow::Result<std::process::Output> {
     debug_assert!(
@@ -334,6 +332,16 @@ pub fn wait_with_output_timeout(
         "wait_with_output_timeout requires Stdio::piped() stdout AND stderr; \
          an unpiped child silently yields empty output"
     );
+    wait_for_piped_child(child, timeout, "child process")
+}
+
+/// The deadline wait behind every capturing helper: kills `child` once `timeout` passes, else
+/// returns its streams through [`exited_child_output`]; `label` names the child in errors.
+pub(crate) fn wait_for_piped_child(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+    label: &str,
+) -> anyhow::Result<std::process::Output> {
     let stdout = child.stdout.take().map(read_on_thread);
     let stderr = child.stderr.take().map(read_on_thread);
     let start = std::time::Instant::now();
@@ -342,16 +350,16 @@ pub fn wait_with_output_timeout(
             Some(status) => break status,
             None if start.elapsed() >= timeout => {
                 if let Err(e) = child.kill() {
-                    log::warn!("failed to kill timed-out child process: {e}");
+                    log::warn!("failed to kill timed-out {label}: {e}");
                 }
                 let _ = child.wait();
-                anyhow::bail!("child process timed out after {}s", timeout.as_secs());
+                anyhow::bail!("{label} timed out after {}s", timeout.as_secs());
             }
             None => std::thread::sleep(TIMEOUT_POLL_INTERVAL),
         }
     };
     let drained = |reader: Option<std::sync::mpsc::Receiver<Vec<u8>>>| {
-        reader.map_or(Ok(Vec::new()), |r| exited_child_output(&r, "child process"))
+        reader.map_or(Ok(Vec::new()), |r| exited_child_output(&r, label))
     };
     Ok(std::process::Output {
         status,
@@ -370,57 +378,8 @@ pub fn run_with_timeout_capture(
 
     let program = cmd.get_program().to_string_lossy().to_string();
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn()?;
-
-    let out_pipe = match child.stdout.take() {
-        Some(p) => p,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("command '{program}' produced no stdout pipe");
-        }
-    };
-    let err_pipe = match child.stderr.take() {
-        Some(p) => p,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("command '{program}' produced no stderr pipe");
-        }
-    };
-
-    let out_reader = read_on_thread(out_pipe);
-    let err_reader = read_on_thread(err_pipe);
-
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None => {
-                if start.elapsed() >= timeout {
-                    if let Err(e) = child.kill() {
-                        log::warn!("failed to kill timed-out process: {e}");
-                    }
-                    let _ = child.wait();
-                    anyhow::bail!(
-                        "command '{}' timed out after {}s",
-                        program,
-                        timeout.as_secs()
-                    );
-                }
-                std::thread::sleep(TIMEOUT_POLL_INTERVAL);
-            }
-        }
-    };
-
-    let label = format!("command '{program}'");
-    let stdout = exited_child_output(&out_reader, &label)?;
-    let stderr = exited_child_output(&err_reader, &label)?;
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
+    let child = cmd.spawn()?;
+    wait_for_piped_child(child, timeout, &format!("command '{program}'"))
 }
 
 /// Returns the isolated LIMA_HOME directory `~/.speedwave/lima` (avoids
@@ -995,7 +954,7 @@ pub(crate) mod tests {
     fn wait_with_output_timeout_returns_once_the_child_exits_while_a_grandchild_holds_the_pipes() {
         let child = spawn_shell("sleep 30 & exit 0");
         let start = std::time::Instant::now();
-        let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
+        let err = wait_with_output_timeout(child, std::time::Duration::from_secs(10))
             .expect_err("output a leftover process keeps open is not the child's answer");
         assert!(
             err.to_string().contains("still holds its output open"),
@@ -1136,7 +1095,7 @@ pub(crate) mod tests {
         let start = Instant::now();
         let result = run_with_timeout_capture(
             Command::new("sh").args(["-c", "sleep 30 & exit 0"]),
-            Duration::from_millis(200),
+            Duration::from_secs(10),
         );
         let err = result.unwrap_err().to_string();
         assert!(

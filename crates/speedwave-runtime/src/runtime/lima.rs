@@ -11,7 +11,7 @@ pub struct LimaRuntime {
     /// Deadline for the `Stopping` arm of `ensure_ready_inner`.
     /// `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
     vm_stop_timeout: Option<std::time::Duration>,
-    vm_start_inhibited: fn() -> bool,
+    engine_teardown_started: fn() -> bool,
     /// `None` means use `consts::data_dir()`. Test-only override so compose-path
     /// resolution never touches the shared data dir during a test run.
     #[cfg(test)]
@@ -42,7 +42,7 @@ impl LimaRuntime {
                 consts::LIMA_VM_STOP_POLL_DELAY_SECS,
             ),
             vm_stop_timeout: None,
-            vm_start_inhibited: super::vm_start_inhibited,
+            engine_teardown_started: super::engine_teardown_started,
             #[cfg(test)]
             data_dir_override: None,
         }
@@ -59,7 +59,7 @@ impl LimaRuntime {
                 consts::LIMA_VM_STOP_POLL_DELAY_SECS,
             ),
             vm_stop_timeout: None,
-            vm_start_inhibited: || false,
+            engine_teardown_started: || false,
             data_dir_override: None,
         }
     }
@@ -103,10 +103,10 @@ impl LimaRuntime {
         self
     }
 
-    /// Acts as if [`super::inhibit_vm_start`] ran, without touching the process-wide flag.
+    /// Acts as if [`super::begin_engine_teardown`] ran, without touching the process-wide flag.
     #[cfg(test)]
-    fn with_vm_start_inhibited(mut self) -> Self {
-        self.vm_start_inhibited = || true;
+    fn with_engine_teardown_started(mut self) -> Self {
+        self.engine_teardown_started = || true;
         self
     }
 
@@ -125,10 +125,7 @@ impl LimaRuntime {
         if self.is_available() {
             Ok(())
         } else {
-            anyhow::bail!(
-                "Lima VM '{}' is not running. Start it with `ensure_ready()` first.",
-                consts::lima_vm_name(),
-            )
+            anyhow::bail!("Lima VM '{}' is not running.", consts::lima_vm_name())
         }
     }
 
@@ -924,9 +921,9 @@ impl LimaRuntime {
     /// Starts a Lima VM that is in the Stopped state.
     /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
     fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
-        if (self.vm_start_inhibited)() {
+        if (self.engine_teardown_started)() {
             log::info!("Lima VM '{vm}' is stopped and stays stopped while the engine shuts down");
-            return Err(anyhow::Error::new(super::VmStartInhibited));
+            return Err(anyhow::Error::new(super::EngineTearingDown));
         }
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
@@ -1003,7 +1000,7 @@ impl LimaRuntime {
                     };
                     match s.trim() {
                         "Stopped" => {
-                            log::info!("Lima VM '{}' finished stopping, now starting", vm);
+                            log::info!("Lima VM '{}' finished stopping", vm);
                             break;
                         }
                         "Running" => {
@@ -2753,6 +2750,10 @@ mod tests {
             err.to_string().contains("not running"),
             "a stopped VM cannot answer for its images, got: {err}"
         );
+        assert!(
+            !err.to_string().contains("ensure_ready"),
+            "this text reaches the rebuild banner, so it must not name internal API, got: {err}"
+        );
     }
 
     #[test]
@@ -3216,39 +3217,39 @@ mod tests {
     }
 
     #[test]
-    fn ensure_ready_leaves_a_stopped_vm_stopped_once_its_start_is_inhibited() {
+    fn ensure_ready_leaves_a_stopped_vm_stopped_once_the_engine_teardown_began() {
         let runner = MockRunner::new()
             .with_response("limactl --version", "limactl version 2.1.2")
             .with_response(&vm_status_key(), "Stopped");
-        let rt = LimaRuntime::with_runner(Box::new(runner)).with_vm_start_inhibited();
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_engine_teardown_started();
         let err = rt.ensure_ready().unwrap_err();
         assert!(
-            err.downcast_ref::<crate::runtime::VmStartInhibited>()
+            err.downcast_ref::<crate::runtime::EngineTearingDown>()
                 .is_some(),
-            "a stopped VM must stay stopped once its start is inhibited, got: {err}"
+            "a stopped VM must stay stopped once the engine teardown began, got: {err}"
         );
     }
 
     #[test]
-    fn ensure_ready_does_not_start_a_vm_that_finished_stopping_once_its_start_is_inhibited() {
+    fn ensure_ready_does_not_start_a_vm_that_finished_stopping_once_the_engine_teardown_began() {
         let runner = SequencedRunner::new()
             .with_fallback("limactl --version", "limactl version 2.1.2")
             .with_sequence(&vm_status_key(), vec!["Stopping", "Stopped"]);
         let rt = LimaRuntime::with_runner(Box::new(runner))
             .with_zero_vm_stop_poll_delay()
-            .with_vm_start_inhibited();
+            .with_engine_teardown_started();
         let err = rt.ensure_ready().unwrap_err();
         assert!(
-            err.downcast_ref::<crate::runtime::VmStartInhibited>()
+            err.downcast_ref::<crate::runtime::EngineTearingDown>()
                 .is_some(),
             "the wait for a stopping VM must not end in a start, got: {err}"
         );
     }
 
     #[test]
-    fn ensure_ready_accepts_a_running_vm_while_its_start_is_inhibited() {
+    fn ensure_ready_accepts_a_running_vm_during_the_engine_teardown() {
         let rt = LimaRuntime::with_runner(Box::new(mock_runner_with_vm_running()))
-            .with_vm_start_inhibited();
+            .with_engine_teardown_started();
         assert!(rt.ensure_ready().is_ok());
     }
 
@@ -3308,7 +3309,7 @@ mod tests {
     }
 
     #[test]
-    fn the_production_runtime_reads_the_process_wide_vm_start_inhibit() {
+    fn the_production_runtime_reads_the_process_wide_engine_teardown() {
         let source = include_str!("lima.rs");
         let new_fn = source
             .split("    pub fn new() -> Self {")
@@ -3316,7 +3317,7 @@ mod tests {
             .expect("LimaRuntime::new must exist");
         let body = &new_fn[..new_fn.find("\n    }\n").expect("new() must end")];
         assert!(
-            body.contains("vm_start_inhibited: super::vm_start_inhibited,"),
+            body.contains("engine_teardown_started: super::engine_teardown_started,"),
             "LimaRuntime::new must read the flag app exit and factory reset set"
         );
     }

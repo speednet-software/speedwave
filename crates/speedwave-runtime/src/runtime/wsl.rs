@@ -844,6 +844,9 @@ impl WslRuntime {
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         let violations = crate::os_prereqs::check_os_prereqs();
         if let Some(v) = violations.first() {
+            if v.rule == crate::os_prereqs::PrereqRule::WslUnresponsive {
+                return Err(super::VmStatusUnreadable::error(v.to_string()));
+            }
             anyhow::bail!("{v}");
         }
 
@@ -1010,6 +1013,27 @@ mod tests {
             err.contains("cannot start") && err.contains("dism.exe"),
             "a prereq violation must surface with its remediation, got: {err}"
         );
+    }
+
+    #[test]
+    fn ensure_ready_reads_an_unresponsive_wsl_as_an_unreadable_state() {
+        let _pin =
+            crate::os_prereqs::PinnedPrereqs::pin(vec![crate::os_prereqs::PrereqViolation {
+                rule: crate::os_prereqs::PrereqRule::WslUnresponsive,
+                message: "wsl.exe --status did not answer: child process timed out after 10s"
+                    .to_string(),
+                remediation: consts::WSL_UNRESPONSIVE_MSG,
+            }]);
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a wedged WSL must be retried like an unreadable VM, not reported as missing, got: {err}"
+        );
+        assert!(err.to_string().contains("did not answer"), "got: {err}");
     }
 
     #[test]
