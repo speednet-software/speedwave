@@ -284,6 +284,16 @@ describe('ComposerComponent', () => {
       expect(textarea().hasAttribute('disabled')).toBe(false);
     });
 
+    it('tells the user the session is starting, unless a turn streams', () => {
+      fixture.componentRef.setInput('sendBlocked', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('queue next message...');
+    });
+
     it('sends the kept text once the block lifts', () => {
       const emitted: string[] = [];
       component.submitted.subscribe((v) => emitted.push(v.payload));

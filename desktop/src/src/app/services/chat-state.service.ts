@@ -284,8 +284,11 @@ export class ChatStateService {
       return;
     }
     if (this.hasLiveSession()) {
-      if (this.isStreaming) this._pendingModelOverride.set(wireId);
-      else await this.sendMessage(`/model ${wireId}`);
+      if (this.isStreaming || this.sessionStartInFlightFromState()) {
+        this._pendingModelOverride.set(wireId);
+      } else {
+        await this.sendMessage(`/model ${wireId}`);
+      }
       return;
     }
     if (this.chatIsOccupied()) return;
@@ -518,7 +521,7 @@ export class ChatStateService {
   }
 
   /**
-   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
+   * Mark a session start in progress (resume) so `sendMessage` refuses until it ends;
    * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
    */
   beginStartingSession(): (outcome?: StartOutcome) => void {
@@ -727,6 +730,7 @@ export class ChatStateService {
     this.notifyChange();
 
     const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
+    const generation = this._sessionGeneration;
     try {
       await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
@@ -743,6 +747,7 @@ export class ChatStateService {
             while (this.startingSession && Date.now() < deadline) {
               await new Promise((r) => setTimeout(r, SESSION_START_POLL_MS));
             }
+            if (generation !== this._sessionGeneration) return;
             if (this.startingSession) {
               this.isStreaming = false;
               this._messages = [
@@ -789,14 +794,16 @@ export class ChatStateService {
             return;
           }
           const result = await this.tauri.invoke<ProjectList>('list_projects');
+          if (generation !== this._sessionGeneration) return;
           if (result.active_project) {
             this.startingSession = true;
             this._deferredEffort.set(null);
             try {
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {
-              this.startingSession = false;
+              if (generation === this._sessionGeneration) this.startingSession = false;
             }
+            if (generation !== this._sessionGeneration) return;
             await this.tauri.invoke('send_message', invokeArgs);
             return;
           }

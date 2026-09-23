@@ -540,6 +540,7 @@ export class ComposerComponent implements AfterViewInit {
    */
   effectivePlaceholder(): string {
     if (this.streaming()) return 'queue next message...';
+    if (this.sendBlocked()) return 'starting session...';
     return this.placeholder();
   }
 
