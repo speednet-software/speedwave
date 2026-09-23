@@ -251,19 +251,34 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
-/// `Ok(true)` if every [`enabled_images`] image for `integrations` is present. Runs `rt.ensure_ready()`
-/// first and again while the probe cannot reach the engine; an engine error is never `Ok(false)`.
+/// An image check whose engine never answered; unlike an `ensure_ready` failure it is not a skip,
+/// so reconcile fails on it and Retry re-runs the check.
+#[derive(Debug)]
+pub struct EngineDidNotAnswer(anyhow::Error);
+
+impl std::fmt::Display for EngineDidNotAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for EngineDidNotAnswer {}
+
+/// `Ok(true)` if every [`enabled_images`] image for `integrations` is present. Re-runs `ensure_ready` while
+/// the engine does not answer and `keep_trying()` holds; a silent engine is [`EngineDidNotAnswer`].
 pub fn images_exist(
     rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
     manifest: &crate::bundle::BundleManifest,
+    keep_trying: impl Fn() -> bool,
 ) -> anyhow::Result<bool> {
     images_exist_within(
         rt,
         integrations,
         manifest,
-        std::time::Duration::from_secs(crate::consts::LIMA_VM_STOP_TIMEOUT_SECS),
-        std::time::Duration::from_secs(crate::consts::LIMA_VM_STOP_POLL_DELAY_SECS),
+        std::time::Duration::from_secs(crate::consts::ENGINE_UNREACHABLE_WINDOW_SECS),
+        std::time::Duration::from_secs(crate::consts::ENGINE_UNREACHABLE_POLL_DELAY_SECS),
+        keep_trying,
     )
 }
 
@@ -273,6 +288,7 @@ fn images_exist_within(
     manifest: &crate::bundle::BundleManifest,
     window: std::time::Duration,
     poll_delay: std::time::Duration,
+    keep_trying: impl Fn() -> bool,
 ) -> anyhow::Result<bool> {
     let mut unreachable_since: Option<std::time::Instant> = None;
     loop {
@@ -301,9 +317,12 @@ fn images_exist_within(
                     std::time::Instant::now()
                 });
                 if since.elapsed() >= window {
-                    return Err(e);
+                    return Err(anyhow::Error::new(EngineDidNotAnswer(e)));
                 }
                 std::thread::sleep(poll_delay);
+                if !keep_trying() {
+                    return Err(anyhow::Error::new(EngineDidNotAnswer(e)));
+                }
             }
         }
     }
@@ -3092,13 +3111,13 @@ mod tests {
         #[test]
         fn test_images_exist_returns_true_when_all_present() {
             let rt = image_check_mock(&[]);
-            assert!(images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
+            assert!(images_exist(&rt, &all_enabled(), &fake_manifest(), || true).unwrap());
         }
 
         #[test]
         fn test_images_exist_returns_false_when_any_missing() {
             let rt = image_check_mock(&["speedwave-claude"]);
-            assert!(!images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
+            assert!(!images_exist(&rt, &all_enabled(), &fake_manifest(), || true).unwrap());
         }
 
         #[test]
@@ -3108,7 +3127,7 @@ mod tests {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
             };
-            assert!(images_exist(&rt, &cfg, &fake_manifest()).unwrap());
+            assert!(images_exist(&rt, &cfg, &fake_manifest(), || true).unwrap());
         }
 
         #[test]
@@ -3118,7 +3137,7 @@ mod tests {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
             };
-            assert!(!images_exist(&rt, &cfg, &fake_manifest()).unwrap());
+            assert!(!images_exist(&rt, &cfg, &fake_manifest(), || true).unwrap());
         }
 
         const KEX_RESET: &str =
@@ -3138,6 +3157,7 @@ mod tests {
                 &fake_manifest(),
                 OPEN_WINDOW,
                 std::time::Duration::ZERO,
+                || true,
             )
             .unwrap();
             assert!(present);
@@ -3158,6 +3178,7 @@ mod tests {
                 &fake_manifest(),
                 OPEN_WINDOW,
                 std::time::Duration::ZERO,
+                || true,
             )
             .unwrap();
             assert!(present);
@@ -3178,6 +3199,7 @@ mod tests {
                 &fake_manifest(),
                 OPEN_WINDOW,
                 std::time::Duration::ZERO,
+                || true,
             )
             .unwrap();
             assert!(present);
@@ -3197,6 +3219,7 @@ mod tests {
                 &fake_manifest(),
                 OPEN_WINDOW,
                 std::time::Duration::ZERO,
+                || true,
             )
             .unwrap();
             assert!(!present);
@@ -3214,13 +3237,62 @@ mod tests {
                 &fake_manifest(),
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
+                || true,
             )
             .unwrap_err();
             assert!(
                 err.to_string().contains("kex_exchange_identification"),
                 "an unreachable engine must surface as its error, got: {err}"
             );
+            assert!(err.downcast_ref::<EngineDidNotAnswer>().is_some());
             assert_eq!(handles.ensure_ready_count(), 1);
+        }
+
+        #[test]
+        fn images_exist_marks_a_vm_status_that_stays_unreadable() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_ensure_ready_status_unreadable(
+                    "Cannot read the state of Lima VM 'speedwave': resource temporarily unavailable",
+                )
+                .build();
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                || true,
+            )
+            .unwrap_err();
+            assert!(err.downcast_ref::<EngineDidNotAnswer>().is_some());
+            assert_eq!(handles.ensure_ready_count(), 1);
+        }
+
+        #[test]
+        fn images_exist_stops_re_running_ensure_ready_once_told_to_stop() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_image_exists_failure(KEX_RESET)
+                .build();
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+                || false,
+            )
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<EngineDidNotAnswer>().is_some(),
+                "a stopped check still reports the engine as silent, got: {err}"
+            );
+            assert_eq!(
+                handles.ensure_ready_count(),
+                1,
+                "ensure_ready must not run again once the engine is being torn down"
+            );
         }
 
         #[test]
@@ -3229,10 +3301,14 @@ mod tests {
                 .with_ensure_ready_error("Lima VM 'speedwave' not found")
                 .with_image_exists_error(KEX_RESET)
                 .build();
-            let err = images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap_err();
+            let err = images_exist(&rt, &all_enabled(), &fake_manifest(), || true).unwrap_err();
             assert!(
                 err.to_string().contains("not found"),
                 "the ensure_ready error must win over any probe, got: {err}"
+            );
+            assert!(
+                err.downcast_ref::<EngineDidNotAnswer>().is_none(),
+                "a runtime that cannot be readied is not a silent engine, got: {err}"
             );
             assert_eq!(handles.ensure_ready_count(), 1);
         }

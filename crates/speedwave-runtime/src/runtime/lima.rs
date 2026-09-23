@@ -688,7 +688,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         self.require_running()?;
-        super::image_inspect_verdict(self.runner.run(
+        super::image_inspect_verdict(self.runner.run_bounded(
             "limactl",
             &[
                 "shell",
@@ -700,6 +700,7 @@ impl ContainerRuntime for LimaRuntime {
                 "inspect",
                 tag,
             ],
+            consts::CONTAINER_EXEC_PROBE_TIMEOUT,
         ))
     }
 
@@ -908,9 +909,7 @@ impl ContainerRuntime for LimaRuntime {
 const LIMA_UNMATCHED_INSTANCES: &str = "unmatched instances";
 
 fn unreadable_vm_status(vm: &str, cause: &anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(super::VmStatusUnreadable::new(format!(
-        "Cannot read the state of Lima VM '{vm}': {cause}"
-    )))
+    super::VmStatusUnreadable::error(format!("Cannot read the state of Lima VM '{vm}': {cause}"))
 }
 
 impl LimaRuntime {
@@ -974,18 +973,25 @@ impl LimaRuntime {
                     std::time::Duration::from_secs(consts::LIMA_VM_STOP_TIMEOUT_SECS)
                 });
                 let deadline = std::time::Instant::now() + stop_timeout;
+                let mut status_poll_failing = false;
                 loop {
                     std::thread::sleep(self.vm_stop_poll_delay);
                     let s = match self
                         .runner
                         .run("limactl", &["list", "--format", "{{.Status}}", vm])
                     {
-                        Ok(s) => s,
+                        Ok(s) => {
+                            status_poll_failing = false;
+                            s
+                        }
                         Err(e) if std::time::Instant::now() >= deadline => {
                             return Err(unreadable_vm_status(vm, &e));
                         }
                         Err(e) => {
-                            log::warn!("Lima VM status poll failed (will retry): {e}");
+                            if !status_poll_failing {
+                                log::warn!("Lima VM status poll failed (will retry): {e}");
+                                status_poll_failing = true;
+                            }
                             continue;
                         }
                     };
@@ -2541,11 +2547,13 @@ mod tests {
 
     #[test]
     fn test_remove_images_empty_tags_is_noop_after_require_running() {
-        let runner = mock_runner_with_vm_running();
-        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        assert!(rt.remove_images(&[], false).is_ok());
         assert!(
-            rt.remove_images(&[], false).is_ok(),
-            "empty tags should return Ok without calling rmi"
+            recorded.lock().unwrap().is_empty(),
+            "empty tags must not run rmi, got: {:?}",
+            recorded.lock().unwrap()
         );
     }
 
@@ -2569,18 +2577,38 @@ mod tests {
 
     #[test]
     fn test_remove_images_error_is_warn_only() {
+        struct FailingRmiRunner {
+            rmi_calls: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for FailingRmiRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                if key.contains("list --format") {
+                    return Ok("Running".to_string());
+                }
+                self.rmi_calls.lock().unwrap().push(key);
+                anyhow::bail!("no such image")
+            }
+        }
         let tags = vec!["speedwave-claude:abc123".to_string()];
-        let runner = mock_runner_with_vm_running().with_error(
-            &format!(
-                "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123",
-                consts::lima_vm_name()
-            ),
-            "no such image",
-        );
-        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let rmi_calls = Arc::new(Mutex::new(Vec::new()));
+        let rt = LimaRuntime::with_runner(Box::new(FailingRmiRunner {
+            rmi_calls: rmi_calls.clone(),
+        }));
         assert!(
             rt.remove_images(&tags, false).is_ok(),
             "rmi failure should not propagate"
+        );
+        assert_eq!(
+            *rmi_calls.lock().unwrap(),
+            vec![format!(
+                "limactl shell {} -- sudo nerdctl rmi speedwave-claude:abc123",
+                consts::lima_vm_name()
+            )],
+            "the rmi must run even though its failure is only a warning"
         );
     }
 
@@ -2647,6 +2675,16 @@ mod tests {
     }
 
     #[test]
+    fn image_exists_reads_no_such_image_in_any_case() {
+        let runner = mock_runner_with_vm_running().with_error(
+            &image_inspect_key("speedwave-claude:abc123"),
+            "limactl failed: Error: No such image: speedwave-claude:abc123",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(!rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
     fn image_exists_surfaces_an_ssh_failure_instead_of_an_absent_image() {
         let runner = mock_runner_with_vm_running().with_error(
             &image_inspect_key("speedwave-claude:abc123"),
@@ -2661,16 +2699,47 @@ mod tests {
     }
 
     #[test]
+    fn image_exists_bounds_the_probe_by_the_exec_probe_timeout() {
+        struct BoundedProbeRecorder {
+            timeouts: Arc<Mutex<Vec<std::time::Duration>>>,
+        }
+        impl CommandRunner for BoundedProbeRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                if key.contains("list --format") {
+                    return Ok("Running".to_string());
+                }
+                anyhow::bail!("the image probe must go through run_bounded, got run: {key}")
+            }
+            fn run_bounded(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<String> {
+                self.timeouts.lock().unwrap().push(timeout);
+                Ok("[{}]".to_string())
+            }
+        }
+        let timeouts = Arc::new(Mutex::new(Vec::new()));
+        let rt = LimaRuntime::with_runner(Box::new(BoundedProbeRecorder {
+            timeouts: timeouts.clone(),
+        }));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+        assert_eq!(
+            *timeouts.lock().unwrap(),
+            vec![consts::CONTAINER_EXEC_PROBE_TIMEOUT]
+        );
+    }
+
+    #[test]
     fn image_exists_fails_when_the_vm_is_stopped() {
         let runner = MockRunner::new()
             .with_response("limactl --version", "limactl version 1.0.0")
-            .with_response(
-                &format!(
-                    "limactl list --format {{{{.Status}}}} {}",
-                    consts::lima_vm_name()
-                ),
-                "Stopped",
-            );
+            .with_response(&vm_status_key(), "Stopped");
         let rt = LimaRuntime::with_runner(Box::new(runner));
         let err = rt.image_exists("speedwave-claude:abc123").unwrap_err();
         assert!(

@@ -236,8 +236,6 @@ pub(crate) fn vm_exec_run(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = out_thread.join();
-                    let _ = err_thread.join();
                     anyhow::bail!(
                         "vm_exec: '{}' timed out after {}s",
                         program,
@@ -275,6 +273,17 @@ pub trait CommandRunner: Send + Sync {
     /// Needed for commands like `wsl.exe --list` that output UTF-16LE.
     fn run_raw_stdout(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Vec<u8>> {
         self.run(cmd, args).map(|s| s.into_bytes())
+    }
+
+    /// Like `run`, but gives up after `timeout`. The default ignores the deadline so test runners
+    /// never spawn a process; [`RealRunner`] bounds the real child and captures both streams.
+    fn run_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        self.run(cmd, args)
     }
 
     /// Like `run`, but kills on `timeout`, captures stderr, treats non-zero as `Err`.
@@ -429,6 +438,21 @@ impl CommandRunner for RealRunner {
         let output = Self::prepare_command(cmd, args).output()?;
         if output.status.success() {
             Ok(output.stdout)
+        } else {
+            Err(run_failure(cmd, &output.stderr, &output.stdout))
+        }
+    }
+
+    fn run_bounded(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        let mut command = Self::prepare_command(cmd, args);
+        let output = binary::run_with_timeout_capture(&mut command, timeout)?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(run_failure(cmd, &output.stderr, &output.stdout))
         }
@@ -647,21 +671,20 @@ pub(crate) fn image_inspect_verdict(inspect: anyhow::Result<String>) -> anyhow::
     let Err(e) = inspect else {
         return Ok(true);
     };
-    if e.to_string().contains(NO_SUCH_IMAGE_FRAGMENT) {
+    let lower = e.to_string().to_ascii_lowercase();
+    if lower.contains(NO_SUCH_IMAGE_FRAGMENT) {
         Ok(false)
     } else {
         Err(e)
     }
 }
 
-/// `ensure_ready` failed because the VM/distro status call itself failed, not because the VM is
-/// missing; unlike a missing VM it can be transient, so readiness retry loops may re-run it.
 #[derive(Debug)]
-pub struct VmStatusUnreadable(String);
+pub(crate) struct VmStatusUnreadable(String);
 
 impl VmStatusUnreadable {
-    pub(crate) fn new(message: String) -> Self {
-        Self(message)
+    pub(crate) fn error(message: String) -> anyhow::Error {
+        anyhow::Error::new(Self(message))
     }
 }
 
@@ -2701,6 +2724,79 @@ services:
         assert!(!is_stopped_container_error("mount namespace root"));
         assert!(!is_stopped_container_error("connection refused"));
         assert!(!is_stopped_container_error(""));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vm_exec_run_returns_on_deadline_while_a_grandchild_holds_the_pipes() {
+        let start = std::time::Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & sleep 30"]);
+        let err = vm_exec_run(command, b"", std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "an orphaned grandchild still holding stdout must not stretch the deadline, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_bounded_falls_back_to_run_for_runners_that_only_implement_run() {
+        struct RunOnly;
+        impl CommandRunner for RunOnly {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                Ok(format!("{cmd} {}", args.join(" ")))
+            }
+        }
+        let out = RunOnly
+            .run_bounded("limactl", &["list"], std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(out, "limactl list");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_bounded_returns_stdout() {
+        let out = RealRunner
+            .run_bounded(
+                "sh",
+                &["-c", "printf ok"],
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_bounded_keeps_stderr_in_the_error() {
+        let err = RealRunner
+            .run_bounded(
+                "sh",
+                &["-c", "echo 'no such image: x:1' >&2; exit 1"],
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no such image: x:1"),
+            "the verdict reads stderr, so it must survive, got: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_bounded_gives_up_at_the_deadline() {
+        let start = std::time::Instant::now();
+        let err = RealRunner
+            .run_bounded(
+                "sh",
+                &["-c", "sleep 30"],
+                std::time::Duration::from_millis(200),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
     /// Stderr classified as stale-mount by `is_stale_container_error`; single

@@ -391,8 +391,6 @@ pub fn run_with_timeout_capture(
                         log::warn!("failed to kill timed-out process: {e}");
                     }
                     let _ = child.wait();
-                    let _ = out_reader.join();
-                    let _ = err_reader.join();
                     anyhow::bail!(
                         "command '{}' timed out after {}s",
                         program,
@@ -1077,6 +1075,25 @@ pub(crate) mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "should not wait for the full 60s"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_timeout_capture_returns_on_deadline_while_a_grandchild_holds_the_pipes() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let result = run_with_timeout_capture(
+            Command::new("sh").args(["-c", "sleep 30 & sleep 30"]),
+            Duration::from_millis(200),
+        );
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "an orphaned grandchild still holding stdout must not stretch the deadline, took {:?}",
+            start.elapsed()
         );
     }
 

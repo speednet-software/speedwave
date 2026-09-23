@@ -367,10 +367,17 @@ pub const EXIT_CLEANUP_TIMEOUT_SECS: u64 = 60;
 pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 
 /// Delay in seconds between status polls while waiting for a Lima VM
-/// in `Stopping` state to finish.
+/// in `Stopping` state to finish. Used by `ensure_ready_inner`.
 pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
+
+/// Seconds a readiness check keeps re-running `ensure_ready` after the engine first fails to answer;
+/// twice the VM stop wait, since a Lima VM reports Running until its guest has stopped.
+pub const ENGINE_UNREACHABLE_WINDOW_SECS: u64 = 2 * LIMA_VM_STOP_TIMEOUT_SECS;
+
+/// Delay in seconds between those `ensure_ready` re-runs.
+pub const ENGINE_UNREACHABLE_POLL_DELAY_SECS: u64 = LIMA_VM_STOP_POLL_DELAY_SECS;
 
 /// Physical storage tier per auth field (ADR-060).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

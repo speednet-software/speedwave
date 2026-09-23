@@ -787,6 +787,7 @@ pub async fn factory_reset(
     oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
+    crate::reconcile::begin_engine_teardown();
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4592,6 +4593,22 @@ mod tests {
         assert!(
             ensure_pos < up_pos,
             "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    #[test]
+    fn factory_reset_marks_the_engine_teardown_before_stopping_anything() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
+        let teardown = fn_body
+            .find("begin_engine_teardown()")
+            .expect("factory_reset must mark the engine teardown");
+        let first_stop = fn_body
+            .find("WATCHDOG_STOP")
+            .expect("factory_reset stops the watchdogs");
+        assert!(
+            teardown < first_stop,
+            "a startup image check must not restart the VM a factory reset deletes"
         );
     }
 

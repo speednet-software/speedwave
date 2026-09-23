@@ -621,7 +621,7 @@ impl ContainerRuntime for MockRuntime {
             .unwrap()
             .pop_front();
         if let Some(msg) = next_unreadable {
-            return Err(anyhow::Error::new(super::VmStatusUnreadable::new(msg)));
+            return Err(super::VmStatusUnreadable::error(msg));
         }
         match &self.ensure_ready_result {
             ResultCell::Ok => Ok(()),
