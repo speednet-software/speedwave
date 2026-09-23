@@ -406,6 +406,18 @@ describe('ChatComponent', () => {
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
 
+    it('blocks the composer send while a session start is in flight', () => {
+      projectState.status.set('ready');
+      const endStartingSession = chatState.beginStartingSession();
+      fixture.detectChanges();
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+      expect(composer.componentInstance.sendBlocked()).toBe(true);
+
+      endStartingSession();
+      fixture.detectChanges();
+      expect(composer.componentInstance.sendBlocked()).toBe(false);
+    });
+
     it('binds composerContextLabel to the composer contextLabel input, formatted from session stats', () => {
       projectState.status.set('ready');
       chatState._setState({

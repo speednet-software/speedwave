@@ -261,6 +261,58 @@ describe('ComposerComponent', () => {
     });
   });
 
+  describe('send blocked while a session starts', () => {
+    it('keeps the text and emits nothing on Enter', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      fixture.componentRef.setInput('sendBlocked', true);
+      component.text.setValue('wait for the session');
+      fixture.detectChanges();
+
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual([]);
+      expect(component.text.value).toBe('wait for the session');
+    });
+
+    it('disables the send button but leaves the field editable', () => {
+      fixture.componentRef.setInput('sendBlocked', true);
+      component.text.setValue('ready');
+      fixture.detectChanges();
+
+      expect(sendButton().hasAttribute('disabled')).toBe(true);
+      expect(textarea().hasAttribute('disabled')).toBe(false);
+    });
+
+    it('tells the user the session is starting, ahead of the queue hint', () => {
+      fixture.componentRef.setInput('sendBlocked', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      fixture.componentRef.setInput('sendBlocked', false);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('queue next message...');
+    });
+
+    it('sends the kept text once the block lifts', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      fixture.componentRef.setInput('sendBlocked', true);
+      component.text.setValue('now it goes');
+      fixture.detectChanges();
+
+      fixture.componentRef.setInput('sendBlocked', false);
+      fixture.detectChanges();
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual(['now it goes']);
+    });
+  });
+
   describe('slash menu trigger', () => {
     function dispatchInputAt(value: string, caretPos: number): void {
       const ta = textarea();

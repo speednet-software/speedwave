@@ -69,9 +69,6 @@ export type {
   QueuedMessage,
 };
 
-const SESSION_START_TIMEOUT_MS = 30_000;
-const SESSION_START_POLL_MS = 500;
-
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
 
 export const NEW_CONVERSATION_FAILED =
@@ -284,8 +281,11 @@ export class ChatStateService {
       return;
     }
     if (this.hasLiveSession()) {
-      if (this.isStreaming) this._pendingModelOverride.set(wireId);
-      else await this.sendMessage(`/model ${wireId}`);
+      if (this.isStreaming || this.sessionStartInFlightFromState()) {
+        this._pendingModelOverride.set(wireId);
+      } else {
+        await this.sendMessage(`/model ${wireId}`);
+      }
       return;
     }
     if (this.chatIsOccupied()) return;
@@ -376,9 +376,6 @@ export class ChatStateService {
     this.startingSessionSignal.set(v);
   }
   private _sessionGeneration = 0;
-
-  /** How the most recent session start ended; gates a waiting `sendMessage`'s resend. */
-  private _lastStartOutcome: StartOutcome | null = null;
 
   /** Durable session id; survives a container restart that nulls live stats. */
   private _lastKnownSessionId: string | null = null;
@@ -500,6 +497,10 @@ export class ChatStateService {
     return '';
   });
 
+  readonly sessionStartInFlightFromState: Signal<boolean> = computed(
+    () => this.startingSessionSignal() || this.resumeInProgressSignal()
+  );
+
   private readonly _loadingTranscript = signal<boolean>(false);
   readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
 
@@ -513,16 +514,11 @@ export class ChatStateService {
     this._loadingTranscript.set(false);
   }
 
-  /**
-   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
-   * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
-   */
-  beginStartingSession(): (outcome?: StartOutcome) => void {
+  /** Mark a resume's session start in flight until the returned function runs. */
+  beginStartingSession(): () => void {
     this.startingSession = true;
-    this._lastStartOutcome = null;
     this._sessionGeneration += 1;
-    return (outcome: StartOutcome = 'started') => {
-      this._lastStartOutcome = outcome;
+    return () => {
       this.startingSession = false;
     };
   }
@@ -623,7 +619,6 @@ export class ChatStateService {
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
-      this._lastStartOutcome = null;
       this._deferredEffort.set(null);
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
@@ -652,7 +647,6 @@ export class ChatStateService {
       } finally {
         if (gen === this._sessionGeneration) {
           this.startingSession = false;
-          this._lastStartOutcome = outcome;
         }
       }
       return outcome;
@@ -694,7 +688,7 @@ export class ChatStateService {
     const chatInput: ChatInput = typeof input === 'string' ? chatInputFromText(input) : input;
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
-    if (!hasContent || this.isStreaming) return;
+    if (!hasContent || this.isStreaming || this.sessionStartInFlightFromState()) return;
     if (chatInput.attachments.length === 0 && isBlankOrSlashOnly(chatInput.text)) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
@@ -723,6 +717,13 @@ export class ChatStateService {
     this.notifyChange();
 
     const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
+    const generation = this._sessionGeneration;
+    const turnId = this._turnId;
+    const project = this.projectState.activeProject();
+    const sameConversation = (): boolean =>
+      this.isStreaming && generation === this._sessionGeneration && turnId === this._turnId;
+    const sameProject = (): boolean =>
+      project === this.projectState.activeProject() && this.projectState.status() !== 'switching';
     try {
       await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
@@ -734,65 +735,36 @@ export class ChatStateService {
         errStr.includes('Broken pipe')
       ) {
         try {
-          if (this.startingSession) {
-            const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
-            while (this.startingSession && Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, SESSION_START_POLL_MS));
-            }
-            if (this.startingSession) {
-              this.isStreaming = false;
-              this._messages = [
-                ...this._messages,
-                {
-                  role: 'assistant',
-                  blocks: [
-                    {
-                      type: 'error',
-                      content:
-                        'Session is still starting (containers may be restarting). Please try again in a moment.',
-                    },
-                  ],
-                  timestamp: Date.now(),
-                },
-              ];
-              this.notifyChange();
-              return;
-            }
-            if (this._lastStartOutcome !== 'started') {
-              this.isStreaming = false;
-              this.notifyChange();
-              return;
-            }
-            try {
-              await this.tauri.invoke('send_message', invokeArgs);
-            } catch (postWaitErr) {
-              this.isStreaming = false;
-              this._messages = [
-                ...this._messages,
-                {
-                  role: 'assistant',
-                  blocks: [
-                    {
-                      type: 'error',
-                      content: `Failed to send message after session started: ${postWaitErr}`,
-                    },
-                  ],
-                  timestamp: Date.now(),
-                },
-              ];
-              this.notifyChange();
-            }
+          if (!sameConversation()) return;
+          const result = await this.tauri.invoke<ProjectList>('list_projects');
+          if (!sameConversation()) return;
+          const retryBlocked = this.sessionStartInFlightFromState()
+            ? 'Session is still starting (containers may be restarting). Please try again in a moment.'
+            : result.active_project && project !== null && result.active_project !== project
+              ? `The active project is now '${result.active_project}', not '${project}'. Switch projects in the project list, then resend the message.`
+              : null;
+          if (retryBlocked) {
+            this.isStreaming = false;
+            this._messages = [
+              ...this._messages,
+              {
+                role: 'assistant',
+                blocks: [{ type: 'error', content: retryBlocked }],
+                timestamp: Date.now(),
+              },
+            ];
+            this.notifyChange();
             return;
           }
-          const result = await this.tauri.invoke<ProjectList>('list_projects');
           if (result.active_project) {
             this.startingSession = true;
             this._deferredEffort.set(null);
             try {
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {
-              this.startingSession = false;
+              if (generation === this._sessionGeneration) this.startingSession = false;
             }
+            if (!sameConversation()) return;
             await this.tauri.invoke('send_message', invokeArgs);
             return;
           }
@@ -815,11 +787,13 @@ export class ChatStateService {
         } catch (retryErr) {
           const retryMsg = String(retryErr);
           if (isNotAuthenticatedError(retryMsg)) {
-            this.projectState.status.set('auth_required');
+            if (sameProject()) this.projectState.status.set('auth_required');
+            if (!sameConversation()) return;
             this.isStreaming = false;
             this.notifyChange();
             return;
           }
+          if (!sameConversation()) return;
           this.isStreaming = false;
           this._messages = [
             ...this._messages,
@@ -833,6 +807,7 @@ export class ChatStateService {
           return;
         }
       }
+      if (!sameConversation()) return;
       this.isStreaming = false;
       this._messages = [
         ...this._messages,
@@ -1536,7 +1511,7 @@ export class ChatStateService {
       }
     } finally {
       this.endTranscriptLoad();
-      endStartingSession(outcome);
+      endStartingSession();
       this._resumeInProgress = false;
       if (gen !== this._sessionGeneration) {
         this._optimisticSessionId = null;
@@ -1652,6 +1627,7 @@ export class ChatStateService {
   private async setupStreamListener(): Promise<void> {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
+        if (this.sessionStartInFlightFromState()) return;
         const chunk = event.payload;
         if (
           chunk.chunk_type === 'SystemInit' ||

@@ -78,6 +78,7 @@
           <app-composer
             #composer
             [streaming]="chat.isStreamingFromState()"
+            [sendBlocked]="chat.sessionStartInFlightFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [projectId]="projectState.activeProject() ?? ''"
