@@ -29,7 +29,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `$$dataDir = $$dataDir.TrimEnd('\')$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
-  FileWrite $0 `$$desktopExe = $$instDir + '\Speedwave.exe'$\r$\n`
+  FileWrite $0 `$$desktopExe = $$instDir + '\speedwave-desktop.exe'$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$instance = (Split-Path $$dataDir -Leaf) -replace '^\.+', ''$\r$\n`
   FileWrite $0 `if ($$instance -eq 'speedwave') {$\r$\n`
@@ -250,6 +250,71 @@ Var SpeedwaveDataDirOverride
   !undef SW_FIREWALL_ID
 !macroend
 
+!macro SPEEDWAVE_MATERIALIZE_RESET
+  !define SW_RESET_ID ${__LINE__}
+  InitPluginsDir
+  ClearErrors
+  FileOpen $0 "$PLUGINSDIR\reset.ps1" w
+  IfErrors 0 sw_RESET_write_ok_${SW_RESET_ID}
+    DetailPrint "Speedwave: could not create reset.ps1 in $PLUGINSDIR — skipping."
+    Goto sw_RESET_write_done_${SW_RESET_ID}
+  sw_RESET_write_ok_${SW_RESET_ID}:
+  FileWrite $0 `param($\r$\n`
+  FileWrite $0 `  [string]$$InstDir,$\r$\n`
+  FileWrite $0 `  [string]$$DataDir,$\r$\n`
+  FileWrite $0 `  [string]$$DefaultInstDir,$\r$\n`
+  FileWrite $0 `  [string]$$DesktopProcess = 'speedwave-desktop'$\r$\n`
+  FileWrite $0 `)$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `$$instDir = if ($$InstDir) { $$InstDir } else { $$env:SPW_INSTDIR }$\r$\n`
+  FileWrite $0 `$$dataDir = if ($$DataDir) { $$DataDir } else { $$env:SPW_DATA_DIR }$\r$\n`
+  FileWrite $0 `$$defaultInstDir = if ($$DefaultInstDir) { $$DefaultInstDir } else { $$env:SPW_DEFAULT_INSTDIR }$\r$\n`
+  FileWrite $0 `if (-not $$instDir -or -not $$dataDir -or -not $$defaultInstDir) {$\r$\n`
+  FileWrite $0 `  [Console]::Error.WriteLine('SPW_INSTDIR, SPW_DATA_DIR and SPW_DEFAULT_INSTDIR must all be set')$\r$\n`
+  FileWrite $0 `  exit 2$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `$$separators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)$\r$\n`
+  FileWrite $0 `function Get-NormalizedPath([string]$$Path) {$\r$\n`
+  FileWrite $0 `  return [System.IO.Path]::GetFullPath($$Path).TrimEnd($$separators)$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `$$instDir = Get-NormalizedPath $$instDir$\r$\n`
+  FileWrite $0 `if (-not $$instDir.Equals((Get-NormalizedPath $$defaultInstDir), [System.StringComparison]::OrdinalIgnoreCase)) {$\r$\n`
+  FileWrite $0 `  Write-Output ('skipped: ' + $$instDir + ' is not the default install dir')$\r$\n`
+  FileWrite $0 `  exit 10$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `if ($$instDir.Equals((Get-NormalizedPath $$dataDir), [System.StringComparison]::OrdinalIgnoreCase)) {$\r$\n`
+  FileWrite $0 `  Write-Output ('skipped: ' + $$instDir + ' is also the Speedwave data dir')$\r$\n`
+  FileWrite $0 `  exit 11$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `if (Get-Process -Name $$DesktopProcess -ErrorAction SilentlyContinue) {$\r$\n`
+  FileWrite $0 `  Write-Output ('skipped: ' + $$DesktopProcess + ' is still running')$\r$\n`
+  FileWrite $0 `  exit 12$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `$$trees = @('build-context', 'mcp-os', 'oauth', 'THIRD-PARTY-LICENSES', 'host_exec')$\r$\n`
+  FileWrite $0 `$$failed = 0$\r$\n`
+  FileWrite $0 `foreach ($$tree in $$trees) {$\r$\n`
+  FileWrite $0 `  $$path = [System.IO.Path]::Combine($$instDir, $$tree)$\r$\n`
+  FileWrite $0 `  if (-not [System.IO.Directory]::Exists($$path)) { continue }$\r$\n`
+  FileWrite $0 `  try {$\r$\n`
+  FileWrite $0 `    [System.IO.Directory]::Delete($$path, $$true)$\r$\n`
+  FileWrite $0 `    Write-Output ('removed ' + $$path)$\r$\n`
+  FileWrite $0 `  } catch {$\r$\n`
+  FileWrite $0 `    Write-Output ('could not remove ' + $$path + ': ' + $$_.Exception.Message)$\r$\n`
+  FileWrite $0 `    $$failed++$\r$\n`
+  FileWrite $0 `  }$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `if ($$failed -gt 0) { exit 3 }$\r$\n`
+  FileWrite $0 `exit 0$\r$\n`
+  FileClose $0
+  sw_RESET_write_done_${SW_RESET_ID}:
+  !undef SW_RESET_ID
+!macroend
+
 !macro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
   !define SW_RUN_HIDDEN_ID ${__LINE__}
   InitPluginsDir
@@ -294,18 +359,20 @@ Var SpeedwaveDataDirOverride
   ${If} $0 != 0
     DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
     DetailPrint "Common causes: PowerShell missing, AppLocker / WDAC blocking script execution, ExecutionPolicy enforced by GPO, or a worker process the sweep could not kill."
+    DetailPrint "Speedwave PRE-INSTALL: skipped the resource reset, so files a release no longer ships may remain."
+  ${Else}
+    !insertmacro SPEEDWAVE_MATERIALIZE_RESET
+    System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", t "$LOCALAPPDATA\${PRODUCTNAME}")i'
+    nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\reset.ps1$\""`
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "Speedwave PRE-INSTALL: resource reset exited $0, so files a release no longer ships may remain."
+    ${EndIf}
+    System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", i 0)i'
   ${EndIf}
 
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", i 0)i'
-
-  ${GetFileName} "$INSTDIR" $0
-  ${If} $0 == "${PRODUCTNAME}"
-    RMDir /r "$INSTDIR\build-context"
-    RMDir /r "$INSTDIR\mcp-os"
-    RMDir /r "$INSTDIR\oauth"
-    RMDir /r "$INSTDIR\THIRD-PARTY-LICENSES"
-  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

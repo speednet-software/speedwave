@@ -7,9 +7,15 @@ mod tests {
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
     const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
+    const RESET_PS1: &str = include_str!("../windows/reset.ps1");
+    const TAURI_CONF: &str = include_str!("../tauri.conf.json");
     const TAURI_WINDOWS_CONF: &str = include_str!("../tauri.windows.conf.json");
-    const INSTALLER_PS1_SOURCES: [(&str, &str); 2] =
-        [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)];
+    const RETIRED_DIRECTORY_RESOURCE_ROOTS: [&str; 1] = ["host_exec"];
+    const INSTALLER_PS1_SOURCES: [(&str, &str); 3] = [
+        ("sweep.ps1", SWEEP_PS1),
+        ("firewall.ps1", FIREWALL_PS1),
+        ("reset.ps1", RESET_PS1),
+    ];
 
     #[test]
     fn has_all_required_hook_macros() {
@@ -62,46 +68,113 @@ mod tests {
     }
 
     #[test]
-    fn preinstall_removes_exactly_the_windows_directory_resources() {
-        let roots = windows_directory_resource_roots();
+    fn reset_ps1_clears_every_current_and_retired_directory_resource() {
+        let mut expected = windows_directory_resource_roots();
         assert!(
-            roots.contains("build-context"),
-            "tauri.windows.conf.json must bundle build-context/ as a directory resource: {roots:?}"
+            expected.contains("build-context"),
+            "tauri.windows.conf.json must bundle build-context/ as a directory resource: {expected:?}"
         );
+        expected.extend(RETIRED_DIRECTORY_RESOURCE_ROOTS.map(str::to_owned));
         assert_eq!(
-            recursive_removals(section(HOOKS, "NSIS_HOOK_PREINSTALL")),
-            roots,
-            "PREINSTALL must RMDir /r every directory resource Tauri lays down and nothing else: \
-             an /UPDATE install never runs the previous uninstaller, so files a release drops stay behind"
+            reset_trees(),
+            expected,
+            "reset.ps1 must clear every directory resource the installer lays down and every retired one: \
+             an /UPDATE or silent install never runs the previous uninstaller, so files a release drops stay behind"
         );
     }
 
     #[test]
-    fn preinstall_resets_resource_trees_after_the_sweep_inside_a_product_named_dir() {
+    fn reset_trees_cover_every_bundled_directory_asset() {
+        let trees = reset_trees();
+        let assets = speedwave_runtime::bundle::required_bundled_assets("windows")
+            .expect("the Windows bundled assets must resolve");
+        for asset in assets.iter().filter(|a| {
+            matches!(
+                a.kind,
+                speedwave_runtime::bundle::BundledAssetKind::Directory
+            )
+        }) {
+            let root = asset.path.split('/').next().unwrap_or_default();
+            assert!(
+                trees.contains(root),
+                "reset.ps1 must clear {root}, the tree holding the bundled directory {}",
+                asset.path
+            );
+        }
+    }
+
+    #[test]
+    fn reset_ps1_deletes_through_dotnet_without_following_links() {
+        assert!(
+            RESET_PS1.contains("[System.IO.Directory]::Delete($path, $true)"),
+            "reset.ps1 must delete with Directory.Delete, which does not recurse through reparse points"
+        );
+        let lower = RESET_PS1.to_lowercase();
+        for follower in ["remove-item", "rmdir", "rd /s", "get-childitem"] {
+            assert!(
+                !lower.contains(follower),
+                "reset.ps1 must not delete or walk trees with {follower}, which can follow junctions"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_ps1_resets_only_the_default_install_dir_while_the_desktop_is_stopped() {
+        for input in [
+            "$env:SPW_INSTDIR",
+            "$env:SPW_DATA_DIR",
+            "$env:SPW_DEFAULT_INSTDIR",
+        ] {
+            assert!(RESET_PS1.contains(input), "reset.ps1 must read {input}");
+        }
+        assert!(
+            RESET_PS1.contains("OrdinalIgnoreCase"),
+            "reset.ps1 must compare NTFS paths case-insensitively"
+        );
+        let stem = desktop_exe_stem();
+        assert!(
+            RESET_PS1.contains(&format!("[string]$DesktopProcess = '{stem}'"))
+                && RESET_PS1.contains("Get-Process -Name $DesktopProcess"),
+            "reset.ps1 must skip while any {stem} runs: Tauri's own name-based check could still abort the install"
+        );
+    }
+
+    #[test]
+    fn preinstall_runs_the_reset_only_after_a_successful_sweep() {
         let pre = section(HOOKS, "NSIS_HOOK_PREINSTALL");
         let sweep = pre
             .find(r#"$\"$PLUGINSDIR\sweep.ps1$\""#)
             .expect("PREINSTALL must run the sweep");
-        let leaf = pre
-            .find(r#"${GetFileName} "$INSTDIR" $0"#)
-            .expect("PREINSTALL must read the last path component of $INSTDIR");
-        let guard = pre
-            .find(r#"${If} $0 == "${PRODUCTNAME}""#)
-            .expect("PREINSTALL must gate the reset on an install dir named after the product");
-        let end = guard
-            + pre[guard..]
-                .find("${EndIf}")
-                .expect("the reset guard must be closed");
+        let failed = sweep
+            + pre[sweep..]
+                .find("${If} $0 != 0")
+                .expect("PREINSTALL must check the sweep exit code");
+        let succeeded = failed
+            + pre[failed..]
+                .find("${Else}")
+                .expect("PREINSTALL must branch on a successful sweep");
+        let default_dir = pre
+            .find(r#"SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", t "$LOCALAPPDATA\${PRODUCTNAME}")"#)
+            .expect("PREINSTALL must pass Tauri's default per-user install dir to reset.ps1");
+        let reset = pre
+            .find(r#"$\"$PLUGINSDIR\reset.ps1$\""#)
+            .expect("PREINSTALL must run the materialized $PLUGINSDIR\\reset.ps1 (via the shim)");
         assert!(
-            sweep < leaf && leaf < guard,
-            "the reset must follow the sweep, which releases handles held under $INSTDIR"
+            pre.contains("!insertmacro SPEEDWAVE_MATERIALIZE_RESET"),
+            "PREINSTALL must materialize reset.ps1"
         );
-        for (at, _) in pre.match_indices("RMDir /r") {
-            assert!(
-                guard < at && at < end,
-                "every RMDir /r in PREINSTALL must sit inside the product-named-dir guard"
-            );
-        }
+        assert!(
+            succeeded < default_dir && default_dir < reset,
+            "reset.ps1 must run only in the successful-sweep branch, after its inputs are set"
+        );
+        assert!(
+            pre.contains(r#"SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", i 0)"#),
+            "PREINSTALL must clear SPW_DEFAULT_INSTDIR after the reset"
+        );
+        assert!(
+            !pre.to_lowercase().contains("rmdir"),
+            "PREINSTALL must leave deletion to reset.ps1: NSIS RMDir /r recurses through junctions"
+        );
     }
 
     #[test]
@@ -134,7 +207,15 @@ mod tests {
 
     #[test]
     fn installer_hooks_nsh_matches_template_plus_generated_macros() {
-        let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1, RUN_HIDDEN_VBS);
+        let expected = render_expected_hooks(
+            TEMPLATE,
+            &[
+                ("sweep", "ps1", SWEEP_PS1),
+                ("firewall", "ps1", FIREWALL_PS1),
+                ("reset", "ps1", RESET_PS1),
+                ("run-hidden", "vbs", RUN_HIDDEN_VBS),
+            ],
+        );
         assert_eq!(
             HOOKS, expected,
             "installer-hooks.nsh is out of sync with its inputs — run `make generate-installer-nsh` and commit"
@@ -177,8 +258,8 @@ mod tests {
             .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
             .count();
         assert_eq!(
-            shim_calls, 3,
-            "expected 3 hooks invoking PowerShell via the wscript shim, found {shim_calls}"
+            shim_calls, 4,
+            "expected 4 PowerShell runs via the wscript shim (sweep, reset, 2x firewall), found {shim_calls}"
         );
         assert_eq!(
             HOOKS
@@ -210,9 +291,10 @@ mod tests {
 
     #[test]
     fn sweep_ps1_kills_all_three_target_categories() {
+        let stem = desktop_exe_stem();
         assert!(
-            SWEEP_PS1.contains(r"\Speedwave.exe"),
-            "sweep.ps1 must target Speedwave.exe"
+            SWEEP_PS1.contains(&format!(r"'\{stem}.exe'")),
+            "sweep.ps1 must target $INSTDIR\\{stem}.exe, the binary Tauri installs"
         );
         assert!(
             SWEEP_PS1.contains(r"\nodejs\"),
@@ -578,41 +660,54 @@ mod tests {
         conf["bundle"]["resources"]
             .as_object()
             .expect("tauri.windows.conf.json must map bundle.resources")
-            .values()
-            .filter_map(serde_json::Value::as_str)
-            .filter(|target| target.ends_with('/'))
-            .filter_map(|target| target.split('/').next())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    fn recursive_removals(hook: &str) -> std::collections::BTreeSet<String> {
-        hook.lines()
-            .filter_map(|line| line.trim().strip_prefix("RMDir /r "))
-            .map(|target| {
-                target
-                    .strip_prefix(r#""$INSTDIR\"#)
-                    .and_then(|rest| rest.strip_suffix('"'))
-                    .filter(|dir| !dir.is_empty() && !dir.contains(['\\', '/', '$']))
-                    .unwrap_or_else(|| {
-                        panic!("RMDir /r must name a single child of $INSTDIR, got {target}")
-                    })
-                    .to_owned()
+            .iter()
+            .filter_map(|(source, target)| Some((source, target.as_str()?)))
+            .filter(|(source, target)| {
+                source.ends_with('/') || source.contains('*') || target.ends_with('/')
+            })
+            .map(|(_, target)| {
+                let root = target.split(['/', '\\']).next().unwrap_or_default();
+                assert!(
+                    !matches!(root, "" | "." | ".."),
+                    "a directory resource must install under a named child of $INSTDIR, got {target}"
+                );
+                root.to_owned()
             })
             .collect()
     }
 
-    fn render_expected_hooks(
-        template: &str,
-        sweep_ps1: &str,
-        firewall_ps1: &str,
-        run_hidden_vbs: &str,
-    ) -> String {
-        let mut embed = emit_materialize_macro("sweep", "ps1", sweep_ps1);
-        embed.push('\n');
-        embed.push_str(&emit_materialize_macro("firewall", "ps1", firewall_ps1));
-        embed.push('\n');
-        embed.push_str(&emit_materialize_macro("run-hidden", "vbs", run_hidden_vbs));
+    fn reset_trees() -> std::collections::BTreeSet<String> {
+        let list = RESET_PS1
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("$trees = @("))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("reset.ps1 must list its trees on one `$trees = @(...)` line");
+        list.split(',')
+            .map(|item| {
+                let tree = item.trim().trim_matches('\'');
+                assert!(
+                    !matches!(tree, "" | "." | "..") && !tree.contains(['\\', '/', '$', '*']),
+                    "reset.ps1 must name single children of $INSTDIR, got {item}"
+                );
+                tree.to_owned()
+            })
+            .collect()
+    }
+
+    fn desktop_exe_stem() -> String {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_CONF).expect("tauri.conf.json must parse");
+        conf["mainBinaryName"]
+            .as_str()
+            .map_or_else(|| env!("CARGO_PKG_NAME").to_owned(), str::to_owned)
+    }
+
+    fn render_expected_hooks(template: &str, scripts: &[(&str, &str, &str)]) -> String {
+        let embed = scripts
+            .iter()
+            .map(|(name, ext, src)| emit_materialize_macro(name, ext, src))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let mut out = String::new();
         for line in template.lines() {

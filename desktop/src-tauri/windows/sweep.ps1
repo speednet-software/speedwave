@@ -17,7 +17,7 @@ $instDir = $instDir.TrimEnd('\')
 $dataDir = $dataDir.TrimEnd('\')
 
 $nodePrefix = $instDir + '\nodejs\'
-$desktopExe = $instDir + '\Speedwave.exe'
+$desktopExe = $instDir + '\speedwave-desktop.exe'
 
 $instance = (Split-Path $dataDir -Leaf) -replace '^\.+', ''
 if ($instance -eq 'speedwave') {

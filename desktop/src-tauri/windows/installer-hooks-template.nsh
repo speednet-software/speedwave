@@ -20,18 +20,20 @@ Var SpeedwaveDataDirOverride
   ${If} $0 != 0
     DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
     DetailPrint "Common causes: PowerShell missing, AppLocker / WDAC blocking script execution, ExecutionPolicy enforced by GPO, or a worker process the sweep could not kill."
+    DetailPrint "Speedwave PRE-INSTALL: skipped the resource reset, so files a release no longer ships may remain."
+  ${Else}
+    !insertmacro SPEEDWAVE_MATERIALIZE_RESET
+    System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", t "$LOCALAPPDATA\${PRODUCTNAME}")i'
+    nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\reset.ps1$\""`
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "Speedwave PRE-INSTALL: resource reset exited $0, so files a release no longer ships may remain."
+    ${EndIf}
+    System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", i 0)i'
   ${EndIf}
 
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", i 0)i'
-
-  ${GetFileName} "$INSTDIR" $0
-  ${If} $0 == "${PRODUCTNAME}"
-    RMDir /r "$INSTDIR\build-context"
-    RMDir /r "$INSTDIR\mcp-os"
-    RMDir /r "$INSTDIR\oauth"
-    RMDir /r "$INSTDIR\THIRD-PARTY-LICENSES"
-  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
