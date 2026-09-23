@@ -18,6 +18,8 @@ on:
       - "containers/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
+      - "scripts/check-nsis-update-reset.ps1"
+      - ".github/workflows/desktop-build.yml"
   push:
     branches: [main, dev]
     paths:
@@ -35,6 +37,8 @@ on:
       - "containers/**"
       - "scripts/bundle-build-context.sh"
       - "scripts/bundle-build-context.ps1"
+      - "scripts/check-nsis-update-reset.ps1"
+      - ".github/workflows/desktop-build.yml"
 
 permissions:
   contents: read
@@ -47,18 +51,34 @@ jobs:
   matrix-setup:
     runs-on: ubuntu-latest
     timeout-minutes: 1
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
       - name: Determine build matrix
         id: set
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'matrix={"include":[{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"}]}' >> "$GITHUB_OUTPUT"
+          macos_arm='{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"}'
+          macos_x64='{"platform":"macos-latest","args":"--target x86_64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"}'
+          windows='{"platform":"windows-latest","args":"","rust-targets":""}'
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            include="$macos_arm,$macos_x64,$windows"
           else
-            echo 'matrix={"include":[{"platform":"macos-latest","args":"--target aarch64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"macos-latest","args":"--target x86_64-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"platform":"windows-latest","args":"","rust-targets":""}]}' >> "$GITHUB_OUTPUT"
+            files="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')"
+            if grep -qE '^(desktop/src-tauri/windows/|desktop/src-tauri/tauri\.windows\.conf\.json$|scripts/check-nsis-update-reset\.ps1$|\.github/workflows/desktop-build\.yml$)' <<< "$files"; then
+              include="$macos_arm,$windows"
+            else
+              include="$macos_arm"
+            fi
           fi
+          echo "matrix={\"include\":[$include]}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: matrix-setup
