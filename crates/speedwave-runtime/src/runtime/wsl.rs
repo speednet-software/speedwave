@@ -658,11 +658,10 @@ impl ContainerRuntime for WslRuntime {
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         let distro = self.distro();
-        let result = self.runner.run(
+        super::image_inspect_verdict(self.runner.run(
             "wsl.exe",
             &["-d", distro, "--", "nerdctl", "image", "inspect", tag],
-        );
-        Ok(result.is_ok())
+        ))
     }
 
     fn system_prune(&self) -> anyhow::Result<()> {
@@ -2044,6 +2043,45 @@ mod tests {
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(rt.remove_images(&tags, true).is_ok());
+    }
+
+    fn image_inspect_key() -> String {
+        format!(
+            "wsl.exe -d {} -- nerdctl image inspect speedwave-claude:abc123",
+            consts::wsl_distro_name()
+        )
+    }
+
+    #[test]
+    fn image_exists_is_true_for_a_tag_nerdctl_inspects() {
+        let runner = MockRunner::new().with_response(&image_inspect_key(), "[{}]");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_is_false_when_nerdctl_answers_no_such_image() {
+        let runner = MockRunner::new().with_error(
+            &image_inspect_key(),
+            "wsl.exe failed: time=\"2026-09-23T12:15:48+02:00\" level=fatal \
+             msg=\"1 errors:\\nno such image: speedwave-claude:abc123\"",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(!rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_surfaces_a_wsl_transport_failure_instead_of_an_absent_image() {
+        let runner = MockRunner::new().with_error(
+            &image_inspect_key(),
+            "wsl.exe failed: Catastrophic failure\nError code: Wsl/Service/E_UNEXPECTED",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.image_exists("speedwave-claude:abc123").unwrap_err();
+        assert!(
+            err.to_string().contains("Wsl/Service/E_UNEXPECTED"),
+            "the engine error must reach the caller, got: {err}"
+        );
     }
 
     #[test]

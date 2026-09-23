@@ -176,7 +176,8 @@ impl LockedRuntime {
         self.inner.container_logs(container, tail)
     }
 
-    /// `true` if an image with this tag exists.
+    /// `Ok(true)` if an image with this tag exists; `Ok(false)` only when the engine answers that it
+    /// is absent, while an engine that cannot answer is `Err`.
     pub fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         self.inner.image_exists(tag)
     }

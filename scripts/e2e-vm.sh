@@ -839,7 +839,9 @@ fi
 
 # Kill any leftover Speedwave processes from previous runs
 pkill -f speedwave-desktop 2>/dev/null || true
-pkill -f limactl 2>/dev/null || true
+SPEEDWAVE_VM_NAME="$(basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//')"
+LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl stop "$SPEEDWAVE_VM_NAME" >/dev/null 2>&1 || true
+pkill -9 -f limactl 2>/dev/null || true
 pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
 

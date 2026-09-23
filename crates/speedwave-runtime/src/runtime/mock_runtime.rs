@@ -149,6 +149,7 @@ pub struct MockRuntimeBuilder {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
+    image_exists_failure_queue: Arc<Mutex<Vec<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
@@ -212,6 +213,7 @@ impl MockRuntimeBuilder {
             image_exists_default: false,
             image_missing_substrings: Vec::new(),
             image_exists_error: None,
+            image_exists_failure_queue: Arc::new(Mutex::new(Vec::new())),
             build_image_result: BuildResult::Ok,
             build_attempt_errors: HashMap::new(),
             build_attempts: Arc::new(Mutex::new(HashMap::new())),
@@ -287,6 +289,14 @@ impl MockRuntimeBuilder {
     /// Makes `image_exists` fail with `msg`.
     pub fn with_image_exists_error(mut self, msg: &str) -> Self {
         self.image_exists_error = Some(msg.to_string());
+        self
+    }
+    /// Push a scripted `image_exists` failure (FIFO); the normal answer resumes once the queue is empty.
+    pub fn push_image_exists_failure(self, msg: &str) -> Self {
+        self.image_exists_failure_queue
+            .lock()
+            .unwrap()
+            .push(msg.to_string());
         self
     }
     /// Default for `image_exists(tag)` when no exact-match override is set and no
@@ -417,6 +427,7 @@ impl MockRuntimeBuilder {
             image_exists_default: self.image_exists_default,
             image_missing_substrings: self.image_missing_substrings,
             image_exists_error: self.image_exists_error,
+            image_exists_failure_queue: self.image_exists_failure_queue,
             build_image_result: self.build_image_result,
             build_attempt_errors: self.build_attempt_errors,
             build_attempts: self.build_attempts,
@@ -459,6 +470,7 @@ struct MockRuntime {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
+    image_exists_failure_queue: Arc<Mutex<Vec<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
@@ -683,6 +695,17 @@ impl ContainerRuntime for MockRuntime {
     }
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        let next_failure = {
+            let mut q = self.image_exists_failure_queue.lock().unwrap();
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
+            }
+        };
+        if let Some(err) = next_failure {
+            anyhow::bail!("{err}");
+        }
         if let Some(err) = &self.image_exists_error {
             anyhow::bail!("{err}");
         }
@@ -883,6 +906,20 @@ mod tests {
             .build();
         assert!(rt.image_exists("present:1").unwrap());
         assert!(!rt.image_exists("absent:1").unwrap());
+    }
+
+    #[test]
+    fn image_exists_failure_queue_drains_in_fifo_before_the_configured_answer() {
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_image_exists("present:1", true)
+            .push_image_exists_failure("first engine error")
+            .push_image_exists_failure("second engine error")
+            .build();
+        let first = rt.image_exists("present:1").unwrap_err();
+        assert!(first.to_string().contains("first engine error"));
+        let second = rt.image_exists("present:1").unwrap_err();
+        assert!(second.to_string().contains("second engine error"));
+        assert!(rt.image_exists("present:1").unwrap());
     }
 
     #[test]

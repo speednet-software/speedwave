@@ -7,6 +7,7 @@ Rules for the clean-install rig pipeline and the engine-level bats suites (`_tes
 - The WDIO suite ends with `07-factory-reset.spec.ts`, which wipes the project, data dir, and VM/distro. Anything needing a provisioned engine or the live `e2e-test` project must run in the **live window**: Phase 3 runs wdio with `SPW_E2E_SPEC_PHASE=pre-reset` (all specs minus 07), then the bats suites, then `SPW_E2E_SPEC_PHASE=reset-only` (07 alone, so factory-reset coverage and rig cleanup are preserved). Phase 2 runs the full suite (no env set).
 - `SPW_E2E_SPEC_PHASE` is read by `desktop/e2e/wdio.conf.ts::resolveSpecs`: empty/`all` → full list, unknown values throw (fail-loud). Never position an engine-dependent step "after the suite" — that is a factory-reset machine.
 - macOS only: the app stops the Lima VM when it exits, and Lima has no on-demand start (WSL does) — the bats step must `limactl start` (bundled binary, prod `LIMA_HOME`) before the engine preflight.
+- macOS only: every app launch finds the VM settled — `run_macos_e2e` stops it through the bundled `limactl stop` (prod `LIMA_HOME`) before launching, and only then SIGKILLs stray `limactl` processes. A bare `pkill -f limactl` (SIGTERM) starts a graceful shutdown during which `limactl list` still says Running for tens of seconds while SSH resets (`kex_exchange_identification`): the reset-only launch after the bats suites then saw every engine call fail and no `project-pill`. Guard: `_tests/e2e/e2e-vm-excludes.bats`.
 
 ## Windows transport rules (all empirically verified on the rig)
 

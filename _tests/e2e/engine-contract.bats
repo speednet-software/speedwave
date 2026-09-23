@@ -40,6 +40,17 @@ teardown() {
   [[ "$output" == *"no such object $DEAD"* ]]
 }
 
+@test "image inspect of a present tag exits 0 (image_exists reads success as present)" {
+  run $ENGINE_EXEC nerdctl image inspect "$IMG"
+  [ "$status" -eq 0 ]
+}
+
+@test "image inspect of a missing tag fails non-zero with 'no such image' (the only absent verdict)" {
+  run $ENGINE_EXEC nerdctl image inspect speedwave-spwcontract-absent:0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no such image: speedwave-spwcontract-absent:0"* ]]
+}
+
 @test "flock on the names dir blocks nerdctl create (TOCTOU guard basis)" {
   script=$(cat <<EOF
 flock $STORE sleep 6 &

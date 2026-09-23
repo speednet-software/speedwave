@@ -224,6 +224,15 @@ const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duratio
 #[cfg(test)]
 const TRANSIENT_BUILD_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
 
+const ENGINE_UNREACHABLE_RETRIES: u64 =
+    crate::consts::LIMA_VM_STOP_TIMEOUT_SECS.div_ceil(crate::consts::LIMA_VM_STOP_POLL_DELAY_SECS);
+
+#[cfg(not(test))]
+const ENGINE_UNREACHABLE_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(crate::consts::LIMA_VM_STOP_POLL_DELAY_SECS);
+#[cfg(test)]
+const ENGINE_UNREACHABLE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Tags an image name with its build-input hash (`name:hash`).
 pub fn image_ref(name: &str, hash: &str) -> String {
     format!("{name}:{hash}")
@@ -250,36 +259,45 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
-/// `true` if every [`enabled_images`] image for `integrations` is present. Pass the union across
-/// projects when reconciling. Call `rt.ensure_ready()` first; do not guard with `is_available()`.
+/// `Ok(true)` if every [`enabled_images`] image for `integrations` is present. Runs `rt.ensure_ready()`
+/// first and again while the probe cannot reach the engine; an engine error is never `Ok(false)`.
 pub fn images_exist(
     rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
-) -> bool {
-    let manifest = match crate::bundle::load_current_bundle_manifest() {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("cannot load bundle manifest: {e:#}");
-            return false;
+    manifest: &crate::bundle::BundleManifest,
+) -> anyhow::Result<bool> {
+    let mut retries_left = ENGINE_UNREACHABLE_RETRIES;
+    loop {
+        rt.ensure_ready()?;
+        match probe_enabled_images(rt, integrations, manifest) {
+            Err(e) if retries_left > 0 => {
+                retries_left -= 1;
+                log::warn!(
+                    "image check could not reach the container engine, re-running ensure_ready \
+                     ({retries_left} retries left): {e}"
+                );
+                std::thread::sleep(ENGINE_UNREACHABLE_RETRY_DELAY);
+            }
+            verdict => return verdict,
         }
-    };
-    images_exist_with_manifest(rt, integrations, &manifest)
+    }
 }
 
-/// Core of [`images_exist`] taking an explicit manifest, so tests inject a build
-/// root and never read `SPEEDWAVE_RESOURCES_DIR` or the production marker.
-pub fn images_exist_with_manifest(
+fn probe_enabled_images(
     rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
     manifest: &crate::bundle::BundleManifest,
-) -> bool {
-    enabled_images(integrations).iter().all(|img| {
+) -> anyhow::Result<bool> {
+    for img in enabled_images(integrations) {
         let Ok(tag) = manifest.image_tag(img.name) else {
             log::warn!("no manifest hash for image {}", img.name);
-            return false;
+            return Ok(false);
         };
-        rt.image_exists(&tag).unwrap_or(false)
-    })
+        if !rt.image_exists(&tag)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Resolves the build-context root (`containers/`, `mcp-servers/`).
@@ -3048,21 +3066,13 @@ mod tests {
         #[test]
         fn test_images_exist_returns_true_when_all_present() {
             let rt = image_check_mock(&[]);
-            assert!(images_exist_with_manifest(
-                &rt,
-                &all_enabled(),
-                &fake_manifest()
-            ));
+            assert!(images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
         }
 
         #[test]
         fn test_images_exist_returns_false_when_any_missing() {
             let rt = image_check_mock(&["speedwave-claude"]);
-            assert!(!images_exist_with_manifest(
-                &rt,
-                &all_enabled(),
-                &fake_manifest()
-            ));
+            assert!(!images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
         }
 
         #[test]
@@ -3072,7 +3082,7 @@ mod tests {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
             };
-            assert!(images_exist_with_manifest(&rt, &cfg, &fake_manifest()));
+            assert!(images_exist(&rt, &cfg, &fake_manifest()).unwrap());
         }
 
         #[test]
@@ -3082,7 +3092,61 @@ mod tests {
                 slack: true,
                 ..ResolvedIntegrationsConfig::default()
             };
-            assert!(!images_exist_with_manifest(&rt, &cfg, &fake_manifest()));
+            assert!(!images_exist(&rt, &cfg, &fake_manifest()).unwrap());
+        }
+
+        const KEX_RESET: &str =
+            "limactl failed: kex_exchange_identification: read: Connection reset by peer";
+
+        #[test]
+        fn images_exist_re_runs_ensure_ready_after_an_engine_error() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_image_exists_failure(KEX_RESET)
+                .build();
+            assert!(images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
+            assert_eq!(handles.ensure_ready_count(), 2);
+        }
+
+        #[test]
+        fn images_exist_reports_a_missing_image_only_once_the_engine_answers() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .with_image_missing_substring(IMAGE_CLAUDE)
+                .push_image_exists_failure(KEX_RESET)
+                .build();
+            assert!(!images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap());
+            assert_eq!(handles.ensure_ready_count(), 2);
+        }
+
+        #[test]
+        fn images_exist_surfaces_the_engine_error_once_the_retry_budget_is_spent() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_error(KEX_RESET)
+                .build();
+            let err = images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap_err();
+            assert!(
+                err.to_string().contains("kex_exchange_identification"),
+                "an unreachable engine must surface as its error, got: {err}"
+            );
+            assert_eq!(
+                handles.ensure_ready_count(),
+                1 + ENGINE_UNREACHABLE_RETRIES as usize
+            );
+        }
+
+        #[test]
+        fn images_exist_does_not_probe_when_ensure_ready_fails() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_ensure_ready_error("Lima VM 'speedwave' not found")
+                .with_image_exists_error(KEX_RESET)
+                .build();
+            let err = images_exist(&rt, &all_enabled(), &fake_manifest()).unwrap_err();
+            assert!(
+                err.to_string().contains("not found"),
+                "the ensure_ready error must win over any probe, got: {err}"
+            );
+            assert_eq!(handles.ensure_ready_count(), 1);
         }
     }
 

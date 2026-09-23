@@ -538,11 +538,9 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             }
         }
 
-        match rt.ensure_ready() {
-            Ok(()) => {
-                if build::images_exist(&rt, &active_integrations) {
-                    return Ok(());
-                }
+        match build::images_exist(&rt, &active_integrations, &manifest) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
                 log::warn!("bundle unchanged but images missing, forcing rebuild");
                 prepare_rebuild(&mut state, app_handle)?;
             }
@@ -2593,6 +2591,30 @@ mod tests {
         assert!(
             repair.contains("prepare_rebuild(&mut state, app_handle)?"),
             "missing images must force a rebuild via prepare_rebuild"
+        );
+    }
+
+    #[test]
+    fn reconcile_does_not_rebuild_when_the_engine_cannot_answer_the_image_check() {
+        let source = include_str!("reconcile.rs");
+        let inner_fn = source
+            .split("fn reconcile_bundle_update_inner(")
+            .nth(1)
+            .expect("reconcile_bundle_update_inner function should exist");
+        let check = inner_fn
+            .split("match build::images_exist(&rt, &active_integrations, &manifest)")
+            .nth(1)
+            .expect("an unchanged bundle must match on the image check verdict");
+        let engine_error_arm = check
+            .split("Err(e) =>")
+            .nth(1)
+            .expect("the image check must handle an engine that cannot answer");
+        let arm_end = engine_error_arm
+            .find("return Ok(())")
+            .expect("an engine error must end the reconcile, not fall through to a rebuild");
+        assert!(
+            !engine_error_arm[..arm_end].contains("prepare_rebuild"),
+            "an engine error is not a missing image and must not force a rebuild"
         );
     }
 

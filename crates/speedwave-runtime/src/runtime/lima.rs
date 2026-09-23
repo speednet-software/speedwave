@@ -688,7 +688,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         self.require_running()?;
-        let result = self.runner.run(
+        super::image_inspect_verdict(self.runner.run(
             "limactl",
             &[
                 "shell",
@@ -700,8 +700,7 @@ impl ContainerRuntime for LimaRuntime {
                 "inspect",
                 tag,
             ],
-        );
-        Ok(result.is_ok())
+        ))
     }
 
     fn system_prune(&self) -> anyhow::Result<()> {
@@ -2596,6 +2595,65 @@ mod tests {
         assert!(
             err.to_string().contains("not running"),
             "require_running error should propagate, got: {err}"
+        );
+    }
+
+    fn image_inspect_key(tag: &str) -> String {
+        format!(
+            "limactl shell {} -- sudo nerdctl image inspect {tag}",
+            consts::lima_vm_name()
+        )
+    }
+
+    #[test]
+    fn image_exists_is_true_for_a_tag_nerdctl_inspects() {
+        let runner = mock_runner_with_vm_running()
+            .with_response(&image_inspect_key("speedwave-claude:abc123"), "[{}]");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_is_false_when_nerdctl_answers_no_such_image() {
+        let runner = mock_runner_with_vm_running().with_error(
+            &image_inspect_key("speedwave-claude:abc123"),
+            "limactl failed: time=\"2026-09-23T12:15:48+02:00\" level=fatal \
+             msg=\"1 errors:\\nno such image: speedwave-claude:abc123\"",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(!rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_surfaces_an_ssh_failure_instead_of_an_absent_image() {
+        let runner = mock_runner_with_vm_running().with_error(
+            &image_inspect_key("speedwave-claude:abc123"),
+            "limactl failed: kex_exchange_identification: read: Connection reset by peer",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.image_exists("speedwave-claude:abc123").unwrap_err();
+        assert!(
+            err.to_string().contains("kex_exchange_identification"),
+            "the engine error must reach the caller, got: {err}"
+        );
+    }
+
+    #[test]
+    fn image_exists_fails_when_the_vm_is_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(
+                &format!(
+                    "limactl list --format {{{{.Status}}}} {}",
+                    consts::lima_vm_name()
+                ),
+                "Stopped",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.image_exists("speedwave-claude:abc123").unwrap_err();
+        assert!(
+            err.to_string().contains("not running"),
+            "a stopped VM cannot answer for its images, got: {err}"
         );
     }
 
