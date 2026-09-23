@@ -183,10 +183,10 @@ describe('withClientValidation (Family B)', () => {
 });
 
 describe('withDeclaredParams', () => {
-  const tool = (properties: Record<string, unknown>): Tool => ({
+  const tool = (properties: Record<string, unknown>, required?: string[]): Tool => ({
     name: 'updateThing',
     description: 'Update a thing',
-    inputSchema: { type: 'object', properties },
+    inputSchema: { type: 'object', properties, ...(required ? { required } : {}) },
   });
   const ok = { content: [{ type: 'text' as const, text: 'ok' }] };
 
@@ -217,18 +217,61 @@ describe('withDeclaredParams', () => {
     expect(handler).not.toHaveBeenCalled();
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toBe(
-      'Error: Invalid version_id (received: 999999). updateThing does not accept this parameter, ' +
+      'Error: Invalid version_id. updateThing does not accept this parameter, ' +
         'so the call was rejected and nothing was sent. Accepted parameters: id, title. ' +
         'Retry with accepted parameters only.'
     );
   });
 
-  it('names every undeclared argument with its value', async () => {
+  it('names every undeclared argument without echoing any value', async () => {
     const handler = vi.fn();
-    const res = await withDeclaredParams(tool({ id: {} }), handler)({ id: 1, a: 'x', b: null });
+    const res = await withDeclaredParams(
+      tool({ id: {} }),
+      handler
+    )({
+      id: 1,
+      a: 'jan.kowalski@example.com',
+      b: null,
+    });
     expect(handler).not.toHaveBeenCalled();
-    expect(res.content[0].text).toContain('Invalid a, b (received: {"a":"x","b":null}).');
+    expect(res.content[0].text).toContain('Invalid a, b.');
     expect(res.content[0].text).toContain('does not accept these parameters');
+    expect(res.content[0].text).not.toContain('jan.kowalski');
+  });
+
+  it('names at most 20 undeclared arguments and counts the rest', async () => {
+    const params = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`k${i}`, i]));
+    const res = await withDeclaredParams(tool({}), vi.fn())(params);
+    expect(res.content[0].text).toContain('k19 and 5 more.');
+    expect(res.content[0].text).not.toContain('k20');
+  });
+
+  it('rejects a call missing a required argument without calling the handler', async () => {
+    const handler = vi.fn();
+    const res = await withDeclaredParams(tool({ identifier: {} }, ['identifier']), handler)({});
+    expect(handler).not.toHaveBeenCalled();
+    expect(res.content[0].text).toBe(
+      'Error: Invalid identifier (received: undefined). updateThing requires identifier, ' +
+        'so the call was rejected and nothing was sent.'
+    );
+  });
+
+  it.each([null, ''])('treats a required argument set to %j as missing', async (value) => {
+    const handler = vi.fn();
+    const res = await withDeclaredParams(tool({ id: {} }, ['id']), handler)({ id: value });
+    expect(handler).not.toHaveBeenCalled();
+    expect(res.content[0].text).toContain('updateThing requires id');
+  });
+
+  it('accepts a required argument set to 0 or false', async () => {
+    const handler = vi.fn().mockResolvedValue(ok);
+    const wrapped = withDeclaredParams(tool({ n: {}, f: {} }, ['n', 'f']), handler);
+    expect(await wrapped({ n: 0, f: false })).toBe(ok);
+  });
+
+  it('reports an undeclared argument before a missing required one', async () => {
+    const res = await withDeclaredParams(tool({ id: {} }, ['id']), vi.fn())({ extra: 1 });
+    expect(res.content[0].text).toContain('Invalid extra.');
   });
 
   it('says no parameters are accepted by a tool that declares none', async () => {
@@ -248,6 +291,6 @@ describe('withDeclaredParams', () => {
     const handler = vi.fn();
     const res = await withDeclaredParams(tool({ issue_id: {} }), handler)({ Issue_ID: 5 });
     expect(handler).not.toHaveBeenCalled();
-    expect(res.content[0].text).toContain('Invalid Issue_ID (received: 5)');
+    expect(res.content[0].text).toContain('Invalid Issue_ID.');
   });
 });

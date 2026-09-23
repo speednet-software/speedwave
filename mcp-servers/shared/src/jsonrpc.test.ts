@@ -618,9 +618,14 @@ describe('jsonrpc', () => {
         expect(toolHandler).toHaveBeenCalledWith({});
       });
 
-      it.each(['a string', 42, true, [1, 2, 3]])(
-        'defaults non-object arguments (%j) to empty object',
-        async (invalidArgs) => {
+      it.each([
+        ['me', 'a string'],
+        [42, 'a number'],
+        [true, 'a boolean'],
+        [[1, 2, 3], 'an array'],
+      ])(
+        'rejects non-object arguments (%j) instead of running the tool without them',
+        async (invalidArgs, received) => {
           const tool = {
             name: 'args_tool',
             description: 'Tool with args',
@@ -638,10 +643,35 @@ describe('jsonrpc', () => {
             params: { name: 'args_tool', arguments: invalidArgs },
           };
           const result = await handler.processRequest(request, null);
-          expect(result.response!.error).toBeUndefined();
-          expect(toolHandler).toHaveBeenCalledWith({});
+          expect(result.response!.error?.code).toBe(JSONRPCErrorCode.InvalidParams);
+          expect(result.response!.error?.message).toContain(`received ${received}`);
+          expect(toolHandler).not.toHaveBeenCalled();
         }
       );
+
+      it('treats null arguments like missing ones', async () => {
+        const tool = {
+          name: 'null_args_tool',
+          description: 'No args',
+          inputSchema: { type: 'object' as const, properties: {} },
+        };
+        const toolHandler = vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'OK' }],
+        });
+        handler.registerTool(tool, toolHandler);
+
+        const result = await handler.processRequest(
+          {
+            jsonrpc: '2.0',
+            method: 'tools/call',
+            id: 1,
+            params: { name: 'null_args_tool', arguments: null },
+          },
+          null
+        );
+        expect(result.response!.error).toBeUndefined();
+        expect(toolHandler).toHaveBeenCalledWith({});
+      });
     });
 
     describe('internal error sanitization', () => {

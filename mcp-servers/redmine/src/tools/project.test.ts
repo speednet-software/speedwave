@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createProjectTools } from './project-tools.js';
+import { expectEmittedKeysDeclared } from './test-helpers.js';
 import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
@@ -504,9 +505,14 @@ describe('Project Tools', () => {
       id: 87,
       project: { id: 1972, name: 'Auditor' },
       name: '[W10] Week 10',
+      description: '',
       status: 'open',
       due_date: null,
       sharing: 'none',
+      wiki_page_title: null,
+      custom_fields: [{ id: 4, name: 'Sprint goal', value: 'Reports' }],
+      created_on: '2026-02-20T09:00:00Z',
+      updated_on: '2026-02-20T09:00:00Z',
     };
 
     const listVersions = () =>
@@ -525,17 +531,17 @@ describe('Project Tools', () => {
       });
     });
 
-    it('lists the versions of the requested project with only declared keys', async () => {
+    it('declares every key of a version as Redmine returns it', async () => {
       mockClient.listVersions.mockResolvedValue({ versions: [version], total_count: 1 });
       const def = listVersions();
 
-      const result = await def.handler({ project_id: 'auditor-rpe' });
+      const emitted = expectEmittedKeysDeclared(
+        def.tool,
+        await def.handler({ project_id: 'auditor-rpe' })
+      );
 
       expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
-      const emitted = JSON.parse((result.content[0] as { text: string }).text);
       expect(emitted).toEqual({ versions: [version], total_count: 1 });
-      const declared = Object.keys(def.tool.outputSchema!.properties as Record<string, unknown>);
-      expect(declared).toEqual(expect.arrayContaining(Object.keys(emitted)));
       const itemProps = (
         def.tool.outputSchema!.properties as Record<
           string,
@@ -543,6 +549,14 @@ describe('Project Tools', () => {
         >
       ).versions.items.properties;
       expect(Object.keys(itemProps)).toEqual(expect.arrayContaining(Object.keys(version)));
+    });
+
+    it('passes a numeric project id through unchanged', async () => {
+      mockClient.listVersions.mockResolvedValue({ versions: [], total_count: 0 });
+
+      await listVersions().handler({ project_id: 1972 });
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith(1972);
     });
 
     it('defaults to the configured project when project_id is omitted', async () => {

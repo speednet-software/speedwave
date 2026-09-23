@@ -171,7 +171,7 @@ const searchProjectIdsTool: Tool = {
 const listVersionsTool: Tool = {
   name: 'listVersions',
   description:
-    "List a project's versions (target versions, e.g. a milestone or a planning week), including versions shared from other projects. Pass a version's id as fixed_version_id to createIssue, updateIssue, or listIssueIds. project_id defaults to the configured project; if scoped to a single project, a different project_id fails with a scope error.",
+    "List a project's versions (target versions, e.g. a milestone or a planning week) in every status, including versions shared from other projects. Only a version whose status is open can be assigned: pass its id as fixed_version_id to createIssue or updateIssue; any id also filters listIssueIds. project_id defaults to the configured project and accepts its numeric ID or identifier; if scoped to a single project, another project fails with a scope error.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: [
@@ -190,7 +190,7 @@ const listVersionsTool: Tool = {
     type: 'object',
     properties: {
       project_id: {
-        type: 'string',
+        type: ['string', 'number'],
         description:
           'Project ID or identifier — obtained from listProjectIds; defaults to the configured project',
       },
@@ -203,16 +203,24 @@ const listVersionsTool: Tool = {
         type: 'object',
         properties: {
           id: { type: 'number', description: 'Version ID, the value fixed_version_id takes' },
-          name: { type: 'string' },
-          status: { type: 'string', enum: ['open', 'locked', 'closed'] },
-          due_date: { type: ['string', 'null'], description: 'YYYY-MM-DD, or null' },
-          sharing: { type: 'string' },
-          description: { type: 'string' },
           project: {
             type: 'object',
             description: 'Owning project; differs from project_id for a shared version',
             properties: { id: { type: 'number' }, name: { type: 'string' } },
           },
+          name: { type: 'string' },
+          description: { type: 'string' },
+          status: {
+            type: 'string',
+            enum: ['open', 'locked', 'closed'],
+            description: 'Only open versions can be assigned',
+          },
+          due_date: { type: ['string', 'null'], description: 'YYYY-MM-DD, or null' },
+          sharing: { type: 'string' },
+          wiki_page_title: { type: ['string', 'null'] },
+          custom_fields: { type: 'array', items: { type: 'object' } },
+          created_on: { type: 'string' },
+          updated_on: { type: 'string' },
         },
       },
     },
@@ -297,7 +305,7 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
     {
       tool: listVersionsTool,
       handler: async (params) => {
-        const { project_id } = params as { project_id?: string };
+        const { project_id } = params as { project_id?: string | number };
         const target = project_id || client.getProjectScope();
         if (!target) {
           return teachingErrorResult({

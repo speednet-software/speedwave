@@ -138,33 +138,41 @@ export function withClientValidation<C, T>(
   };
 }
 
+const MAX_NAMED_UNDECLARED = 20;
+
 /**
- * Wrap a handler so a call carrying an argument its tool's `inputSchema` does not declare is
- * rejected with a teaching error before the handler runs, instead of being silently dropped.
- * @param tool - Tool whose `inputSchema.properties` names every argument the handler accepts.
- * @param handler - Handler invoked only when every argument is declared.
+ * Wrap a handler so an argument its tool's `inputSchema` does not declare, or a missing required
+ * one, is rejected with a teaching error before the handler runs instead of being silently dropped.
+ * @param tool - Tool whose `inputSchema` names every argument the handler accepts and requires.
+ * @param handler - Handler invoked only when every argument is declared and every required one set.
  */
 export function withDeclaredParams(tool: Tool, handler: ToolHandler): ToolHandler {
   const declared = Object.keys(tool.inputSchema.properties);
   const accepted = new Set(declared);
+  const required = tool.inputSchema.required ?? [];
   return async (...args) => {
     const [params] = args;
     const undeclared = Object.keys(params).filter((name) => !accepted.has(name));
-    if (undeclared.length === 0) {
-      return handler(...args);
+    if (undeclared.length > 0) {
+      const extra = undeclared.length - MAX_NAMED_UNDECLARED;
+      const named = undeclared.slice(0, MAX_NAMED_UNDECLARED).join(', ');
+      const subject = undeclared.length === 1 ? 'this parameter' : 'these parameters';
+      return teachingErrorResult({
+        paramName: extra > 0 ? `${named} and ${extra} more` : named,
+        nextStep:
+          `${tool.name} does not accept ${subject}, so the call was rejected and nothing was sent. ` +
+          `Accepted parameters: ${declared.length > 0 ? declared.join(', ') : 'none'}. ` +
+          'Retry with accepted parameters only.',
+      });
     }
-    const received =
-      undeclared.length === 1
-        ? params[undeclared[0]]
-        : Object.fromEntries(undeclared.map((name) => [name, params[name]]));
-    const subject = undeclared.length === 1 ? 'this parameter' : 'these parameters';
-    return teachingErrorResult({
-      paramName: undeclared.join(', '),
-      received,
-      nextStep:
-        `${tool.name} does not accept ${subject}, so the call was rejected and nothing was sent. ` +
-        `Accepted parameters: ${declared.length > 0 ? declared.join(', ') : 'none'}. ` +
-        'Retry with accepted parameters only.',
-    });
+    const missing = required.find((name) => isMissingRequired(params[name]));
+    if (missing !== undefined) {
+      return teachingErrorResult({
+        paramName: missing,
+        received: params[missing],
+        nextStep: `${tool.name} requires ${missing}, so the call was rejected and nothing was sent.`,
+      });
+    }
+    return handler(...args);
   };
 }

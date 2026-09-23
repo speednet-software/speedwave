@@ -265,9 +265,6 @@ export interface RedmineIssue {
    * Assigned user (optional).
    */
   assigned_to?: { id: number; name: string };
-  /**
-   * Target version; Redmine omits the key while none is set.
-   */
   fixed_version?: { id: number; name: string };
   /**
    * Issue title/subject.
@@ -454,20 +451,17 @@ export interface RedmineUser {
    */
   id: number;
   /**
-   * Login username; absent on project membership rows.
+   * Login username.
    */
   login?: string;
   /**
-   * First name; absent on project membership rows.
+   * First name.
    */
   firstname?: string;
   /**
-   * Last name; absent on project membership rows.
+   * Last name.
    */
   lastname?: string;
-  /**
-   * Display name, the only name project membership rows carry.
-   */
   name?: string;
   /**
    * Email address (optional).
@@ -483,8 +477,7 @@ export interface RedmineUser {
   updated_on?: string;
 }
 
-/** The user fields a tool may return; every other key Redmine sends (api_key, twofa_scheme, passwd_changed_on, ...) is dropped. */
-const PUBLIC_USER_FIELDS = [
+export const PUBLIC_USER_FIELDS = [
   'id',
   'login',
   'firstname',
@@ -495,10 +488,6 @@ const PUBLIC_USER_FIELDS = [
   'updated_on',
 ] as const;
 
-/**
- * Copy only {@link PUBLIC_USER_FIELDS} out of a raw Redmine user record.
- * @param user - User object as Redmine returned it.
- */
 function toPublicUser(user: Record<string, unknown>): RedmineUser {
   return Object.fromEntries(
     PUBLIC_USER_FIELDS.filter((field) => Object.hasOwn(user, field)).map((field) => [
@@ -509,38 +498,21 @@ function toPublicUser(user: Record<string, unknown>): RedmineUser {
 }
 
 /**
- * Redmine version (target version of an issue, e.g. a milestone or a planning week).
+ * Redmine version: an issue's target version, e.g. a milestone or a planning week.
  * @interface RedmineVersion
  */
 export interface RedmineVersion {
-  /**
-   * Version ID, the value createIssue/updateIssue take as fixed_version_id.
-   */
   id: number;
-  /**
-   * Project that owns the version; a shared version belongs to another project.
-   */
   project: { id: number; name: string };
-  /**
-   * Version name.
-   */
   name: string;
-  /**
-   * Version description.
-   */
   description?: string;
-  /**
-   * Version status: open, locked, or closed.
-   */
-  status: string;
-  /**
-   * Due date (YYYY-MM-DD), or null when not set.
-   */
+  status: 'open' | 'locked' | 'closed';
   due_date?: string | null;
-  /**
-   * Sharing scope: none, descendants, hierarchy, tree, or system.
-   */
   sharing: string;
+  wiki_page_title?: string | null;
+  custom_fields?: Array<{ id: number; name: string; value: unknown }>;
+  created_on: string;
+  updated_on: string;
 }
 
 /**
@@ -692,10 +664,7 @@ interface IssuePayload {
    * Estimated hours.
    */
   estimated_hours?: number;
-  /**
-   * Target version ID; null clears the target version on update.
-   */
-  fixed_version_id?: number | null;
+  fixed_version_id?: number;
   /**
    * Update notes/comment.
    */
@@ -846,6 +815,16 @@ function sanitizeTextile(textile: string): string {
   return result;
 }
 
+function pathSegment(value: string | number): string {
+  const segment = encodeURIComponent(String(value));
+  if (segment === '' || segment === '.' || segment === '..') {
+    throw new Error(
+      `Invalid identifier ${JSON.stringify(segment)}: pass a numeric ID or a project identifier.`
+    );
+  }
+  return segment;
+}
+
 /** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
 export type ErrorContext = Record<string, string | number>;
 
@@ -891,9 +870,6 @@ function formatNotFoundError(context?: ErrorContext): string {
 /** Field-name prefixes (case-insensitive, matched at the start of a message) that map to a hint. */
 const ASSIGNEE_HINT_PREFIXES = ['assigned to', 'assignee'];
 
-/** Redmine's label for fixed_version_id in a validation message, matched like {@link ASSIGNEE_HINT_PREFIXES}. */
-const VERSION_HINT_PREFIX = 'target version';
-
 /**
  * Check whether a lowercased message starts with `field` as a whole word, so "Qa status" never matches "status".
  * @param messageLower - Lowercased message to check.
@@ -918,16 +894,15 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
     ? errors.filter((e): e is string => typeof e === 'string').map((e) => e.toLowerCase())
     : [];
 
-  if (messages.some((m) => ASSIGNEE_HINT_PREFIXES.some((p) => startsWithFieldName(m, p)))) {
-    return `${prefixed}. Call resolveUser or listUsers to find a valid assignee.`;
-  }
-  if (messages.some((m) => startsWithFieldName(m, VERSION_HINT_PREFIX))) {
-    return `${prefixed}. Call ${TOOL_NAMES.LIST_VERSIONS} for the versions this issue's project can use.`;
-  }
-  if (messages.some((m) => MAPPABLE_FIELDS.some((field) => startsWithFieldName(m, field)))) {
-    return `${prefixed}. Call getMappings for valid values in this project.`;
-  }
-  return prefixed;
+  const names = (fields: readonly string[]) =>
+    messages.some((m) => fields.some((field) => startsWithFieldName(m, field)));
+  const hints = [
+    names(ASSIGNEE_HINT_PREFIXES) && 'Call resolveUser or listUsers to find a valid assignee.',
+    (context?.fixed_version_id !== undefined || names(['target version'])) &&
+      `If the error is about the target version, call ${TOOL_NAMES.LIST_VERSIONS} and pick a version whose status is open.`,
+    names(MAPPABLE_FIELDS) && 'Call getMappings for valid values in this project.',
+  ].filter((hint): hint is string => typeof hint === 'string');
+  return hints.length > 0 ? `${prefixed}. ${hints.join(' ')}` : prefixed;
 }
 
 /** Redmine API client for issues, time entries, journals, users, and projects. */
@@ -1044,7 +1019,7 @@ export class RedmineClient {
     }
 
     const fetchPromise = this.client
-      .get(`/projects/${scope}.json`)
+      .get(`/projects/${pathSegment(scope)}.json`)
       .then((response) => response.data.project.id as number)
       .catch((err) => {
         this._scopedProjectIdPromise = null;
@@ -1105,7 +1080,7 @@ export class RedmineClient {
     options: {
       project_id?: string;
       assigned_to_id?: string | number;
-      status_id?: string;
+      status_id?: string | number;
       tracker_id?: number;
       priority_id?: number;
       fixed_version_id?: number;
@@ -1145,7 +1120,7 @@ export class RedmineClient {
       params.include = options.include.join(',');
     }
 
-    const response = await this.client.get(`/issues/${issueId}.json`, { params });
+    const response = await this.client.get(`/issues/${pathSegment(issueId)}.json`, { params });
     const issue = response.data.issue;
 
     const scope = this.getProjectScope();
@@ -1217,6 +1192,9 @@ export class RedmineClient {
     fixed_version_id?: number;
   }): Promise<RedmineIssue> {
     this._enforceProjectId(options.project_id);
+    if (options.parent_issue_id) {
+      await this._ensureIssueInScope(options.parent_issue_id);
+    }
 
     const trimmedSubject = options.subject.trim();
     if (!trimmedSubject) {
@@ -1256,7 +1234,7 @@ export class RedmineClient {
    * @param options.assigned_to_id - New assigned user ID.
    * @param options.parent_issue_id - New parent issue ID.
    * @param options.estimated_hours - New estimated hours.
-   * @param options.fixed_version_id - New target version ID; null clears it.
+   * @param options.fixed_version_id - New target version ID.
    * @param options.notes - Update notes/comment.
    */
   async updateIssue(
@@ -1271,13 +1249,16 @@ export class RedmineClient {
       assigned_to_id?: number;
       parent_issue_id?: number;
       estimated_hours?: number;
-      fixed_version_id?: number | null;
+      fixed_version_id?: number;
       notes?: string;
     }
   ): Promise<RedmineIssue> {
     await this._ensureIssueInScope(issueId);
     if (options.project_id) {
       this._enforceProjectId(options.project_id);
+    }
+    if (options.parent_issue_id) {
+      await this._ensureIssueInScope(options.parent_issue_id);
     }
 
     const issue: Partial<IssuePayload> = {};
@@ -1293,10 +1274,16 @@ export class RedmineClient {
     if (options.assigned_to_id !== undefined) issue.assigned_to_id = options.assigned_to_id;
     if (options.parent_issue_id !== undefined) issue.parent_issue_id = options.parent_issue_id;
     if (options.estimated_hours !== undefined) issue.estimated_hours = options.estimated_hours;
-    if (options.fixed_version_id !== undefined) issue.fixed_version_id = options.fixed_version_id;
+    if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
     if (options.notes) issue.notes = sanitizeTextile(options.notes);
 
-    await this.client.put(`/issues/${issueId}.json`, { issue });
+    if (Object.keys(issue).length === 0) {
+      throw new Error(
+        `Nothing to update on issue ${issueId}: every field given was empty or unset, so no request was sent to Redmine. Pass at least one field with a value.`
+      );
+    }
+
+    await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue });
 
     return this.showIssue(issueId);
   }
@@ -1308,7 +1295,7 @@ export class RedmineClient {
    */
   async commentIssue(issueId: number, comment: string): Promise<void> {
     await this._ensureIssueInScope(issueId);
-    await this.client.put(`/issues/${issueId}.json`, {
+    await this.client.put(`/issues/${pathSegment(issueId)}.json`, {
       issue: { notes: sanitizeTextile(comment) },
     });
   }
@@ -1405,7 +1392,7 @@ export class RedmineClient {
   ): Promise<void> {
     const scope = this.getProjectScope();
     if (scope) {
-      const response = await this.client.get(`/time_entries/${timeEntryId}.json`);
+      const response = await this.client.get(`/time_entries/${pathSegment(timeEntryId)}.json`);
       const entry = response.data.time_entry as RedmineTimeEntry;
       const scopedNumericId = await this._resolveProjectNumericId(scope);
       if (entry.project.id !== scopedNumericId) {
@@ -1419,7 +1406,7 @@ export class RedmineClient {
     if (options.activity_id) time_entry.activity_id = options.activity_id;
     if (options.comments !== undefined) time_entry.comments = options.comments;
 
-    await this.client.put(`/time_entries/${timeEntryId}.json`, { time_entry });
+    await this.client.put(`/time_entries/${pathSegment(timeEntryId)}.json`, { time_entry });
   }
 
   /**
@@ -1439,9 +1426,12 @@ export class RedmineClient {
    */
   async updateJournal(issueId: number, journalId: number, notes: string): Promise<void> {
     await this._ensureIssueInScope(issueId);
-    await this.client.put(`/issues/${issueId}/journals/${journalId}.json`, {
-      journal: { notes: sanitizeTextile(notes) },
-    });
+    await this.client.put(
+      `/issues/${pathSegment(issueId)}/journals/${pathSegment(journalId)}.json`,
+      {
+        journal: { notes: sanitizeTextile(notes) },
+      }
+    );
   }
 
   /**
@@ -1451,7 +1441,9 @@ export class RedmineClient {
    */
   async deleteJournal(issueId: number, journalId: number): Promise<void> {
     await this._ensureIssueInScope(issueId);
-    await this.client.delete(`/issues/${issueId}/journals/${journalId}.json`);
+    await this.client.delete(
+      `/issues/${pathSegment(issueId)}/journals/${pathSegment(journalId)}.json`
+    );
   }
 
   /** Get the current authenticated user's public profile, never the account's API key. */
@@ -1467,7 +1459,9 @@ export class RedmineClient {
   async listUsers(projectId?: string): Promise<RedmineUser[]> {
     const enforcedProjectId = this._enforceProjectId(projectId);
     if (enforcedProjectId) {
-      const response = await this.client.get(`/projects/${enforcedProjectId}/memberships.json`);
+      const response = await this.client.get(
+        `/projects/${pathSegment(enforcedProjectId)}/memberships.json`
+      );
       return (response.data.memberships as Array<{ user?: Record<string, unknown> }>)
         .flatMap((m) => (m.user ? [m.user] : []))
         .map(toPublicUser);
@@ -1477,17 +1471,30 @@ export class RedmineClient {
   }
 
   /**
-   * List the versions a project can assign as an issue's target version, shared versions included.
-   * @param projectId - Project ID or identifier.
-   * @throws {ProjectScopeError} When projectId is not the configured project.
+   * List every version a project sees, its own and shared ones in any status; only open ones are assignable.
+   * @param projectId - Project ID or identifier; the configured project may be named either way.
+   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
    */
   async listVersions(
-    projectId: string
+    projectId: string | number
   ): Promise<{ versions: RedmineVersion[]; total_count: number }> {
-    const target = this._enforceProjectId(projectId) ?? projectId;
-    const response = await this.client.get(`/projects/${encodeURIComponent(target)}/versions.json`);
+    const target = String(projectId);
+    const scope = this.getProjectScope();
+    if (scope && target !== scope && !(await this._namesScopedProject(scope, target))) {
+      throw new ProjectScopeError(scope, target);
+    }
+    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
     const versions = (response.data.versions ?? []) as RedmineVersion[];
     return { versions, total_count: response.data.total_count ?? versions.length };
+  }
+
+  private async _namesScopedProject(scope: string, target: string): Promise<boolean> {
+    const scopedId = await this._resolveProjectNumericId(scope);
+    if (/^\d+$/.test(target)) {
+      return Number(target) === scopedId;
+    }
+    const response = await this.client.get(`/projects/${pathSegment(target)}.json`);
+    return response.data.project?.id === scopedId;
   }
 
   /**
@@ -1495,6 +1502,9 @@ export class RedmineClient {
    * @param identifier - User identifier ('me', user ID, or username).
    */
   async resolveUser(identifier: string): Promise<number | null> {
+    if (typeof identifier !== 'string' || identifier.trim() === '') {
+      return null;
+    }
     if (identifier === 'me') {
       const user = await this.getCurrentUser();
       return user.id;
@@ -1578,7 +1588,7 @@ export class RedmineClient {
       params.include = options.include.join(',');
     }
 
-    const response = await this.client.get(`/projects/${projectId}.json`, { params });
+    const response = await this.client.get(`/projects/${pathSegment(projectId)}.json`, { params });
     const project = response.data.project;
 
     const scope = this.getProjectScope();
@@ -1653,7 +1663,7 @@ export class RedmineClient {
    */
   async listRelations(issueId: number): Promise<{ relations: IssueRelation[] }> {
     await this._ensureIssueInScope(issueId);
-    const response = await this.client.get(`/issues/${issueId}/relations.json`);
+    const response = await this.client.get(`/issues/${pathSegment(issueId)}/relations.json`);
     return { relations: response.data.relations || [] };
   }
 
@@ -1687,9 +1697,12 @@ export class RedmineClient {
       relation.delay = options.delay;
     }
 
-    const response = await this.client.post(`/issues/${options.issue_id}/relations.json`, {
-      relation,
-    });
+    const response = await this.client.post(
+      `/issues/${pathSegment(options.issue_id)}/relations.json`,
+      {
+        relation,
+      }
+    );
     return { relation: response.data.relation };
   }
 
@@ -1700,11 +1713,11 @@ export class RedmineClient {
   async deleteRelation(relationId: number): Promise<void> {
     const scope = this.getProjectScope();
     if (scope) {
-      const response = await this.client.get(`/relations/${relationId}.json`);
+      const response = await this.client.get(`/relations/${pathSegment(relationId)}.json`);
       const rel = response.data.relation as IssueRelation;
       await this._ensureIssueInScope(rel.issue_id);
     }
-    await this.client.delete(`/relations/${relationId}.json`);
+    await this.client.delete(`/relations/${pathSegment(relationId)}.json`);
   }
 
   /**

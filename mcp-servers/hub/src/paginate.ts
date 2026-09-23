@@ -44,7 +44,6 @@ type PaginatedResponse<T> = {
   issues?: T[];
   /** Redmine time entries */
   time_entries?: T[];
-  /** Redmine project versions */
   versions?: T[];
   /** Redmine/GitLab projects */
   projects?: T[];
