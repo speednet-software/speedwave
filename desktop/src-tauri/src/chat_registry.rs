@@ -2,10 +2,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use speedwave_runtime::resources::MAX_CHAT_TABS;
+
 use crate::chat::ChatSession;
 
 pub(crate) const MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB: &str =
     "conversation is already open in another tab";
+
+pub(crate) const MSG_TAB_LIMIT_REACHED: &str = "tab limit reached";
 
 pub(crate) fn validate_tab_id(tab_id: &str) -> Result<(), String> {
     crate::history::validate_session_id(tab_id).map_err(|e| e.to_string())
@@ -33,9 +37,12 @@ impl ChatSessions {
         self.tabs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn prepare(&self, tab_id: &str, project: &str) -> TabEntry {
+    pub(crate) fn prepare(&self, tab_id: &str, project: &str) -> Result<TabEntry, String> {
         let (entry, replaced) = {
             let mut tabs = self.lock_tabs();
+            if !tabs.contains_key(tab_id) && tabs.len() >= MAX_CHAT_TABS as usize {
+                return Err(MSG_TAB_LIMIT_REACHED.to_string());
+            }
             let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
             match tabs.get_mut(tab_id) {
                 Some(entry) if entry.project == project => {
@@ -76,7 +83,7 @@ impl ChatSessions {
                 }
             }
         }
-        entry
+        Ok(entry)
     }
 
     pub(crate) fn entry(&self, tab_id: &str) -> Option<TabEntry> {
@@ -144,9 +151,15 @@ pub(crate) mod test_support {
 
     pub(crate) const TEST_TAB_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test support: a full registry here is a broken fixture"
+    )]
     pub(crate) fn registry_with(project: &str) -> (SharedChatSessions, TabEntry) {
         let reg: SharedChatSessions = Arc::new(ChatSessions::default());
-        let entry = reg.prepare(TEST_TAB_ID, project);
+        let entry = reg
+            .prepare(TEST_TAB_ID, project)
+            .expect("an empty registry must accept the first tab");
         (reg, entry)
     }
 }
@@ -162,7 +175,47 @@ mod tests {
 
     const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const TAB_B: &str = "550e8400-e29b-41d4-a716-446655440001";
+    const TAB_C: &str = "550e8400-e29b-41d4-a716-446655440002";
+    const TAB_D: &str = "550e8400-e29b-41d4-a716-446655440003";
     const SID: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+
+    fn registry_at_cap() -> ChatSessions {
+        let reg = ChatSessions::default();
+        for tab in [TAB_A, TAB_B, TAB_C] {
+            reg.prepare(tab, "acme").unwrap();
+        }
+        assert_eq!(MAX_CHAT_TABS, 3, "registry_at_cap plants exactly the cap");
+        reg
+    }
+
+    #[test]
+    fn a_fourth_new_tab_is_rejected_at_the_cap() {
+        let reg = registry_at_cap();
+        let err = reg.prepare(TAB_D, "acme").unwrap_err();
+        assert_eq!(err, MSG_TAB_LIMIT_REACHED);
+        assert!(reg.entry(TAB_D).is_none(), "the rejected tab must not land");
+    }
+
+    #[test]
+    fn existing_tab_ids_keep_working_at_the_cap() {
+        let reg = registry_at_cap();
+        let before = reg.entry(TAB_A).unwrap();
+        let same = reg.prepare(TAB_A, "acme").unwrap();
+        assert!(Arc::ptr_eq(&before.session, &same.session));
+        let switched = reg.prepare(TAB_B, "globex").unwrap();
+        assert_eq!(switched.project, "globex");
+        assert!(reg.prepare(TAB_D, "acme").is_err(), "cap still enforced");
+    }
+
+    #[test]
+    fn close_then_open_succeeds_after_the_cap() {
+        let reg = registry_at_cap();
+        assert!(reg.prepare(TAB_D, "acme").is_err());
+        reg.remove(TAB_C).unwrap();
+        let entry = reg.prepare(TAB_D, "acme").unwrap();
+        assert_eq!(entry.project, "acme");
+        assert!(reg.prepare(TAB_C, "acme").is_err(), "the cap is re-reached");
+    }
 
     #[test]
     fn valid_uuid_tab_id_is_accepted_and_junk_is_rejected() {
@@ -175,19 +228,19 @@ mod tests {
     #[test]
     fn prepare_is_idempotent_per_tab_and_isolated_across_tabs() {
         let reg = ChatSessions::default();
-        let a1 = reg.prepare(TAB_A, "acme");
-        let a2 = reg.prepare(TAB_A, "acme");
+        let a1 = reg.prepare(TAB_A, "acme").unwrap();
+        let a2 = reg.prepare(TAB_A, "acme").unwrap();
         assert!(Arc::ptr_eq(&a1.session, &a2.session));
         assert!(Arc::ptr_eq(&a1.start_serialize, &a2.start_serialize));
-        let b = reg.prepare(TAB_B, "acme");
+        let b = reg.prepare(TAB_B, "acme").unwrap();
         assert!(!Arc::ptr_eq(&a1.session, &b.session));
     }
 
     #[test]
     fn prepare_with_a_different_project_replaces_the_entry() {
         let reg = ChatSessions::default();
-        let old = reg.prepare(TAB_A, "acme");
-        let new = reg.prepare(TAB_A, "globex");
+        let old = reg.prepare(TAB_A, "acme").unwrap();
+        let new = reg.prepare(TAB_A, "globex").unwrap();
         assert!(!Arc::ptr_eq(&old.session, &new.session));
         assert_eq!(new.project, "globex");
     }
@@ -195,13 +248,13 @@ mod tests {
     #[test]
     fn any_for_project_prefers_the_most_recently_prepared_entry() {
         let reg = ChatSessions::default();
-        let a = reg.prepare(TAB_A, "acme");
-        let b = reg.prepare(TAB_B, "acme");
+        let a = reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
         assert!(Arc::ptr_eq(
             &reg.any_for_project("acme").unwrap(),
             &b.session
         ));
-        let a_again = reg.prepare(TAB_A, "acme");
+        let a_again = reg.prepare(TAB_A, "acme").unwrap();
         assert!(Arc::ptr_eq(
             &reg.any_for_project("acme").unwrap(),
             &a_again.session
@@ -213,8 +266,8 @@ mod tests {
     #[test]
     fn claim_transcript_blocks_a_second_tab_and_frees_on_remove() {
         let reg = ChatSessions::default();
-        reg.prepare(TAB_A, "acme");
-        reg.prepare(TAB_B, "acme");
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "acme").unwrap();
         reg.claim_transcript(TAB_A, Some(SID)).unwrap();
         let err = reg.claim_transcript(TAB_B, Some(SID)).unwrap_err();
         assert_eq!(err, MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB);
@@ -226,8 +279,8 @@ mod tests {
     #[test]
     fn claim_transcript_with_none_clears_the_slot() {
         let reg = ChatSessions::default();
-        reg.prepare(TAB_A, "acme");
-        reg.prepare(TAB_B, "acme");
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "acme").unwrap();
         reg.claim_transcript(TAB_A, Some(SID)).unwrap();
         reg.claim_transcript(TAB_A, None).unwrap();
         reg.claim_transcript(TAB_B, Some(SID)).unwrap();
@@ -236,8 +289,8 @@ mod tests {
     #[test]
     fn drain_all_empties_the_registry() {
         let reg = ChatSessions::default();
-        reg.prepare(TAB_A, "acme");
-        reg.prepare(TAB_B, "globex");
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "globex").unwrap();
         assert_eq!(reg.drain_all().len(), 2);
         assert!(reg.entry(TAB_A).is_none());
         assert!(reg.entry(TAB_B).is_none());
@@ -246,19 +299,19 @@ mod tests {
     #[test]
     fn other_entry_for_project_sees_only_sibling_tabs_of_the_same_project() {
         let reg = ChatSessions::default();
-        reg.prepare(TAB_A, "acme");
+        reg.prepare(TAB_A, "acme").unwrap();
         assert!(!reg.other_entry_for_project("acme", TAB_A));
-        reg.prepare(TAB_B, "globex");
+        reg.prepare(TAB_B, "globex").unwrap();
         assert!(!reg.other_entry_for_project("acme", TAB_A));
-        reg.prepare(TAB_B, "acme");
+        reg.prepare(TAB_B, "acme").unwrap();
         assert!(reg.other_entry_for_project("acme", TAB_A));
     }
 
     #[test]
     fn entry_for_project_returns_the_most_recent_full_entry() {
         let reg = ChatSessions::default();
-        reg.prepare(TAB_A, "acme");
-        let b = reg.prepare(TAB_B, "acme");
+        reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
         let entry = reg.entry_for_project("acme").unwrap();
         assert!(Arc::ptr_eq(&entry.session, &b.session));
         assert!(Arc::ptr_eq(&entry.start_serialize, &b.start_serialize));
@@ -285,8 +338,8 @@ mod tests {
     #[test]
     fn prepare_with_a_different_project_replaces_and_stops_the_old_entry() {
         let reg = ChatSessions::default();
-        let old = reg.prepare(TAB_A, "acme");
-        let new = reg.prepare(TAB_A, "globex");
+        let old = reg.prepare(TAB_A, "acme").unwrap();
+        let new = reg.prepare(TAB_A, "globex").unwrap();
         assert!(!Arc::ptr_eq(&old.session, &new.session));
         assert_eq!(new.project, "globex");
 

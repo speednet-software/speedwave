@@ -372,12 +372,12 @@ mod tests {
     fn clear_chat_sessions_empties_the_registry_and_leaves_it_usable() {
         let reg: SharedChatSessions =
             std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
-        reg.prepare(TAB_A, "acme");
-        reg.prepare(TAB_B, "globex");
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "globex").unwrap();
         clear_chat_sessions(&reg);
         assert!(reg.entry(TAB_A).is_none());
         assert!(reg.entry(TAB_B).is_none());
-        let entry = reg.prepare(TAB_A, "acme");
+        let entry = reg.prepare(TAB_A, "acme").unwrap();
         assert_eq!(entry.project, "acme");
         assert!(reg.entry(TAB_A).is_some());
     }
@@ -394,7 +394,7 @@ mod tests {
     fn clear_chat_sessions_survives_a_poisoned_session() {
         let reg: SharedChatSessions =
             std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
-        let entry = reg.prepare(TAB_A, "acme");
+        let entry = reg.prepare(TAB_A, "acme").unwrap();
         let arc_clone = entry.session.clone();
         let _ = std::thread::spawn(move || {
             let _guard = arc_clone.lock().unwrap();

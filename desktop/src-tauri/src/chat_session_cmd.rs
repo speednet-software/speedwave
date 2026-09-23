@@ -18,7 +18,7 @@ fn start_session_inner(
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let entry = registry.prepare(tab_id, project);
+    let entry = registry.prepare(tab_id, project)?;
     let _serialize = entry
         .start_serialize
         .lock()
@@ -614,10 +614,23 @@ mod tests {
     }
 
     #[test]
+    fn start_session_inner_propagates_the_tab_cap_rejection_before_any_start_work() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let prepare_pos = body
+            .find("registry.prepare(tab_id, project)?")
+            .expect("start_session_inner must propagate the registry's tab-cap rejection");
+        let work_pos = body
+            .find("ensure_oauth_running")
+            .expect("start_session_inner must call ensure_oauth_running");
+        assert!(prepare_pos < work_pos);
+    }
+
+    #[test]
     fn two_tabs_start_without_serializing_on_each_other() {
         let reg = ChatSessions::default();
-        let a = reg.prepare(TAB_A, "acme");
-        let b = reg.prepare(TAB_B, "acme");
+        let a = reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
         let _held_a = a.start_serialize.lock().unwrap();
         assert!(
             b.start_serialize.try_lock().is_ok(),
@@ -938,7 +951,7 @@ mod tests {
     #[test]
     fn tab_session_resolves_a_prepared_tab() {
         let reg: SharedChatSessions = Arc::new(ChatSessions::default());
-        let entry = reg.prepare(TAB_A, "acme");
+        let entry = reg.prepare(TAB_A, "acme").unwrap();
         let resolved = tab_session(&reg, TAB_A).unwrap();
         assert!(Arc::ptr_eq(&resolved, &entry.session));
     }
@@ -946,8 +959,8 @@ mod tests {
     #[test]
     fn stopping_one_tab_leaves_the_sibling_untouched() {
         let reg = ChatSessions::default();
-        let a = reg.prepare(TAB_A, "acme");
-        let b = reg.prepare(TAB_B, "acme");
+        let a = reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
         a.session.lock().unwrap().stop().unwrap();
         assert!(
             b.session.try_lock().is_ok(),
