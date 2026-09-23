@@ -764,12 +764,26 @@ pub fn ensure_exec_healthy(
 }
 
 const COMPOSE_UP_TIMEOUT_SECS: u64 = 180;
+const COMPOSE_UP_KILL_GRACE_SECS: u64 = 10;
+const COMPOSE_UP_DEADLINE_FRAGMENT: &str = "timeout: sending signal";
 
-pub(crate) fn compose_up_argv(compose_file: &str, project: &str, flags: &[&str]) -> Vec<String> {
+pub(crate) enum UpMode<'a> {
+    Diverged,
+    All,
+    Service(&'a str),
+}
+
+pub(crate) fn compose_up_argv(compose_file: &str, project: &str, mode: UpMode<'_>) -> Vec<String> {
+    let kill_after = format!("--kill-after={COMPOSE_UP_KILL_GRACE_SECS}");
     let limit = COMPOSE_UP_TIMEOUT_SECS.to_string();
+    let mode_args = match mode {
+        UpMode::Diverged => vec!["--remove-orphans"],
+        UpMode::All => vec!["--force-recreate", "--remove-orphans"],
+        UpMode::Service(service) => vec!["--force-recreate", service],
+    };
     [
         "timeout",
-        "--kill-after=10",
+        kill_after.as_str(),
         "--verbose",
         limit.as_str(),
         "nerdctl",
@@ -782,13 +796,13 @@ pub(crate) fn compose_up_argv(compose_file: &str, project: &str, flags: &[&str])
         "-d",
     ]
     .into_iter()
-    .chain(flags.iter().copied())
+    .chain(mode_args)
     .map(str::to_string)
     .collect()
 }
 
 pub(crate) fn explain_compose_up_deadline(e: anyhow::Error) -> anyhow::Error {
-    if e.to_string().contains("timeout: sending signal") {
+    if e.to_string().contains(COMPOSE_UP_DEADLINE_FRAGMENT) {
         anyhow::anyhow!(
             "compose up did not finish within {COMPOSE_UP_TIMEOUT_SECS}s and was stopped: {e}"
         )
@@ -1013,12 +1027,11 @@ pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(Str
 const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_millis(1);
+const TASK_BUNDLE_DIR_FRAGMENT: &str = "io.containerd.runtime.v2.task/";
 
 fn is_task_create_collision(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
-    s.contains("mkdir ")
-        && s.contains("io.containerd.runtime.v2.task/")
-        && s.contains("file exists")
+    s.contains("mkdir ") && s.contains(TASK_BUNDLE_DIR_FRAGMENT) && s.contains("file exists")
 }
 
 /// Shared fail-closed per-entry heal function + flock gate. The destructive `rm`
@@ -3148,6 +3161,56 @@ services:
         );
         assert!(r.is_err());
         assert_eq!(ups.load(Ordering::SeqCst), 1, "no retry for another path");
+    }
+
+    #[test]
+    fn engine_state_heal_heals_all_three_classes_in_one_up() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let cni_cleaned = AtomicUsize::new(0);
+        let ns_cleaned = AtomicUsize::new(0);
+        let name = own_name("acme", "mcp_hub");
+        let r = with_engine_state_heal(
+            "acme",
+            || match ups.fetch_add(1, Ordering::SeqCst) {
+                0 => anyhow::bail!("iptables: Chain already exists"),
+                1 => Err(ns_conflict_err(&name, DEAD_ID)),
+                2 => Err(task_bundle_collision_err()),
+                _ => Ok(()),
+            },
+            |_e| {
+                cni_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_e| {
+                ns_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(r.is_ok(), "the fourth up succeeds after three heals: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 4, "up runs four times");
+        assert_eq!(cni_cleaned.load(Ordering::SeqCst), 1, "CNI heal ran once");
+        assert_eq!(
+            ns_cleaned.load(Ordering::SeqCst),
+            1,
+            "name-store heal ran once"
+        );
+    }
+
+    #[test]
+    fn engine_contract_bats_pins_the_task_collision_and_up_deadline_phrases() {
+        let bats = include_str!("../../../../_tests/e2e/engine-contract.bats");
+        assert!(
+            bats.contains(&format!(
+                "TASKS=/run/containerd/{TASK_BUNDLE_DIR_FRAGMENT}{}",
+                consts::CONTAINERD_NAMESPACE
+            )),
+            "engine-contract.bats TASKS= must be the task bundle root the collision heal keys on"
+        );
+        assert!(
+            bats.contains(&format!("{COMPOSE_UP_DEADLINE_FRAGMENT} TERM to command")),
+            "engine-contract.bats must pin the timeout line explain_compose_up_deadline keys on"
+        );
     }
 
     #[test]

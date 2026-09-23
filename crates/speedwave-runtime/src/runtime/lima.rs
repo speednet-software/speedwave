@@ -351,7 +351,7 @@ impl ContainerRuntime for LimaRuntime {
         );
 
         let compose_file = self.compose_file_path(project)?;
-        let up_argv = super::compose_up_argv(&compose_file, project, &["--remove-orphans"]);
+        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::Diverged);
         self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
     }
 
@@ -650,11 +650,7 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
-        let up_argv = super::compose_up_argv(
-            &compose_file,
-            project,
-            &["--force-recreate", "--remove-orphans"],
-        );
+        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::All);
         self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
     }
 
@@ -663,7 +659,7 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
         let up_argv =
-            super::compose_up_argv(&compose_file, project, &["--force-recreate", service]);
+            super::compose_up_argv(&compose_file, project, super::UpMode::Service(service));
         self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
     }
 
@@ -1584,12 +1580,30 @@ mod tests {
         }
     }
 
-    /// Runner whose first compose `up` fails with a real nerdctl name-store conflict.
-    struct NameStoreHealRunner {
+    struct FirstUpFailsRunner {
+        first_up_error: String,
         up_calls: Arc<std::sync::atomic::AtomicUsize>,
         cleanup_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
-    impl CommandRunner for NameStoreHealRunner {
+    impl FirstUpFailsRunner {
+        fn with_error(first_up_error: String) -> Self {
+            Self {
+                first_up_error,
+                up_calls: Arc::default(),
+                cleanup_calls: Arc::default(),
+            }
+        }
+
+        fn name_store_conflict() -> Self {
+            Self::with_error(format!(
+                "level=fatal msg=\"name-store error\\nname \\\"{}_acme_mcp_hub\\\" \
+                 is already used by ID \\\"{}\\\"\"",
+                consts::compose_prefix(),
+                "db0da85287aa1119f5ef5483d7585c28ef721cf946111cf8d5369d308ecf450e"
+            ))
+        }
+    }
+    impl CommandRunner for FirstUpFailsRunner {
         fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
             use std::sync::atomic::Ordering;
             if cmd == "limactl" && args.first() == Some(&"--version") {
@@ -1601,12 +1615,7 @@ mod tests {
             let joined = args.join(" ");
             if joined.contains("nerdctl") && joined.contains("compose") && joined.contains(" up ") {
                 if self.up_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    anyhow::bail!(
-                        "level=fatal msg=\"name-store error\\nname \\\"{}_acme_mcp_hub\\\" \
-                         is already used by ID \\\"{}\\\"\"",
-                        consts::compose_prefix(),
-                        "db0da85287aa1119f5ef5483d7585c28ef721cf946111cf8d5369d308ecf450e"
-                    );
+                    anyhow::bail!("{}", self.first_up_error);
                 }
                 return Ok(String::new());
             }
@@ -1619,13 +1628,11 @@ mod tests {
 
     #[test]
     fn compose_up_recreate_self_heals_stale_name_store_and_retries() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let up_calls = Arc::new(AtomicUsize::new(0));
-        let cleanup_calls = Arc::new(AtomicUsize::new(0));
-        let rt = LimaRuntime::with_runner(Box::new(NameStoreHealRunner {
-            up_calls: Arc::clone(&up_calls),
-            cleanup_calls: Arc::clone(&cleanup_calls),
-        }));
+        use std::sync::atomic::Ordering;
+        let runner = FirstUpFailsRunner::name_store_conflict();
+        let up_calls = Arc::clone(&runner.up_calls);
+        let cleanup_calls = Arc::clone(&runner.cleanup_calls);
+        let rt = LimaRuntime::with_runner(Box::new(runner));
         assert!(
             rt.compose_up_recreate("acme").is_ok(),
             "a dead name-store reservation must self-heal and retry to success"
@@ -1636,13 +1643,11 @@ mod tests {
 
     #[test]
     fn compose_up_service_self_heals_stale_name_store_and_retries() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let up_calls = Arc::new(AtomicUsize::new(0));
-        let cleanup_calls = Arc::new(AtomicUsize::new(0));
-        let rt = LimaRuntime::with_runner(Box::new(NameStoreHealRunner {
-            up_calls: Arc::clone(&up_calls),
-            cleanup_calls: Arc::clone(&cleanup_calls),
-        }));
+        use std::sync::atomic::Ordering;
+        let runner = FirstUpFailsRunner::name_store_conflict();
+        let up_calls = Arc::clone(&runner.up_calls);
+        let cleanup_calls = Arc::clone(&runner.cleanup_calls);
+        let rt = LimaRuntime::with_runner(Box::new(runner));
         assert!(rt.compose_up_service("acme", "proxy").is_ok());
         assert_eq!(up_calls.load(Ordering::SeqCst), 2, "up fail + retry");
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "one heal payload");
@@ -2024,7 +2029,8 @@ mod tests {
     #[test]
     fn every_compose_up_runs_nerdctl_under_the_up_deadline() {
         let bounded = format!(
-            "sudo timeout --kill-after=10 --verbose {} nerdctl compose",
+            "sudo timeout --kill-after={} --verbose {} nerdctl compose",
+            super::super::COMPOSE_UP_KILL_GRACE_SECS,
             super::super::COMPOSE_UP_TIMEOUT_SECS
         );
         let (recorded, runner) = make_recording_runner();
@@ -2046,37 +2052,17 @@ mod tests {
 
     #[test]
     fn compose_up_names_the_deadline_when_timeout_stops_nerdctl() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        struct DeadlineRunner {
-            up_calls: Arc<AtomicUsize>,
-        }
-        impl CommandRunner for DeadlineRunner {
-            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-                if cmd == "limactl" && args.first() == Some(&"--version") {
-                    return Ok("limactl version 1.0.0".to_string());
-                }
-                if cmd == "limactl" && args.first() == Some(&"list") {
-                    return Ok("Running".to_string());
-                }
-                if args.join(" ").contains(" up -d") {
-                    self.up_calls.fetch_add(1, Ordering::SeqCst);
-                    anyhow::bail!(
-                        "limactl failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}"
-                    );
-                }
-                Ok(String::new())
-            }
-        }
-
-        let up_calls = Arc::new(AtomicUsize::new(0));
-        let rt = LimaRuntime::with_runner(Box::new(DeadlineRunner {
-            up_calls: Arc::clone(&up_calls),
-        }));
-        let err = rt
+        use std::sync::atomic::Ordering;
+        let runner = FirstUpFailsRunner::with_error(
+            "limactl failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}"
+                .to_string(),
+        );
+        let up_calls = Arc::clone(&runner.up_calls);
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let msg = rt
             .compose_up_recreate("acme")
-            .expect_err("a stopped up must fail");
-        let msg = err.to_string();
+            .expect_err("a stopped up must fail")
+            .to_string();
         assert!(
             msg.contains(&format!(
                 "did not finish within {}s",
@@ -2090,6 +2076,18 @@ mod tests {
             1,
             "a deadline is not healed"
         );
+    }
+
+    #[test]
+    fn compose_up_keeps_an_error_that_is_not_the_deadline_unchanged() {
+        let raw = "limactl failed: level=fatal msg=\"no such image: speedwave-claude:abc\"";
+        let runner = FirstUpFailsRunner::with_error(raw.to_string());
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let msg = rt
+            .compose_up("acme")
+            .expect_err("a failed up must fail")
+            .to_string();
+        assert_eq!(msg, raw);
     }
 
     /// ADR-073: single-service recreate targets exactly the named service, keeps

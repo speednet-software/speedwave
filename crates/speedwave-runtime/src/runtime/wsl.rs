@@ -419,7 +419,7 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up_argv = super::compose_up_argv(&compose_file, project, &["--remove-orphans"]);
+        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::Diverged);
         let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
         self.ensure_claude_home_writable(project);
         result
@@ -619,11 +619,7 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up_argv = super::compose_up_argv(
-            &compose_file,
-            project,
-            &["--force-recreate", "--remove-orphans"],
-        );
+        let up_argv = super::compose_up_argv(&compose_file, project, super::UpMode::All);
         let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
         self.ensure_claude_home_writable(project);
         result
@@ -634,7 +630,7 @@ impl ContainerRuntime for WslRuntime {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
         let up_argv =
-            super::compose_up_argv(&compose_file, project, &["--force-recreate", service]);
+            super::compose_up_argv(&compose_file, project, super::UpMode::Service(service));
         let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
         self.ensure_claude_home_writable(project);
         result
@@ -1305,10 +1301,14 @@ mod tests {
 
     fn bounded_up_key(project: &str, flags: &[&str]) -> String {
         let compose_file = wsl_compose_file_path(project).unwrap();
+        let kill_after = format!(
+            "--kill-after={}",
+            crate::runtime::COMPOSE_UP_KILL_GRACE_SECS
+        );
         let limit = crate::runtime::COMPOSE_UP_TIMEOUT_SECS.to_string();
         let mut argv = vec![
             "timeout",
-            "--kill-after=10",
+            kill_after.as_str(),
             "--verbose",
             limit.as_str(),
             "nerdctl",
