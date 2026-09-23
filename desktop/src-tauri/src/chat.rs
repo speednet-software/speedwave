@@ -1495,10 +1495,6 @@ impl ChatSession {
         }
     }
 
-    pub fn project_name(&self) -> &str {
-        &self.project_name
-    }
-
     pub(crate) fn tab_id(&self) -> &str {
         &self.tab_id
     }
