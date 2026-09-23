@@ -178,6 +178,13 @@ impl WslRuntime {
         let _ = run_root("chmod", &["chmod", "-R", "u+rwX", &path]);
     }
 
+    fn run_bounded_up(&self, up_argv: &[String]) -> anyhow::Result<()> {
+        let args: Vec<&str> = up_argv.iter().map(String::as_str).collect();
+        self.run_in_distro(&args, false)
+            .map(|_| ())
+            .map_err(super::explain_compose_up_deadline)
+    }
+
     /// Sets retry delay and restart ready delay to zero for tests to avoid sleeping.
     #[cfg(test)]
     fn with_zero_delay(mut self) -> Self {
@@ -412,24 +419,8 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up = || {
-            self.run_in_distro(
-                &[
-                    "nerdctl",
-                    "compose",
-                    "-f",
-                    &compose_file,
-                    "-p",
-                    project,
-                    "up",
-                    "-d",
-                    "--remove-orphans",
-                ],
-                false,
-            )
-            .map(|_| ())
-        };
-        let result = self.up_with_heal(project, up);
+        let up_argv = super::compose_up_argv(&compose_file, project, &["--remove-orphans"]);
+        let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
         self.ensure_claude_home_writable(project);
         result
     }
@@ -628,25 +619,12 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up = || {
-            self.run_in_distro(
-                &[
-                    "nerdctl",
-                    "compose",
-                    "-f",
-                    &compose_file,
-                    "-p",
-                    project,
-                    "up",
-                    "-d",
-                    "--force-recreate",
-                    "--remove-orphans",
-                ],
-                false,
-            )
-            .map(|_| ())
-        };
-        let result = self.up_with_heal(project, up);
+        let up_argv = super::compose_up_argv(
+            &compose_file,
+            project,
+            &["--force-recreate", "--remove-orphans"],
+        );
+        let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
         self.ensure_claude_home_writable(project);
         result
     }
@@ -655,25 +633,9 @@ impl ContainerRuntime for WslRuntime {
         super::validate_builtin_service_name(service)?;
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up = || {
-            self.run_in_distro(
-                &[
-                    "nerdctl",
-                    "compose",
-                    "-f",
-                    &compose_file,
-                    "-p",
-                    project,
-                    "up",
-                    "-d",
-                    "--force-recreate",
-                    service,
-                ],
-                false,
-            )
-            .map(|_| ())
-        };
-        let result = self.up_with_heal(project, up);
+        let up_argv =
+            super::compose_up_argv(&compose_file, project, &["--force-recreate", service]);
+        let result = self.up_with_heal(project, || self.run_bounded_up(&up_argv));
         self.ensure_claude_home_writable(project);
         result
     }
@@ -1341,29 +1303,65 @@ mod tests {
         assert!(rt.compose_down("wsl-cleanup-test").is_ok());
     }
 
-    #[test]
-    fn test_compose_up_recreate_includes_force_recreate() {
-        let compose_file = wsl_compose_file_path("acme").unwrap();
-        let remote = crate::runtime::shell_quote_argv(&[
+    fn bounded_up_key(project: &str, flags: &[&str]) -> String {
+        let compose_file = wsl_compose_file_path(project).unwrap();
+        let limit = crate::runtime::COMPOSE_UP_TIMEOUT_SECS.to_string();
+        let mut argv = vec![
+            "timeout",
+            "--kill-after=10",
+            "--verbose",
+            limit.as_str(),
             "nerdctl",
             "compose",
             "-f",
             &compose_file,
             "-p",
-            "acme",
+            project,
             "up",
             "-d",
-            "--force-recreate",
-            "--remove-orphans",
-        ]);
-        let expected_key = format!(
+        ];
+        argv.extend_from_slice(flags);
+        format!(
             "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            remote
-        );
-        let runner = MockRunner::new().with_response(&expected_key, "");
+            crate::runtime::shell_quote_argv(&argv)
+        )
+    }
+
+    #[test]
+    fn every_compose_up_runs_nerdctl_under_the_up_deadline() {
+        let runner = MockRunner::new()
+            .with_response(&bounded_up_key("acme", &["--remove-orphans"]), "")
+            .with_response(
+                &bounded_up_key("acme", &["--force-recreate", "--remove-orphans"]),
+                "",
+            )
+            .with_response(&bounded_up_key("acme", &["--force-recreate", "proxy"]), "");
         let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.compose_up("acme").is_ok());
         assert!(rt.compose_up_recreate("acme").is_ok());
+        assert!(rt.compose_up_service("acme", "proxy").is_ok());
+    }
+
+    #[test]
+    fn compose_up_names_the_deadline_when_timeout_stops_nerdctl() {
+        let runner = MockRunner::new().with_error(
+            &bounded_up_key("acme", &["--remove-orphans"]),
+            "wsl.exe failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let msg = rt
+            .compose_up("acme")
+            .expect_err("a stopped up must fail")
+            .to_string();
+        assert!(
+            msg.contains(&format!(
+                "did not finish within {}s",
+                crate::runtime::COMPOSE_UP_TIMEOUT_SECS
+            )),
+            "got: {msg}"
+        );
+        assert!(msg.contains("sending signal TERM"), "raw cause kept: {msg}");
     }
 
     #[test]

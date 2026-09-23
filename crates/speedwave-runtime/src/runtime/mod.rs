@@ -763,6 +763,40 @@ pub fn ensure_exec_healthy(
     })
 }
 
+const COMPOSE_UP_TIMEOUT_SECS: u64 = 180;
+
+pub(crate) fn compose_up_argv(compose_file: &str, project: &str, flags: &[&str]) -> Vec<String> {
+    let limit = COMPOSE_UP_TIMEOUT_SECS.to_string();
+    [
+        "timeout",
+        "--kill-after=10",
+        "--verbose",
+        limit.as_str(),
+        "nerdctl",
+        "compose",
+        "-f",
+        compose_file,
+        "-p",
+        project,
+        "up",
+        "-d",
+    ]
+    .into_iter()
+    .chain(flags.iter().copied())
+    .map(str::to_string)
+    .collect()
+}
+
+pub(crate) fn explain_compose_up_deadline(e: anyhow::Error) -> anyhow::Error {
+    if e.to_string().contains("timeout: sending signal") {
+        anyhow::anyhow!(
+            "compose up did not finish within {COMPOSE_UP_TIMEOUT_SECS}s and was stopped: {e}"
+        )
+    } else {
+        e
+    }
+}
+
 /// Max `compose_validate` attempts; 100/200/400/800/1600 ms backoff (~3.1 s) for
 /// the guest to see the host write through virtiofs (300 ms was too short).
 const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 6;

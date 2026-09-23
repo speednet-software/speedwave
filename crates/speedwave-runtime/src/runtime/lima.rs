@@ -325,6 +325,15 @@ fn force_remove_project_containers_with_retry(
     );
 }
 
+fn run_bounded_up(runner: &dyn CommandRunner, up_argv: &[String]) -> anyhow::Result<()> {
+    let mut args = vec!["shell", consts::lima_vm_name(), "--", "sudo"];
+    args.extend(up_argv.iter().map(String::as_str));
+    runner
+        .run("limactl", &args)
+        .map(|_| ())
+        .map_err(super::explain_compose_up_deadline)
+}
+
 impl ContainerRuntime for LimaRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
@@ -342,29 +351,8 @@ impl ContainerRuntime for LimaRuntime {
         );
 
         let compose_file = self.compose_file_path(project)?;
-        let up = || {
-            self.runner
-                .run(
-                    "limactl",
-                    &[
-                        "shell",
-                        vm,
-                        "--",
-                        "sudo",
-                        "nerdctl",
-                        "compose",
-                        "-f",
-                        &compose_file,
-                        "-p",
-                        project,
-                        "up",
-                        "-d",
-                        "--remove-orphans",
-                    ],
-                )
-                .map(|_| ())
-        };
-        self.up_with_heal(project, up)
+        let up_argv = super::compose_up_argv(&compose_file, project, &["--remove-orphans"]);
+        self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -662,60 +650,21 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
-        let up = || {
-            self.runner
-                .run(
-                    "limactl",
-                    &[
-                        "shell",
-                        consts::lima_vm_name(),
-                        "--",
-                        "sudo",
-                        "nerdctl",
-                        "compose",
-                        "-f",
-                        &compose_file,
-                        "-p",
-                        project,
-                        "up",
-                        "-d",
-                        "--force-recreate",
-                        "--remove-orphans",
-                    ],
-                )
-                .map(|_| ())
-        };
-        self.up_with_heal(project, up)
+        let up_argv = super::compose_up_argv(
+            &compose_file,
+            project,
+            &["--force-recreate", "--remove-orphans"],
+        );
+        self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
-        let up = || {
-            self.runner
-                .run(
-                    "limactl",
-                    &[
-                        "shell",
-                        consts::lima_vm_name(),
-                        "--",
-                        "sudo",
-                        "nerdctl",
-                        "compose",
-                        "-f",
-                        &compose_file,
-                        "-p",
-                        project,
-                        "up",
-                        "-d",
-                        "--force-recreate",
-                        service,
-                    ],
-                )
-                .map(|_| ())
-        };
-        self.up_with_heal(project, up)
+        let up_argv =
+            super::compose_up_argv(&compose_file, project, &["--force-recreate", service]);
+        self.up_with_heal(project, || run_bounded_up(&*self.runner, &up_argv))
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -2069,6 +2018,77 @@ mod tests {
             commands[0].contains("-p testproject"),
             "command should include project name, got: {}",
             commands[0]
+        );
+    }
+
+    #[test]
+    fn every_compose_up_runs_nerdctl_under_the_up_deadline() {
+        let bounded = format!(
+            "sudo timeout --kill-after=10 --verbose {} nerdctl compose",
+            super::super::COMPOSE_UP_TIMEOUT_SECS
+        );
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.compose_up("testproject").unwrap();
+        rt.compose_up_recreate("testproject").unwrap();
+        rt.compose_up_service("testproject", "proxy").unwrap();
+
+        let commands = recorded.lock().unwrap();
+        let ups: Vec<&String> = commands.iter().filter(|c| c.contains(" up -d")).collect();
+        assert_eq!(ups.len(), 3, "one up per variant: {commands:?}");
+        for up in ups {
+            assert!(
+                up.contains(&bounded),
+                "up must run under the deadline: {up}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_up_names_the_deadline_when_timeout_stops_nerdctl() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DeadlineRunner {
+            up_calls: Arc<AtomicUsize>,
+        }
+        impl CommandRunner for DeadlineRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                if cmd == "limactl" && args.first() == Some(&"--version") {
+                    return Ok("limactl version 1.0.0".to_string());
+                }
+                if cmd == "limactl" && args.first() == Some(&"list") {
+                    return Ok("Running".to_string());
+                }
+                if args.join(" ").contains(" up -d") {
+                    self.up_calls.fetch_add(1, Ordering::SeqCst);
+                    anyhow::bail!(
+                        "limactl failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}"
+                    );
+                }
+                Ok(String::new())
+            }
+        }
+
+        let up_calls = Arc::new(AtomicUsize::new(0));
+        let rt = LimaRuntime::with_runner(Box::new(DeadlineRunner {
+            up_calls: Arc::clone(&up_calls),
+        }));
+        let err = rt
+            .compose_up_recreate("acme")
+            .expect_err("a stopped up must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "did not finish within {}s",
+                super::super::COMPOSE_UP_TIMEOUT_SECS
+            )),
+            "got: {msg}"
+        );
+        assert!(msg.contains("sending signal TERM"), "raw cause kept: {msg}");
+        assert_eq!(
+            up_calls.load(Ordering::SeqCst),
+            1,
+            "a deadline is not healed"
         );
     }
 
