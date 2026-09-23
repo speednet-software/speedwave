@@ -108,7 +108,7 @@ describe('ChatComponent', () => {
     it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
       projectState.activeProject.set('test');
       const dispose = vi.fn();
-      const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
+      const begin = vi.spyOn(chatState['store'], 'beginStartingSession').mockReturnValue(dispose);
 
       const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -1105,7 +1105,7 @@ describe('ChatComponent', () => {
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
 
       chatState.isStreaming = true;
-      chatState['notifyChange']();
+      chatState['store']['notifyChange']();
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
@@ -1115,7 +1115,7 @@ describe('ChatComponent', () => {
       projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
-      chatState['notifyChange']();
+      chatState['store']['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
       expect(spy).toHaveBeenCalledTimes(1);
@@ -1152,7 +1152,7 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      chatState['notifyChange']();
+      chatState['store']['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
     });
@@ -1174,7 +1174,7 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      chatState['notifyChange']();
+      chatState['store']['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
       expect(spy).toHaveBeenCalledTimes(1);
