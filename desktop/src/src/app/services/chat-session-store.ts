@@ -759,6 +759,11 @@ export class ChatSessionStore {
               this.notifyChange();
               return;
             }
+            if (this._disposed) {
+              this.isStreaming = false;
+              this.notifyChange();
+              return;
+            }
             try {
               await this.deps.tauri.invoke('send_message', invokeArgs);
             } catch (postWaitErr) {
@@ -781,6 +786,11 @@ export class ChatSessionStore {
             return;
           }
           const result = await this.deps.tauri.invoke<ProjectList>('list_projects');
+          if (this._disposed) {
+            this.isStreaming = false;
+            this.notifyChange();
+            return;
+          }
           if (result.active_project) {
             this.startingSession = true;
             this._deferredEffort.set(null);
@@ -791,6 +801,11 @@ export class ChatSessionStore {
               });
             } finally {
               this.startingSession = false;
+            }
+            if (this._disposed) {
+              this.isStreaming = false;
+              this.notifyChange();
+              return;
             }
             await this.deps.tauri.invoke('send_message', invokeArgs);
             return;

@@ -2161,6 +2161,27 @@ describe('ChatStateService', () => {
 
       expect(projectState.status()).toBe('switching');
     });
+
+    it('a stale send whose restart probe succeeds after a switch does not start_chat on the disposed tab', async () => {
+      const listGate = createDeferred<{ active_project: string | null }>();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') throw new Error('session exited');
+        if (cmd === 'list_projects') return listGate.promise;
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const stale = staleStore.sendMessage('hello');
+      await new Promise((r) => setTimeout(r, 0));
+
+      await switchProjectMidFlight();
+      listGate.resolve({ active_project: 'other' });
+      await stale;
+
+      expect(calls).not.toContain('start_chat');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
   });
 
   describe('resumeConversation while a container restart runs', () => {

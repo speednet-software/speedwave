@@ -564,6 +564,15 @@ export class ChatStateService {
     return this.activeStore().refreshLlmConfigCache();
   }
 
+  /**
+   * Re-reads `get_llm_config()` and updates every open tab's fallback-chain cache — a provider
+   * config save is project-level, so a background tab must not keep a stale cache until its own
+   * next `refreshControlData()` cycle.
+   */
+  async refreshLlmConfigCacheAll(): Promise<void> {
+    await Promise.all(Array.from(this._tabs().values(), (store) => store.refreshLlmConfigCache()));
+  }
+
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
       const status = this.projectState.status();

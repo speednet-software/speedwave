@@ -8,16 +8,40 @@ import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import type { CaptureWarning, Segment, TranscriptSession } from '../models/transcript';
 
-/** Minimal ChatStateService stand-in — only the send path is exercised here. */
+/** Minimal ChatStateService stand-in — only the send path (plus tab tracking) is exercised here. */
 class MockChatState {
   readonly isStreamingFromState = signal(false);
   calls: string[] = [];
+  private tabIds = new Set(['tab-1']);
+  private active = 'tab-1';
+  activeTabId = (): string => this.active;
+  tabs = (): ReadonlyMap<string, object> => new Map(Array.from(this.tabIds, (id) => [id, {}]));
+  activateTab = vi.fn((tabId: string) => {
+    if (this.tabIds.has(tabId)) this.active = tabId;
+  });
   startNewConversation = vi.fn(async () => {
     this.calls.push('startNewConversation');
   });
   sendMessage = vi.fn(async (_text: string, _label?: string) => {
     this.calls.push('sendMessage');
   });
+
+  /**
+   * Test helper: opens a second tab and makes it active — simulates the phase 3 tab bar.
+   * @param tabId - id of the new tab to open and activate.
+   */
+  switchToNewTab(tabId: string): void {
+    this.tabIds.add(tabId);
+    this.active = tabId;
+  }
+
+  /**
+   * Test helper: simulates the user closing a tab.
+   * @param tabId - id of the tab to close.
+   */
+  closeTab(tabId: string): void {
+    this.tabIds.delete(tabId);
+  }
 }
 
 function seg(start: number, end: number, text: string): Segment {
@@ -663,6 +687,66 @@ describe('TranscriptionService', () => {
       };
       await svc.stageForChat('sess-1', 'current-chat');
       expect(svc.stagedTranscript()).toBe('# Second meeting');
+    });
+
+    it('delivers the transcript to the tab that was active when staging started, even if the user switches tabs mid-flow', async () => {
+      const markdownGate = createDeferred<string>();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
+        if (cmd === 'get_transcript_markdown') return markdownGate.promise;
+        return undefined;
+      };
+      const staging = svc.stageForChat('sess-1');
+      await new Promise((r) => setTimeout(r, 0));
+
+      mockChat.switchToNewTab('tab-2');
+      markdownGate.resolve('# Meeting transcript');
+      await staging;
+
+      expect(mockChat.activateTab).toHaveBeenCalledWith('tab-1');
+      expect(mockChat.activeTabId()).toBe('tab-1');
+      expect(svc.stagedTranscript()).toBe('# Meeting transcript');
+      expect(svc.chatPromptDraft()).not.toBe('');
+    });
+
+    it('re-targets the origin tab before opening the new conversation, not whichever tab is active at that point', async () => {
+      mockChat.startNewConversation = vi.fn(async () => {
+        mockChat.calls.push(`startNewConversation:${mockChat.activeTabId()}`);
+      });
+      const getGate = createDeferred<TranscriptSession>();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return getGate.promise;
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return undefined;
+      };
+      const staging = svc.stageForChat('sess-1');
+      await new Promise((r) => setTimeout(r, 0));
+
+      mockChat.switchToNewTab('tab-2');
+      getGate.resolve(snapshot({ language: 'en' }));
+      await staging;
+
+      expect(mockChat.calls).toContain('startNewConversation:tab-1');
+    });
+
+    it('fails instead of misattaching the transcript when the origin tab was closed mid-flow', async () => {
+      const markdownGate = createDeferred<string>();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
+        if (cmd === 'get_transcript_markdown') return markdownGate.promise;
+        return undefined;
+      };
+      const staging = svc.stageForChat('sess-1');
+      await new Promise((r) => setTimeout(r, 0));
+
+      mockChat.switchToNewTab('tab-2');
+      mockChat.closeTab('tab-1');
+      markdownGate.resolve('# Meeting transcript');
+
+      await expect(staging).rejects.toThrow('closed');
+      expect(svc.stagedTranscript()).toBe('');
+      expect(svc.chatPromptDraft()).toBe('');
+      expect(mockChat.startNewConversation).not.toHaveBeenCalled();
     });
   });
 

@@ -480,7 +480,7 @@ describe('LlmProviderComponent', () => {
 
   it('refreshes ChatStateService cache after a successful save', async () => {
     const chatState = TestBed.inject(ChatStateService);
-    const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCache').mockResolvedValue();
+    const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCacheAll').mockResolvedValue();
     component.provider.set('ollama');
     component.model.set('llama3.3');
     component.baseUrl.set('http://localhost:11434');
@@ -490,7 +490,7 @@ describe('LlmProviderComponent', () => {
 
   it('does not refresh ChatStateService cache when save fails', async () => {
     const chatState = TestBed.inject(ChatStateService);
-    const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCache').mockResolvedValue();
+    const refreshSpy = vi.spyOn(chatState, 'refreshLlmConfigCacheAll').mockResolvedValue();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') throw new Error('save failed');
       return undefined;
@@ -499,6 +499,26 @@ describe('LlmProviderComponent', () => {
     component.model.set('llama3.3');
     await component.saveConfig();
     expect(refreshSpy).not.toHaveBeenCalled();
+  });
+
+  it('refreshes every open tab, not only the active one, so a background tab does not keep a stale provider cache', async () => {
+    const chatState = TestBed.inject(ChatStateService);
+    const tabA = chatState.activeTabId();
+    const tabB = await chatState.openTab();
+    chatState.activateTab(tabA);
+    const storeA = chatState.tabs().get(tabA);
+    const storeB = chatState.tabs().get(tabB);
+    if (!storeA || !storeB) throw new Error('expected both tabs to have a store');
+    const refreshA = vi.spyOn(storeA, 'refreshLlmConfigCache');
+    const refreshB = vi.spyOn(storeB, 'refreshLlmConfigCache');
+
+    component.provider.set('ollama');
+    component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
+    await component.saveConfig();
+
+    expect(refreshA).toHaveBeenCalledTimes(1);
+    expect(refreshB).toHaveBeenCalledTimes(1);
   });
 
   it('renders two provider cards (anthropic + local) in a radiogroup', async () => {

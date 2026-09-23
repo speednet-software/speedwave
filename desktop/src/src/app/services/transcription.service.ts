@@ -309,10 +309,29 @@ export class TranscriptionService {
    * @param target - `'new-chat'` (default) opens a fresh conversation first; `'current-chat'` keeps the active thread.
    */
   async stageForChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
+    const originTabId = this.chatState.activeTabId();
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
-    if (target === 'new-chat') await this.chatState.startNewConversation();
+    this.reclaimOriginTab(originTabId);
+    if (target === 'new-chat') {
+      await this.chatState.startNewConversation();
+      this.reclaimOriginTab(originTabId);
+    }
     this.stagedTranscriptSignal.set(md);
     this.chatPromptDraftSignal.set(TRANSCRIPT_PROMPT_DEFAULTS[session.language]);
+  }
+
+  /**
+   * Re-targets the flow at the tab that was active when `stageForChat` started: if the user
+   * switched away mid-flow, re-activates it (the store itself is untouched) so the transcript
+   * still lands on the right conversation; if it was closed instead, fails loudly rather than
+   * misattaching the transcript to whichever tab is active now.
+   * @param tabId - tab id captured at the start of `stageForChat`.
+   */
+  private reclaimOriginTab(tabId: string): void {
+    if (!this.chatState.tabs().has(tabId)) {
+      throw new Error('the chat tab this transcript was staged for was closed');
+    }
+    if (this.chatState.activeTabId() !== tabId) this.chatState.activateTab(tabId);
   }
 
   /** Drops the draft once the composer has loaded it, so a later render does not overwrite edits. */
