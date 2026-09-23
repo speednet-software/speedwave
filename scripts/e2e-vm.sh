@@ -287,7 +287,6 @@ if [ -x "$LIMACTL" ] && LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" "$LIMACTL" list -q 
             sudo nerdctl compose -f "$compose_file" -p "$project" down 2>/dev/null || true
     done
 fi
-# Kill Lima VM (hostagent ignores SIGTERM)
 pkill -9 -f limactl 2>/dev/null || true
 rm -f $SPEEDWAVE_DATA_DIR/lima/*/ssh.sock 2>/dev/null || true
 # Unmount all Speedwave DMG volumes (Finder appends " 1", " 2" for duplicates)
@@ -831,7 +830,8 @@ SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
 export PATH="$HOME/.cargo/bin:$PATH"
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-APP_PATH="/Applications/Speedwave.app/Contents/MacOS/speedwave-desktop"
+APP_BUNDLE="/Applications/Speedwave.app"
+APP_PATH="$APP_BUNDLE/Contents/MacOS/speedwave-desktop"
 if [ ! -f "$APP_PATH" ]; then
     echo "ERROR: Speedwave binary not found at $APP_PATH" >&2
     exit 1
@@ -840,7 +840,9 @@ fi
 # Kill any leftover Speedwave processes from previous runs
 pkill -f speedwave-desktop 2>/dev/null || true
 SPEEDWAVE_VM_NAME="$(basename "$SPEEDWAVE_DATA_DIR" | sed 's/^\.//')"
-LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl stop "$SPEEDWAVE_VM_NAME" >/dev/null 2>&1 || true
+if [ -d "$SPEEDWAVE_DATA_DIR/lima/$SPEEDWAVE_VM_NAME" ]; then
+    LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" "$APP_BUNDLE/Contents/Resources/lima/bin/limactl" stop "$SPEEDWAVE_VM_NAME" || true
+fi
 pkill -9 -f limactl 2>/dev/null || true
 pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
@@ -857,7 +859,6 @@ APP_PID=$!
 
 cleanup() {
     # Kill app and all child processes (Lima hostagent, mcp-os node, SSH mux).
-    # Lima hostagent ignores SIGTERM — use SIGKILL after a brief grace period.
     kill $APP_PID 2>/dev/null || true
     pkill -f speedwave-desktop 2>/dev/null || true
     sleep 1

@@ -90,8 +90,7 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     ) -> anyhow::Result<std::path::PathBuf>;
     fn container_logs(&self, container: &str, tail: u32) -> anyhow::Result<String>;
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String>;
-    /// `Ok(false)` only when the engine answers that `tag` is absent (nerdctl `no such image`);
-    /// an engine that cannot answer (VM down, SSH/wsl.exe failure) is `Err`, never absent.
+    /// Returns `true` if the given image tag exists in the container runtime.
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool>;
     /// Recreates all containers using `--force-recreate --remove-orphans`.
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()>;
@@ -648,8 +647,7 @@ pub(crate) fn image_inspect_verdict(inspect: anyhow::Result<String>) -> anyhow::
     let Err(e) = inspect else {
         return Ok(true);
     };
-    let lower = e.to_string().to_ascii_lowercase();
-    if lower.contains(NO_SUCH_IMAGE_FRAGMENT) {
+    if e.to_string().contains(NO_SUCH_IMAGE_FRAGMENT) {
         Ok(false)
     } else {
         Err(e)

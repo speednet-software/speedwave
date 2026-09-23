@@ -48,7 +48,7 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
     local body launch stop
     body="$(sed -n '/^run_macos_e2e()/,/^}/p' "$SCRIPT")"
     launch="$(echo "$body" | grep -n '^"\$APP_PATH" &$' | cut -d: -f1)"
-    stop="$(echo "$body" | grep -n 'Resources/lima/bin/limactl stop ' | head -1 | cut -d: -f1)"
+    stop="$(echo "$body" | grep -nE 'Resources/lima/bin/limactl"? stop ' | head -1 | cut -d: -f1)"
     [ -n "$launch" ]
     [ -n "$stop" ]
     [ "$stop" -lt "$launch" ]

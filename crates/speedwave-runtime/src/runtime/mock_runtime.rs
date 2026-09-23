@@ -7,7 +7,7 @@
 
 use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -149,7 +149,7 @@ pub struct MockRuntimeBuilder {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
-    image_exists_failure_queue: Arc<Mutex<Vec<String>>>,
+    image_exists_failure_queue: Arc<Mutex<VecDeque<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
@@ -213,7 +213,7 @@ impl MockRuntimeBuilder {
             image_exists_default: false,
             image_missing_substrings: Vec::new(),
             image_exists_error: None,
-            image_exists_failure_queue: Arc::new(Mutex::new(Vec::new())),
+            image_exists_failure_queue: Arc::new(Mutex::new(VecDeque::new())),
             build_image_result: BuildResult::Ok,
             build_attempt_errors: HashMap::new(),
             build_attempts: Arc::new(Mutex::new(HashMap::new())),
@@ -296,7 +296,7 @@ impl MockRuntimeBuilder {
         self.image_exists_failure_queue
             .lock()
             .unwrap()
-            .push(msg.to_string());
+            .push_back(msg.to_string());
         self
     }
     /// Default for `image_exists(tag)` when no exact-match override is set and no
@@ -470,7 +470,7 @@ struct MockRuntime {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
-    image_exists_failure_queue: Arc<Mutex<Vec<String>>>,
+    image_exists_failure_queue: Arc<Mutex<VecDeque<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
@@ -695,14 +695,7 @@ impl ContainerRuntime for MockRuntime {
     }
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
-        let next_failure = {
-            let mut q = self.image_exists_failure_queue.lock().unwrap();
-            if q.is_empty() {
-                None
-            } else {
-                Some(q.remove(0))
-            }
-        };
+        let next_failure = self.image_exists_failure_queue.lock().unwrap().pop_front();
         if let Some(err) = next_failure {
             anyhow::bail!("{err}");
         }

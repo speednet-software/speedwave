@@ -367,7 +367,7 @@ pub const EXIT_CLEANUP_TIMEOUT_SECS: u64 = 60;
 pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 
 /// Delay in seconds between status polls while waiting for a Lima VM
-/// in `Stopping` state to finish. Used by `ensure_ready_inner`.
+/// in `Stopping` state to finish.
 pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 
 const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);

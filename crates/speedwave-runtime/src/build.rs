@@ -266,17 +266,23 @@ pub fn images_exist(
     integrations: &ResolvedIntegrationsConfig,
     manifest: &crate::bundle::BundleManifest,
 ) -> anyhow::Result<bool> {
-    let mut retries_left = ENGINE_UNREACHABLE_RETRIES;
+    let mut retries = 0;
     loop {
         rt.ensure_ready()?;
         match probe_enabled_images(rt, integrations, manifest) {
-            Err(e) if retries_left > 0 => {
-                retries_left -= 1;
-                log::warn!(
-                    "image check could not reach the container engine, re-running ensure_ready \
-                     ({retries_left} retries left): {e}"
-                );
+            Err(e) if retries < ENGINE_UNREACHABLE_RETRIES => {
+                if retries == 0 {
+                    log::warn!(
+                        "image check could not reach the container engine, re-running \
+                         ensure_ready up to {ENGINE_UNREACHABLE_RETRIES} times: {e}"
+                    );
+                }
+                retries += 1;
                 std::thread::sleep(ENGINE_UNREACHABLE_RETRY_DELAY);
+            }
+            Ok(present) if retries > 0 => {
+                log::info!("container engine answered the image check after {retries} retries");
+                return Ok(present);
             }
             verdict => return verdict,
         }
