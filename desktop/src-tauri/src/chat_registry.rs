@@ -34,8 +34,8 @@ impl ChatSessions {
     }
 
     pub(crate) fn prepare(&self, tab_id: &str, project: &str) -> TabEntry {
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let mut tabs = self.lock_tabs();
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         match tabs.get_mut(tab_id) {
             Some(entry) if entry.project == project => {
                 entry.seq = seq;
@@ -72,12 +72,16 @@ impl ChatSessions {
         self.lock_tabs().drain().map(|(_, e)| e.session).collect()
     }
 
-    pub(crate) fn any_for_project(&self, project: &str) -> Option<Arc<Mutex<ChatSession>>> {
+    pub(crate) fn entry_for_project(&self, project: &str) -> Option<TabEntry> {
         self.lock_tabs()
             .values()
             .filter(|e| e.project == project)
             .max_by_key(|e| e.seq)
-            .map(|e| e.session.clone())
+            .cloned()
+    }
+
+    pub(crate) fn any_for_project(&self, project: &str) -> Option<Arc<Mutex<ChatSession>>> {
+        self.entry_for_project(project).map(|e| e.session)
     }
 
     pub(crate) fn claim_transcript(
@@ -112,6 +116,19 @@ impl ChatSessions {
         self.lock_tabs()
             .iter()
             .any(|(id, e)| id != tab_id && e.project == project)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{Arc, ChatSessions, SharedChatSessions, TabEntry};
+
+    pub(crate) const TEST_TAB_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    pub(crate) fn registry_with(project: &str) -> (SharedChatSessions, TabEntry) {
+        let reg: SharedChatSessions = Arc::new(ChatSessions::default());
+        let entry = reg.prepare(TEST_TAB_ID, project);
+        (reg, entry)
     }
 }
 
@@ -216,5 +233,43 @@ mod tests {
         assert!(!reg.other_entry_for_project("acme", TAB_A));
         reg.prepare(TAB_B, "acme");
         assert!(reg.other_entry_for_project("acme", TAB_A));
+    }
+
+    #[test]
+    fn entry_for_project_returns_the_most_recent_full_entry() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme");
+        let b = reg.prepare(TAB_B, "acme");
+        let entry = reg.entry_for_project("acme").unwrap();
+        assert!(Arc::ptr_eq(&entry.session, &b.session));
+        assert!(Arc::ptr_eq(&entry.start_serialize, &b.start_serialize));
+        assert_eq!(entry.project, "acme");
+        assert!(reg.entry_for_project("other").is_none());
+    }
+
+    #[test]
+    fn prepare_assigns_the_seq_under_the_map_lock() {
+        let source = include_str!("chat_registry.rs");
+        let after_sig = source
+            .split("fn prepare(")
+            .nth(1)
+            .expect("prepare must exist");
+        let body = &after_sig[..after_sig.find("\n    }").expect("prepare must close")];
+        let lock_pos = body.find("lock_tabs").expect("prepare must lock the map");
+        let seq_pos = body.find("fetch_add").expect("prepare must bump the seq");
+        assert!(
+            lock_pos < seq_pos,
+            "the seq must be assigned under the map lock so seq order matches insertion order"
+        );
+    }
+
+    #[test]
+    fn test_support_registry_with_prepares_one_tab_for_the_project() {
+        let (reg, entry) = test_support::registry_with("acme");
+        assert_eq!(entry.project, "acme");
+        assert!(Arc::ptr_eq(
+            &reg.entry(test_support::TEST_TAB_ID).unwrap().session,
+            &entry.session
+        ));
     }
 }

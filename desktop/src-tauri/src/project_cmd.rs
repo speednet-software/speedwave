@@ -1,4 +1,4 @@
-use crate::chat::{ChatSession, SharedChatSession};
+use crate::chat_registry::SharedChatSessions;
 use crate::reconcile;
 use crate::types::{check_project, ProjectEntry, ProjectList};
 use crate::{containers_cmd, integrations_cmd};
@@ -42,11 +42,9 @@ pub(crate) const PROJECT_TRANSITION_BUSY_ERR: &str =
 pub(crate) async fn switch_project(
     name: String,
     app: tauri::AppHandle,
-    chat_state: tauri::State<'_, SharedChatSession>,
+    chat_state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), String> {
-    use containers_cmd::{
-        spawn_background_teardown, switch_project_core, teardown_only, SwitchResult,
-    };
+    use containers_cmd::{spawn_background_teardown, switch_project_core, SwitchResult};
 
     let Ok(_transition_guard) = PROJECT_TRANSITION_LOCK.try_lock() else {
         return Err(PROJECT_TRANSITION_BUSY_ERR.to_string());
@@ -114,54 +112,10 @@ pub(crate) async fn switch_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    let rebind_name = name.clone();
-    let rebind_app = app.clone();
-    let rebind_state = chat_state.inner().clone();
-    let rebind_result: Result<(), String> =
-        tokio::task::spawn_blocking(move || rebind_chat(&rebind_name, &rebind_app, &rebind_state))
-            .await
-            .map_err(|e| e.to_string())?;
-
-    if let Err(e) = rebind_result {
-        reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
-        let mut cleanup_parts: Vec<String> = Vec::new();
-
-        let new_for_teardown = name.clone();
-        let teardown_err: Option<String> = tokio::task::spawn_blocking(move || {
-            let rt = speedwave_runtime::runtime::detect_runtime();
-            teardown_only(&new_for_teardown, &rt)
-        })
+    let registry = chat_state.inner().clone();
+    tokio::task::spawn_blocking(move || clear_chat_sessions(&registry))
         .await
-        .unwrap_or_else(|je| Some(format!("join error: {je}")));
-
-        if let Some(te) = teardown_err {
-            cleanup_parts.push(format!("Teardown of new project incomplete: {te}"));
-        }
-
-        if let Some(ref prev) = previous {
-            let rb_prev = prev.clone();
-            let rb_app = app.clone();
-            let rb_state = chat_state.inner().clone();
-            let rb_result: Result<(), String> =
-                tokio::task::spawn_blocking(move || rebind_chat(&rb_prev, &rb_app, &rb_state))
-                    .await
-                    .unwrap_or_else(|je| Err(format!("join error: {je}")));
-
-            if let Err(re) = rb_result {
-                cleanup_parts.push(format!("Chat rebind back to '{prev}' failed: {re}"));
-            }
-        }
-
-        let cleanup_error = if cleanup_parts.is_empty() {
-            None
-        } else {
-            Some(cleanup_parts.join(". "))
-        };
-
-        let full_error =
-            rollback_and_emit_failed(&app, previous, &e.to_string(), cleanup_error.as_deref());
-        return Err(full_error);
-    }
+        .map_err(|e| e.to_string())?;
 
     if let Some(prev) = pending_teardown {
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
@@ -175,22 +129,23 @@ pub(crate) async fn switch_project(
     Ok(())
 }
 
-pub(crate) fn rebind_chat(
-    project: &str,
-    app: &tauri::AppHandle,
-    chat_state: &SharedChatSession,
-) -> Result<(), String> {
-    check_project(project)?;
-    let mut session = chat_state
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
-    session.stop().map_err(|e| e.to_string())?;
-    *session = ChatSession::new(
-        project,
-        "00000000-0000-4000-8000-000000000000",
-        std::sync::Arc::new(std::sync::Mutex::new(None)),
-    );
-    session.start(app.clone(), None).map_err(|e| e.to_string())
+pub(crate) fn clear_chat_sessions(registry: &SharedChatSessions) {
+    for session_arc in registry.drain_all() {
+        match session_arc.lock() {
+            Ok(mut session) => {
+                if let Err(e) = session.stop() {
+                    log::warn!("failed to stop a chat session during project transition: {e}");
+                }
+            }
+            Err(poisoned) => {
+                if let Err(e) = poisoned.into_inner().stop() {
+                    log::warn!(
+                        "failed to stop a poisoned chat session during project transition: {e}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
@@ -381,14 +336,73 @@ mod tests {
             prev_oauth > success_marker,
             "previous-project worker teardown must live in the success path"
         );
-        let rebind_fail = body
-            .find("rebind_result {")
-            .expect("rebind-failure block must exist");
-        let fail_window = &body[rebind_fail..success_marker];
+    }
+
+    #[test]
+    fn switch_clears_every_chat_tab_after_the_container_switch() {
+        let source = include_str!("project_cmd.rs");
+        let switch_fn = source
+            .split("pub(crate) async fn switch_project(")
+            .nth(1)
+            .expect("switch_project must exist");
+        let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
+        let switch_pos = body
+            .find("switch_project_core")
+            .expect("switch must run the container switch");
+        let clear_pos = body
+            .find("clear_chat_sessions")
+            .expect("switch must clear the chat tab registry");
+        let emit_pos = body
+            .find("project_switch_succeeded")
+            .expect("switch must emit the success event");
         assert!(
-            fail_window.contains("teardown_oauth_for_project"),
-            "rebind failure must retire the destination's host workers"
+            switch_pos < clear_pos && clear_pos < emit_pos,
+            "the registry must be cleared after the switch and before the success event"
         );
+        assert!(
+            !body.contains("rebind_chat"),
+            "the singleton rebind is gone; the frontend starts the new project's tabs"
+        );
+    }
+
+    const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const TAB_B: &str = "550e8400-e29b-41d4-a716-446655440001";
+
+    #[test]
+    fn clear_chat_sessions_empties_the_registry_and_leaves_it_usable() {
+        let reg: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        reg.prepare(TAB_A, "acme");
+        reg.prepare(TAB_B, "globex");
+        clear_chat_sessions(&reg);
+        assert!(reg.entry(TAB_A).is_none());
+        assert!(reg.entry(TAB_B).is_none());
+        let entry = reg.prepare(TAB_A, "acme");
+        assert_eq!(entry.project, "acme");
+        assert!(reg.entry(TAB_A).is_some());
+    }
+
+    #[test]
+    fn clear_chat_sessions_on_an_empty_registry_is_a_noop() {
+        let reg: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        clear_chat_sessions(&reg);
+        assert!(reg.entry(TAB_A).is_none());
+    }
+
+    #[test]
+    fn clear_chat_sessions_survives_a_poisoned_session() {
+        let reg: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        let entry = reg.prepare(TAB_A, "acme");
+        let arc_clone = entry.session.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = arc_clone.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        clear_chat_sessions(&reg);
+        assert!(reg.entry(TAB_A).is_none());
     }
 
     #[test]

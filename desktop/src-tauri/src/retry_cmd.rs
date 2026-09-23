@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::chat::{validate_retry_uuid, ChatSession, SharedChatSession};
+use crate::chat::{validate_retry_uuid, ChatSession};
+use crate::chat_registry::{self, SharedChatSessions, TabEntry};
 use crate::history::validate_session_id;
 
 /// Errors surfaced to the frontend from `retry_last_turn`, serialised as a
@@ -58,11 +59,11 @@ pub(crate) trait SessionDriver {
     fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String>;
 }
 
-/// Real driver backed by [`ChatSession`]. Swaps the session out of its mutex so
+/// Real driver backed by [`ChatSession`]. Swaps the session out of its tab's mutex so
 /// `stop()` (blocks on reader-thread drain) does not starve `send_message` et al.
 struct ChatSessionDriver<'a> {
-    session_arc: SharedChatSession,
-    project_name: Option<String>,
+    entry: TabEntry,
+    tab_id: String,
     app_handle: &'a AppHandle,
 }
 
@@ -70,17 +71,16 @@ impl SessionDriver for ChatSessionDriver<'_> {
     fn stop(&mut self) -> Result<(), String> {
         let mut old = {
             let mut guard = self
-                .session_arc
+                .entry
+                .session
                 .lock()
                 .map_err(|e| format!("session lock poisoned: {e}"))?;
-            let project_name = guard.project_name().to_string();
-            self.project_name = Some(project_name.clone());
             std::mem::replace(
                 &mut *guard,
                 ChatSession::new(
-                    &project_name,
-                    "00000000-0000-4000-8000-000000000000",
-                    std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    &self.entry.project,
+                    &self.tab_id,
+                    self.entry.transcript.clone(),
                 ),
             )
         };
@@ -91,7 +91,8 @@ impl SessionDriver for ChatSessionDriver<'_> {
 
     fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String> {
         let mut session = self
-            .session_arc
+            .entry
+            .session
             .lock()
             .map_err(|e| format!("session lock poisoned: {e}"))?;
         session
@@ -100,25 +101,41 @@ impl SessionDriver for ChatSessionDriver<'_> {
     }
 }
 
-/// Tauri command — retry the last assistant turn in the active session, rewinding
+fn tab_entry_for_retry(
+    registry: &SharedChatSessions,
+    tab_id: &str,
+) -> Result<TabEntry, RetryError> {
+    if chat_registry::validate_tab_id(tab_id).is_err() {
+        return Err(RetryError::SessionNotFound);
+    }
+    registry.entry(tab_id).ok_or(RetryError::SessionNotFound)
+}
+
+/// Tauri command — retry the last assistant turn in the given tab's session, rewinding
 /// to the frontend-supplied `session_id`/`user_uuid` (ADR-046).
 #[tauri::command]
 pub async fn retry_last_turn(
+    tab_id: String,
     session_id: String,
     user_uuid: String,
     app_handle: AppHandle,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), RetryError> {
     log::info!(
         "retry_last_turn: session_id_len={} user_uuid_len={}",
         session_id.len(),
         user_uuid.len()
     );
-    let session_arc = state.inner().clone();
+    let registry = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+        let entry = tab_entry_for_retry(&registry, &tab_id)?;
+        let serializer = entry.start_serialize.clone();
+        let _serialize = serializer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut driver = ChatSessionDriver {
-            session_arc,
-            project_name: None,
+            entry,
+            tab_id,
             app_handle: &app_handle,
         };
         retry_last_turn_inner(&session_id, &user_uuid, &mut driver)
@@ -266,5 +283,63 @@ mod tests {
         let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
         assert!(r.is_ok());
         assert_eq!(drv.stop_calls, 1);
+    }
+
+    const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn an_unknown_or_malformed_tab_is_session_not_found() {
+        let reg: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        assert_eq!(
+            tab_entry_for_retry(&reg, TAB_A).err(),
+            Some(RetryError::SessionNotFound)
+        );
+        assert_eq!(
+            tab_entry_for_retry(&reg, "not-a-uuid").err(),
+            Some(RetryError::SessionNotFound)
+        );
+    }
+
+    #[test]
+    fn a_prepared_tab_resolves_to_its_entry() {
+        let (reg, entry) = crate::chat_registry::test_support::registry_with("acme");
+        let resolved = tab_entry_for_retry(&reg, TAB_A).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&resolved.session, &entry.session));
+        assert_eq!(resolved.project, "acme");
+    }
+
+    #[test]
+    fn the_retry_driver_replaces_the_session_with_the_same_tab_identity() {
+        let source = include_str!("retry_cmd.rs");
+        let stop_impl = source
+            .split("fn stop(&mut self) -> Result<(), String> {")
+            .nth(1)
+            .unwrap();
+        let body = &stop_impl[..stop_impl.find("fn start_with_retry").unwrap()];
+        assert!(
+            body.contains("self.entry.project") && body.contains("self.tab_id"),
+            "the replacement session must carry the tab's own project and tab id"
+        );
+        assert!(
+            body.contains("self.entry.transcript.clone()"),
+            "the replacement session must keep the tab's transcript slot"
+        );
+    }
+
+    #[test]
+    fn retry_holds_the_tab_serializer_for_the_whole_stop_and_start() {
+        let source = include_str!("retry_cmd.rs");
+        let command = source
+            .split("pub async fn retry_last_turn(")
+            .nth(1)
+            .unwrap();
+        let body = &command[..command.find("\nmod tests").unwrap_or(command.len())];
+        let guard_pos = body.find("start_serialize").unwrap();
+        let inner_pos = body.find("retry_last_turn_inner").unwrap();
+        assert!(
+            guard_pos < inner_pos,
+            "the serializer must be held before the stop+start sequence runs"
+        );
     }
 }

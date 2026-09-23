@@ -443,7 +443,7 @@ pub async fn add_project(
     name: String,
     dir: String,
     app: tauri::AppHandle,
-    chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
+    chat_state: tauri::State<'_, crate::chat_registry::SharedChatSessions>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
@@ -532,9 +532,10 @@ pub async fn add_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
-        log::warn!("rebind_chat failed after adding project: {e}");
-    }
+    let registry = chat_state.inner().clone();
+    tokio::task::spawn_blocking(move || crate::clear_chat_sessions(&registry))
+        .await
+        .map_err(|e| e.to_string())?;
 
     if let Some(prev) = pending_teardown {
         spawn_background_teardown(prev);

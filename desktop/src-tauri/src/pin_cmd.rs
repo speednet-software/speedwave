@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::chat::SharedChatSession;
+use crate::chat_registry::SharedChatSessions;
 use crate::types::check_project;
 use speedwave_runtime::config;
 
@@ -110,10 +110,10 @@ fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
     })
 }
 
-fn picker_wire_ids(session_arc: &SharedChatSession, project_name: &str) -> Vec<String> {
+fn picker_wire_ids(registry: &SharedChatSessions, project_name: &str) -> Vec<String> {
     config::load_user_config()
         .map_err(|e| e.to_string())
-        .and_then(|cfg| crate::model_picker::picker_for(&cfg, session_arc, project_name))
+        .and_then(|cfg| crate::model_picker::picker_for(&cfg, registry, project_name))
         .ok()
         .flatten()
         .map(|picker| picker.rows.into_iter().map(|r| r.wire_id).collect())
@@ -123,14 +123,14 @@ fn picker_wire_ids(session_arc: &SharedChatSession, project_name: &str) -> Vec<S
 fn set_model_pin_inner(
     project_id: &str,
     model: &str,
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
 ) -> Result<(), String> {
     let project_name = resolve_project_name(project_id)?;
     crate::claude_settings::set_model_pin(
         speedwave_runtime::consts::data_dir(),
         &project_name,
         model,
-        &picker_wire_ids(session_arc, &project_name),
+        &picker_wire_ids(registry, &project_name),
     )
 }
 
@@ -138,7 +138,7 @@ fn set_model_pin_inner(
 pub(crate) fn set_model_pin(
     project_id: String,
     model: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), String> {
     set_model_pin_inner(&project_id, &model, state.inner())
 }
@@ -238,12 +238,8 @@ mod tests {
         assert_eq!(get_err, resolve_project_name("").unwrap_err());
     }
 
-    fn no_session() -> SharedChatSession {
-        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new(
-            "proj",
-            "550e8400-e29b-41d4-a716-446655440000",
-            std::sync::Arc::new(std::sync::Mutex::new(None)),
-        )))
+    fn no_session() -> SharedChatSessions {
+        crate::chat_registry::test_support::registry_with("proj").0
     }
 
     #[test]

@@ -2341,8 +2341,6 @@ impl Drop for ChatSession {
     }
 }
 
-pub type SharedChatSession = Arc<Mutex<ChatSession>>;
-
 fn drain_queued_message(
     app_handle: &AppHandle,
     tab_id: &str,

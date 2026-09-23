@@ -1,4 +1,7 @@
-use crate::chat::{self, ChatSession, SharedChatSession};
+use std::sync::{Arc, Mutex};
+
+use crate::chat::{self, ChatSession};
+use crate::chat_registry::{self, SharedChatSessions};
 use crate::control_channel::{
     self, ContextUsage, ControlHandle, ControlQuery, PlanUsage, SessionInfoState,
 };
@@ -7,18 +10,21 @@ use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
 use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
-static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn start_session_inner(
     project: &str,
+    tab_id: &str,
     resume_session_id: Option<&str>,
-    session_arc: SharedChatSession,
+    registry: SharedChatSessions,
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let _serialize = START_SERIALIZE
+    let entry = registry.prepare(tab_id, project);
+    let _serialize = entry
+        .start_serialize
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    registry.claim_transcript(tab_id, resume_session_id)?;
 
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
@@ -40,18 +46,15 @@ fn start_session_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    log::info!("extracting old session");
+    log::info!("extracting old session for this tab");
     let mut old_session = {
-        let mut guard = session_arc
+        let mut guard = entry
+            .session
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))?;
         std::mem::replace(
             &mut *guard,
-            ChatSession::new(
-                project,
-                "00000000-0000-4000-8000-000000000000",
-                std::sync::Arc::new(std::sync::Mutex::new(None)),
-            ),
+            ChatSession::new(project, tab_id, entry.transcript.clone()),
         )
     };
     log::info!("stopping old session (outside lock)");
@@ -59,7 +62,8 @@ fn start_session_inner(
     drop(old_session);
 
     log::info!("starting new session");
-    let mut session = session_arc
+    let mut session = entry
+        .session
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     let result = session
@@ -72,37 +76,111 @@ fn start_session_inner(
 #[tauri::command]
 pub(crate) async fn start_chat(
     project: String,
+    tab_id: String,
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
     oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
+    chat_registry::validate_tab_id(&tab_id)?;
     log::info!("starting chat for project={project}");
-    let session_arc = state.inner().clone();
+    let registry = state.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(&project, None, session_arc, oauth_arc, app_handle)
+        start_session_inner(&project, &tab_id, None, registry, oauth_arc, app_handle)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub(crate) async fn send_message(
+pub(crate) async fn resume_conversation(
+    project: String,
+    session_id: String,
+    tab_id: String,
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, SharedChatSessions>,
+    oauth: tauri::State<'_, SharedOauth>,
+) -> Result<(), String> {
+    check_project(&project)?;
+    crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
+    chat_registry::validate_tab_id(&tab_id)?;
+    log::info!("resuming conversation for project={project}");
+    let registry = state.inner().clone();
+    let oauth_arc = oauth.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        start_session_inner(
+            &project,
+            &tab_id,
+            Some(&session_id),
+            registry,
+            oauth_arc,
+            app_handle,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn close_chat_tab_inner(registry: &SharedChatSessions, tab_id: &str) -> Result<(), String> {
+    let Some(entry) = registry.entry(tab_id) else {
+        return Ok(());
+    };
+    let _serialize = entry
+        .start_serialize
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(session_arc) = registry.remove(tab_id) else {
+        return Ok(());
+    };
+    let mut session = session_arc
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?;
+    session.stop().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn close_chat_tab(
+    tab_id: String,
+    state: tauri::State<'_, SharedChatSessions>,
+) -> Result<(), String> {
+    chat_registry::validate_tab_id(&tab_id)?;
+    let registry = state.inner().clone();
+    tokio::task::spawn_blocking(move || close_chat_tab_inner(&registry, &tab_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+const MSG_NO_SESSION_FOR_TAB: &str = "no chat session for this tab";
+
+fn tab_session(
+    registry: &SharedChatSessions,
+    tab_id: &str,
+) -> Result<Arc<Mutex<ChatSession>>, String> {
+    chat_registry::validate_tab_id(tab_id)?;
+    registry
+        .entry(tab_id)
+        .map(|e| e.session)
+        .ok_or_else(|| MSG_NO_SESSION_FOR_TAB.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn send_message(
+    tab_id: String,
     blocks: Vec<chat::WireContentBlock>,
     display_text: String,
-    state: tauri::State<'_, SharedChatSession>,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), String> {
     if display_text.len() > chat::MAX_MESSAGE_LEN {
         return Err("Message too long".to_string());
     }
+    let session_arc = tab_session(state.inner(), &tab_id)?;
     log::info!(
         "sending message: blocks={}, display_len={}",
         blocks.len(),
         display_text.len()
     );
-    let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let mut session = session_arc.try_lock().map_err(|_| {
             log::info!("try_lock failed sending message (session busy)");
@@ -119,15 +197,16 @@ pub(crate) async fn send_message(
 
 #[tauri::command]
 pub(crate) async fn submit_question_answer(
+    tab_id: String,
     tool_use_id: String,
     question_idx: usize,
     answer: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), String> {
     if answer.len() > chat::MAX_ASK_USER_ANSWER_LEN {
         return Err("Answer too long".to_string());
     }
-    let session_arc = state.inner().clone();
+    let session_arc = tab_session(state.inner(), &tab_id)?;
     tokio::task::spawn_blocking(move || {
         let mut session = session_arc
             .try_lock()
@@ -140,7 +219,7 @@ pub(crate) async fn submit_question_answer(
     .map_err(|e| e.to_string())?
 }
 
-fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
+fn stop_chat_inner(session_arc: Arc<Mutex<ChatSession>>) -> Result<(), String> {
     let mut session = session_arc
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -148,97 +227,82 @@ fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) async fn stop_chat(state: tauri::State<'_, SharedChatSession>) -> Result<(), String> {
+pub(crate) async fn stop_chat(
+    tab_id: String,
+    state: tauri::State<'_, SharedChatSessions>,
+) -> Result<(), String> {
     log::info!("interrupting chat turn");
-    let session_arc = state.inner().clone();
+    let session_arc = tab_session(state.inner(), &tab_id)?;
     tokio::task::spawn_blocking(move || stop_chat_inner(session_arc))
         .await
         .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn resume_conversation(
-    project: String,
-    session_id: String,
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, SharedChatSession>,
-    oauth: tauri::State<'_, SharedOauth>,
-) -> Result<(), String> {
-    check_project(&project)?;
-    crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
-    log::info!("resuming conversation for project={project}");
-    let session_arc = state.inner().clone();
-    let oauth_arc = oauth.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        start_session_inner(
-            &project,
-            Some(&session_id),
-            session_arc,
-            oauth_arc,
-            app_handle,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 const MSG_SESSION_BUSY: &str = "chat session is busy";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
 
 pub(crate) fn session_info_state_inner(
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
 ) -> SessionInfoState {
+    let Some(session_arc) = registry.any_for_project(project) else {
+        return SessionInfoState::Unavailable;
+    };
     match session_arc.try_lock() {
-        Ok(session) if session.project_name() == project => session.session_info_state(),
-        _ => SessionInfoState::Unavailable,
+        Ok(session) => session.session_info_state(),
+        Err(_) => SessionInfoState::Unavailable,
     }
 }
 
 fn control_handle_for(
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
 ) -> Result<ControlHandle, String> {
+    let session_arc = registry
+        .any_for_project(project)
+        .ok_or_else(|| MSG_NO_SESSION_FOR_PROJECT.to_string())?;
     let session = session_arc
         .try_lock()
         .map_err(|_| MSG_SESSION_BUSY.to_string())?;
-    if session.project_name() != project {
-        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
-    }
     session.control_handle().map_err(|e| e.to_string())
 }
 
 fn control_query_inner<T>(
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
     query: ControlQuery,
     parse: fn(&serde_json::Value) -> Result<T, control_channel::ControlError>,
 ) -> Result<T, String> {
-    let handle = control_handle_for(session_arc, project)?;
+    let handle = control_handle_for(registry, project)?;
     handle
         .query(query)
         .and_then(|value| parse(&value))
         .map_err(|e| e.to_string())
 }
 
-fn takes_wire_effort_inner(session_arc: &SharedChatSession, project: &str) -> bool {
-    let _serialize = START_SERIALIZE
+fn takes_wire_effort_inner(registry: &SharedChatSessions, project: &str) -> bool {
+    let Some(entry) = registry.entry_for_project(project) else {
+        return false;
+    };
+    let _serialize = entry
+        .start_serialize
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut session = session_arc
+    let mut session = entry
+        .session
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    session.project_name() == project && session.takes_wire_effort()
+    session.takes_wire_effort()
 }
 
 #[tauri::command]
 pub(crate) async fn get_chat_takes_wire_effort(
     project: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<bool, String> {
     check_project(&project)?;
-    let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || takes_wire_effort_inner(&session_arc, &project))
+    let registry = state.inner().clone();
+    tokio::task::spawn_blocking(move || takes_wire_effort_inner(&registry, &project))
         .await
         .map_err(|e| e.to_string())
 }
@@ -246,7 +310,7 @@ pub(crate) async fn get_chat_takes_wire_effort(
 #[tauri::command]
 pub(crate) async fn get_chat_session_info(
     project: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<SessionInfoState, String> {
     check_project(&project)?;
     Ok(session_info_state_inner(state.inner(), &project))
@@ -255,13 +319,13 @@ pub(crate) async fn get_chat_session_info(
 #[tauri::command]
 pub(crate) async fn get_plan_usage(
     project: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<PlanUsage, String> {
     check_project(&project)?;
-    let session_arc = state.inner().clone();
+    let registry = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         control_query_inner(
-            &session_arc,
+            &registry,
             &project,
             ControlQuery::Usage,
             control_channel::parse_plan_usage,
@@ -274,13 +338,13 @@ pub(crate) async fn get_plan_usage(
 #[tauri::command]
 pub(crate) async fn get_context_usage(
     project: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<ContextUsage, String> {
     check_project(&project)?;
-    let session_arc = state.inner().clone();
+    let registry = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         control_query_inner(
-            &session_arc,
+            &registry,
             &project,
             ControlQuery::ContextUsage,
             control_channel::parse_context_usage,
@@ -299,103 +363,101 @@ pub(crate) async fn get_context_usage(
 )]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use crate::chat_registry::test_support::registry_with;
+    use crate::chat_registry::ChatSessions;
+
+    const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const TAB_B: &str = "550e8400-e29b-41d4-a716-446655440001";
 
     #[test]
     fn session_info_is_unavailable_without_a_live_session() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
+        let (reg, _entry) = registry_with("acme");
         assert_eq!(
-            session_info_state_inner(&session_arc, "acme"),
+            session_info_state_inner(&reg, "acme"),
+            SessionInfoState::Unavailable
+        );
+    }
+
+    #[test]
+    fn session_info_is_unavailable_on_an_empty_registry() {
+        let reg: SharedChatSessions = Arc::new(ChatSessions::default());
+        assert_eq!(
+            session_info_state_inner(&reg, "acme"),
             SessionInfoState::Unavailable
         );
     }
 
     #[test]
     fn session_info_is_unavailable_for_another_project_and_while_the_session_is_locked() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
+        let (reg, entry) = registry_with("acme");
         assert_eq!(
-            session_info_state_inner(&session_arc, "other"),
+            session_info_state_inner(&reg, "other"),
             SessionInfoState::Unavailable
         );
-        let _held = session_arc.lock().unwrap();
+        let _held = entry.session.lock().unwrap();
         assert_eq!(
-            session_info_state_inner(&session_arc, "acme"),
+            session_info_state_inner(&reg, "acme"),
             SessionInfoState::Unavailable
         );
     }
 
     #[test]
     fn a_live_process_launched_with_effort_takes_the_wire() {
-        let mut session = ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        );
-        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        assert!(takes_wire_effort_inner(&session_arc, "acme"));
+        let (reg, entry) = registry_with("acme");
+        entry
+            .session
+            .lock()
+            .unwrap()
+            .set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        assert!(takes_wire_effort_inner(&reg, "acme"));
         assert!(
-            !takes_wire_effort_inner(&session_arc, "other"),
+            !takes_wire_effort_inner(&reg, "other"),
             "another project's session says nothing about this one"
         );
     }
 
     #[test]
     fn a_process_without_effort_or_without_life_does_not_take_the_wire() {
-        let never_spawned: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
+        let (never_spawned, _entry) = registry_with("acme");
         assert!(!takes_wire_effort_inner(&never_spawned, "acme"));
 
-        let mut unpinned = ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        );
-        unpinned.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), false);
-        let unpinned: SharedChatSession = Arc::new(Mutex::new(unpinned));
+        let (unpinned, entry) = registry_with("acme");
+        entry
+            .session
+            .lock()
+            .unwrap()
+            .set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), false);
         assert!(!takes_wire_effort_inner(&unpinned, "acme"));
 
-        let mut exited = ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        );
-        exited.set_test_process(chat::spawn_test_child(chat::TestChild::Exited), true);
-        let exited: SharedChatSession = Arc::new(Mutex::new(exited));
+        let (exited, entry) = registry_with("acme");
+        entry
+            .session
+            .lock()
+            .unwrap()
+            .set_test_process(chat::spawn_test_child(chat::TestChild::Exited), true);
         assert!(!takes_wire_effort_inner(&exited, "acme"));
     }
 
     #[test]
     fn the_wire_effort_answer_waits_for_a_start_in_progress() {
-        let mut session = ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        );
-        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        let starting = START_SERIALIZE
+        let (reg, entry) = registry_with("acme");
+        entry
+            .session
+            .lock()
+            .unwrap()
+            .set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        let starting = entry
+            .start_serialize
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let reader = {
-            let session_arc = session_arc.clone();
-            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
+            let reg = reg.clone();
+            std::thread::spawn(move || takes_wire_effort_inner(&reg, "acme"))
         };
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(
             !reader.is_finished(),
-            "a start stopping the old process holds only START_SERIALIZE, and must not read as a hold"
+            "a start stopping the old process holds only the tab serializer, and must not read as a hold"
         );
         drop(starting);
         assert!(reader.join().unwrap());
@@ -403,17 +465,16 @@ mod tests {
 
     #[test]
     fn the_wire_effort_answer_waits_for_the_session_lock() {
-        let mut session = ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        );
-        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        let held = session_arc.lock().unwrap();
+        let (reg, entry) = registry_with("acme");
+        entry
+            .session
+            .lock()
+            .unwrap()
+            .set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
+        let held = entry.session.lock().unwrap();
         let reader = {
-            let session_arc = session_arc.clone();
-            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
+            let reg = reg.clone();
+            std::thread::spawn(move || takes_wire_effort_inner(&reg, "acme"))
         };
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(
@@ -436,13 +497,9 @@ mod tests {
 
     #[test]
     fn control_query_without_a_live_session_errors_instead_of_waiting() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
+        let (reg, _entry) = registry_with("acme");
         let err = control_query_inner(
-            &session_arc,
+            &reg,
             "acme",
             ControlQuery::Usage,
             control_channel::parse_plan_usage,
@@ -453,13 +510,9 @@ mod tests {
 
     #[test]
     fn control_query_rejects_a_project_the_session_does_not_belong_to() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
+        let (reg, _entry) = registry_with("acme");
         let err = control_query_inner(
-            &session_arc,
+            &reg,
             "other",
             ControlQuery::ContextUsage,
             control_channel::parse_context_usage,
@@ -470,14 +523,10 @@ mod tests {
 
     #[test]
     fn control_query_never_waits_for_a_session_that_is_being_started() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "acme",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
-        let _held = session_arc.lock().unwrap();
+        let (reg, entry) = registry_with("acme");
+        let _held = entry.session.lock().unwrap();
         let err = control_query_inner(
-            &session_arc,
+            &reg,
             "acme",
             ControlQuery::Usage,
             control_channel::parse_plan_usage,
@@ -550,48 +599,43 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_serializes_before_any_start_stop() {
+    fn start_session_inner_serializes_per_tab_before_any_start_stop() {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
         let guard_pos = body
-            .find("START_SERIALIZE")
-            .expect("start_session_inner must acquire START_SERIALIZE");
+            .find("start_serialize")
+            .expect("start_session_inner must acquire the per-tab start serializer");
         let work_pos = body
             .find("ensure_oauth_running")
             .expect("start_session_inner must call ensure_oauth_running");
+        assert!(guard_pos < work_pos);
+    }
+
+    #[test]
+    fn two_tabs_start_without_serializing_on_each_other() {
+        let reg = ChatSessions::default();
+        let a = reg.prepare(TAB_A, "acme");
+        let b = reg.prepare(TAB_B, "acme");
+        let _held_a = a.start_serialize.lock().unwrap();
         assert!(
-            guard_pos < work_pos,
-            "START_SERIALIZE must be acquired before any start/stop work"
+            b.start_serialize.try_lock().is_ok(),
+            "tab B's start must not wait on tab A's serializer"
         );
     }
 
     #[test]
-    fn start_serialize_mutex_admits_one_holder_at_a_time() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-        let live = Arc::new(AtomicUsize::new(0));
-        let max = Arc::new(AtomicUsize::new(0));
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let live = live.clone();
-            let max = max.clone();
-            handles.push(std::thread::spawn(move || {
-                let _g = START_SERIALIZE
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
-                max.fetch_max(now, Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                live.fetch_sub(1, Ordering::SeqCst);
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
-        assert_eq!(
-            max.load(Ordering::SeqCst),
-            1,
-            "START_SERIALIZE must admit only one start at a time"
+    fn start_session_inner_claims_the_transcript_before_any_start_work() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let claim_pos = body
+            .find("claim_transcript")
+            .expect("start_session_inner must claim the transcript for this tab");
+        let work_pos = body
+            .find("ensure_oauth_running")
+            .expect("start_session_inner must call ensure_oauth_running");
+        assert!(
+            claim_pos < work_pos,
+            "the resume dedup must reject a doubly-opened conversation before any start work"
         );
     }
 
@@ -691,8 +735,8 @@ mod tests {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
         assert!(
-            body.contains("session_arc") && body.contains(".lock()"),
-            "start_session_inner must acquire the session lock"
+            body.contains(".session") && body.contains(".lock()"),
+            "start_session_inner must acquire the tab session lock"
         );
     }
 
@@ -735,12 +779,15 @@ mod tests {
         let check_pos = body
             .find("check_project")
             .expect("start_chat must call check_project");
+        let tab_pos = body
+            .find("validate_tab_id")
+            .expect("start_chat must validate the tab id");
         let spawn_pos = body
             .find("spawn_blocking")
             .expect("start_chat must use spawn_blocking");
         assert!(
-            check_pos < spawn_pos,
-            "check_project must come BEFORE spawn_blocking for fail-fast validation"
+            check_pos < spawn_pos && tab_pos < spawn_pos,
+            "check_project and validate_tab_id must come BEFORE spawn_blocking for fail-fast validation"
         );
     }
 
@@ -761,6 +808,22 @@ mod tests {
     }
 
     #[test]
+    fn send_message_resolves_the_tab_before_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn send_message(");
+        let tab_pos = body
+            .find("tab_session")
+            .expect("send_message must resolve the tab session");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("send_message must use spawn_blocking");
+        assert!(
+            tab_pos < spawn_pos,
+            "the tab must resolve BEFORE spawn_blocking for fail-fast validation"
+        );
+    }
+
+    #[test]
     fn submit_question_answer_validates_length_before_spawn_blocking() {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "async fn submit_question_answer(");
@@ -773,6 +836,38 @@ mod tests {
         assert!(
             len_pos < spawn_pos,
             "answer length check must come BEFORE spawn_blocking for fail-fast validation"
+        );
+    }
+
+    #[test]
+    fn submit_question_answer_resolves_the_tab_before_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn submit_question_answer(");
+        let tab_pos = body
+            .find("tab_session")
+            .expect("submit_question_answer must resolve the tab session");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("submit_question_answer must use spawn_blocking");
+        assert!(
+            tab_pos < spawn_pos,
+            "the tab must resolve BEFORE spawn_blocking for fail-fast validation"
+        );
+    }
+
+    #[test]
+    fn stop_chat_resolves_the_tab_before_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn stop_chat(");
+        let tab_pos = body
+            .find("tab_session")
+            .expect("stop_chat must resolve the tab session");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("stop_chat must use spawn_blocking");
+        assert!(
+            tab_pos < spawn_pos,
+            "the tab must resolve BEFORE spawn_blocking for fail-fast validation"
         );
     }
 
@@ -811,13 +906,75 @@ mod tests {
     }
 
     #[test]
+    fn commands_reject_an_unknown_tab_id() {
+        let reg: SharedChatSessions = Arc::new(ChatSessions::default());
+        assert_eq!(
+            tab_session(&reg, TAB_A).err().unwrap(),
+            MSG_NO_SESSION_FOR_TAB
+        );
+        assert!(tab_session(&reg, "not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn tab_session_resolves_a_prepared_tab() {
+        let reg: SharedChatSessions = Arc::new(ChatSessions::default());
+        let entry = reg.prepare(TAB_A, "acme");
+        let resolved = tab_session(&reg, TAB_A).unwrap();
+        assert!(Arc::ptr_eq(&resolved, &entry.session));
+    }
+
+    #[test]
+    fn stopping_one_tab_leaves_the_sibling_untouched() {
+        let reg = ChatSessions::default();
+        let a = reg.prepare(TAB_A, "acme");
+        let b = reg.prepare(TAB_B, "acme");
+        a.session.lock().unwrap().stop().unwrap();
+        assert!(
+            b.session.try_lock().is_ok(),
+            "sibling session must stay lockable and live"
+        );
+        assert!(reg.entry(TAB_B).is_some());
+    }
+
+    #[test]
+    fn close_chat_tab_on_an_unknown_tab_is_ok() {
+        let reg: SharedChatSessions = Arc::new(ChatSessions::default());
+        close_chat_tab_inner(&reg, TAB_A).unwrap();
+    }
+
+    #[test]
+    fn close_chat_tab_removes_the_entry_and_stops_the_session() {
+        let (reg, entry) = registry_with("acme");
+        close_chat_tab_inner(&reg, crate::chat_registry::test_support::TEST_TAB_ID).unwrap();
+        assert!(reg
+            .entry(crate::chat_registry::test_support::TEST_TAB_ID)
+            .is_none());
+        assert!(
+            entry.session.try_lock().is_ok(),
+            "the stopped session must not stay locked"
+        );
+    }
+
+    #[test]
+    fn close_chat_tab_takes_the_serializer_before_removing_the_entry() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn close_chat_tab_inner(");
+        let guard_pos = body
+            .find("start_serialize")
+            .expect("close_chat_tab_inner must take the per-tab serializer");
+        let remove_pos = body
+            .find(".remove(")
+            .expect("close_chat_tab_inner must remove the entry");
+        assert!(
+            guard_pos < remove_pos,
+            "the serializer must be held before the entry is removed"
+        );
+    }
+
+    #[test]
     fn stop_chat_inner_without_active_session_errors() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "test-project",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
-        let err = stop_chat_inner(session_arc).expect_err("expected error on idle session");
+        let (_reg, entry) = registry_with("test-project");
+        let err = stop_chat_inner(entry.session).expect_err("expected error on idle session");
         assert!(
             err.contains("no active session"),
             "expected 'no active session' in error, got: {err}"
@@ -826,18 +983,14 @@ mod tests {
 
     #[test]
     fn stop_chat_inner_poisoned_mutex_returns_lock_poisoned_error() {
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
-            "test-project",
-            "550e8400-e29b-41d4-a716-446655440000",
-            Arc::new(Mutex::new(None)),
-        )));
-        let arc_clone = session_arc.clone();
+        let (_reg, entry) = registry_with("test-project");
+        let arc_clone = entry.session.clone();
         let _ = std::thread::spawn(move || {
             let _guard = arc_clone.lock().unwrap();
             panic!("poison the mutex");
         })
         .join();
-        let result = stop_chat_inner(session_arc);
+        let result = stop_chat_inner(entry.session);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
