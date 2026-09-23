@@ -1,6 +1,7 @@
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "e2e")]
 pub const E2E_WEBDRIVER_PORT: u16 = 4445;
 
 #[cfg(any(test, feature = "e2e"))]
