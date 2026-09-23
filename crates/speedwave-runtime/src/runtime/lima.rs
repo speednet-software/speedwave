@@ -153,7 +153,7 @@ impl LimaRuntime {
     }
 
     /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations): clean + retry once per class.
+    /// collisions, dead name-store reservations); see [`super::with_engine_state_heal`].
     fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
     where
         U: Fn() -> anyhow::Result<()>,
@@ -1608,6 +1608,73 @@ mod tests {
             "up runs twice (fail + retry)"
         );
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "cleanup runs once");
+    }
+
+    #[test]
+    fn compose_up_heals_each_stale_chain_its_retries_uncover() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct StaleChainsRunner {
+            chains: Mutex<std::collections::VecDeque<&'static str>>,
+            up_calls: Arc<AtomicUsize>,
+            cleanups: Arc<Mutex<Vec<String>>>,
+        }
+        impl CommandRunner for StaleChainsRunner {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                if cmd == "limactl" && args.first() == Some(&"--version") {
+                    return Ok("limactl version 1.0.0".to_string());
+                }
+                if cmd == "limactl" && args.first() == Some(&"list") {
+                    return Ok("Running".to_string());
+                }
+                let joined = args.join(" ");
+                if joined.contains("nerdctl")
+                    && joined.contains("compose")
+                    && joined.contains(" up ")
+                {
+                    self.up_calls.fetch_add(1, Ordering::SeqCst);
+                    return match self.chains.lock().unwrap().pop_front() {
+                        Some(chain) => Err(anyhow::anyhow!(
+                            "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
+                        )),
+                        None => Ok(String::new()),
+                    };
+                }
+                if joined.contains("base64 -d | sh") {
+                    self.cleanups.lock().unwrap().push(joined);
+                }
+                Ok(String::new())
+            }
+        }
+
+        let up_calls = Arc::new(AtomicUsize::new(0));
+        let cleanups = Arc::new(Mutex::new(Vec::new()));
+        let rt = LimaRuntime::with_runner(Box::new(StaleChainsRunner {
+            chains: Mutex::new(
+                [
+                    "CNI-d3c42d65590ae0cf2c72261f",
+                    "CNI-1be9c452999fb96d888571d2",
+                ]
+                .into(),
+            ),
+            up_calls: Arc::clone(&up_calls),
+            cleanups: Arc::clone(&cleanups),
+        }));
+        assert!(
+            rt.compose_up("acme").is_ok(),
+            "each stale chain a retry uncovers must be healed"
+        );
+        assert_eq!(
+            up_calls.load(Ordering::SeqCst),
+            3,
+            "two failed ups, then success"
+        );
+        let cleanups = cleanups.lock().unwrap();
+        assert_eq!(cleanups.len(), 2, "one cleanup per stale chain");
+        assert_ne!(
+            cleanups[0], cleanups[1],
+            "each cleanup targets the chain its own failure names"
+        );
     }
 
     /// Runner whose first compose `up` fails with a real nerdctl name-store conflict.

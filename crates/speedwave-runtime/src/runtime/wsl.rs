@@ -132,7 +132,7 @@ impl WslRuntime {
     }
 
     /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations): clean + retry once per class.
+    /// collisions, dead name-store reservations); see [`super::with_engine_state_heal`].
     fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
     where
         U: Fn() -> anyhow::Result<()>,
@@ -2747,6 +2747,53 @@ mod tests {
                 calls[3].1
             );
             assert!(calls[4].1.last().unwrap().contains(" up "), "retry up");
+        }
+
+        fn stale_chain_failure(chain: &str) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!(
+                "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
+            ))
+        }
+
+        #[test]
+        fn compose_up_heals_each_stale_chain_its_retries_uncover() {
+            let mut responses = owned_pass();
+            responses.push(stale_chain_failure("CNI-d3c42d65590ae0cf2c72261f"));
+            responses.push(Ok("".into()));
+            responses.push(stale_chain_failure("CNI-1be9c452999fb96d888571d2"));
+            responses.push(Ok("".into()));
+            responses.push(Ok("".into()));
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(
+                rt.compose_up("acme").is_ok(),
+                "each stale chain a retry uncovers must be healed"
+            );
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                9,
+                "2 pre + up(fail) + cleanup + up(fail) + cleanup + up + 2 post"
+            );
+            let last = |i: usize| calls[i].1.last().unwrap().clone();
+            for i in [2, 4, 6] {
+                assert!(last(i).contains(" up "), "up at {i}: {:?}", calls[i].1);
+            }
+            for i in [3, 5] {
+                assert!(
+                    last(i).contains("base64 -d | sh") && calls[i].1.contains(&"root".to_string()),
+                    "root cleanup at {i}: {:?}",
+                    calls[i].1
+                );
+            }
+            assert_ne!(
+                last(3),
+                last(5),
+                "each cleanup targets the chain its own failure names"
+            );
         }
 
         fn name_store_conflict_msg() -> String {

@@ -832,6 +832,15 @@ fn scan_cni_ids(haystack: &str, prefix: &str) -> Vec<String> {
         .collect()
 }
 
+const MAX_CNI_HEALS: usize = 16;
+
+fn named_cni_state(err: &anyhow::Error) -> Vec<String> {
+    let msg = err.to_string();
+    let mut ids = scan_cni_ids(&msg, "CNI-");
+    ids.extend(scan_cni_ids(&msg, "br-"));
+    ids
+}
+
 /// Best-effort cleanup for a stale-CNI failure: base64 `sh -c` payload (root, in the VM)
 /// targeting ONLY the `CNI-*` chains / `br-*` bridges named in `err`.
 pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
@@ -1033,36 +1042,39 @@ pub(crate) fn registered_compose_projects() -> Vec<String> {
         .collect()
 }
 
-/// Runs `up`; heals at most once per class (stale CNI, stale name-store) and retries.
+/// Runs `up`; heals and retries: name-store once, CNI per failure naming unflushed state (capped).
 /// Other errors propagate; cleanup failure still retries; surfaced error = latest `up`'s.
 pub(crate) fn with_engine_state_heal<U, C, N>(
     project: &str,
     up: U,
-    cni_cleanup: C,
+    mut cni_cleanup: C,
     name_store_cleanup: N,
 ) -> anyhow::Result<()>
 where
     U: Fn() -> anyhow::Result<()>,
-    C: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
+    C: FnMut(&anyhow::Error) -> anyhow::Result<()>,
     N: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
 {
-    let mut cni_cleanup = Some(cni_cleanup);
+    let mut cni_heals = 0;
+    let mut cni_flushed = std::collections::BTreeSet::new();
     let mut name_store_cleanup = Some(name_store_cleanup);
-    let mut result = up();
-    for _ in 0..2 {
-        let Err(e) = result else {
+    loop {
+        let Err(e) = up() else {
             return Ok(());
         };
         let healed = if is_stale_cni_error(&e) {
-            match cni_cleanup.take() {
-                Some(cleanup) => {
-                    log::warn!("compose up hit a CNI setup failure ({e}); flushing any named CNI state and retrying once");
-                    if let Err(ce) = cleanup(&e) {
-                        log::warn!("CNI cleanup failed (continuing to retry): {ce}");
-                    }
-                    true
+            let named = named_cni_state(&e);
+            let names_unflushed_state = named.iter().any(|id| !cni_flushed.contains(id));
+            if cni_heals < MAX_CNI_HEALS && (cni_heals == 0 || names_unflushed_state) {
+                cni_heals += 1;
+                cni_flushed.extend(named);
+                log::warn!("compose up hit a CNI setup failure ({e}); flushing the CNI state it names and retrying (heal {cni_heals}/{MAX_CNI_HEALS})");
+                if let Err(ce) = cni_cleanup(&e) {
+                    log::warn!("CNI cleanup failed (continuing to retry): {ce}");
                 }
-                None => false,
+                true
+            } else {
+                false
             }
         } else if !name_store_conflicts(&e, project).is_empty() {
             match name_store_cleanup.take() {
@@ -1081,9 +1093,7 @@ where
         if !healed {
             return Err(e);
         }
-        result = up();
     }
-    result
 }
 
 /// Shared `force_remove_project_containers` (the `rm` closure removes a batch;
@@ -3144,6 +3154,201 @@ services:
             1,
             "name-store heal ran once"
         );
+    }
+
+    const PROXY_CHAIN: &str = "CNI-d3c42d65590ae0cf2c72261f";
+    const HUB_CHAIN: &str = "CNI-0f1e2d3c4b5a69788796a5b4";
+    const CLAUDE_CHAIN: &str = "CNI-1be9c452999fb96d888571d2";
+
+    fn stale_chain_failure(chain: &str, container: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            r##"wsl.exe failed: time="2026-09-23T01:10:08+02:00" level=fatal msg="1 errors:\nfailed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error running createRuntime hook #0: exit status 1, stdout: , stderr: time=\"2026-09-23T01:10:07+02:00\" level=warning msg=\"Container failed starting. Removing allocated network configuration.\"\ntime=\"2026-09-23T01:10:08+02:00\" level=fatal msg=\"failed to call cni.Setup: plugin type=\\\"bridge\\\" failed (add): running [/usr/sbin/iptables -t nat -N {chain} --wait]: exit status 1: iptables: Chain already exists.\\n\""
+time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing container {container}: error while creating container {container}: exit status 1""##
+        )
+    }
+
+    struct HealRun {
+        result: anyhow::Result<()>,
+        ups: usize,
+        cni_heals: Vec<Vec<String>>,
+        name_store_heals: usize,
+    }
+
+    fn run_heal(failures: Vec<anyhow::Error>) -> HealRun {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let failures = std::sync::Mutex::new(std::collections::VecDeque::from(failures));
+        let ups = AtomicUsize::new(0);
+        let mut cni_heals = Vec::new();
+        let mut name_store_heals = 0;
+        let result = with_engine_state_heal(
+            "acme",
+            || {
+                ups.fetch_add(1, Ordering::SeqCst);
+                failures.lock().unwrap().pop_front().map_or(Ok(()), Err)
+            },
+            |e| {
+                cni_heals.push(named_cni_state(e));
+                Ok(())
+            },
+            |_e| {
+                name_store_heals += 1;
+                Ok(())
+            },
+        );
+        HealRun {
+            result,
+            ups: ups.into_inner(),
+            cni_heals,
+            name_store_heals,
+        }
+    }
+
+    #[test]
+    fn engine_state_heal_keeps_healing_while_each_failure_names_a_new_chain() {
+        let run = run_heal(vec![
+            stale_chain_failure(PROXY_CHAIN, &own_name("acme", "proxy")),
+            stale_chain_failure(HUB_CHAIN, &own_name("acme", "mcp_hub")),
+            stale_chain_failure(CLAUDE_CHAIN, &own_name("acme", "claude")),
+        ]);
+        assert!(
+            run.result.is_ok(),
+            "every stale chain the retries uncover is healed: {:?}",
+            run.result
+        );
+        assert_eq!(run.ups, 4, "three failed ups, then success");
+        assert_eq!(
+            run.cni_heals,
+            vec![
+                vec![PROXY_CHAIN.to_string()],
+                vec![HUB_CHAIN.to_string()],
+                vec![CLAUDE_CHAIN.to_string()],
+            ],
+            "each heal gets the latest failure, so it flushes the chain that failure names"
+        );
+        assert_eq!(run.name_store_heals, 0);
+    }
+
+    #[test]
+    fn engine_state_heal_gives_up_when_a_retry_fails_on_a_flushed_chain() {
+        let proxy = own_name("acme", "proxy");
+        let run = run_heal(vec![
+            stale_chain_failure(PROXY_CHAIN, &proxy),
+            stale_chain_failure(PROXY_CHAIN, &proxy),
+            stale_chain_failure(CLAUDE_CHAIN, &own_name("acme", "claude")),
+        ]);
+        let err = run
+            .result
+            .expect_err("a chain the heal already flushed must not be healed again");
+        assert!(err.to_string().contains(PROXY_CHAIN), "latest error: {err}");
+        assert_eq!(run.ups, 2);
+        assert_eq!(run.cni_heals.len(), 1);
+    }
+
+    #[test]
+    fn engine_state_heal_gives_up_when_a_retry_names_no_cni_state() {
+        let run = run_heal(vec![
+            stale_chain_failure(PROXY_CHAIN, &own_name("acme", "proxy")),
+            anyhow::anyhow!(
+                "failed to call cni.Setup: failed to allocate for range 0: 10.4.0.4 has been allocated, duplicate allocation is not allowed"
+            ),
+        ]);
+        let err = run
+            .result
+            .expect_err("a failure naming nothing new ends the heal");
+        assert!(
+            err.to_string().contains("duplicate allocation"),
+            "latest error: {err}"
+        );
+        assert_eq!(run.ups, 2);
+        assert_eq!(run.cni_heals.len(), 1);
+    }
+
+    #[test]
+    fn engine_state_heal_heals_a_cni_failure_naming_nothing_only_once() {
+        let run = run_heal(vec![
+            anyhow::anyhow!("iptables: Chain already exists"),
+            anyhow::anyhow!("iptables: Chain already exists"),
+            anyhow::anyhow!("iptables: Chain already exists"),
+        ]);
+        assert!(run.result.is_err());
+        assert_eq!(
+            run.ups, 2,
+            "the first CNI failure heals even when it names nothing"
+        );
+        assert_eq!(run.cni_heals, vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn engine_state_heal_stops_after_max_cni_heals() {
+        let hub = own_name("acme", "mcp_hub");
+        let run = run_heal(
+            (0..MAX_CNI_HEALS + 2)
+                .map(|i| stale_chain_failure(&format!("CNI-{i:024x}"), &hub))
+                .collect(),
+        );
+        let err = run
+            .result
+            .expect_err("an engine naming a fresh chain on every retry must not loop forever");
+        assert!(
+            err.to_string()
+                .contains(&format!("CNI-{MAX_CNI_HEALS:024x}")),
+            "latest error: {err}"
+        );
+        assert_eq!(run.cni_heals.len(), MAX_CNI_HEALS);
+        assert_eq!(run.ups, MAX_CNI_HEALS + 1);
+    }
+
+    #[test]
+    fn engine_state_heal_treats_a_new_bridge_as_new_cni_state() {
+        let run = run_heal(vec![
+            anyhow::anyhow!(
+                "failed to call cni.Setup: bridge br-0a1b2c3d4e5f already has an IP address different from 10.4.1.1/24"
+            ),
+            anyhow::anyhow!(
+                "failed to call cni.Setup: bridge br-6a7b8c9d0e1f already has an IP address different from 10.4.2.1/24"
+            ),
+        ]);
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        assert_eq!(
+            run.cni_heals,
+            vec![
+                vec!["br-0a1b2c3d4e5f".to_string()],
+                vec!["br-6a7b8c9d0e1f".to_string()],
+            ]
+        );
+        assert_eq!(run.ups, 3);
+    }
+
+    #[test]
+    fn engine_state_heal_heals_a_new_chain_after_a_name_store_heal() {
+        let run = run_heal(vec![
+            stale_chain_failure(PROXY_CHAIN, &own_name("acme", "proxy")),
+            ns_conflict_err(&own_name("acme", "mcp_hub"), DEAD_ID),
+            stale_chain_failure(CLAUDE_CHAIN, &own_name("acme", "claude")),
+        ]);
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        assert_eq!(run.ups, 4);
+        assert_eq!(
+            run.cni_heals,
+            vec![
+                vec![PROXY_CHAIN.to_string()],
+                vec![CLAUDE_CHAIN.to_string()]
+            ]
+        );
+        assert_eq!(run.name_store_heals, 1);
+    }
+
+    #[test]
+    fn engine_state_heal_heals_name_store_at_most_once() {
+        let name = own_name("acme", "mcp_hub");
+        let run = run_heal(vec![
+            ns_conflict_err(&name, DEAD_ID),
+            ns_conflict_err(&name, DEAD_ID),
+        ]);
+        assert!(run.result.is_err());
+        assert_eq!(run.ups, 2);
+        assert_eq!(run.name_store_heals, 1);
+        assert!(run.cni_heals.is_empty());
     }
 
     #[test]
