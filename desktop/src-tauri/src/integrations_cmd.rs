@@ -1307,6 +1307,7 @@ pub async fn restart_integration_containers(
                         "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
                     );
                 }
+                log::warn!("restart of '{project}' failed and its containers were rolled back to the previous configuration");
                 anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
             }
 
