@@ -1548,9 +1548,6 @@ impl ChatSession {
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 
-        #[cfg(feature = "e2e")]
-        crate::e2e_support::record_spawn_args(&args);
-
         Ok(PreparedSpawn {
             args,
             container,
@@ -1596,6 +1593,9 @@ impl ChatSession {
             resume_session_id,
             resume_at_uuid,
         )?;
+
+        #[cfg(feature = "e2e")]
+        crate::e2e_support::record_spawn_args(&self.tab_id, &args);
 
         let soft_impose_cfg = {
             let project_dir =
