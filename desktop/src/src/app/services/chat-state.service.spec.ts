@@ -2182,6 +2182,59 @@ describe('ChatStateService', () => {
       expect(calls).not.toContain('start_chat');
       expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
     });
+
+    it('a stale send whose session restart succeeds after a switch does not re-send into the disposed tab', async () => {
+      const startGate = createDeferred<void>();
+      const calls: string[] = [];
+      let sendCount = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') {
+          sendCount += 1;
+          if (sendCount === 1) throw new Error('session exited');
+          return undefined;
+        }
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'other', dir: '/tmp/other' }], active_project: 'other' };
+        if (cmd === 'start_chat') return startGate.promise;
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const stale = staleStore.sendMessage('hello');
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(calls).toContain('start_chat');
+
+      await switchProjectMidFlight();
+      startGate.resolve();
+      await stale;
+
+      expect(calls.filter((c) => c === 'start_chat')).toHaveLength(1);
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
+
+    it('a stale send parked on a starting session does not re-send after a switch, even when the start finished as started', async () => {
+      const startGate = createDeferred<void>();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') throw new Error('no active session');
+        if (cmd === 'start_chat') return startGate.promise;
+        return undefined;
+      };
+      const staleStore = service.activeStore();
+      const starting = staleStore.startChatSession();
+      await new Promise((r) => setTimeout(r, 0));
+      const stale = staleStore.sendMessage('hello');
+      await new Promise((r) => setTimeout(r, 0));
+
+      startGate.resolve();
+      await expect(starting).resolves.toBe('started');
+      await switchProjectMidFlight();
+      await stale;
+
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
   });
 
   describe('resumeConversation while a container restart runs', () => {
