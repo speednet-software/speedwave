@@ -811,9 +811,7 @@ describe('ChatStateService', () => {
       expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
     });
 
-    it('leaves a newer turn streaming when a superseded retry start fails with sign-in required', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
+    function installFailingSendWithPendingRetryStart(activeProject = 'test') {
       const pendingRetryStart = createDeferred();
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -825,9 +823,134 @@ describe('ChatStateService', () => {
             }
             return undefined;
           case 'start_chat':
-            return calls.filter((c) => c === 'start_chat').length === 1
-              ? pendingRetryStart.promise
-              : undefined;
+            return pendingRetryStart.promise;
+          case 'list_projects':
+            return {
+              projects: [{ name: activeProject, dir: `/tmp/${activeProject}` }],
+              active_project: activeProject,
+            };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      return { pendingRetryStart, calls };
+    }
+
+    it("marks the project as needing sign-in when the retry's own start fails after Stop", async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const { pendingRetryStart, calls } = installFailingSendWithPendingRetryStart();
+
+      const sending = service.sendMessage('never mind');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      await service.stopConversation();
+      pendingRetryStart.reject(
+        new Error('Claude is not authenticated. Please authenticate first.')
+      );
+      await sending;
+
+      expect(projectState.status()).toBe('auth_required');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('does not mark a project as needing sign-in for a retry that a project switch superseded', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const { pendingRetryStart, calls } = installFailingSendWithPendingRetryStart();
+
+      const sending = service.sendMessage('written before the switch');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      pendingRetryStart.reject(
+        new Error('Claude is not authenticated. Please authenticate first.')
+      );
+      await sending;
+
+      expect(projectState.status()).toBe('switching');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
+
+    it('does not mark the new project as needing sign-in after a switch finished during the retry', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const { pendingRetryStart, calls } = installFailingSendWithPendingRetryStart();
+
+      const sending = service.sendMessage('written before the switch');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await vi.waitFor(() => {
+        expect(projectState.status()).toBe('ready');
+      });
+      pendingRetryStart.reject(
+        new Error('Claude is not authenticated. Please authenticate first.')
+      );
+      await sending;
+
+      expect(projectState.activeProject()).toBe('other');
+      expect(projectState.status()).toBe('ready');
+    });
+
+    it("does not send after a project switch failed back during the retry's own start", async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const { pendingRetryStart, calls } = installFailingSendWithPendingRetryStart();
+
+      const sending = service.sendMessage('written before the switch');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'switch failed' });
+      pendingRetryStart.resolve();
+      await sending;
+
+      expect(projectState.activeProject()).toBe('test');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('does not start a session when the backend already moved to another project', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const { calls } = installFailingSendWithPendingRetryStart('other');
+
+      await service.sendMessage('written for test');
+
+      expect(calls).not.toContain('start_chat');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('keeps a late failure of a replaced send out of the new chat', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingSend = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            await pendingSend.promise;
+            return undefined;
           case 'list_projects':
             return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
           case 'get_bundle_reconcile_state':
@@ -841,21 +964,18 @@ describe('ChatStateService', () => {
 
       const sending = service.sendMessage('written before New');
       await vi.waitFor(() => {
-        expect(calls).toContain('start_chat');
+        expect(calls).toContain('send_message');
       });
       service.resetForNewConversation();
       await service.init();
       await vi.waitFor(() => {
         expect(service.sessionStartInFlightFromState()).toBe(false);
       });
-      await service.sendMessage('first message of the new chat');
-      pendingRetryStart.reject(
-        new Error('Claude is not authenticated. Please authenticate first.')
-      );
+      pendingSend.reject(new Error('Message too long'));
       await sending;
 
-      expect(projectState.status()).toBe('auth_required');
-      expect(service.isStreaming).toBe(true);
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(false);
     });
 
     it('keeps the error of a superseded retry start out of the new chat', async () => {

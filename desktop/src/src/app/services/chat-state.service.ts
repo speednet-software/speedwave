@@ -724,10 +724,9 @@ export class ChatStateService {
     const turnId = this._turnId;
     const project = this.projectState.activeProject();
     const sameConversation = (): boolean =>
-      generation === this._sessionGeneration &&
-      turnId === this._turnId &&
-      project === this.projectState.activeProject() &&
-      this.projectState.status() !== 'switching';
+      this.isStreaming && generation === this._sessionGeneration && turnId === this._turnId;
+    const sameProject = (): boolean =>
+      project === this.projectState.activeProject() && this.projectState.status() !== 'switching';
     try {
       await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
@@ -761,6 +760,11 @@ export class ChatStateService {
           }
           const result = await this.tauri.invoke<ProjectList>('list_projects');
           if (!sameConversation()) return;
+          if (result.active_project && project !== null && result.active_project !== project) {
+            this.isStreaming = false;
+            this.notifyChange();
+            return;
+          }
           if (result.active_project) {
             this.startingSession = true;
             this._deferredEffort.set(null);
@@ -792,7 +796,7 @@ export class ChatStateService {
         } catch (retryErr) {
           const retryMsg = String(retryErr);
           if (isNotAuthenticatedError(retryMsg)) {
-            this.projectState.status.set('auth_required');
+            if (sameProject()) this.projectState.status.set('auth_required');
             if (!sameConversation()) return;
             this.isStreaming = false;
             this.notifyChange();
@@ -812,6 +816,7 @@ export class ChatStateService {
           return;
         }
       }
+      if (!sameConversation()) return;
       this.isStreaming = false;
       this._messages = [
         ...this._messages,
