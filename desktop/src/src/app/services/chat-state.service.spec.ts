@@ -480,9 +480,31 @@ describe('ChatStateService', () => {
         expect(service.activeTabId()).toBe(tab2);
       });
 
-      it('branch 2: resumes in place when the active tab is idle and clean', async () => {
+      it('single-tab gate: a busy sole tab resumes in place instead of spawning an invisible second tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
         const tab1 = service.activeTabId();
+        const active = service.tabs().get(tab1)!;
+        active.isStreaming = true;
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') return { session_id: 'single-busy', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('single-busy');
+
+        expect(service.tabs().size).toBe(1);
+        expect(service.activeTabId()).toBe(tab1);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'single-busy', tabId: tab1 })
+        );
+      });
+
+      it('branch 2: with 2+ tabs an idle+clean active tab resumes in place', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        const tab2 = await service.openTab();
+        expect(service.tabs().size).toBe(2);
         mockTauri.invokeHandler = async (cmd: string) => {
           if (cmd === 'get_conversation') return { session_id: 'resume-me', messages: [] };
           return undefined;
@@ -491,18 +513,19 @@ describe('ChatStateService', () => {
 
         await service.openConversation('resume-me');
 
-        expect(service.activeTabId()).toBe(tab1);
-        expect(service.tabs().size).toBe(1);
+        expect(service.activeTabId()).toBe(tab2);
+        expect(service.tabs().size).toBe(2);
         expect(invokeSpy).toHaveBeenCalledWith(
           'resume_conversation',
-          expect.objectContaining({ sessionId: 'resume-me', tabId: tab1 })
+          expect.objectContaining({ sessionId: 'resume-me', tabId: tab2 })
         );
       });
 
-      it('branch 3: opens a new resuming tab when the active tab is busy and under cap', async () => {
+      it('branch 3: with 2+ tabs a busy active tab under the cap opens a new resuming tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        const tab1 = service.activeTabId();
-        const active = service.tabs().get(tab1)!;
+        const tab2 = await service.openTab();
+        expect(service.tabs().size).toBe(2);
+        const active = service.tabs().get(tab2)!;
         active.isStreaming = true;
         mockTauri.invokeHandler = async (cmd: string) => {
           if (cmd === 'get_conversation') return { session_id: 'resume-new-tab', messages: [] };
@@ -512,9 +535,9 @@ describe('ChatStateService', () => {
 
         await service.openConversation('resume-new-tab');
 
-        expect(service.tabs().size).toBe(2);
+        expect(service.tabs().size).toBe(3);
         const newTabId = service.activeTabId();
-        expect(newTabId).not.toBe(tab1);
+        expect(newTabId).not.toBe(tab2);
         expect(invokeSpy).toHaveBeenCalledWith(
           'resume_conversation',
           expect.objectContaining({ sessionId: 'resume-new-tab', tabId: newTabId })
@@ -585,10 +608,17 @@ describe('ChatStateService', () => {
     });
 
     describe('restart-complete flags background tabs', () => {
-      it('flags a background tab as sessionEnded and resumes only the active tab', async () => {
-        type RestartInternal = {
-          notifyRestartBegin(): Promise<void>;
-        };
+      type RestartInternal = {
+        notifyRestartBegin(): Promise<void>;
+      };
+
+      async function fireRestart(projectState: ProjectStateService): Promise<void> {
+        await (projectState as unknown as RestartInternal).notifyRestartBegin();
+        projectState.notifyRestartComplete();
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      it('flags a background tab with a session as sessionEnded and resumes only the active tab', async () => {
         const projectState = TestBed.inject(ProjectStateService);
         await projectState.init();
         projectState.activeProject.set('test');
@@ -599,12 +629,48 @@ describe('ChatStateService', () => {
         const store2 = service.tabs().get(tab2)!;
         store2.seedSessionId('bg-session');
 
-        await (projectState as unknown as RestartInternal).notifyRestartBegin();
-        projectState.notifyRestartComplete();
-        await new Promise((r) => setTimeout(r, 0));
+        await fireRestart(projectState);
 
         expect(store2.sessionEnded()).toBe(true);
         expect(service.tabs().get(tab1)!.sessionEnded()).toBe(false);
+      });
+
+      it('does not flag a fresh never-used background tab', async () => {
+        const projectState = TestBed.inject(ProjectStateService);
+        await projectState.init();
+        projectState.activeProject.set('test');
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+        const store2 = service.tabs().get(tab2)!;
+        expect(store2.lastKnownSessionId).toBeNull();
+        expect(store2.optimisticSessionId).toBeNull();
+
+        await fireRestart(projectState);
+
+        expect(store2.sessionEnded()).toBe(false);
+      });
+
+      it('clears the stream state of a flagged streaming background tab', async () => {
+        const projectState = TestBed.inject(ProjectStateService);
+        await projectState.init();
+        projectState.activeProject.set('test');
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+        const store2 = service.tabs().get(tab2)!;
+        store2.seedSessionId('bg-streaming');
+        store2.handleStreamChunk({ chunk_type: 'Text', data: { content: 'partial' } });
+        expect(store2.isStreaming).toBe(true);
+
+        await fireRestart(projectState);
+
+        expect(store2.sessionEnded()).toBe(true);
+        expect(store2.isStreaming).toBe(false);
+        expect(store2.currentBlocks).toEqual([]);
+        expect(store2.messages.at(-1)?.blocks).toEqual([{ type: 'text', content: 'partial' }]);
       });
     });
   });

@@ -190,23 +190,26 @@ export class ChatStateService {
     }
     store.dispose();
 
-    const map = new Map(this._tabs());
-    map.delete(tabId);
+    const remaining = new Map(this._tabs());
+    remaining.delete(tabId);
 
-    if (map.size === 0) {
+    if (remaining.size === 0) {
       const fresh = this.makeStore();
-      map.set(fresh.tabId, fresh);
-      this._tabs.set(map);
+      const transitional = new Map(this._tabs());
+      transitional.set(fresh.tabId, fresh);
+      this._tabs.set(transitional);
       this._activeTabId.set(fresh.tabId);
+      remaining.set(fresh.tabId, fresh);
+      this._tabs.set(remaining);
       await fresh.init();
       return;
     }
 
-    this._tabs.set(map);
     if (this._activeTabId() === tabId) {
-      const neighbor = map.keys().next().value as string;
+      const neighbor = remaining.keys().next().value as string;
       this._activeTabId.set(neighbor);
     }
+    this._tabs.set(remaining);
   }
 
   /**
@@ -219,8 +222,10 @@ export class ChatStateService {
   }
 
   /**
-   * Resumes a conversation, choosing among owning-tab activation, in-place resume,
-   * a new resuming tab, or (at the tab cap) a resume into the active tab.
+   * Resumes a conversation. A tab already owning the session is activated; with several
+   * tabs open, an idle+clean active tab resumes in place, an occupied one opens a new
+   * resuming tab under the cap; otherwise (single tab, or at the cap) the active tab
+   * resumes in place — today's replace semantics until the phase 3 tab UI lands.
    * @param sessionId - Session UUID to resume.
    */
   async openConversation(sessionId: string): Promise<void> {
@@ -230,13 +235,15 @@ export class ChatStateService {
       return;
     }
     const active = this.activeStore();
-    if (!active.hasConversation() && !active.isStreaming) {
-      await active.resumeConversation(sessionId);
-      return;
-    }
-    if (this.canOpenTab()) {
-      await this.openTabResuming(sessionId);
-      return;
+    if (this._tabs().size > 1) {
+      if (!active.hasConversation() && !active.isStreaming) {
+        await active.resumeConversation(sessionId);
+        return;
+      }
+      if (this.canOpenTab()) {
+        await this.openTabResuming(sessionId);
+        return;
+      }
     }
     await active.resumeConversation(sessionId);
   }
@@ -580,7 +587,10 @@ export class ChatStateService {
     this.projectState.onRestartComplete(() => {
       const activeTabId = this._activeTabId();
       for (const [tabId, store] of this._tabs()) {
-        if (tabId !== activeTabId) store.markSessionEnded();
+        if (tabId === activeTabId) continue;
+        if (store.lastKnownSessionId !== null || store.optimisticSessionId !== null) {
+          store.markSessionEnded();
+        }
       }
       void this.activeStore().decideResumeAfterRestart();
     });

@@ -113,6 +113,59 @@ describe('ChatSessionStore', () => {
       expect(store.sessionEnded()).toBe(true);
     });
 
+    it('markSessionEnded on an idle store leaves messages and stream state untouched', () => {
+      store._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'kept' }], timestamp: 1 }],
+      });
+
+      store.markSessionEnded();
+
+      expect(store.isStreaming).toBe(false);
+      expect(store.messages).toHaveLength(1);
+      expect(store.currentBlocks).toEqual([]);
+    });
+
+    it('markSessionEnded on a streaming store finalizes the turn like a stop', () => {
+      store.handleStreamChunk({ chunk_type: 'Text', data: { content: 'partial' } });
+      expect(store.isStreaming).toBe(true);
+      const turnBefore = store.turnId;
+
+      store.markSessionEnded();
+
+      expect(store.sessionEnded()).toBe(true);
+      expect(store.isStreaming).toBe(false);
+      expect(store.currentBlocks).toEqual([]);
+      expect(store.turnId).toBeGreaterThan(turnBefore);
+      expect(store.messages.at(-1)?.role).toBe('assistant');
+      expect(store.messages.at(-1)?.blocks).toEqual([{ type: 'text', content: 'partial' }]);
+    });
+
+    it('markSessionEnded marks a running tool interrupted', () => {
+      store.isStreaming = true;
+      store._setState({
+        currentBlocks: [
+          {
+            type: 'tool_use',
+            tool: {
+              type: 'tool_use',
+              tool_id: 't1',
+              tool_name: 'Bash',
+              input_json: '{}',
+              status: 'running',
+            },
+          },
+        ],
+      });
+
+      store.markSessionEnded();
+
+      const lastBlocks = store.messages.at(-1)?.blocks;
+      expect(lastBlocks?.[0]).toMatchObject({
+        type: 'tool_use',
+        tool: { status: 'error', result: 'Interrupted', result_is_error: true },
+      });
+    });
+
     it('resetForNewConversation clears a session-ended flag', () => {
       store.markSessionEnded();
       store.resetForNewConversation();

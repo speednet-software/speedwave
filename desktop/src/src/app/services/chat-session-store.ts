@@ -427,9 +427,10 @@ export class ChatSessionStore {
   /** Set for a background tab whose backend session ended without this store driving it (phase 3 surfaces this). */
   readonly sessionEnded: Signal<boolean> = this._sessionEnded.asReadonly();
 
-  /** Marks that this tab's backend session ended while it was not the active tab. */
+  /** Marks that this tab's backend session ended while it was not the active tab; a streaming turn is finalized as interrupted. */
   markSessionEnded(): void {
     this._sessionEnded.set(true);
+    if (this.isStreaming) this.finalizeInterruptedTurn();
   }
 
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
@@ -897,17 +898,9 @@ export class ChatSessionStore {
     }
   }
 
-  /**
-   * Stops the current Claude turn (no-op when not streaming). Resets UI state
-   * synchronously to re-enable input, then fires the backend stop in background.
-   */
-  async stopConversation(): Promise<void> {
-    if (!this.isStreaming) return;
-
+  private finalizeInterruptedTurn(): void {
     this._turnId += 1;
-
     this.isStreaming = false;
-
     const keptBlocks = interruptRunningTools(
       this._currentBlocks.filter((b) => b.type !== 'ask_user')
     );
@@ -919,6 +912,16 @@ export class ChatSessionStore {
     }
     this._currentBlocks = [];
     this.notifyChange();
+  }
+
+  /**
+   * Stops the current Claude turn (no-op when not streaming). Resets UI state
+   * synchronously to re-enable input, then fires the backend stop in background.
+   */
+  async stopConversation(): Promise<void> {
+    if (!this.isStreaming) return;
+
+    this.finalizeInterruptedTurn();
 
     try {
       await this.deps.tauri.invoke('stop_chat', { tabId: this.tabId });
