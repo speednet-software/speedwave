@@ -43,6 +43,7 @@ import {
   type MessageBlock,
   type SessionStats,
   type StreamChunk,
+  type TabStreamChunk,
   type ToolUseBlock,
   type AskUserQuestionBlock,
   type AskUserQuestionItem,
@@ -134,6 +135,12 @@ const DEFAULT_MODEL_ALIAS = 'default';
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
+  private readonly _tabId = crypto.randomUUID();
+  /** Stable per-tab id sent on every session-scoped Tauri command (PR 2 moves ownership to the tab registry). */
+  get tabId(): string {
+    return this._tabId;
+  }
+
   private _messages: ChatMessage[] = [];
   /** Completed messages (immutable — replaced on each change). */
   get messages(): readonly ChatMessage[] {
@@ -423,6 +430,7 @@ export class ChatStateService {
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
+  private _sawSwitching = false;
 
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
@@ -631,7 +639,7 @@ export class ChatStateService {
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
       try {
-        await this.tauri.invoke('start_chat', { project });
+        await this.tauri.invoke('start_chat', { project, tabId: this._tabId });
         this.log.debug('[chat-state] startChatSession: success');
         outcome = gen === this._sessionGeneration ? 'started' : 'skipped';
       } catch (err) {
@@ -724,7 +732,7 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.notifyChange();
 
-    const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
+    const invokeArgs = { blocks: wireBlocks, displayText: surfaceText, tabId: this._tabId };
     try {
       await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
@@ -791,7 +799,10 @@ export class ChatStateService {
             this.startingSession = true;
             this._deferredEffort.set(null);
             try {
-              await this.tauri.invoke('start_chat', { project: result.active_project });
+              await this.tauri.invoke('start_chat', {
+                project: result.active_project,
+                tabId: this._tabId,
+              });
             } finally {
               this.startingSession = false;
             }
@@ -879,6 +890,7 @@ export class ChatStateService {
         toolUseId,
         questionIdx,
         answer: value,
+        tabId: this._tabId,
       });
     } catch (err) {
       if (capturedTurn !== this._turnId) {
@@ -929,7 +941,7 @@ export class ChatStateService {
     this.notifyChange();
 
     try {
-      await this.tauri.invoke('stop_chat');
+      await this.tauri.invoke('stop_chat', { tabId: this._tabId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('no active session')) {
@@ -1375,6 +1387,7 @@ export class ChatStateService {
       await this.tauri.invoke('retry_last_turn', {
         sessionId,
         userUuid,
+        tabId: this._tabId,
       });
     } catch (err) {
       this.log.error(`[chat-state] retryLastAssistant: invoke failed: ${String(err)}`);
@@ -1399,7 +1412,8 @@ export class ChatStateService {
       if (project && (status === 'no_provider' || status === 'auth_required')) {
         this.planUsage.drop(project);
       }
-      if (this.projectState.status() === 'switching') {
+      if (status === 'switching') {
+        this._sawSwitching = true;
         this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
@@ -1409,8 +1423,12 @@ export class ChatStateService {
         this._pendingEffortOverride.set(null);
         this._deferredEffort.set(null);
         this.notifyChange();
-      } else if (this.projectState.status() === 'ready') {
+      } else if (status === 'ready') {
         void this.refreshLlmConfigCache();
+        if (this._sawSwitching) {
+          this._sawSwitching = false;
+          void this.startChatSession();
+        }
       }
     });
   }
@@ -1492,7 +1510,11 @@ export class ChatStateService {
           this.log.error(`[chat-state] get_conversation failed: ${String(err)}`);
           return null;
         });
-      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
+      const resumePromise = this.tauri.invoke('resume_conversation', {
+        project,
+        sessionId,
+        tabId: this._tabId,
+      });
 
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
       if (gen !== this._sessionGeneration) return;
@@ -1654,8 +1676,9 @@ export class ChatStateService {
 
   private async setupStreamListener(): Promise<void> {
     try {
-      this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
+      this.unlisten = await this.tauri.listen<TabStreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
+        if (chunk.tab_id !== this._tabId) return;
         if (
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||

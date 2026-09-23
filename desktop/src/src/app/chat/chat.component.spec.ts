@@ -302,6 +302,7 @@ describe('ChatComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'Hello Claude' }],
         displayText: 'Hello Claude',
+        tabId: chatState.tabId,
       });
     });
 
@@ -346,6 +347,7 @@ describe('ChatComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'summarize this\n\n# Meeting transcript' }],
         displayText: 'summarize this',
+        tabId: chatState.tabId,
       });
       expect(transcription.stagedTranscript()).toBe('');
     });
@@ -370,6 +372,7 @@ describe('ChatComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'never mind' }],
         displayText: 'never mind',
+        tabId: chatState.tabId,
       });
     });
 

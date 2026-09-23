@@ -428,6 +428,7 @@ describe('ChatStateService', () => {
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'Hello' }],
         displayText: 'Hello',
+        tabId: service.tabId,
       });
     });
 
@@ -455,6 +456,7 @@ describe('ChatStateService', () => {
           },
         ],
         displayText: 'Co tu widać?',
+        tabId: service.tabId,
       });
       expect(service.messages[0].blocks).toEqual([
         { type: 'text', content: 'Co tu widać?' },
@@ -481,6 +483,7 @@ describe('ChatStateService', () => {
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: '@/workspace/.speedwave/pastes/paste-2.jpg' }],
         displayText: '',
+        tabId: service.tabId,
       });
     });
 
@@ -794,6 +797,7 @@ describe('ChatStateService', () => {
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: '/model claude-sonnet-5' }],
         displayText: '/model claude-sonnet-5',
+        tabId: service.tabId,
       });
     });
 
@@ -813,6 +817,7 @@ describe('ChatStateService', () => {
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: wireText }],
         displayText: '/model claude-sonnet-5',
+        tabId: service.tabId,
       });
     });
   });
@@ -1758,6 +1763,76 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('tab id addressing (SPEED-388)', () => {
+    it('passes its tab id to start_chat', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(spy).toHaveBeenCalledWith('start_chat', { project: 'test', tabId: service.tabId });
+    });
+
+    it('drops chat_stream chunks addressed to another tab', async () => {
+      await service.init();
+      service.isStreaming = true;
+
+      mockTauri.dispatchEvent('chat_stream', {
+        tab_id: 'not-mine',
+        chunk_type: 'Text',
+        data: { content: 'x' },
+      });
+
+      expect(service.currentBlocks).toEqual([]);
+      expect(service.messagesFromState()).toEqual([]);
+    });
+
+    it('routes chunks addressed to its own tab', async () => {
+      await service.init();
+
+      mockTauri.dispatchEvent('chat_stream', {
+        tab_id: service.tabId,
+        chunk_type: 'SystemInit',
+        data: { model: 'm', session_id: 'sid' },
+      });
+
+      expect(service.sessionStats?.session_id).toBe('sid');
+    });
+
+    it('starts a fresh session after a project switch reaches ready', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'test' });
+
+      await vi.waitFor(() => {
+        expect(spy).toHaveBeenCalledWith(
+          'start_chat',
+          expect.objectContaining({ tabId: service.tabId })
+        );
+      });
+    });
+
+    it('does not start a second session on a bare container-restart ready with no prior switching', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await projectState.restartContainers();
+
+      expect(projectState.status()).toBe('ready');
+      expect(spy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+    });
+  });
+
   describe('sessionStatsFromState signal (reactive footer)', () => {
     it('defaults to null and mirrors the getter', () => {
       expect(service.sessionStatsFromState()).toBeNull();
@@ -1831,7 +1906,7 @@ describe('ChatStateService', () => {
 
       expect(service.pendingModelOverride()).toBeNull();
       const startCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
-      expect(startCall?.[1]).toEqual({ project: 'test' });
+      expect(startCall?.[1]).toEqual({ project: 'test', tabId: service.tabId });
     });
 
     it('a reset during an in-flight resume discards its transcript and starts fresh', async () => {
@@ -2170,6 +2245,7 @@ describe('ChatStateService', () => {
         expect(invokeSpy).toHaveBeenCalledWith('resume_conversation', {
           project: 'test',
           sessionId: LIVE,
+          tabId: service.tabId,
         });
         expect(service.deferredEffort()).toBeNull();
         expect(service.lastKnownSessionId).toBe(LIVE);
@@ -3131,6 +3207,7 @@ describe('ChatStateService', () => {
         toolUseId: 'toolu_ask3',
         questionIdx: 0,
         answer: 'A',
+        tabId: service.tabId,
       });
     });
 
@@ -3184,6 +3261,7 @@ describe('ChatStateService', () => {
         toolUseId: 'toolu_nonexistent',
         questionIdx: 0,
         answer: 'yes',
+        tabId: service.tabId,
       });
     });
 
@@ -3214,6 +3292,7 @@ describe('ChatStateService', () => {
         toolUseId: 'toolu_ask1',
         questionIdx: 0,
         answer: 'A, B',
+        tabId: service.tabId,
       });
     });
   });
@@ -3460,7 +3539,7 @@ describe('ChatStateService', () => {
       service.isStreaming = true;
       service._setState({ currentBlocks: [{ type: 'text', content: 'partial' }] });
       await service.stopConversation();
-      expect(invokeSpy).toHaveBeenCalledWith('stop_chat');
+      expect(invokeSpy).toHaveBeenCalledWith('stop_chat', { tabId: service.tabId });
       expect(invokeSpy).toHaveBeenCalledTimes(1);
       expect(service.isStreaming).toBe(false);
       expect(service.currentBlocks).toEqual([]);
@@ -3586,6 +3665,7 @@ describe('ChatStateService', () => {
       service.isStreaming = true;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Result',
+        tab_id: service.tabId,
         data: {
           session_id: 's-q',
           total_cost: 0.01,
@@ -3598,6 +3678,7 @@ describe('ChatStateService', () => {
 
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'QueueDrained',
+        tab_id: service.tabId,
         data: { session_id: 's-q', text: 'queued follow-up' },
       });
       expect(service.pendingQueue).toBeNull();
@@ -3609,6 +3690,7 @@ describe('ChatStateService', () => {
 
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Text',
+        tab_id: service.tabId,
         data: { content: 'ACK' },
       });
       expect(service.currentBlocks.some((b) => b.type === 'text' && b.content === 'ACK')).toBe(
@@ -3623,6 +3705,7 @@ describe('ChatStateService', () => {
       await service.stopConversation();
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Text',
+        tab_id: service.tabId,
         data: { content: 'late content from stopped turn' },
       });
       expect(service.isStreaming).toBe(false);
@@ -3653,6 +3736,7 @@ describe('ChatStateService', () => {
       service.isStreaming = true;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Result',
+        tab_id: service.tabId,
         data: {
           session_id: 's1',
           total_cost: 0.01,
@@ -3671,7 +3755,11 @@ describe('ChatStateService', () => {
         overage_status: 'rejected',
         is_using_overage: false,
       };
-      mockTauri.dispatchEvent('chat_stream', { chunk_type: 'RateLimit', data: signal });
+      mockTauri.dispatchEvent('chat_stream', {
+        chunk_type: 'RateLimit',
+        tab_id: service.tabId,
+        data: signal,
+      });
       await new Promise((r) => setTimeout(r, 0));
 
       expect(TestBed.inject(PlanUsageService).lastSignal('test')).toEqual(signal);
@@ -3683,11 +3771,13 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'SystemInit',
+        tab_id: service.tabId,
         data: { model: 'claude-opus-4-7' },
       });
       service.isStreaming = true;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Result',
+        tab_id: service.tabId,
         data: {
           session_id: 's2',
           total_cost: 0,
@@ -3709,6 +3799,7 @@ describe('ChatStateService', () => {
       const statsBefore = service.sessionStats;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Text',
+        tab_id: service.tabId,
         data: { content: 'LATE' },
       });
       expect(service.messages).toBe(messagesBefore);
@@ -3726,6 +3817,7 @@ describe('ChatStateService', () => {
       const statsBefore = service.sessionStats;
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Result',
+        tab_id: service.tabId,
         data: {
           session_id: 'late',
           total_cost: 99,
@@ -4069,6 +4161,7 @@ describe('ChatStateService', () => {
       expect(invokeSpy).toHaveBeenCalledWith('retry_last_turn', {
         sessionId: '550e8400-e29b-41d4-a716-446655440000',
         userUuid: 'msg_user_1',
+        tabId: service.tabId,
       });
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].role).toBe('user');
@@ -6206,7 +6299,7 @@ describe('ChatStateService', () => {
         model: 'claude-sonnet-5',
       });
       expect(startCalls.at(-1)?.i).toBeGreaterThan(pinCallIndex);
-      expect(startCalls.at(-1)?.args).toEqual({ project: 'test' });
+      expect(startCalls.at(-1)?.args).toEqual({ project: 'test', tabId: service.tabId });
       expect(
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
       ).toHaveLength(0);
