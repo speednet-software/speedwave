@@ -137,7 +137,7 @@ pub struct MockRuntimeBuilder {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
-    ensure_ready_unreadable_queue: Arc<Mutex<VecDeque<String>>>,
+    ensure_ready_script: Arc<Mutex<VecDeque<ScriptedEnsureReady>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -180,6 +180,12 @@ enum ResultCell {
     Err(String),
 }
 
+enum ScriptedEnsureReady {
+    StatusUnreadable(String),
+    Fails(String),
+    StartInhibited,
+}
+
 #[derive(Clone)]
 enum BuildResult {
     Ok,
@@ -202,7 +208,7 @@ impl MockRuntimeBuilder {
             handles: MockHandles::default(),
             is_available: true,
             ensure_ready_result: ResultCell::Ok,
-            ensure_ready_unreadable_queue: Arc::new(Mutex::new(VecDeque::new())),
+            ensure_ready_script: Arc::new(Mutex::new(VecDeque::new())),
             fail_on_up: HashSet::new(),
             fail_on_down: HashSet::new(),
             fail_on_recreate: HashSet::new(),
@@ -250,13 +256,21 @@ impl MockRuntimeBuilder {
         self.ensure_ready_result = ResultCell::Err(msg.to_string());
         self
     }
-    /// Push a scripted `ensure_ready` failure carrying `VmStatusUnreadable` (FIFO); the
-    /// configured result resumes once the queue is empty.
+    /// Push a scripted `ensure_ready` failure carrying `VmStatusUnreadable`; scripted failures
+    /// run first in FIFO order, then the configured result resumes.
     pub fn push_ensure_ready_status_unreadable(self, msg: &str) -> Self {
-        self.ensure_ready_unreadable_queue
-            .lock()
-            .unwrap()
-            .push_back(msg.to_string());
+        self.push_ensure_ready(ScriptedEnsureReady::StatusUnreadable(msg.to_string()))
+    }
+    /// Push a scripted plain `ensure_ready` failure with `msg`.
+    pub fn push_ensure_ready_failure(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::Fails(msg.to_string()))
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmStartInhibited`.
+    pub fn push_ensure_ready_start_inhibited(self) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::StartInhibited)
+    }
+    fn push_ensure_ready(self, outcome: ScriptedEnsureReady) -> Self {
+        self.ensure_ready_script.lock().unwrap().push_back(outcome);
         self
     }
     /// Sets the value returned by `is_available`.
@@ -426,7 +440,7 @@ impl MockRuntimeBuilder {
             handles: self.handles,
             is_available: self.is_available,
             ensure_ready_result: self.ensure_ready_result,
-            ensure_ready_unreadable_queue: self.ensure_ready_unreadable_queue,
+            ensure_ready_script: self.ensure_ready_script,
             fail_on_up: self.fail_on_up,
             fail_on_down: self.fail_on_down,
             fail_on_recreate: self.fail_on_recreate,
@@ -470,7 +484,7 @@ struct MockRuntime {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
-    ensure_ready_unreadable_queue: Arc<Mutex<VecDeque<String>>>,
+    ensure_ready_script: Arc<Mutex<VecDeque<ScriptedEnsureReady>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -615,13 +629,16 @@ impl ContainerRuntime for MockRuntime {
         self.handles
             .ensure_ready_calls
             .fetch_add(1, Ordering::SeqCst);
-        let next_unreadable = self
-            .ensure_ready_unreadable_queue
-            .lock()
-            .unwrap()
-            .pop_front();
-        if let Some(msg) = next_unreadable {
-            return Err(super::VmStatusUnreadable::error(msg));
+        let scripted = self.ensure_ready_script.lock().unwrap().pop_front();
+        match scripted {
+            Some(ScriptedEnsureReady::StatusUnreadable(msg)) => {
+                return Err(super::VmStatusUnreadable::error(msg));
+            }
+            Some(ScriptedEnsureReady::Fails(msg)) => anyhow::bail!("{msg}"),
+            Some(ScriptedEnsureReady::StartInhibited) => {
+                return Err(anyhow::Error::new(super::VmStartInhibited));
+            }
+            None => {}
         }
         match &self.ensure_ready_result {
             ResultCell::Ok => Ok(()),
@@ -923,17 +940,28 @@ mod tests {
     }
 
     #[test]
-    fn ensure_ready_unreadable_queue_drains_before_the_configured_result() {
+    fn ensure_ready_script_drains_in_fifo_before_the_configured_result() {
         let (rt, handles) = MockRuntimeBuilder::new()
             .push_ensure_ready_status_unreadable("status read failed")
+            .push_ensure_ready_failure("stuck in Stopping")
+            .push_ensure_ready_start_inhibited()
             .build();
-        let err = rt.ensure_ready().unwrap_err();
-        assert!(err
+        let unreadable = rt.ensure_ready().unwrap_err();
+        assert!(unreadable
             .downcast_ref::<super::super::VmStatusUnreadable>()
             .is_some());
-        assert!(err.to_string().contains("status read failed"));
+        assert!(unreadable.to_string().contains("status read failed"));
+        let failed = rt.ensure_ready().unwrap_err();
+        assert!(failed.to_string().contains("stuck in Stopping"));
+        assert!(failed
+            .downcast_ref::<super::super::VmStatusUnreadable>()
+            .is_none());
+        let inhibited = rt.ensure_ready().unwrap_err();
+        assert!(inhibited
+            .downcast_ref::<super::super::VmStartInhibited>()
+            .is_some());
         assert!(rt.ensure_ready().is_ok());
-        assert_eq!(handles.ensure_ready_count(), 2);
+        assert_eq!(handles.ensure_ready_count(), 4);
     }
 
     #[test]

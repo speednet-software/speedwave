@@ -96,16 +96,6 @@ const RECONCILE_REBUILDING: u8 = 2;
 
 static BUNDLE_RECONCILE_PHASE: AtomicU8 = AtomicU8::new(RECONCILE_IDLE);
 
-static ENGINE_TEARDOWN_STARTED: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn begin_engine_teardown() {
-    ENGINE_TEARDOWN_STARTED.store(true, Ordering::SeqCst);
-}
-
-fn engine_teardown_started() -> bool {
-    ENGINE_TEARDOWN_STARTED.load(Ordering::SeqCst)
-}
-
 #[derive(Clone, Debug)]
 enum ImageReadiness {
     Ready,
@@ -141,13 +131,11 @@ pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
     }
 }
 
-pub(crate) fn wait_for_image_check(timeout: Duration) -> Result<(), String> {
-    match readiness_after_waiting_while(timeout, |s| matches!(s, ImageReadiness::Checking)) {
-        ImageReadiness::Checking => {
-            Err("Timed out waiting for the container engine check".to_string())
-        }
-        ImageReadiness::Ready | ImageReadiness::Building | ImageReadiness::Failed(_) => Ok(()),
-    }
+pub(crate) fn wait_for_image_check(timeout: Duration) -> bool {
+    !matches!(
+        readiness_after_waiting_while(timeout, |s| matches!(s, ImageReadiness::Checking)),
+        ImageReadiness::Checking
+    )
 }
 
 pub(crate) fn mark_image_check_pending() {
@@ -181,12 +169,12 @@ impl Drop for ImageReadinessGuard {
     }
 }
 
-fn image_readiness_failed() -> bool {
+fn image_readiness_failure() -> Option<String> {
     let (lock, _) = &*IMAGES_READY;
-    matches!(
-        &*lock.lock().unwrap_or_else(|e| e.into_inner()),
-        ImageReadiness::Failed(_)
-    )
+    match &*lock.lock().unwrap_or_else(|e| e.into_inner()) {
+        ImageReadiness::Failed(message) => Some(message.clone()),
+        ImageReadiness::Ready | ImageReadiness::Checking | ImageReadiness::Building => None,
+    }
 }
 
 pub(crate) fn retry_bundle_reconcile_if_failed(app_handle: &tauri::AppHandle) -> bool {
@@ -194,7 +182,7 @@ pub(crate) fn retry_bundle_reconcile_if_failed(app_handle: &tauri::AppHandle) ->
 }
 
 fn retry_when_failed(reenter: impl FnOnce() -> bool) -> bool {
-    if !image_readiness_failed() {
+    if image_readiness_failure().is_none() {
         return false;
     }
     reenter()
@@ -211,12 +199,17 @@ pub(crate) fn current_bundle_status() -> BundleReconcileStatus {
     let current_bundle_id = bundle::load_current_bundle_manifest()
         .ok()
         .map(|m| m.bundle_id);
-    bundle_status_from(&bundle::load_bundle_state(), current_bundle_id.as_deref())
+    bundle_status_from(
+        &bundle::load_bundle_state(),
+        current_bundle_id.as_deref(),
+        image_readiness_failure(),
+    )
 }
 
 fn bundle_status_from(
     state: &bundle::BundleState,
     current_bundle_id: Option<&str>,
+    live_failure: Option<String>,
 ) -> BundleReconcileStatus {
     let bundle_changed = current_bundle_id
         .map(|current| state.applied_bundle_id.as_deref() != Some(current))
@@ -230,7 +223,7 @@ fn bundle_status_from(
         last_error: if bundle_changed {
             state.last_error.clone()
         } else {
-            None
+            live_failure
         },
         pending_running_projects: if bundle_changed {
             state.pending_running_projects.clone()
@@ -392,6 +385,9 @@ pub(crate) fn stop_projects(
 
 fn set_bundle_error(state: &mut bundle::BundleState, message: String) -> String {
     state.last_error = Some(message.clone());
+    if speedwave_runtime::runtime::vm_start_inhibited() {
+        return message;
+    }
     if let Err(e) = bundle::save_bundle_state(state) {
         log::warn!("Failed to save bundle error state: {e}");
     }
@@ -504,71 +500,15 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             )
         })?;
     } else {
-        let mut retained: Vec<String> = Vec::new();
-        if !state.pending_running_projects.is_empty() {
-            match rt.ensure_ready() {
-                Ok(()) => {
-                    let pending = state.pending_running_projects.clone();
-                    log::info!(
-                        "bundle unchanged, restoring {} stopped project(s)",
-                        pending.len()
-                    );
-                    retained = restore_projects(&pending, &rt).map_err(|e| {
-                        let msg = format!("Project restore failed: {e}");
-                        log::error!("{msg}");
-                        set_bundle_error(&mut state, msg)
-                    })?;
-                }
-                Err(e) => {
-                    log::warn!(
-                        "{} project(s) pending restore but runtime not ready \
-                         ({e}) — will retry next launch",
-                        state.pending_running_projects.len()
-                    );
-                    release_image_waiters(app_handle);
-                    return Ok(());
-                }
-            }
-        }
-        if state.last_error.is_some() || state.pending_running_projects != retained {
-            log::info!("bundle matches but reconcile state dirty, cleaning up");
-            state.last_error = None;
-            state.pending_running_projects = retained;
-            bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
-        }
-
-        match config::load_user_config() {
-            Ok(cfg) => {
-                for project in crate::containers_cmd::crashed_teardown_intents() {
-                    if cfg.active_project.as_deref() == Some(project.as_str()) {
-                        continue;
-                    }
-                    log::info!("converging crash-interrupted teardown of '{project}'");
-                    crate::containers_cmd::spawn_background_teardown(project);
-                }
-            }
-            Err(e) => {
-                log::warn!("skipping teardown convergence, config unreadable: {e}");
-            }
-        }
-
-        match build::images_exist(&rt, &active_integrations, &manifest, || {
-            !engine_teardown_started()
+        let images_present = match build::images_exist(&rt, &active_integrations, &manifest, || {
+            !speedwave_runtime::runtime::vm_start_inhibited()
         }) {
-            Ok(true) => {
-                log::info!("no reconcile changes needed, setting images Ready");
-                release_image_waiters(app_handle);
-                return Ok(());
-            }
-            Ok(false) => {
-                log::warn!("bundle unchanged but images missing, forcing rebuild");
-                prepare_rebuild(&mut state, app_handle)?;
+            Ok(present) => present,
+            Err(e) if e.downcast_ref::<build::ImageCheckCancelled>().is_some() => {
+                return Err(format!("{e:#}"));
             }
             Err(e) if e.downcast_ref::<build::EngineDidNotAnswer>().is_some() => {
-                let msg = format!(
-                    "Container engine did not answer the image check: {}",
-                    build::user_facing_engine_error(&e)
-                );
+                let msg = build::user_facing_engine_error(&e);
                 log::error!("{msg}");
                 return Err(set_bundle_error(&mut state, msg));
             }
@@ -577,7 +517,49 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 release_image_waiters(app_handle);
                 return Ok(());
             }
+        };
+        if images_present {
+            let mut retained: Vec<String> = Vec::new();
+            if !state.pending_running_projects.is_empty() {
+                let pending = state.pending_running_projects.clone();
+                log::info!(
+                    "bundle unchanged, restoring {} stopped project(s)",
+                    pending.len()
+                );
+                retained = restore_projects(&pending, &rt).map_err(|e| {
+                    let msg = format!("Project restore failed: {e}");
+                    log::error!("{msg}");
+                    set_bundle_error(&mut state, msg)
+                })?;
+            }
+            if state.last_error.is_some() || state.pending_running_projects != retained {
+                log::info!("bundle matches but reconcile state dirty, cleaning up");
+                state.last_error = None;
+                state.pending_running_projects = retained;
+                bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
+            }
+
+            match config::load_user_config() {
+                Ok(cfg) => {
+                    for project in crate::containers_cmd::crashed_teardown_intents() {
+                        if cfg.active_project.as_deref() == Some(project.as_str()) {
+                            continue;
+                        }
+                        log::info!("converging crash-interrupted teardown of '{project}'");
+                        crate::containers_cmd::spawn_background_teardown(project);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("skipping teardown convergence, config unreadable: {e}");
+                }
+            }
+
+            log::info!("no reconcile changes needed, setting images Ready");
+            release_image_waiters(app_handle);
+            return Ok(());
         }
+        log::warn!("bundle unchanged but images missing, forcing rebuild");
+        prepare_rebuild(&mut state, app_handle)?;
     }
 
     let build_root = build::resolve_build_root().map_err(|e| {
@@ -798,7 +780,11 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) -> bool {
                 log::info!("bundle reconcile thread finished successfully");
             }
             Ok(Err(e)) => {
-                log::error!("bundle reconcile failed: {e}");
+                if speedwave_runtime::runtime::vm_start_inhibited() {
+                    log::info!("bundle reconcile stopped while the engine shuts down: {e}");
+                } else {
+                    log::error!("bundle reconcile failed: {e}");
+                }
                 set_image_readiness(ImageReadiness::Failed(e));
             }
             Err(panic_info) => {
@@ -971,7 +957,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     if CLEANUP_ONCE.swap(true, Ordering::SeqCst) {
         return None;
     }
-    begin_engine_teardown();
+    speedwave_runtime::runtime::inhibit_vm_start();
 
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2018,29 +2004,6 @@ mod tests {
         }
 
         #[test]
-        fn unchanged_branch_not_ready_keeps_pending() {
-            let source = include_str!("reconcile.rs");
-            let inner_fn = source
-                .split("fn reconcile_bundle_update_inner(")
-                .nth(1)
-                .expect("reconcile_bundle_update_inner function should exist");
-            let branch_pos = inner_fn
-                .find("pending restore but runtime not ready")
-                .expect("unchanged branch must handle runtime-not-ready");
-            let branch = &inner_fn[branch_pos..];
-            let return_pos = branch
-                .find("return Ok(())")
-                .expect("not-ready arm must return early");
-            let persist_pos = branch
-                .find("pending_running_projects = retained")
-                .expect("pending rewrite exists later in the branch");
-            assert!(
-                return_pos < persist_pos,
-                "not-ready arm must return (keeping pending) before the rewrite"
-            );
-        }
-
-        #[test]
         fn prepare_rebuild_resets_phase_preserves_pending_projects() {
             let source = include_str!("reconcile.rs");
             let fn_start = source
@@ -2163,7 +2126,7 @@ mod tests {
                 last_error: None,
             };
 
-            let status = bundle_status_from(&state, Some("current-bundle"));
+            let status = bundle_status_from(&state, Some("current-bundle"), None);
             assert!(status.in_progress);
             assert_eq!(status.phase, "pending");
             assert_eq!(status.pending_running_projects, vec!["alpha"]);
@@ -2182,7 +2145,7 @@ mod tests {
                 last_error: Some("stale error".to_string()),
             };
 
-            let status = bundle_status_from(&state, Some("current-bundle"));
+            let status = bundle_status_from(&state, Some("current-bundle"), None);
             assert!(!status.in_progress);
             assert!(status.last_error.is_none());
             assert!(status.pending_running_projects.is_empty());
@@ -2201,7 +2164,7 @@ mod tests {
 
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_CHECKING, Ordering::Relaxed);
 
-            let status = bundle_status_from(&state, Some("current-bundle"));
+            let status = bundle_status_from(&state, Some("current-bundle"), None);
             assert!(
                 !status.in_progress,
                 "CHECKING phase must not show as in_progress"
@@ -2223,7 +2186,7 @@ mod tests {
 
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_REBUILDING, Ordering::Relaxed);
 
-            let status = bundle_status_from(&state, Some("current-bundle"));
+            let status = bundle_status_from(&state, Some("current-bundle"), None);
             assert!(
                 status.in_progress,
                 "REBUILDING phase must show as in_progress"
@@ -2244,7 +2207,7 @@ mod tests {
                 last_error: Some("Image rebuild failed".to_string()),
             };
 
-            let status = bundle_status_from(&state, Some("current-bundle"));
+            let status = bundle_status_from(&state, Some("current-bundle"), None);
             assert!(!status.in_progress);
             assert_eq!(status.phase, "images_built");
             assert_eq!(status.last_error.as_deref(), Some("Image rebuild failed"));
@@ -2255,11 +2218,36 @@ mod tests {
         }
 
         #[test]
+        fn current_bundle_status_surfaces_a_live_failure_when_the_bundle_is_already_applied() {
+            BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
+
+            let state = bundle::BundleState {
+                applied_bundle_id: Some("current-bundle".to_string()),
+                applied_image_hashes: Default::default(),
+                phase: bundle::BundleReconcilePhase::Done,
+                pending_running_projects: Vec::new(),
+                last_error: Some("persisted by an earlier launch".to_string()),
+            };
+
+            let status = bundle_status_from(
+                &state,
+                Some("current-bundle"),
+                Some("Container engine did not answer the image check".to_string()),
+            );
+            assert!(!status.in_progress);
+            assert_eq!(
+                status.last_error.as_deref(),
+                Some("Container engine did not answer the image check"),
+                "a failure of this launch must reach the UI, where Retry re-runs it"
+            );
+        }
+
+        #[test]
         fn missing_applied_bundle_id_is_reported_as_in_progress() {
             BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
 
             let state = bundle::BundleState::default();
-            let status = bundle_status_from(&state, Some("current-bundle"));
+            let status = bundle_status_from(&state, Some("current-bundle"), None);
             assert!(
                 status.in_progress,
                 "missing applied_bundle_id (fresh install) must report in_progress"
@@ -2357,7 +2345,7 @@ mod tests {
         #[serial]
         fn image_check_wait_returns_at_once_when_ready() {
             set_readiness(ImageReadiness::Ready);
-            assert!(wait_for_image_check(Duration::from_secs(1)).is_ok());
+            assert!(wait_for_image_check(Duration::from_secs(1)));
         }
 
         #[test]
@@ -2371,7 +2359,7 @@ mod tests {
 
             set_readiness(ImageReadiness::Ready);
 
-            assert!(handle.join().unwrap().is_ok());
+            assert!(handle.join().unwrap());
         }
 
         #[test]
@@ -2380,11 +2368,11 @@ mod tests {
             set_readiness(ImageReadiness::Building);
 
             let started = std::time::Instant::now();
-            let result = wait_for_image_check(Duration::from_secs(30));
+            let finished = wait_for_image_check(Duration::from_secs(30));
             let waited = started.elapsed();
 
             set_readiness(ImageReadiness::Ready);
-            assert!(result.is_ok());
+            assert!(finished);
             assert!(
                 waited < Duration::from_secs(10),
                 "a rebuild is not an engine check and must not block the caller, waited {waited:?}"
@@ -2396,11 +2384,11 @@ mod tests {
         fn image_check_wait_ends_once_a_reconcile_has_failed() {
             set_readiness(ImageReadiness::Failed("Image rebuild failed".to_string()));
 
-            let result = wait_for_image_check(Duration::from_secs(1));
+            let finished = wait_for_image_check(Duration::from_secs(1));
 
             set_readiness(ImageReadiness::Ready);
             assert!(
-                result.is_ok(),
+                finished,
                 "a failed reconcile is surfaced by starts and Retry, not by a container check"
             );
         }
@@ -2411,21 +2399,27 @@ mod tests {
             set_readiness(ImageReadiness::Ready);
 
             mark_image_check_pending();
-            let result = wait_for_image_check(Duration::from_millis(50));
+            let finished = wait_for_image_check(Duration::from_millis(50));
 
             set_readiness(ImageReadiness::Ready);
-            assert!(result.unwrap_err().contains("Timed out"));
+            assert!(
+                !finished,
+                "a marked check must hold the wait until it has run"
+            );
         }
 
         #[test]
         #[serial]
-        fn image_check_wait_times_out_while_checking() {
+        fn image_check_wait_runs_out_while_checking() {
             set_readiness(ImageReadiness::Checking);
 
-            let result = wait_for_image_check(Duration::from_millis(50));
+            let started = std::time::Instant::now();
+            let finished = wait_for_image_check(Duration::from_millis(50));
+            let waited = started.elapsed();
 
             set_readiness(ImageReadiness::Ready);
-            assert!(result.unwrap_err().contains("Timed out"));
+            assert!(!finished);
+            assert!(waited >= Duration::from_millis(50), "waited {waited:?}");
         }
 
         #[test]
@@ -2751,36 +2745,144 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unchanged_bundle_reports_images_ready_only_after_the_engine_answered() {
+    fn unchanged_bundle_branch_source() -> &'static str {
         let inner_fn = reconcile_inner_source();
-        let branch_pos = inner_fn
-            .find("bundle matches but reconcile state dirty")
-            .expect("the unchanged-bundle branch must exist");
-        let check_pos = inner_fn
+        let branch = inner_fn
+            .find("re-reconciling after interrupted update")
+            .expect("the interrupted-update branch precedes the unchanged-bundle branch");
+        &inner_fn[branch..]
+    }
+
+    #[test]
+    fn unchanged_bundle_asks_the_engine_before_anything_else() {
+        let branch = unchanged_bundle_branch_source();
+        let check_pos = branch
             .find(IMAGE_CHECK_CALL)
             .expect("an unchanged bundle must match on the image check verdict");
-        let before_check = &inner_fn[branch_pos..check_pos];
-        assert!(
-            !before_check.contains("release_image_waiters(")
-                && !before_check.contains("set_image_readiness(ImageReadiness::Ready)"),
-            "images must not be reported Ready before the engine answered the image check"
-        );
-        assert!(
-            !before_check.contains("rt.ensure_ready()"),
-            "images_exist readies the runtime itself; a call before it would skip its retry"
-        );
-        let present_arm = inner_fn[check_pos..]
-            .split("Ok(true) =>")
+        let before_check = &branch[..check_pos];
+        for early in [
+            "rt.ensure_ready()",
+            "restore_projects(",
+            "release_image_waiters(",
+            "set_image_readiness(ImageReadiness::Ready)",
+            "save_bundle_state(",
+        ] {
+            assert!(
+                !before_check.contains(early),
+                "`{early}` must wait for the engine's answer: images_exist readies the runtime \
+                 and retries while it is silent"
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_bundle_restores_and_reports_ready_only_with_the_images_present() {
+        let branch = unchanged_bundle_branch_source();
+        let check_pos = branch
+            .find(IMAGE_CHECK_CALL)
+            .expect("an unchanged bundle must match on the image check verdict");
+        let present = branch[check_pos..]
+            .split("if images_present {")
             .nth(1)
-            .expect("the image check must handle present images");
-        let return_pos = present_arm
+            .expect("present images must have their own block");
+        let block_end = present
             .find("return Ok(())")
             .expect("present images must end the reconcile");
+        let block = &present[..block_end];
+        let restore = block
+            .find("restore_projects(&pending, &rt)")
+            .expect("pending projects are restored once the engine answered");
+        let ready = block
+            .find("release_image_waiters(app_handle)")
+            .expect("present images must report Ready before the reconcile ends");
         assert!(
-            present_arm[..return_pos].contains("release_image_waiters(app_handle)"),
-            "present images must report Ready before the reconcile ends"
+            restore < ready,
+            "Ready must follow the restore it waits for"
         );
+        assert!(
+            !block.contains("prepare_rebuild"),
+            "present images must not force a rebuild"
+        );
+        let missing = &present[block_end..];
+        assert!(
+            missing.contains("prepare_rebuild(&mut state, app_handle)?"),
+            "missing images fall through to the rebuild"
+        );
+    }
+
+    #[test]
+    fn unchanged_bundle_keeps_pending_projects_when_the_runtime_cannot_be_readied() {
+        let branch = unchanged_bundle_branch_source();
+        let skip = branch
+            .find("runtime not ready for reconcile")
+            .expect("an ensure_ready failure must stay a logged skip");
+        let skip_return = skip
+            + branch[skip..]
+                .find("return Ok(())")
+                .expect("the skip ends the reconcile");
+        let rewrite = branch
+            .find("pending_running_projects = retained")
+            .expect("the unchanged branch rewrites the pending list after a restore");
+        assert!(
+            skip_return < rewrite,
+            "a skipped check must return before the pending list is rewritten"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_image_check_neither_persists_nor_rebuilds() {
+        let check = reconcile_inner_source()
+            .split(IMAGE_CHECK_CALL)
+            .nth(1)
+            .expect("an unchanged bundle must match on the image check verdict");
+        let cancelled = check
+            .split("downcast_ref::<build::ImageCheckCancelled>()")
+            .nth(1)
+            .expect("the check must tell a teardown apart from a silent engine");
+        let arm_end = cancelled
+            .find("return Err(")
+            .expect("a cancelled check ends the reconcile without a verdict");
+        assert!(
+            !cancelled[..arm_end].contains("set_bundle_error")
+                && !cancelled[..arm_end].contains("prepare_rebuild"),
+            "a factory reset may be wiping the data dir; a cancelled check must not write to it"
+        );
+    }
+
+    #[test]
+    fn reconcile_errors_are_not_persisted_once_the_engine_is_torn_down() {
+        let source = include_str!("reconcile.rs");
+        let body = source
+            .split("fn set_bundle_error(")
+            .nth(1)
+            .expect("set_bundle_error must exist");
+        let body = &body[..body.find("\n}\n").expect("set_bundle_error must end")];
+        let gate = body
+            .find("speedwave_runtime::runtime::vm_start_inhibited()")
+            .expect("set_bundle_error must skip the save during a teardown");
+        let save = body
+            .find("bundle::save_bundle_state(state)")
+            .expect("set_bundle_error saves the error otherwise");
+        assert!(gate < save);
+    }
+
+    #[test]
+    fn reconcile_failures_during_a_teardown_are_not_logged_as_errors() {
+        let source = include_str!("reconcile.rs");
+        let failed_arm = source
+            .split("Ok(Err(e)) => {")
+            .nth(1)
+            .expect("the reconcile thread handles a failed reconcile");
+        let arm = &failed_arm[..failed_arm
+            .find("set_image_readiness(ImageReadiness::Failed(e))")
+            .expect("a failed reconcile fails the image waiters")];
+        let gate = arm
+            .find("speedwave_runtime::runtime::vm_start_inhibited()")
+            .expect("the thread must tell a teardown apart from a failure");
+        let error_log = arm
+            .find("log::error!")
+            .expect("a real failure is still an error");
+        assert!(gate < error_log);
     }
 
     #[test]
@@ -2790,10 +2892,10 @@ mod tests {
             .nth(1)
             .expect("an unchanged bundle must match on the image check verdict");
         let call = &check[..check
-            .find("Ok(true) =>")
-            .expect("the image check must handle present images")];
+            .find("Ok(present) => present")
+            .expect("the image check must hand over its verdict")];
         assert!(
-            call.contains("!engine_teardown_started()"),
+            call.contains("!speedwave_runtime::runtime::vm_start_inhibited()"),
             "the retry must stop once exit or factory reset tears the engine down"
         );
     }
@@ -2805,8 +2907,8 @@ mod tests {
             .nth(1)
             .expect("run_exit_cleanup must exist");
         let teardown = body
-            .find("begin_engine_teardown()")
-            .expect("exit cleanup must mark the engine teardown");
+            .find("speedwave_runtime::runtime::inhibit_vm_start()")
+            .expect("exit cleanup must keep the runtime from starting the VM again");
         let cleanup = body
             .find("std::thread::spawn")
             .expect("exit cleanup must stop containers and the VM on a thread");

@@ -2,7 +2,7 @@
 
 use crate::bundle;
 use crate::config::ResolvedIntegrationsConfig;
-use crate::runtime::VmStatusUnreadable;
+use crate::runtime::{VmStartInhibited, VmStatusUnreadable};
 use std::path::PathBuf;
 
 /// A container image definition. Build set is selected per project via [`enabled_images`].
@@ -251,21 +251,33 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&BUILD_LOCK, &data_dir.join("build.lock"), f)
 }
 
-/// An image check whose engine never answered; unlike an `ensure_ready` failure it is not a skip,
-/// so reconcile fails on it and Retry re-runs the check.
+/// Context on an image check whose engine never answered; unlike an `ensure_ready` failure it is
+/// not a skip, so reconcile fails on it and Retry re-runs the check.
 #[derive(Debug)]
-pub struct EngineDidNotAnswer(anyhow::Error);
+pub struct EngineDidNotAnswer;
 
 impl std::fmt::Display for EngineDidNotAnswer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        f.write_str("Container engine did not answer the image check")
     }
 }
 
 impl std::error::Error for EngineDidNotAnswer {}
 
-/// `Ok(true)` if every [`enabled_images`] image for `integrations` is present. Re-runs `ensure_ready` while
-/// the engine does not answer and `keep_trying()` holds; a silent engine is [`EngineDidNotAnswer`].
+/// An image check stopped before a verdict because exit or factory reset tears the engine down.
+#[derive(Debug)]
+pub struct ImageCheckCancelled;
+
+impl std::fmt::Display for ImageCheckCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The image check stopped because the container engine is shutting down")
+    }
+}
+
+impl std::error::Error for ImageCheckCancelled {}
+
+/// `Ok(true)` if every [`enabled_images`] image for `integrations` is present. Runs `ensure_ready` only
+/// while `keep_trying()` holds (else [`ImageCheckCancelled`]); a silent engine is [`EngineDidNotAnswer`].
 pub fn images_exist(
     rt: &super::runtime::LockedRuntime,
     integrations: &ResolvedIntegrationsConfig,
@@ -292,9 +304,20 @@ fn images_exist_within(
 ) -> anyhow::Result<bool> {
     let mut unreachable_since: Option<std::time::Instant> = None;
     loop {
+        if !keep_trying() {
+            return Err(anyhow::Error::new(ImageCheckCancelled));
+        }
         let verdict = match rt.ensure_ready() {
             Ok(()) => probe_enabled_images(rt, integrations, manifest),
-            Err(e) if e.downcast_ref::<VmStatusUnreadable>().is_some() => Err(e),
+            Err(e) if e.downcast_ref::<VmStartInhibited>().is_some() => {
+                return Err(e.context(ImageCheckCancelled));
+            }
+            Err(e)
+                if unreachable_since.is_some()
+                    || e.downcast_ref::<VmStatusUnreadable>().is_some() =>
+            {
+                Err(e)
+            }
             Err(e) => return Err(e),
         };
         match verdict {
@@ -317,12 +340,9 @@ fn images_exist_within(
                     std::time::Instant::now()
                 });
                 if since.elapsed() >= window {
-                    return Err(anyhow::Error::new(EngineDidNotAnswer(e)));
+                    return Err(e.context(EngineDidNotAnswer));
                 }
                 std::thread::sleep(poll_delay);
-                if !keep_trying() {
-                    return Err(anyhow::Error::new(EngineDidNotAnswer(e)));
-                }
             }
         }
     }
@@ -3241,8 +3261,8 @@ mod tests {
             )
             .unwrap_err();
             assert!(
-                err.to_string().contains("kex_exchange_identification"),
-                "an unreachable engine must surface as its error, got: {err}"
+                format!("{err:#}").contains("kex_exchange_identification"),
+                "an unreachable engine must surface as its error, got: {err:#}"
             );
             assert!(err.downcast_ref::<EngineDidNotAnswer>().is_some());
             assert_eq!(handles.ensure_ready_count(), 1);
@@ -3266,14 +3286,18 @@ mod tests {
             )
             .unwrap_err();
             assert!(err.downcast_ref::<EngineDidNotAnswer>().is_some());
+            assert!(
+                err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                    .is_some(),
+                "the marker must keep the cause it carries, got: {err:#}"
+            );
             assert_eq!(handles.ensure_ready_count(), 1);
         }
 
         #[test]
-        fn images_exist_stops_re_running_ensure_ready_once_told_to_stop() {
+        fn images_exist_does_not_ready_the_runtime_once_told_to_stop() {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_image_exists_default(true)
-                .push_image_exists_failure(KEX_RESET)
                 .build();
             let err = images_exist_within(
                 &rt,
@@ -3285,14 +3309,112 @@ mod tests {
             )
             .unwrap_err();
             assert!(
-                err.downcast_ref::<EngineDidNotAnswer>().is_some(),
-                "a stopped check still reports the engine as silent, got: {err}"
+                err.downcast_ref::<ImageCheckCancelled>().is_some(),
+                "a check stopped before it ran must say so, got: {err:#}"
             );
+            assert!(err.downcast_ref::<EngineDidNotAnswer>().is_none());
             assert_eq!(
                 handles.ensure_ready_count(),
-                1,
-                "ensure_ready must not run again once the engine is being torn down"
+                0,
+                "ensure_ready may start a stopped VM, so it must not run once the engine is torn down"
             );
+        }
+
+        #[test]
+        fn images_exist_stops_re_running_ensure_ready_once_told_to_stop() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_image_exists_failure(KEX_RESET)
+                .build();
+            let asked = std::sync::atomic::AtomicUsize::new(0);
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+                || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0,
+            )
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<ImageCheckCancelled>().is_some(),
+                "a check stopped by the teardown is not a silent engine, got: {err:#}"
+            );
+            assert!(err.downcast_ref::<EngineDidNotAnswer>().is_none());
+            assert_eq!(handles.ensure_ready_count(), 1);
+        }
+
+        #[test]
+        fn images_exist_stops_when_ensure_ready_may_not_start_the_vm() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_ensure_ready_start_inhibited()
+                .build();
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+                || true,
+            )
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<ImageCheckCancelled>().is_some(),
+                "a VM kept stopped for the teardown ends the check, got: {err:#}"
+            );
+            assert_eq!(handles.ensure_ready_count(), 1);
+        }
+
+        #[test]
+        fn images_exist_retries_an_ensure_ready_failure_that_follows_an_engine_error() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_ensure_ready_status_unreadable(
+                    "Cannot read the state of Lima VM 'speedwave': resource temporarily unavailable",
+                )
+                .push_ensure_ready_failure("Lima VM 'speedwave' stuck in Stopping state for 30s")
+                .build();
+            let present = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+                || true,
+            )
+            .unwrap();
+            assert!(present);
+            assert_eq!(handles.ensure_ready_count(), 3);
+        }
+
+        #[test]
+        fn images_exist_marks_an_ensure_ready_failure_that_outlasts_the_window() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_ensure_ready_status_unreadable(
+                    "Cannot read the state of Lima VM 'speedwave': resource temporarily unavailable",
+                )
+                .push_ensure_ready_failure("Lima VM 'speedwave' stuck in Stopping state for 30s")
+                .build();
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_millis(60),
+                || true,
+            )
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<EngineDidNotAnswer>().is_some(),
+                "an engine that never answered again must fail the check, got: {err:#}"
+            );
+            assert!(
+                format!("{err:#}").contains("stuck in Stopping"),
+                "the last failure must reach the caller, got: {err:#}"
+            );
+            assert_eq!(handles.ensure_ready_count(), 2);
         }
 
         #[test]

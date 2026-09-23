@@ -192,10 +192,8 @@ pub(crate) fn vm_exec_run(
     stdin: &[u8],
     timeout: std::time::Duration,
 ) -> anyhow::Result<VmExecOutput> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::Stdio;
-    use std::sync::mpsc;
-    use std::thread;
 
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -209,24 +207,14 @@ pub(crate) fn vm_exec_run(
         }
     }
 
-    let Some(mut out_pipe) = child.stdout.take() else {
+    let Some(out_pipe) = child.stdout.take() else {
         anyhow::bail!("vm_exec: stdout pipe missing on '{program}'");
     };
-    let Some(mut err_pipe) = child.stderr.take() else {
+    let Some(err_pipe) = child.stderr.take() else {
         anyhow::bail!("vm_exec: stderr pipe missing on '{program}'");
     };
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
-    let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
-    let out_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = out_pipe.read_to_end(&mut buf);
-        let _ = out_tx.send(buf);
-    });
-    let err_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = err_pipe.read_to_end(&mut buf);
-        let _ = err_tx.send(buf);
-    });
+    let out_reader = binary::read_on_thread(out_pipe);
+    let err_reader = binary::read_on_thread(err_pipe);
 
     let start = std::time::Instant::now();
     let status = loop {
@@ -247,10 +235,9 @@ pub(crate) fn vm_exec_run(
         }
     };
 
-    let _ = out_thread.join();
-    let _ = err_thread.join();
-    let stdout = out_rx.recv().unwrap_or_default();
-    let stderr = err_rx.recv().unwrap_or_default();
+    let label = format!("vm_exec: '{program}'");
+    let stdout = binary::exited_child_output(&out_reader, &label)?;
+    let stderr = binary::exited_child_output(&err_reader, &label)?;
     Ok(VmExecOutput {
         status,
         stdout,
@@ -286,8 +273,8 @@ pub trait CommandRunner: Send + Sync {
         self.run(cmd, args)
     }
 
-    /// Like `run`, but kills on `timeout`, captures stderr, treats non-zero as `Err`.
-    /// Limited-stderr commands only — verbose output deadlocks the 64 KB pipe.
+    /// Like `run`, but kills on `timeout`, captures stderr (drained on a thread), treats non-zero
+    /// as `Err`.
     fn run_with_timeout(
         &self,
         cmd: &str,
@@ -300,6 +287,7 @@ pub trait CommandRunner: Send + Sync {
 
         let program = command.get_program().to_string_lossy().to_string();
         let mut child = command.spawn()?;
+        let stderr_reader = child.stderr.take().map(binary::read_on_thread);
         let start = std::time::Instant::now();
         loop {
             match child.try_wait()? {
@@ -307,14 +295,10 @@ pub trait CommandRunner: Send + Sync {
                     if status.success() {
                         return Ok(());
                     }
-                    let stderr = child
-                        .stderr
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                            decode_wsl_output(&buf)
-                        })
+                    let stderr = stderr_reader
+                        .as_ref()
+                        .and_then(|r| binary::exited_child_output(r, &program).ok())
+                        .map(|buf| decode_wsl_output(&buf))
                         .unwrap_or_default();
                     let detail = stderr.trim();
                     if detail.is_empty() {
@@ -695,6 +679,33 @@ impl std::fmt::Display for VmStatusUnreadable {
 }
 
 impl std::error::Error for VmStatusUnreadable {}
+
+static VM_START_INHIBITED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Keeps every later `ensure_ready` in this process from starting a stopped Lima VM; app exit and
+/// factory reset call it before they stop the engine. WSL starts its distro on demand, so it ignores it.
+pub fn inhibit_vm_start() {
+    VM_START_INHIBITED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `true` once [`inhibit_vm_start`] ran in this process.
+pub fn vm_start_inhibited() -> bool {
+    VM_START_INHIBITED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[derive(Debug)]
+pub(crate) struct VmStartInhibited;
+
+impl std::fmt::Display for VmStartInhibited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "Speedwave is shutting the container engine down and does not start the VM again",
+        )
+    }
+}
+
+impl std::error::Error for VmStartInhibited {}
 
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
@@ -2742,6 +2753,24 @@ services:
     }
 
     #[test]
+    #[cfg(unix)]
+    fn vm_exec_run_returns_once_the_child_exits_while_a_grandchild_holds_the_pipes() {
+        let start = std::time::Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & exit 0"]);
+        let err = vm_exec_run(command, b"", std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(
+            err.to_string().contains("still holds its output open"),
+            "got: {err}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "a grandchild holding the pipes must not outlast the child by its own lifetime, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
     fn run_bounded_falls_back_to_run_for_runners_that_only_implement_run() {
         struct RunOnly;
         impl CommandRunner for RunOnly {
@@ -3040,6 +3069,40 @@ services:
         assert!(
             err_msg.contains("diagnostic"),
             "error should include stderr output, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_reports_a_failure_while_a_grandchild_holds_stderr() {
+        let start = std::time::Instant::now();
+        let err = RealRunner
+            .run_with_timeout(
+                "sh",
+                &["-c", "sleep 30 & exit 3"],
+                std::time::Duration::from_secs(20),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exit code Some(3)"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "a grandchild holding stderr must not hold up the failure, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_drains_stderr_that_outgrows_the_pipe_buffer() {
+        let result = RealRunner.run_with_timeout(
+            "sh",
+            &["-c", "head -c 300000 /dev/zero >&2"],
+            std::time::Duration::from_secs(20),
+        );
+        assert!(
+            result.is_ok(),
+            "a child must not block on a full stderr pipe, got: {result:?}"
         );
     }
 

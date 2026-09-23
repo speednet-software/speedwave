@@ -670,7 +670,12 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("checking whether containers are running for project={project}");
-        crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT)?;
+        if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT) {
+            log::warn!(
+                "container engine check still running after {}s, reading the engine as it is",
+                RECONCILE_WAIT_TIMEOUT.as_secs()
+            );
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         if !rt.is_available() {
             log::warn!("runtime not available");
@@ -787,7 +792,7 @@ pub async fn factory_reset(
     oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
-    crate::reconcile::begin_engine_teardown();
+    speedwave_runtime::runtime::inhibit_vm_start();
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -822,7 +827,7 @@ pub async fn factory_reset(
         drop(guard.take());
     }
 
-    let result = tokio::task::spawn_blocking(|| {
+    let wipe = tokio::task::spawn_blocking(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             drain_pending_teardowns();
@@ -832,16 +837,14 @@ pub async fn factory_reset(
             log::warn!("background teardown drain did not finish within 30s, continuing with wipe");
         }
         log::info!("starting factory reset wipe");
-        setup_wizard::factory_reset().map_err(|e| {
-            log::error!("factory reset failed: {e}");
-            e.to_string()
-        })
+        setup_wizard::factory_reset()
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await;
 
-    if let Err(ref e) = result {
-        log::error!("factory reset wipe failed ({e}), restarting to recover");
+    match wipe {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error!("factory reset wipe failed ({e:#}), restarting to recover"),
+        Err(e) => log::error!("factory reset wipe did not finish ({e}), restarting to recover"),
     }
     app.restart();
 }
@@ -4601,14 +4604,41 @@ mod tests {
         let source = include_str!("containers_cmd.rs");
         let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
         let teardown = fn_body
-            .find("begin_engine_teardown()")
-            .expect("factory_reset must mark the engine teardown");
+            .find("speedwave_runtime::runtime::inhibit_vm_start()")
+            .expect("factory_reset must keep the runtime from starting the VM again");
         let first_stop = fn_body
             .find("WATCHDOG_STOP")
             .expect("factory_reset stops the watchdogs");
         assert!(
             teardown < first_stop,
             "a startup image check must not restart the VM a factory reset deletes"
+        );
+    }
+
+    #[test]
+    fn factory_reset_restarts_even_when_the_wipe_task_does_not_finish() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
+        let wipe = fn_body
+            .find("spawn_blocking(")
+            .expect("factory_reset wipes on a blocking task");
+        let after_wipe = &fn_body[wipe..];
+        assert!(
+            !after_wipe.contains(")?"),
+            "a process that stopped its workers and may not start its VM again must restart, \
+             never return an error and keep running"
+        );
+        assert!(after_wipe.contains("app.restart()"));
+    }
+
+    #[test]
+    fn check_containers_running_answers_from_the_engine_once_the_wait_runs_out() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+        assert!(
+            fn_body.contains("if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT)"),
+            "a first VM start may provision for as long as the wait lasts, so running out of it \
+             must not fail the container check"
         );
     }
 

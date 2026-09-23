@@ -11,6 +11,7 @@ pub struct LimaRuntime {
     /// Deadline for the `Stopping` arm of `ensure_ready_inner`.
     /// `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
     vm_stop_timeout: Option<std::time::Duration>,
+    vm_start_inhibited: fn() -> bool,
     /// `None` means use `consts::data_dir()`. Test-only override so compose-path
     /// resolution never touches the shared data dir during a test run.
     #[cfg(test)]
@@ -41,6 +42,7 @@ impl LimaRuntime {
                 consts::LIMA_VM_STOP_POLL_DELAY_SECS,
             ),
             vm_stop_timeout: None,
+            vm_start_inhibited: super::vm_start_inhibited,
             #[cfg(test)]
             data_dir_override: None,
         }
@@ -57,6 +59,7 @@ impl LimaRuntime {
                 consts::LIMA_VM_STOP_POLL_DELAY_SECS,
             ),
             vm_stop_timeout: None,
+            vm_start_inhibited: || false,
             data_dir_override: None,
         }
     }
@@ -98,6 +101,22 @@ impl LimaRuntime {
     fn with_stop_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.vm_stop_timeout = Some(timeout);
         self
+    }
+
+    /// Acts as if [`super::inhibit_vm_start`] ran, without touching the process-wide flag.
+    #[cfg(test)]
+    fn with_vm_start_inhibited(mut self) -> Self {
+        self.vm_start_inhibited = || true;
+        self
+    }
+
+    /// One `limactl list --format <format>` read of the VM, bounded by `LIMA_LIST_TIMEOUT`.
+    fn read_vm_listing(&self, format: &str) -> anyhow::Result<String> {
+        self.runner.run_bounded(
+            "limactl",
+            &["list", "--format", format, consts::lima_vm_name()],
+            consts::LIMA_LIST_TIMEOUT,
+        )
     }
 
     /// Returns `Ok(())` if the VM is running, or an error if stopped/missing.
@@ -537,21 +556,13 @@ impl ContainerRuntime for LimaRuntime {
         if !limactl_ok {
             return false;
         }
-        self.runner
-            .run(
-                "limactl",
-                &["list", "--format", "{{.Status}}", consts::lima_vm_name()],
-            )
+        self.read_vm_listing("{{.Status}}")
             .map(|output| output.trim() == "Running")
             .unwrap_or(false)
     }
 
     fn is_installed(&self) -> bool {
-        self.runner
-            .run(
-                "limactl",
-                &["list", "--format", "{{.Name}}", consts::lima_vm_name()],
-            )
+        self.read_vm_listing("{{.Name}}")
             .map(|output| output.trim() == consts::lima_vm_name())
             .unwrap_or(false)
     }
@@ -866,10 +877,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn stop_vm(&self) -> anyhow::Result<()> {
         let vm = consts::lima_vm_name();
-        let status = match self
-            .runner
-            .run("limactl", &["list", "--format", "{{.Status}}", vm])
-        {
+        let status = match self.read_vm_listing("{{.Status}}") {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Lima VM status check failed, skipping stop: {e}");
@@ -916,6 +924,10 @@ impl LimaRuntime {
     /// Starts a Lima VM that is in the Stopped state.
     /// Shared by the `Stopped` and `Stopping→Stopped` paths in `ensure_ready_inner`.
     fn start_stopped_vm(&self, vm: &str) -> anyhow::Result<()> {
+        if (self.vm_start_inhibited)() {
+            log::info!("Lima VM '{vm}' is stopped and stays stopped while the engine shuts down");
+            return Err(anyhow::Error::new(super::VmStartInhibited));
+        }
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
             "Lima VM '{}' is stopped, starting (timeout: {}s; a one-time \
@@ -955,10 +967,7 @@ impl LimaRuntime {
         }
 
         let vm = consts::lima_vm_name();
-        let status = match self
-            .runner
-            .run("limactl", &["list", "--format", "{{.Status}}", vm])
-        {
+        let status = match self.read_vm_listing("{{.Status}}") {
             Ok(status) => status,
             Err(e) if e.to_string().contains(LIMA_UNMATCHED_INSTANCES) => String::new(),
             Err(e) => return Err(unreadable_vm_status(vm, &e)),
@@ -976,10 +985,7 @@ impl LimaRuntime {
                 let mut status_poll_failing = false;
                 loop {
                     std::thread::sleep(self.vm_stop_poll_delay);
-                    let s = match self
-                        .runner
-                        .run("limactl", &["list", "--format", "{{.Status}}", vm])
-                    {
+                    let s = match self.read_vm_listing("{{.Status}}") {
                         Ok(s) => {
                             status_poll_failing = false;
                             s
@@ -2701,7 +2707,7 @@ mod tests {
     #[test]
     fn image_exists_bounds_the_probe_by_the_exec_probe_timeout() {
         struct BoundedProbeRecorder {
-            timeouts: Arc<Mutex<Vec<std::time::Duration>>>,
+            probe_timeouts: Arc<Mutex<Vec<std::time::Duration>>>,
         }
         impl CommandRunner for BoundedProbeRecorder {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
@@ -2709,28 +2715,29 @@ mod tests {
                 if key.contains("--version") {
                     return Ok("limactl version 2.1.2".to_string());
                 }
-                if key.contains("list --format") {
-                    return Ok("Running".to_string());
-                }
                 anyhow::bail!("the image probe must go through run_bounded, got run: {key}")
             }
             fn run_bounded(
                 &self,
-                _cmd: &str,
-                _args: &[&str],
+                cmd: &str,
+                args: &[&str],
                 timeout: std::time::Duration,
             ) -> anyhow::Result<String> {
-                self.timeouts.lock().unwrap().push(timeout);
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("list --format") {
+                    return Ok("Running".to_string());
+                }
+                self.probe_timeouts.lock().unwrap().push(timeout);
                 Ok("[{}]".to_string())
             }
         }
-        let timeouts = Arc::new(Mutex::new(Vec::new()));
+        let probe_timeouts = Arc::new(Mutex::new(Vec::new()));
         let rt = LimaRuntime::with_runner(Box::new(BoundedProbeRecorder {
-            timeouts: timeouts.clone(),
+            probe_timeouts: probe_timeouts.clone(),
         }));
         assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
         assert_eq!(
-            *timeouts.lock().unwrap(),
+            *probe_timeouts.lock().unwrap(),
             vec![consts::CONTAINER_EXEC_PROBE_TIMEOUT]
         );
     }
@@ -3205,6 +3212,112 @@ mod tests {
             err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
                 .is_some(),
             "the last status read failed, so the error must say the state is unreadable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_leaves_a_stopped_vm_stopped_once_its_start_is_inhibited() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 2.1.2")
+            .with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_vm_start_inhibited();
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStartInhibited>()
+                .is_some(),
+            "a stopped VM must stay stopped once its start is inhibited, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_does_not_start_a_vm_that_finished_stopping_once_its_start_is_inhibited() {
+        let runner = SequencedRunner::new()
+            .with_fallback("limactl --version", "limactl version 2.1.2")
+            .with_sequence(&vm_status_key(), vec!["Stopping", "Stopped"]);
+        let rt = LimaRuntime::with_runner(Box::new(runner))
+            .with_zero_vm_stop_poll_delay()
+            .with_vm_start_inhibited();
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStartInhibited>()
+                .is_some(),
+            "the wait for a stopping VM must not end in a start, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_accepts_a_running_vm_while_its_start_is_inhibited() {
+        let rt = LimaRuntime::with_runner(Box::new(mock_runner_with_vm_running()))
+            .with_vm_start_inhibited();
+        assert!(rt.ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn every_limactl_list_read_is_bounded_by_the_list_timeout() {
+        struct ListRecorder {
+            bounded: Arc<Mutex<Vec<(String, std::time::Duration)>>>,
+        }
+        impl CommandRunner for ListRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--version") {
+                    return Ok("limactl version 2.1.2".to_string());
+                }
+                anyhow::bail!("an unbounded read ran: {key}")
+            }
+            fn run_bounded(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.bounded.lock().unwrap().push((key.clone(), timeout));
+                if key.contains("{{.Name}}") {
+                    return Ok(consts::lima_vm_name().to_string());
+                }
+                Ok("Running".to_string())
+            }
+            fn run_with_timeout(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                _timeout: std::time::Duration,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        let bounded = Arc::new(Mutex::new(Vec::new()));
+        let rt = LimaRuntime::with_runner(Box::new(ListRecorder {
+            bounded: bounded.clone(),
+        }));
+        assert!(rt.is_available());
+        assert!(rt.is_installed());
+        rt.ensure_ready().unwrap();
+        rt.stop_vm().unwrap();
+        let reads = bounded.lock().unwrap().clone();
+        assert_eq!(
+            reads.len(),
+            4,
+            "one bounded read per entry point, got: {reads:?}"
+        );
+        for (key, timeout) in reads {
+            assert!(key.starts_with("limactl list --format"), "got: {key}");
+            assert_eq!(timeout, consts::LIMA_LIST_TIMEOUT, "for: {key}");
+        }
+    }
+
+    #[test]
+    fn the_production_runtime_reads_the_process_wide_vm_start_inhibit() {
+        let source = include_str!("lima.rs");
+        let new_fn = source
+            .split("    pub fn new() -> Self {")
+            .nth(1)
+            .expect("LimaRuntime::new must exist");
+        let body = &new_fn[..new_fn.find("\n    }\n").expect("new() must end")];
+        assert!(
+            body.contains("vm_start_inhibited: super::vm_start_inhibited,"),
+            "LimaRuntime::new must read the flag app exit and factory reset set"
         );
     }
 
