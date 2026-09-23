@@ -6,7 +6,6 @@ mod tests {
     const FIREWALL_PS1: &str = include_str!("../windows/firewall.ps1");
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
-    const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
     const RESET_PS1: &str = include_str!("../windows/reset.ps1");
     const TAURI_CONF: &str = include_str!("../tauri.conf.json");
     const TAURI_WINDOWS_CONF: &str = include_str!("../tauri.windows.conf.json");
@@ -40,16 +39,12 @@ mod tests {
             "PREINSTALL must !insertmacro SPEEDWAVE_MATERIALIZE_SWEEP"
         );
         assert!(
-            pre.contains(r#"$\"$PLUGINSDIR\sweep.ps1$\""#),
-            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1 (via the shim)"
+            pre.contains(&hidden_powershell_run(r#""$PLUGINSDIR\sweep.ps1""#)),
+            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1 without a console window"
         );
         assert!(
             pre.contains("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe"),
             "PREINSTALL must use the absolute powershell path to defeat PATH hijack"
-        );
-        assert!(
-            pre.contains(r#""$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs""#),
-            "PREINSTALL must run PowerShell via the wscript hidden-window shim"
         );
         for env_name in ["SPW_INSTDIR", "SPW_DATA_DIR"] {
             assert!(
@@ -143,7 +138,7 @@ mod tests {
     fn preinstall_runs_the_reset_only_after_a_successful_sweep() {
         let pre = section(HOOKS, "NSIS_HOOK_PREINSTALL");
         let sweep = pre
-            .find(r#"$\"$PLUGINSDIR\sweep.ps1$\""#)
+            .find(r#""$PLUGINSDIR\sweep.ps1""#)
             .expect("PREINSTALL must run the sweep");
         let failed = sweep
             + pre[sweep..]
@@ -157,8 +152,8 @@ mod tests {
             .find(r#"SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", t "$LOCALAPPDATA\${PRODUCTNAME}")"#)
             .expect("PREINSTALL must pass Tauri's default per-user install dir to reset.ps1");
         let reset = pre
-            .find(r#"$\"$PLUGINSDIR\reset.ps1$\""#)
-            .expect("PREINSTALL must run the materialized $PLUGINSDIR\\reset.ps1 (via the shim)");
+            .find(&hidden_powershell_run(r#""$PLUGINSDIR\reset.ps1""#))
+            .expect("PREINSTALL must run the materialized $PLUGINSDIR\\reset.ps1 without a console window");
         assert!(
             pre.contains("!insertmacro SPEEDWAVE_MATERIALIZE_RESET"),
             "PREINSTALL must materialize reset.ps1"
@@ -185,8 +180,10 @@ mod tests {
             "POSTINSTALL must materialize firewall.ps1"
         );
         assert!(
-            post.contains(r#"$\"$PLUGINSDIR\firewall.ps1$\" -Mode install"#),
-            "POSTINSTALL must invoke firewall.ps1 -Mode install (via the shim)"
+            post.contains(&hidden_powershell_run(
+                r#""$PLUGINSDIR\firewall.ps1" -Mode install"#
+            )),
+            "POSTINSTALL must invoke firewall.ps1 -Mode install without a console window"
         );
     }
 
@@ -194,7 +191,9 @@ mod tests {
     fn postuninstall_removes_firewall_rule_before_wsl_unregister() {
         let post = section(HOOKS, "NSIS_HOOK_POSTUNINSTALL");
         let firewall_idx = post
-            .find("firewall.ps1$\\\" -Mode uninstall")
+            .find(&hidden_powershell_run(
+                r#""$PLUGINSDIR\firewall.ps1" -Mode uninstall"#,
+            ))
             .expect("POSTUNINSTALL must remove firewall rule");
         let wsl_idx = post
             .find("wsl.exe\" --unregister")
@@ -210,23 +209,14 @@ mod tests {
         let expected = render_expected_hooks(
             TEMPLATE,
             &[
-                ("sweep", "ps1", SWEEP_PS1),
-                ("firewall", "ps1", FIREWALL_PS1),
-                ("reset", "ps1", RESET_PS1),
-                ("run-hidden", "vbs", RUN_HIDDEN_VBS),
+                ("sweep", SWEEP_PS1),
+                ("firewall", FIREWALL_PS1),
+                ("reset", RESET_PS1),
             ],
         );
         assert_eq!(
             HOOKS, expected,
             "installer-hooks.nsh is out of sync with its inputs — run `make generate-installer-nsh` and commit"
-        );
-    }
-
-    #[test]
-    fn run_hidden_vbs_has_no_bom() {
-        assert!(
-            !RUN_HIDDEN_VBS.starts_with('\u{feff}'),
-            "run-hidden.vbs must be ANSI/BOM-free (wscript chokes on a BOM)"
         );
     }
 
@@ -253,24 +243,35 @@ mod tests {
     }
 
     #[test]
-    fn install_hooks_run_powershell_via_hidden_shim() {
-        let shim_calls = HOOKS
-            .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
+    fn install_hooks_run_powershell_without_a_console_window() {
+        let runs = HOOKS
+            .matches(&hidden_powershell_run(r#""$PLUGINSDIR\"#))
             .count();
         assert_eq!(
-            shim_calls, 4,
-            "expected 4 PowerShell runs via the wscript shim (sweep, reset, 2x firewall), found {shim_calls}"
+            runs, 4,
+            "expected 4 PowerShell runs through SPEEDWAVE_RUN_HIDDEN (sweep, reset, 2x firewall), found {runs}"
         );
-        assert_eq!(
-            HOOKS
-                .matches("!insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN")
-                .count(),
-            3,
-            "each shim hook must materialize run-hidden.vbs first"
+        let launcher = section(HOOKS, "SPEEDWAVE_RUN_HIDDEN");
+        for call in [
+            "kernel32::CreateProcessW(p 0, w r3, p 0, p 0, i 0, i 0x08000000,",
+            "kernel32::WaitForSingleObject(p r3, i -1)",
+            "kernel32::GetExitCodeProcess(p r3, *i .r0)",
+        ] {
+            assert!(
+                launcher.contains(call),
+                "SPEEDWAVE_RUN_HIDDEN must {call}: CREATE_NO_WINDOW starts PowerShell without a console window and the exit code lands in $0"
+            );
+        }
+        let lower = HOOKS.to_lowercase();
+        assert!(
+            !lower.contains("wscript") && !lower.contains(".vbs"),
+            "no hook may run PowerShell through WSH: it strips the quotes around a path with a space, and VBScript is deprecated"
         );
         assert!(
-            !HOOKS.contains("nsExec::ExecToLog `\"$SYSDIR\\WindowsPowerShell"),
-            "no hook may call powershell.exe directly via nsExec — must use the wscript shim"
+            !HOOKS
+                .lines()
+                .any(|line| line.contains("nsExec::") && line.to_lowercase().contains("powershell")),
+            "no hook may run PowerShell through nsExec, whose console window flashes"
         );
     }
 
@@ -741,10 +742,16 @@ mod tests {
             .map_or_else(|| env!("CARGO_PKG_NAME").to_owned(), str::to_owned)
     }
 
-    fn render_expected_hooks(template: &str, scripts: &[(&str, &str, &str)]) -> String {
+    fn hidden_powershell_run(script_and_args: &str) -> String {
+        format!(
+            r#"!insertmacro SPEEDWAVE_RUN_HIDDEN `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script_and_args}"#
+        )
+    }
+
+    fn render_expected_hooks(template: &str, scripts: &[(&str, &str)]) -> String {
         let embed = scripts
             .iter()
-            .map(|(name, ext, src)| emit_materialize_macro(name, ext, src))
+            .map(|(name, src)| emit_materialize_macro(name, src))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -760,9 +767,9 @@ mod tests {
         out
     }
 
-    fn emit_materialize_macro(name: &str, ext: &str, src: &str) -> String {
+    fn emit_materialize_macro(name: &str, src: &str) -> String {
         let upper = name.to_uppercase().replace('-', "_");
-        let file = format!("{name}.{ext}");
+        let file = format!("{name}.ps1");
         let id = format!("SW_{upper}_ID");
         let mut s = String::new();
         s.push_str(&format!("!macro SPEEDWAVE_MATERIALIZE_{upper}\n"));

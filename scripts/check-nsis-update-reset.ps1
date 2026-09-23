@@ -17,6 +17,7 @@ $dropped = Join-Path $hubSrc 'dropped-by-this-release.ts'
 $outside = Join-Path ([System.IO.Path]::GetTempPath()) 'speedwave-reset-junction-target'
 $sentinel = Join-Path $outside 'sentinel.txt'
 $junction = Join-Path $installDir 'build-context\junction-to-outside'
+$spacedTemp = Join-Path ([System.IO.Path]::GetTempPath()) 'speedwave update temp'
 
 function Invoke-Installer {
     param([string[]]$Switches)
@@ -45,9 +46,19 @@ New-Item -ItemType Directory -Path $outside -Force | Out-Null
 Set-Content -LiteralPath $sentinel -Value 'outside the install dir'
 New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
 
-Invoke-Installer -Switches '/P', '/UPDATE'
+New-Item -ItemType Directory -Path $spacedTemp -Force | Out-Null
+$savedTemp = $env:TEMP
+$savedTmp = $env:TMP
+$env:TEMP = $spacedTemp
+$env:TMP = $spacedTemp
+try {
+    Invoke-Installer -Switches '/P', '/UPDATE'
+} finally {
+    $env:TEMP = $savedTemp
+    $env:TMP = $savedTmp
+}
 if (Test-Path -LiteralPath $dropped) {
-    throw "the /P /UPDATE install kept $dropped, a file this release does not ship"
+    throw "the /P /UPDATE install from a TEMP of '$spacedTemp' kept $dropped, a file this release does not ship"
 }
 if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
     throw "the /P /UPDATE install deleted $sentinel through the junction $junction"
@@ -55,4 +66,4 @@ if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $shipped -PathType Leaf)) {
     throw "the /P /UPDATE install did not lay down $shipped"
 }
-Write-Output "the /P /UPDATE install removed a file this release does not ship, left the junction target alone, and laid down $shipped"
+Write-Output "the /P /UPDATE install from a TEMP of '$spacedTemp' removed a file this release does not ship, left the junction target alone, and laid down $shipped"

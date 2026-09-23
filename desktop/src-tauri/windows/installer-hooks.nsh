@@ -316,31 +316,30 @@ Var SpeedwaveDataDirOverride
   !undef SW_RESET_ID
 !macroend
 
-!macro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
-  !define SW_RUN_HIDDEN_ID ${__LINE__}
-  InitPluginsDir
-  ClearErrors
-  FileOpen $0 "$PLUGINSDIR\run-hidden.vbs" w
-  IfErrors 0 sw_RUN_HIDDEN_write_ok_${SW_RUN_HIDDEN_ID}
-    DetailPrint "Speedwave: could not create run-hidden.vbs in $PLUGINSDIR — skipping."
-    Goto sw_RUN_HIDDEN_write_done_${SW_RUN_HIDDEN_ID}
-  sw_RUN_HIDDEN_write_ok_${SW_RUN_HIDDEN_ID}:
-  FileWrite $0 `' SSOT: hidden-window launcher for NSIS install hooks.$\r$\n`
-  FileWrite $0 `' nsExec runs PowerShell with CREATE_NEW_CONSOLE + SW_HIDE, but modern conhost$\r$\n`
-  FileWrite $0 `' paints its window before honoring SW_HIDE, so powershell.exe flashes a black$\r$\n`
-  FileWrite $0 `' console during install. wscript.exe is a GUI-subsystem host (no console), and$\r$\n`
-  FileWrite $0 `' WshShell.Run(cmd, 0, True) starts the child hidden (window style 0) and waits,$\r$\n`
-  FileWrite $0 `' returning the child exit code. So the flash is gone and Pop $$0 still works.$\r$\n`
-  FileWrite $0 `' Usage: wscript.exe run-hidden.vbs $\"<full command line>$\"$\r$\n`
-  FileWrite $0 `' Encoding: plain ASCII, NO BOM (wscript fails to parse a UTF-8 BOM).$\r$\n`
-  FileWrite $0 `Option Explicit$\r$\n`
-  FileWrite $0 `Dim sh, rc$\r$\n`
-  FileWrite $0 `Set sh = CreateObject($\"WScript.Shell$\")$\r$\n`
-  FileWrite $0 `rc = sh.Run(WScript.Arguments(0), 0, True)$\r$\n`
-  FileWrite $0 `WScript.Quit rc$\r$\n`
-  FileClose $0
-  sw_RUN_HIDDEN_write_done_${SW_RUN_HIDDEN_ID}:
-  !undef SW_RUN_HIDDEN_ID
+!macro SPEEDWAVE_RUN_HIDDEN COMMAND_LINE
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  StrCpy $3 `${COMMAND_LINE}`
+  System::Call '*(&l4, p, p, p, i, i, i, i, i, i, i, i, &i2, &i2, p, p, p, p) p .r1'
+  System::Call '*(p, p, i, i) p .r2'
+  System::Call 'kernel32::CreateProcessW(p 0, w r3, p 0, p 0, i 0, i 0x08000000, p 0, p 0, p r1, p r2) i .r0'
+  ${If} $0 = 0
+    StrCpy $0 "error"
+  ${Else}
+    System::Call '*$2(p .r3, p .r4)'
+    System::Call 'kernel32::WaitForSingleObject(p r3, i -1)'
+    System::Call 'kernel32::GetExitCodeProcess(p r3, *i .r0)'
+    System::Call 'kernel32::CloseHandle(p r3)'
+    System::Call 'kernel32::CloseHandle(p r4)'
+  ${EndIf}
+  System::Free $2
+  System::Free $1
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
@@ -354,9 +353,7 @@ Var SpeedwaveDataDirOverride
   sw_data_dir_ok:
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", t "$1")i'
 
-  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
-  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\sweep.ps1$\""`
-  Pop $0
+  !insertmacro SPEEDWAVE_RUN_HIDDEN `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\sweep.ps1"`
   ${If} $0 != 0
     DetailPrint "Speedwave PRE-INSTALL: sweep exited $0 — install may fail with 'file in use'."
     DetailPrint "Common causes: PowerShell missing, AppLocker / WDAC blocking script execution, ExecutionPolicy enforced by GPO, or a worker process the sweep could not kill."
@@ -364,8 +361,7 @@ Var SpeedwaveDataDirOverride
   ${Else}
     !insertmacro SPEEDWAVE_MATERIALIZE_RESET
     System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", t "$LOCALAPPDATA\${PRODUCTNAME}")i'
-    nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\reset.ps1$\""`
-    Pop $0
+    !insertmacro SPEEDWAVE_RUN_HIDDEN `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\reset.ps1"`
     ${If} $0 != 0
       DetailPrint "Speedwave PRE-INSTALL: resource reset exited $0, so files a release no longer ships may remain."
     ${EndIf}
@@ -378,9 +374,7 @@ Var SpeedwaveDataDirOverride
 
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
-  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
-  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode install"`
-  Pop $0
+  !insertmacro SPEEDWAVE_RUN_HIDDEN `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode install`
   ${If} $0 != 0
     DetailPrint "Speedwave POST-INSTALL: firewall rule install exited $0 (non-fatal)."
   ${EndIf}
@@ -415,9 +409,7 @@ Var SpeedwaveDataDirOverride
   RMDir "$LOCALAPPDATA\Speedwave"
 
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
-  !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
-  nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode uninstall"`
-  Pop $0
+  !insertmacro SPEEDWAVE_RUN_HIDDEN `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\firewall.ps1" -Mode uninstall`
   ${If} $0 != 0
     DetailPrint "Speedwave POST-UNINSTALL: firewall rule remove exited $0 (non-fatal)."
   ${EndIf}
