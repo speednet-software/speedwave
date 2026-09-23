@@ -97,10 +97,7 @@ pub(crate) async fn send_message(
     );
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let mut session = session_arc.try_lock().map_err(|_| {
-            log::info!("try_lock failed sending message (session busy)");
-            "no active session (session is being started)".to_string()
-        })?;
+        let mut session = lock_session_for_input(&session_arc)?;
         log::info!("lock acquired, sending message");
         session
             .send_message(&app_handle, &blocks)
@@ -122,9 +119,7 @@ pub(crate) async fn submit_question_answer(
     }
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let mut session = session_arc
-            .try_lock()
-            .map_err(|_| "no active session (session is being started)".to_string())?;
+        let mut session = lock_session_for_input(&session_arc)?;
         session
             .submit_question_answer(&tool_use_id, question_idx, &answer)
             .map_err(|e| e.to_string())
@@ -177,6 +172,35 @@ pub(crate) async fn resume_conversation(
 
 const MSG_SESSION_BUSY: &str = "chat session is busy";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
+
+const INPUT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+const INPUT_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
+fn lock_session_for_input(
+    session_arc: &SharedChatSession,
+) -> Result<std::sync::MutexGuard<'_, ChatSession>, String> {
+    lock_session_within(session_arc, INPUT_LOCK_WAIT)
+}
+
+fn lock_session_within(
+    session_arc: &SharedChatSession,
+    wait: std::time::Duration,
+) -> Result<std::sync::MutexGuard<'_, ChatSession>, String> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match session_arc.try_lock() {
+            Ok(session) => return Ok(session),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Err(format!("Lock poisoned: {e}")),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(INPUT_LOCK_POLL);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                log::info!("chat session is held by another command, refusing input");
+                return Err(MSG_SESSION_BUSY.to_string());
+            }
+        }
+    }
+}
 
 pub(crate) fn session_info_state_inner(
     session_arc: &SharedChatSession,
@@ -436,6 +460,76 @@ mod tests {
     }
 
     #[test]
+    fn input_to_a_session_held_by_another_command_is_refused_as_busy() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let held = session_arc.lock().unwrap();
+        let Err(err) = lock_session_for_input(&session_arc) else {
+            panic!("a session another command holds must not be taken for input");
+        };
+        assert_eq!(err, MSG_SESSION_BUSY);
+        drop(held);
+        assert_eq!(
+            lock_session_for_input(&session_arc).unwrap().project_name(),
+            "acme"
+        );
+    }
+
+    #[test]
+    fn input_waits_out_a_brief_hold() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                let _held = session_arc.lock().unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            })
+        };
+        held_rx.recv().unwrap();
+        let session = lock_session_within(&session_arc, std::time::Duration::from_secs(30))
+            .expect("a hold that ends within the wait must let the input through");
+        assert_eq!(session.project_name(), "acme");
+        drop(session);
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn send_retry_triggers_in_ts_never_match_the_busy_error() {
+        let ts = include_str!("../../src/src/app/services/chat-state.service.ts");
+        let triggers: Vec<&str> = ts
+            .split("errStr.includes('")
+            .skip(1)
+            .filter_map(|rest| rest.split("')").next())
+            .collect();
+        assert!(
+            triggers.contains(&"no active session"),
+            "the send retry triggers were not found: {triggers:?}"
+        );
+        for trigger in triggers {
+            assert!(
+                !MSG_SESSION_BUSY.contains(trigger),
+                "the send retry restarts the session on '{trigger}', which would replace a live conversation"
+            );
+        }
+    }
+
+    #[test]
+    fn input_to_a_poisoned_session_reports_the_poison() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let arc_clone = session_arc.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = arc_clone.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        let Err(err) = lock_session_for_input(&session_arc) else {
+            panic!("a poisoned session must not be taken for input");
+        };
+        assert!(err.starts_with("Lock poisoned"), "{err}");
+    }
+
+    #[test]
     fn control_commands_release_the_session_lock_before_waiting_for_the_response() {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn control_query_inner<T>(");
@@ -653,8 +747,8 @@ mod tests {
             .find("spawn_blocking")
             .expect("send_message must use spawn_blocking");
         let lock_pos = body
-            .find(".try_lock()")
-            .expect("send_message must acquire the session lock via try_lock");
+            .find("lock_session_for_input(")
+            .expect("send_message must acquire the session lock via lock_session_for_input");
         assert!(
             lock_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
@@ -668,9 +762,9 @@ mod tests {
         let spawn_pos = body
             .find("spawn_blocking")
             .expect("submit_question_answer must use spawn_blocking");
-        let lock_pos = body
-            .find(".try_lock()")
-            .expect("submit_question_answer must acquire the session lock via try_lock");
+        let lock_pos = body.find("lock_session_for_input(").expect(
+            "submit_question_answer must acquire the session lock via lock_session_for_input",
+        );
         assert!(
             lock_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
