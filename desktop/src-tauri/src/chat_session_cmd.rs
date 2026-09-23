@@ -5,6 +5,7 @@ use crate::chat_registry::{self, SharedChatSessions};
 use crate::control_channel::{
     self, ContextUsage, ControlHandle, ControlQuery, PlanUsage, SessionInfoState,
 };
+use crate::project_cmd::clear_chat_sessions;
 use crate::reconcile::SharedOauth;
 use crate::types::check_project;
 use crate::{containers_cmd, ensure_oauth_running};
@@ -150,6 +151,17 @@ pub(crate) async fn close_chat_tab(
     tokio::task::spawn_blocking(move || close_chat_tab_inner(&registry, &tab_id))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn reset_chat_tabs(
+    state: tauri::State<'_, SharedChatSessions>,
+) -> Result<(), String> {
+    log::info!("resetting chat tab registry for a freshly booted webview");
+    let registry = state.inner().clone();
+    tokio::task::spawn_blocking(move || clear_chat_sessions(&registry))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 const MSG_NO_SESSION_FOR_TAB: &str = "no active session for this tab";
@@ -1039,6 +1051,22 @@ mod tests {
         assert!(
             body.contains("spawn_blocking"),
             "stop_chat must use spawn_blocking to avoid blocking the main thread"
+        );
+    }
+
+    #[test]
+    fn reset_chat_tabs_clears_the_registry_inside_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn reset_chat_tabs(");
+        let spawn_pos = body
+            .find("spawn_blocking")
+            .expect("reset_chat_tabs must use spawn_blocking to avoid blocking the main thread");
+        let clear_pos = body
+            .find("clear_chat_sessions")
+            .expect("reset_chat_tabs must delegate to clear_chat_sessions");
+        assert!(
+            clear_pos > spawn_pos,
+            "clear_chat_sessions must run INSIDE spawn_blocking, not before it"
         );
     }
 }

@@ -367,6 +367,7 @@ mod tests {
 
     const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const TAB_B: &str = "550e8400-e29b-41d4-a716-446655440001";
+    const TAB_C: &str = "550e8400-e29b-41d4-a716-446655440002";
 
     #[test]
     fn clear_chat_sessions_empties_the_registry_and_leaves_it_usable() {
@@ -374,9 +375,11 @@ mod tests {
             std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
         reg.prepare(TAB_A, "acme").unwrap();
         reg.prepare(TAB_B, "globex").unwrap();
+        reg.prepare(TAB_C, "acme").unwrap();
         clear_chat_sessions(&reg);
         assert!(reg.entry(TAB_A).is_none());
         assert!(reg.entry(TAB_B).is_none());
+        assert!(reg.entry(TAB_C).is_none());
         let entry = reg.prepare(TAB_A, "acme").unwrap();
         assert_eq!(entry.project, "acme");
         assert!(reg.entry(TAB_A).is_some());

@@ -93,6 +93,7 @@ export class ChatStateService {
   private unsubProjectChange: (() => void) | null = null;
   private _sawSwitching = false;
   private _resumeDecider: (() => Promise<'resume' | 'fresh'>) | null = null;
+  private _backendTabsReset = false;
 
   private readonly _tabs = signal<ReadonlyMap<string, ChatSessionStore>>(new Map());
   private readonly _activeTabId = signal<string>('');
@@ -452,6 +453,14 @@ export class ChatStateService {
 
   /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
   async init(): Promise<void> {
+    if (!this._backendTabsReset) {
+      this._backendTabsReset = true;
+      try {
+        await this.tauri.invoke('reset_chat_tabs');
+      } catch (err) {
+        this.log.warn(`[chat-state] init: reset_chat_tabs invoke failed: ${String(err)}`);
+      }
+    }
     return this.activeStore().init();
   }
 

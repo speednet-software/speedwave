@@ -230,6 +230,71 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('reset_chat_tabs on a fresh webview boot (SPEED-388 phase 5)', () => {
+    it('invokes reset_chat_tabs before the first chat session starts', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const order: string[] = [];
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        order.push(cmd);
+        return mockTauri.invokeHandler(cmd, args);
+      });
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(order.indexOf('reset_chat_tabs')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('reset_chat_tabs')).toBeLessThan(order.indexOf('start_chat'));
+    });
+
+    it('does not invoke reset_chat_tabs again on a second init() of the same service instance', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(spy.mock.calls.filter(([cmd]) => cmd === 'reset_chat_tabs')).toHaveLength(1);
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(spy.mock.calls.filter(([cmd]) => cmd === 'reset_chat_tabs')).toHaveLength(1);
+    });
+
+    it('logs a warning and still starts the chat session when reset_chat_tabs rejects', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'reset_chat_tabs':
+            throw new Error('registry busy');
+          case 'start_chat':
+            return undefined;
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('reset_chat_tabs'));
+      expect(spy).toHaveBeenCalledWith(
+        'start_chat',
+        expect.objectContaining({ tabId: service.tabId })
+      );
+    });
+  });
+
   describe('tab registry (SPEED-388 phase 2)', () => {
     describe('demux', () => {
       it('routes a chat_stream chunk to the store matching its tab_id and drops unknown tabs', async () => {

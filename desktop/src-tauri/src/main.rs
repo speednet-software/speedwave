@@ -1188,6 +1188,7 @@ fn main() {
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::close_chat_tab,
+            chat_session_cmd::reset_chat_tabs,
             chat_session_cmd::get_chat_session_info,
             chat_session_cmd::get_chat_takes_wire_effort,
             chat_session_cmd::get_plan_usage,
