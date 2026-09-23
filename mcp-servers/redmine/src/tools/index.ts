@@ -1,6 +1,6 @@
-/** Redmine tools aggregator: exports all 23 tools across issue/time entry/journal/user/project/relation/config domains. */
+/** Redmine tools aggregator: exports all 24 tools across issue/time entry/journal/user/project/relation/config domains. */
 
-import { ToolDefinition } from '@speedwave/mcp-shared';
+import { ToolDefinition, withDeclaredParams } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { createIssueTools } from './issue-tools.js';
 import { createTimeEntryTools } from './time-entry-tools.js';
@@ -11,7 +11,7 @@ import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
 
 /**
- * Aggregates tool definitions from every Redmine domain module.
+ * Aggregates tool definitions from every Redmine domain module; each handler rejects an argument its schema does not declare.
  * @param client - Redmine client instance
  */
 export function createToolDefinitions(client: RedmineClient | null): ToolDefinition[] {
@@ -23,7 +23,7 @@ export function createToolDefinitions(client: RedmineClient | null): ToolDefinit
     ...createProjectTools(client),
     ...createRelationTools(client),
     ...createConfigTools(client),
-  ];
+  ].map(({ tool, handler }) => ({ tool, handler: withDeclaredParams(tool, handler) }));
 }
 
 export { createIssueTools } from './issue-tools.js';

@@ -72,9 +72,15 @@ const listIssueIdsTool: Tool = {
       project_id: { type: 'string', description: 'Project identifier or key' },
       status: { type: 'string', description: 'Status: open, closed, * (all)' },
       assigned_to: { type: 'string', description: 'Assignee: me, user_id, or username' },
+      assigned_to_id: { type: 'number', description: 'Assignee user ID' },
       tracker_id: { type: 'number', description: 'Tracker ID' },
       priority_id: { type: 'number', description: 'Priority ID' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      fixed_version_id: {
+        type: 'number',
+        description: 'Target version ID — obtained from listVersions',
+      },
+      parent_id: { type: 'number', description: 'Parent issue ID (lists its subtasks)' },
+      limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       offset: { type: 'number', description: 'Pagination offset' },
     },
   },
@@ -152,6 +158,11 @@ const getIssueFullTool: Tool = {
           },
           assigned_to: {
             type: 'object',
+            properties: { id: { type: 'number' }, name: { type: 'string' } },
+          },
+          fixed_version: {
+            type: 'object',
+            description: 'Target version; absent when none is set',
             properties: { id: { type: 'number' }, name: { type: 'string' } },
           },
           project: {
@@ -257,6 +268,10 @@ const createIssueTool: Tool = {
       },
       parent_issue_id: { type: 'number', description: 'Parent issue ID' },
       estimated_hours: { type: 'number', description: 'Estimated hours' },
+      fixed_version_id: {
+        type: 'number',
+        description: 'Target version ID — obtained from listVersions',
+      },
     },
     required: ['project_id', 'subject'],
   },
@@ -312,7 +327,8 @@ const createIssueTool: Tool = {
 
 const updateIssueTool: Tool = {
   name: 'updateIssue',
-  description: 'Update an existing Redmine issue',
+  description:
+    "Update an existing Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
@@ -332,15 +348,25 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
         type: 'number',
         description: 'Issue ID to update — obtained from listIssueIds or searchIssueIds',
       },
+      project_id: { type: 'string', description: 'Move the issue to this project' },
       subject: { type: 'string', description: 'New subject' },
       description: { type: 'string', description: 'New description' },
+      tracker_id: { type: 'number', description: 'Tracker ID' },
+      tracker: { type: 'string', description: 'Tracker name' },
       status_id: { type: 'number', description: 'Status ID' },
       status: { type: 'string', description: 'Status name' },
       priority_id: { type: 'number', description: 'Priority ID' },
+      priority: { type: 'string', description: 'Priority name' },
       assigned_to_id: { type: 'number', description: 'Assigned user ID' },
       assigned_to: {
         type: 'string',
         description: "Assignee name, or 'me' to assign to the current authenticated user",
+      },
+      parent_issue_id: { type: 'number', description: 'Parent issue ID' },
+      estimated_hours: { type: 'number', description: 'Estimated hours' },
+      fixed_version_id: {
+        type: ['number', 'null'],
+        description: 'Target version ID — obtained from listVersions; null clears it',
       },
       notes: { type: 'string', description: 'Update notes/comment' },
     },
@@ -362,6 +388,11 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
         description: 'Assigned user (null if Redmine rejected assignment)',
         properties: { id: { type: 'number' }, name: { type: 'string' } },
       },
+      fixed_version: {
+        type: 'object',
+        description: 'Target version; absent when none is set',
+        properties: { id: { type: 'number' }, name: { type: 'string' } },
+      },
       project: {
         type: 'object',
         properties: { id: { type: 'number' }, name: { type: 'string' } },
@@ -380,6 +411,10 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
         assigned_to_id: 42,
         notes: 'Reassigning for code review',
       },
+    },
+    {
+      description: 'Partial: plan into a target version (id from listVersions)',
+      input: { issue_id: 12345, fixed_version_id: 87 },
     },
     {
       description: 'Full: update multiple fields',
@@ -509,10 +544,6 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          if (resolved.parent_id !== undefined && resolved.parent_issue_id === undefined) {
-            resolved.parent_issue_id = resolved.parent_id;
-            delete resolved.parent_id;
-          }
           const result = await client.createIssue(
             resolved as Parameters<typeof client.createIssue>[0]
           );
@@ -535,6 +566,9 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             id: updatedIssue.id,
             subject: updatedIssue.subject,
             status: updatedIssue.status,
+            assigned_to: updatedIssue.assigned_to,
+            fixed_version: updatedIssue.fixed_version,
+            project: updatedIssue.project,
           });
         });
       },

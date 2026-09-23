@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { withResultValidation, withClientValidation, type ToolResult } from './tool-validation.js';
+import {
+  withResultValidation,
+  withClientValidation,
+  withDeclaredParams,
+  type ToolResult,
+} from './tool-validation.js';
+import type { Tool } from './types.js';
 
 describe('withResultValidation (Family A)', () => {
   it('formats a successful result as pretty JSON by default (indent 2)', async () => {
@@ -173,5 +179,75 @@ describe('withClientValidation (Family B)', () => {
     const wrapped = withClientValidation({ id: 1 }, handler, opts);
     const res = await wrapped({});
     expect(res.content[0].text).toContain('formatted:plain');
+  });
+});
+
+describe('withDeclaredParams', () => {
+  const tool = (properties: Record<string, unknown>): Tool => ({
+    name: 'updateThing',
+    description: 'Update a thing',
+    inputSchema: { type: 'object', properties },
+  });
+  const ok = { content: [{ type: 'text' as const, text: 'ok' }] };
+
+  it('passes a call whose arguments are all declared to the handler unchanged', async () => {
+    const handler = vi.fn().mockResolvedValue(ok);
+    const wrapped = withDeclaredParams(tool({ id: {}, title: {} }), handler);
+    const res = await wrapped({ id: 1, title: 'x' });
+    expect(res).toBe(ok);
+    expect(handler).toHaveBeenCalledWith({ id: 1, title: 'x' });
+  });
+
+  it('passes an empty call through when nothing is declared', async () => {
+    const handler = vi.fn().mockResolvedValue(ok);
+    const res = await withDeclaredParams(tool({}), handler)({});
+    expect(res).toBe(ok);
+  });
+
+  it('forwards the caller context to the handler', async () => {
+    const handler = vi.fn().mockResolvedValue(ok);
+    await withDeclaredParams(tool({ id: {} }), handler)({ id: 1 }, { caller: 'svc' });
+    expect(handler).toHaveBeenCalledWith({ id: 1 }, { caller: 'svc' });
+  });
+
+  it('rejects an undeclared argument without calling the handler', async () => {
+    const handler = vi.fn();
+    const wrapped = withDeclaredParams(tool({ id: {}, title: {} }), handler);
+    const res = await wrapped({ id: 1, version_id: 999999 });
+    expect(handler).not.toHaveBeenCalled();
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toBe(
+      'Error: Invalid version_id (received: 999999). updateThing does not accept this parameter, ' +
+        'so the call was rejected and nothing was sent. Accepted parameters: id, title. ' +
+        'Retry with accepted parameters only.'
+    );
+  });
+
+  it('names every undeclared argument with its value', async () => {
+    const handler = vi.fn();
+    const res = await withDeclaredParams(tool({ id: {} }), handler)({ id: 1, a: 'x', b: null });
+    expect(handler).not.toHaveBeenCalled();
+    expect(res.content[0].text).toContain('Invalid a, b (received: {"a":"x","b":null}).');
+    expect(res.content[0].text).toContain('does not accept these parameters');
+  });
+
+  it('says no parameters are accepted by a tool that declares none', async () => {
+    const res = await withDeclaredParams(tool({}), vi.fn())({ verbose: true });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('Accepted parameters: none.');
+  });
+
+  it('rejects an argument that only matches an Object prototype member', async () => {
+    const handler = vi.fn();
+    const res = await withDeclaredParams(tool({ id: {} }), handler)({ constructor: 1 });
+    expect(handler).not.toHaveBeenCalled();
+    expect(res.content[0].text).toContain('Invalid constructor');
+  });
+
+  it('rejects a name that differs from a declared one only in case', async () => {
+    const handler = vi.fn();
+    const res = await withDeclaredParams(tool({ issue_id: {} }), handler)({ Issue_ID: 5 });
+    expect(handler).not.toHaveBeenCalled();
+    expect(res.content[0].text).toContain('Invalid Issue_ID (received: 5)');
   });
 });

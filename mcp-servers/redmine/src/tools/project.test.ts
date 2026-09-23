@@ -11,12 +11,16 @@ type MockClient = {
   listProjects: Mock;
   showProject: Mock;
   searchProjects: Mock;
+  listVersions: Mock;
+  getProjectScope: Mock;
 };
 
 const createMockClient = (): MockClient => ({
   listProjects: vi.fn(),
   showProject: vi.fn(),
   searchProjects: vi.fn(),
+  listVersions: vi.fn(),
+  getProjectScope: vi.fn().mockReturnValue(null),
 });
 
 describe('Project Tools', () => {
@@ -492,6 +496,109 @@ describe('Project Tools', () => {
         isError: true,
         content: [{ type: 'text', text: 'Error: Search failed' }],
       });
+    });
+  });
+
+  describe('listVersions', () => {
+    const version = {
+      id: 87,
+      project: { id: 1972, name: 'Auditor' },
+      name: '[W10] Week 10',
+      status: 'open',
+      due_date: null,
+      sharing: 'none',
+    };
+
+    const listVersions = () =>
+      createProjectTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'listVersions'
+      )!;
+
+    it('returns unconfigured error when client is null', async () => {
+      const tool = createProjectTools(null).find((t) => t.tool.name === 'listVersions')!;
+
+      const result = await tool.handler({});
+
+      expect(result).toEqual({
+        isError: true,
+        content: [{ type: 'text', text: `Error: ${notConfiguredMessage('Redmine')}` }],
+      });
+    });
+
+    it('lists the versions of the requested project with only declared keys', async () => {
+      mockClient.listVersions.mockResolvedValue({ versions: [version], total_count: 1 });
+      const def = listVersions();
+
+      const result = await def.handler({ project_id: 'auditor-rpe' });
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
+      const emitted = JSON.parse((result.content[0] as { text: string }).text);
+      expect(emitted).toEqual({ versions: [version], total_count: 1 });
+      const declared = Object.keys(def.tool.outputSchema!.properties as Record<string, unknown>);
+      expect(declared).toEqual(expect.arrayContaining(Object.keys(emitted)));
+      const itemProps = (
+        def.tool.outputSchema!.properties as Record<
+          string,
+          { items: { properties: Record<string, unknown> } }
+        >
+      ).versions.items.properties;
+      expect(Object.keys(itemProps)).toEqual(expect.arrayContaining(Object.keys(version)));
+    });
+
+    it('defaults to the configured project when project_id is omitted', async () => {
+      mockClient.getProjectScope.mockReturnValue('auditor-rpe');
+      mockClient.listVersions.mockResolvedValue({ versions: [], total_count: 0 });
+
+      await listVersions().handler({});
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
+    });
+
+    it('treats an empty project_id like an omitted one', async () => {
+      mockClient.getProjectScope.mockReturnValue('auditor-rpe');
+      mockClient.listVersions.mockResolvedValue({ versions: [], total_count: 0 });
+
+      await listVersions().handler({ project_id: '' });
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
+    });
+
+    it('returns a teaching error when no project_id is given and none is configured', async () => {
+      const result = await listVersions().handler({});
+
+      expect(mockClient.listVersions).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text:
+              'Error: Invalid project_id (received: undefined). Get a valid value from listProjectIds. ' +
+              'No default project is configured, so pass project_id explicitly.',
+          },
+        ],
+      });
+    });
+
+    it('passes project_id as formatError context on failure', async () => {
+      mockClient.listVersions.mockRejectedValue(new Error('404'));
+
+      await listVersions().handler({ project_id: 'missing' });
+
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), {
+        project_id: 'missing',
+      });
+    });
+
+    it('surfaces a ProjectScopeError for a project outside the configured scope', async () => {
+      mockClient.listVersions.mockRejectedValue(
+        new ProjectScopeError('my-project', 'other-project')
+      );
+
+      const result = await listVersions().handler({ project_id: 'other-project' });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Project scope violation');
     });
   });
 

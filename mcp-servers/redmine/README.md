@@ -50,17 +50,25 @@ Contains:       Redmine URL, mappings (status, priority, tracker, activity)
 
 ## Tools Reference
 
+Every tool rejects a parameter its `inputSchema` does not declare: the call fails
+with an error naming the parameter and listing the accepted ones, and nothing is
+sent to Redmine.
+
 ### Issue Operations
 
-#### 1. listIssues
+#### 1. listIssueIds
 
-List Redmine issues with optional filters.
+List issue IDs with optional filters.
 
 **Parameters**:
 
 - `project_id` (string, optional): Filter by project ID/identifier
-- `assigned_to_id` (string/number, optional): Filter by user ('me' for current user)
-- `status_id` (string, optional): Filter by status ('open', 'closed', '\*')
+- `status` (string, optional): `open`, `closed`, `*`, or a status name from the mappings
+- `assigned_to` (string, optional): `me`, a user ID, or a username
+- `assigned_to_id` (number, optional): Assignee user ID
+- `tracker_id` (number, optional): Filter by tracker
+- `priority_id` (number, optional): Filter by priority
+- `fixed_version_id` (number, optional): Filter by target version (from `listVersions`)
 - `parent_id` (number, optional): Filter by parent issue
 - `limit` (number, optional): Max results (1-100, default 25)
 - `offset` (number, optional): Pagination offset (default 0)
@@ -69,9 +77,9 @@ List Redmine issues with optional filters.
 
 ```json
 {
-  "project_id": "my-project",
-  "assigned_to_id": "me",
-  "status_id": "open",
+  "status": "open",
+  "assigned_to": "me",
+  "fixed_version_id": 87,
   "limit": 50
 }
 ```
@@ -110,21 +118,27 @@ Create a new issue.
 - `assigned_to_id` (number, optional): Assigned user ID
 - `parent_issue_id` (number, optional): Parent issue (for subtasks)
 - `estimated_hours` (number, optional): Estimated hours
+- `fixed_version_id` (number, optional): Target version (from `listVersions`)
 
 #### 5. updateIssue
 
-Update an existing issue.
+Update an existing issue. Returns `id`, `subject`, `status`, `assigned_to`,
+`fixed_version`, and `project` as the issue holds them after the update.
 
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID to update
+- `project_id` (string, optional): Move the issue to another project
 - `subject` (string, optional): New subject
 - `description` (string, optional): New description (Textile markup)
-- `status_id` (number, optional): New status ID
-- `status` (string, optional): New status name, resolved via the project's configured mappings
-- `priority_id` (number, optional): New priority ID
+- `tracker_id` / `tracker` (number / string, optional): New tracker, by ID or mapped name
+- `status_id` / `status` (number / string, optional): New status, by ID or mapped name
+- `priority_id` / `priority` (number / string, optional): New priority, by ID or mapped name
 - `assigned_to_id` (number, optional): New assigned user ID
 - `assigned_to` (string, optional): Assignee name, or `'me'` to assign to the current authenticated user (resolved via `resolveUser`)
+- `parent_issue_id` (number, optional): New parent issue
+- `estimated_hours` (number, optional): New estimated hours
+- `fixed_version_id` (number or null, optional): New target version (from `listVersions`); `null` clears it
 - `notes` (string, optional): Update notes/comment (Textile markup)
 
 #### 6. commentIssue
@@ -280,6 +294,19 @@ If scoped to a single project, only that project is searched.
 - `query` (string, required): Search query
 - `limit` (number, optional): Max results (default 25)
 
+#### listVersions
+
+List a project's versions (target versions, e.g. a milestone or a planning
+week), including versions shared from other projects. A version's `id` is the
+`fixed_version_id` that `createIssue`, `updateIssue`, and `listIssueIds` take.
+If scoped to a single project, a different `project_id` fails with a scope error.
+
+**Parameters**:
+
+- `project_id` (string, optional): Project ID or identifier; defaults to the configured project
+
+**Returns**: `{ versions: [{ id, name, status, due_date, sharing, description, project }], total_count }`
+
 ### Relation Operations
 
 #### listRelations, createRelation, deleteRelation
@@ -294,6 +321,10 @@ inline on an issue.
 
 Get the current authenticated user's profile (id, login, email, name). Use this
 to resolve `'me'` for tools that only accept a numeric or username assignee.
+Redmine returns the account's `api_key` to its owner; the worker copies only the
+profile fields (`id`, `login`, `firstname`, `lastname`, `mail`, `created_on`,
+`updated_on`), so the key never reaches the model. `listUsers` applies the same
+projection.
 
 ## File Structure
 

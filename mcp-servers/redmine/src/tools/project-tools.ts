@@ -1,5 +1,5 @@
 /**
- * Project Tools - 3 tools for Redmine project operations
+ * Project Tools - 4 tools for Redmine project operations
  */
 
 import {
@@ -8,10 +8,12 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  teachingErrorResult,
   READ_ONLY_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { TOOL_NAMES } from '../tool-names.js';
 import { withRedmineErrors } from './error-handling.js';
 import { successResultSchema } from './schema-helpers.js';
 
@@ -166,6 +168,68 @@ const searchProjectIdsTool: Tool = {
   ],
 };
 
+const listVersionsTool: Tool = {
+  name: 'listVersions',
+  description:
+    "List a project's versions (target versions, e.g. a milestone or a planning week), including versions shared from other projects. Pass a version's id as fixed_version_id to createIssue, updateIssue, or listIssueIds. project_id defaults to the configured project; if scoped to a single project, a different project_id fails with a scope error.",
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: [
+    'redmine',
+    'versions',
+    'version',
+    'target',
+    'fixed_version',
+    'milestone',
+    'sprint',
+    'week',
+    'roadmap',
+  ],
+  example: `const { versions } = await redmine.listVersions({ project_id: 'my-project' })`,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project_id: {
+        type: 'string',
+        description:
+          'Project ID or identifier — obtained from listProjectIds; defaults to the configured project',
+      },
+    },
+  },
+  outputSchema: successResultSchema({
+    versions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'number', description: 'Version ID, the value fixed_version_id takes' },
+          name: { type: 'string' },
+          status: { type: 'string', enum: ['open', 'locked', 'closed'] },
+          due_date: { type: ['string', 'null'], description: 'YYYY-MM-DD, or null' },
+          sharing: { type: 'string' },
+          description: { type: 'string' },
+          project: {
+            type: 'object',
+            description: 'Owning project; differs from project_id for a shared version',
+            properties: { id: { type: 'number' }, name: { type: 'string' } },
+          },
+        },
+      },
+    },
+    total_count: { type: 'number' },
+  }),
+  inputExamples: [
+    {
+      description: 'Minimal: versions of the configured project',
+      input: {},
+    },
+    {
+      description: 'Full: versions of a named project',
+      input: { project_id: 'my-project' },
+    },
+  ],
+};
+
 /**
  * Tool handler function
  * @param client - Redmine client instance
@@ -177,6 +241,7 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
       { tool: listProjectIdsTool, handler: unconfigured },
       { tool: getProjectFullTool, handler: unconfigured },
       { tool: searchProjectIdsTool, handler: unconfigured },
+      { tool: listVersionsTool, handler: unconfigured },
     ];
   }
 
@@ -228,6 +293,25 @@ export function createProjectTools(client: RedmineClient | null): ToolDefinition
             total_count: result.total_count,
           });
         }),
+    },
+    {
+      tool: listVersionsTool,
+      handler: async (params) => {
+        const { project_id } = params as { project_id?: string };
+        const target = project_id || client.getProjectScope();
+        if (!target) {
+          return teachingErrorResult({
+            paramName: 'project_id',
+            received: project_id,
+            correctValueTool: TOOL_NAMES.LIST_PROJECT_IDS,
+            nextStep: 'No default project is configured, so pass project_id explicitly.',
+          });
+        }
+        return withRedmineErrors({ project_id: target }, async () => {
+          const result = await client.listVersions(target);
+          return jsonResult({ versions: result.versions, total_count: result.total_count });
+        });
+      },
     },
   ];
 }

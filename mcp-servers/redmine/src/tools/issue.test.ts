@@ -365,6 +365,29 @@ describe('issue-tools', () => {
       const emitted = expectEmittedKeysDeclared(def.tool, await def.handler({}));
       expect(emitted).toEqual({ ids: [7], total_count: 1 });
     });
+
+    it('passes the tracker, priority, target version and parent filters to the client', async () => {
+      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueIds')!.handler;
+
+      await handler({
+        status: 'open',
+        tracker_id: 1,
+        priority_id: 3,
+        fixed_version_id: 87,
+        parent_id: 10,
+      });
+
+      expect(mockClient.listIssues).toHaveBeenCalledWith({
+        status_id: 'open',
+        tracker_id: 1,
+        priority_id: 3,
+        fixed_version_id: 87,
+        parent_id: 10,
+      });
+    });
   });
 
   describe('getIssueFull', () => {
@@ -398,6 +421,26 @@ describe('issue-tools', () => {
         ],
       });
       expect(mockClient.showIssue).toHaveBeenCalledWith(1, { include: [] });
+    });
+
+    it('returns the target version Redmine reports and declares it in outputSchema', async () => {
+      mockClient.showIssue.mockResolvedValue({
+        id: 1,
+        subject: 'Planned',
+        fixed_version: { id: 87, name: 'Week 10' },
+      });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const def = tools.find((t) => t.tool.name === 'getIssueFull')!;
+      const issueProps = (
+        def.tool.outputSchema!.properties as Record<string, { properties: Record<string, unknown> }>
+      ).issue.properties;
+
+      const result = await def.handler({ issue_id: 1 });
+      const emitted = JSON.parse((result.content[0] as { text: string }).text);
+
+      expect(emitted.fixed_version).toEqual({ id: 87, name: 'Week 10' });
+      expect(Object.keys(issueProps)).toEqual(expect.arrayContaining(Object.keys(emitted)));
     });
 
     it('includes additional data when requested', async () => {
@@ -644,7 +687,7 @@ describe('issue-tools', () => {
       expect(text).toContain('Get a valid value from resolveUser.');
     });
 
-    it('handles parent_id to parent_issue_id conversion', async () => {
+    it('passes parent_issue_id and fixed_version_id through to the client', async () => {
       mockClient.createIssue.mockResolvedValue({ id: 1 });
 
       const tools = createIssueTools(mockClient as unknown as RedmineClient);
@@ -653,13 +696,15 @@ describe('issue-tools', () => {
       await handler!({
         project_id: 'test-project',
         subject: 'Sub-task',
-        parent_id: 10,
+        parent_issue_id: 10,
+        fixed_version_id: 87,
       });
 
       expect(mockClient.createIssue).toHaveBeenCalledWith({
         project_id: 'test-project',
         subject: 'Sub-task',
         parent_issue_id: 10,
+        fixed_version_id: 87,
       });
     });
 
@@ -741,6 +786,7 @@ describe('issue-tools', () => {
                 id: 1,
                 subject: 'Updated Subject',
                 status: { id: 2, name: 'In Progress' },
+                project: { id: 1, name: 'Test Project' },
               },
               null,
               2
@@ -751,6 +797,65 @@ describe('issue-tools', () => {
       expect(mockClient.updateIssue).toHaveBeenCalledWith(1, {
         issue_id: 1,
         subject: 'Updated Subject',
+      });
+    });
+
+    it('returns the assignee and target version the update left on the issue', async () => {
+      mockClient.updateIssue.mockResolvedValue({
+        id: 83432,
+        subject: 'Plan me',
+        status: { id: 1, name: 'New' },
+        assigned_to: { id: 1454, name: 'Kacper' },
+        fixed_version: { id: 87, name: 'Week 10' },
+        project: { id: 1972, name: 'Auditor' },
+      });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const tool = tools.find((t) => t.tool.name === 'updateIssue')!;
+
+      const result = await tool.handler({ issue_id: 83432, fixed_version_id: 87 });
+
+      const emitted = expectEmittedKeysDeclared(tool.tool, result);
+      expect(emitted).toEqual({
+        id: 83432,
+        subject: 'Plan me',
+        status: { id: 1, name: 'New' },
+        assigned_to: { id: 1454, name: 'Kacper' },
+        fixed_version: { id: 87, name: 'Week 10' },
+        project: { id: 1972, name: 'Auditor' },
+      });
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(83432, {
+        issue_id: 83432,
+        fixed_version_id: 87,
+      });
+    });
+
+    it('passes a null fixed_version_id through so the client clears the version', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 5, subject: 's', status: { id: 1 } });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')!.handler;
+
+      await handler({ issue_id: 5, fixed_version_id: null });
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(5, {
+        issue_id: 5,
+        fixed_version_id: null,
+      });
+    });
+
+    it('resolves tracker and priority names the schema declares', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 5, subject: 's', status: { id: 1 } });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')!.handler;
+
+      await handler({ issue_id: 5, tracker: 'feature', priority: 'high' });
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith(5, {
+        issue_id: 5,
+        tracker_id: 2,
+        priority_id: 3,
       });
     });
 

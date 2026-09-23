@@ -275,6 +275,16 @@ describe('RedmineClient', () => {
       });
     });
 
+    it('should send the tracker, priority and target version filters', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({ tracker_id: 1, priority_id: 3, fixed_version_id: 87 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+        params: { limit: 25, offset: 0, tracker_id: 1, priority_id: 3, fixed_version_id: 87 },
+      });
+    });
+
     it('should clamp an oversized limit down to 100', async () => {
       mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
 
@@ -535,6 +545,7 @@ describe('RedmineClient', () => {
         assigned_to_id: 4,
         parent_issue_id: 5,
         estimated_hours: 8.5,
+        fixed_version_id: 87,
       });
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/issues.json', {
@@ -548,6 +559,7 @@ describe('RedmineClient', () => {
           assigned_to_id: 4,
           parent_issue_id: 5,
           estimated_hours: 8.5,
+          fixed_version_id: 87,
         },
       });
     });
@@ -811,6 +823,51 @@ describe('RedmineClient', () => {
       });
 
       expect(result.assigned_to).toBeNull();
+    });
+
+    it('sends fixed_version_id and returns the issue with its new target version', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { issue: { ...mockUpdatedIssue, fixed_version: { id: 87, name: 'Week 10' } } },
+      });
+
+      const result = await client.updateIssue(1, { fixed_version_id: 87 });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
+        issue: { fixed_version_id: 87 },
+      });
+      expect(result.fixed_version).toEqual({ id: 87, name: 'Week 10' });
+    });
+
+    it('sends a null fixed_version_id so Redmine clears the target version', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
+
+      await client.updateIssue(1, { fixed_version_id: null });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
+        issue: { fixed_version_id: null },
+      });
+    });
+
+    it('leaves the target version out of the payload when fixed_version_id is not given', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: {} });
+      mockAxiosInstance.get.mockResolvedValue({ data: { issue: mockUpdatedIssue } });
+
+      await client.updateIssue(1, { notes: 'n' });
+
+      expect(mockAxiosInstance.put.mock.calls[0][1].issue).not.toHaveProperty('fixed_version_id');
+    });
+
+    it('propagates the 422 Redmine returns for a version the issue cannot use', async () => {
+      const rejection = Object.assign(new Error('Unprocessable Entity'), {
+        isAxiosError: true,
+        response: { status: 422, data: { errors: ['Target version is not included in the list'] } },
+      });
+      mockAxiosInstance.put.mockRejectedValue(rejection);
+
+      await expect(client.updateIssue(83432, { fixed_version_id: 999999 })).rejects.toBe(rejection);
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
     });
   });
 
@@ -1101,9 +1158,117 @@ describe('RedmineClient', () => {
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/users/current.json');
       expect(result).toEqual(mockUser);
     });
+
+    it("drops the account's API key and every other non-profile field Redmine returns to the owner", async () => {
+      mockAxiosInstance.get.mockResolvedValue({
+        data: {
+          user: {
+            id: 1454,
+            login: 'kacper.lotowski',
+            admin: false,
+            firstname: 'Kacper',
+            lastname: 'Lotowski',
+            mail: 'kacper@example.com',
+            created_on: '2024-01-01T00:00:00Z',
+            updated_on: '2024-02-01T00:00:00Z',
+            last_login_on: '2026-09-23T08:00:00Z',
+            passwd_changed_on: '2025-01-01T00:00:00Z',
+            twofa_scheme: 'totp',
+            api_key: 'owner-only-key-sentinel',
+            status: 1,
+            custom_fields: [{ id: 3, name: 'Team', value: 'Auditor' }],
+            memberships: [{ id: 9, project: { id: 1972, name: 'Auditor' }, roles: [] }],
+          },
+        },
+      });
+
+      const result = await client.getCurrentUser();
+
+      expect(result).toEqual({
+        id: 1454,
+        login: 'kacper.lotowski',
+        firstname: 'Kacper',
+        lastname: 'Lotowski',
+        mail: 'kacper@example.com',
+        created_on: '2024-01-01T00:00:00Z',
+        updated_on: '2024-02-01T00:00:00Z',
+      });
+      expect(JSON.stringify(result)).not.toContain('owner-only-key-sentinel');
+    });
+
+    it('omits profile fields Redmine did not send instead of emitting undefined keys', async () => {
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { user: { id: 7, login: 'hidden-mail', api_key: 'secret' } },
+      });
+
+      const result = await client.getCurrentUser();
+
+      expect(Object.keys(result)).toEqual(['id', 'login']);
+    });
+
+    it('resolves "me" from the projected profile', async () => {
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { user: { id: 1454, login: 'kacper', api_key: 'secret' } },
+      });
+
+      await expect(client.resolveUser('me')).resolves.toBe(1454);
+    });
   });
 
   describe('listUsers', () => {
+    it("drops security fields from an admin's user listing", async () => {
+      mockAxiosInstance.get.mockResolvedValue({
+        data: {
+          users: [
+            {
+              id: 1,
+              login: 'user1',
+              admin: true,
+              firstname: 'User',
+              lastname: 'One',
+              mail: 'one@example.com',
+              created_on: '2024-01-01T00:00:00Z',
+              updated_on: '2024-01-01T00:00:00Z',
+              last_login_on: '2026-09-23T08:00:00Z',
+              passwd_changed_on: '2025-01-01T00:00:00Z',
+              twofa_scheme: 'totp',
+              status: 1,
+              auth_source: { id: 1, name: 'LDAP' },
+            },
+          ],
+        },
+      });
+
+      const result = await client.listUsers();
+
+      expect(result).toEqual([
+        {
+          id: 1,
+          login: 'user1',
+          firstname: 'User',
+          lastname: 'One',
+          mail: 'one@example.com',
+          created_on: '2024-01-01T00:00:00Z',
+          updated_on: '2024-01-01T00:00:00Z',
+        },
+      ]);
+    });
+
+    it('returns id and name for user memberships and skips group memberships', async () => {
+      mockAxiosInstance.get.mockResolvedValue({
+        data: {
+          memberships: [
+            { id: 1, project: { id: 2, name: 'p' }, user: { id: 10, name: 'Ala Kot' }, roles: [] },
+            { id: 2, project: { id: 2, name: 'p' }, group: { id: 20, name: 'Devs' }, roles: [] },
+          ],
+        },
+      });
+
+      const result = await client.listUsers('p');
+
+      expect(result).toEqual([{ id: 10, name: 'Ala Kot' }]);
+    });
+
     it('should fetch all users when no project specified', async () => {
       const mockUsers: RedmineUser[] = [
         {
@@ -1156,6 +1321,74 @@ describe('RedmineClient', () => {
       expect(result).toHaveLength(2);
       expect(result[0].id).toBe(1);
       expect(result[1].id).toBe(2);
+    });
+  });
+
+  describe('listVersions', () => {
+    const version = {
+      id: 87,
+      project: { id: 1972, name: 'Auditor' },
+      name: '[W10] Week 10',
+      description: '',
+      status: 'open',
+      due_date: '2026-03-06',
+      sharing: 'none',
+      created_on: '2026-02-20T09:00:00Z',
+      updated_on: '2026-02-20T09:00:00Z',
+    };
+
+    it("returns the project's versions and Redmine's total", async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { versions: [version], total_count: 1 } });
+
+      const result = await client.listVersions('auditor-rpe');
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/auditor-rpe/versions.json');
+      expect(result).toEqual({ versions: [version], total_count: 1 });
+    });
+
+    it('keeps a version shared from another project', async () => {
+      const shared = { ...version, id: 12, project: { id: 1, name: 'Company' }, sharing: 'system' };
+      mockAxiosInstance.get.mockResolvedValue({ data: { versions: [shared], total_count: 1 } });
+
+      const result = await client.listVersions('auditor-rpe');
+
+      expect(result.versions[0].project).toEqual({ id: 1, name: 'Company' });
+    });
+
+    it('counts the versions when Redmine sends no total_count', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { versions: [version, version] } });
+
+      const result = await client.listVersions('auditor-rpe');
+
+      expect(result.total_count).toBe(2);
+    });
+
+    it('returns an empty list when the project has no versions key', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: {} });
+
+      const result = await client.listVersions('auditor-rpe');
+
+      expect(result).toEqual({ versions: [], total_count: 0 });
+    });
+
+    it('encodes the project identifier as a single path segment', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { versions: [], total_count: 0 } });
+
+      await client.listVersions('../users/current');
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith(
+        '/projects/..%2Fusers%2Fcurrent/versions.json'
+      );
+    });
+
+    it('propagates a 404 for an unknown project', async () => {
+      const notFound = Object.assign(new Error('Not Found'), {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+      });
+      mockAxiosInstance.get.mockRejectedValue(notFound);
+
+      await expect(client.listVersions('missing')).rejects.toBe(notFound);
     });
   });
 
@@ -1725,6 +1958,36 @@ describe('RedmineClient', () => {
 
       const result = RedmineClient.formatError(error);
       expect(result).toContain('resolveUser');
+    });
+
+    it('should append a listVersions hint when a 422 validation error names the target version', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Target version is not included in the list'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, { issue_id: 83432 });
+      expect(result).toBe(
+        'Validation error: ["Target version is not included in the list"] (issue_id=83432). ' +
+          "Call listVersions for the versions this issue's project can use."
+      );
+    });
+
+    it('does not append a listVersions hint for a field that merely starts with "target version"', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Target versions note is too long'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      expect(RedmineClient.formatError(error)).not.toContain('listVersions');
     });
 
     it('should append a getMappings hint when a 422 validation error names status/priority/tracker/activity', () => {
@@ -3107,6 +3370,24 @@ describe('RedmineClient', () => {
         await client.listUsers();
 
         expect(mockAxiosInstance.get).toHaveBeenCalledWith('/users.json');
+      });
+    });
+
+    describe('listVersions() scoping', () => {
+      it('reads the configured project when called with it', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+        mockAxiosInstance.get.mockResolvedValue({ data: { versions: [], total_count: 0 } });
+
+        await scopedClient.listVersions('my-project');
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects/my-project/versions.json');
+      });
+
+      it('rejects another project without calling Redmine', async () => {
+        const scopedClient = new RedmineClient(config, scopedProjectConfig);
+
+        await expect(scopedClient.listVersions('other-project')).rejects.toThrow(ProjectScopeError);
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
       });
     });
 
