@@ -472,10 +472,8 @@ export class ChatStateService {
   }
 
   private usesAnthropic(): boolean {
-    return (
-      this._currentProvider === 'anthropic' ||
-      (this._activeKind !== null && isAnthropicKind(this._activeKind))
-    );
+    if (this._activeKind !== null) return isAnthropicKind(this._activeKind);
+    return this._currentProvider === 'anthropic';
   }
 
   private async recordRateLimit(info: RateLimitInfo): Promise<void> {

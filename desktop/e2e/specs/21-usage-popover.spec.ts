@@ -199,7 +199,9 @@ describe('Usage Ring + Popover', function () {
       expect(hit.insidePopover).toBe(false);
       expect(hit.testid).toBe('usage-popover-backdrop');
 
-      await (await $('[data-testid="usage-popover-backdrop"]')).click();
+      await browser.execute(() =>
+        (document.querySelector('[data-testid="usage-popover-backdrop"]') as HTMLElement).click()
+      );
       await waitForPopoverClosed();
       expect(await (await $('[data-testid="usage-ring"]')).getAttribute('aria-expanded')).toBe(
         'false'
