@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { ChatStateService, MAX_CHAT_TABS, NEW_CONVERSATION_BUSY } from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { PlanUsageService } from './plan-usage.service';
+import { BetaService } from './beta.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
@@ -14,10 +16,12 @@ describe('ChatStateService', () => {
   let service: ChatStateService;
   let mockTauri: MockTauriService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
+  let betaEnabled: ReturnType<typeof signal<boolean>>;
 
   beforeEach(() => {
     mockTauri = new MockTauriService();
     mockLogger = makeMockLogger();
+    betaEnabled = signal(false);
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -52,6 +56,7 @@ describe('ChatStateService', () => {
         ChatStateService,
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
       ],
     });
 
@@ -539,6 +544,7 @@ describe('ChatStateService', () => {
 
       it('single-tab gate: a busy sole tab resumes in place instead of spawning an invisible second tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(false);
         const tab1 = service.activeTabId();
         const active = service.tabs().get(tab1)!;
         active.isStreaming = true;
@@ -555,6 +561,29 @@ describe('ChatStateService', () => {
         expect(invokeSpy).toHaveBeenCalledWith(
           'resume_conversation',
           expect.objectContaining({ sessionId: 'single-busy', tabId: tab1 })
+        );
+      });
+
+      it('beta on: a busy sole tab opens a new tab and resumes there, because the tab bar is visible', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(true);
+        const tab1 = service.activeTabId();
+        const active = service.tabs().get(tab1)!;
+        active.isStreaming = true;
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') return { session_id: 'single-busy-beta', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('single-busy-beta');
+
+        expect(service.tabs().size).toBe(2);
+        const newTabId = service.activeTabId();
+        expect(newTabId).not.toBe(tab1);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'single-busy-beta', tabId: newTabId })
         );
       });
 

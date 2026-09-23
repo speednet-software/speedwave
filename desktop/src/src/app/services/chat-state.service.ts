@@ -15,6 +15,7 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
+import { BetaService } from './beta.service';
 import {
   ChatSessionStore,
   MAX_CHAT_TABS,
@@ -83,6 +84,7 @@ export class ChatStateService {
   private planUsage = inject(PlanUsageService);
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
+  private beta = inject(BetaService);
 
   private readonly deps: ChatStoreDeps;
 
@@ -228,10 +230,11 @@ export class ChatStateService {
   /**
    * Resumes a conversation. A tab already owning the session is activated; if that tab's
    * backend session already ended (e.g. a container restart while it was backgrounded), the
-   * activation is followed by a real reconnect instead of a silent no-op. With several
-   * tabs open, an idle+clean active tab resumes in place, an occupied one opens a new
-   * resuming tab under the cap; otherwise (single tab, or at the cap) the active tab
-   * resumes in place — today's replace semantics until the phase 3 tab UI lands.
+   * activation is followed by a real reconnect instead of a silent no-op. While the tab bar
+   * is visible (more than one tab open, or the beta tab UI is on), an idle+clean active tab
+   * resumes in place, an occupied one opens a new resuming tab under the cap; otherwise
+   * (single tab with the bar hidden, or at the cap) the active tab resumes in place — today's
+   * replace semantics.
    * @param sessionId - Session UUID to resume.
    */
   async openConversation(sessionId: string): Promise<void> {
@@ -244,7 +247,7 @@ export class ChatStateService {
       return;
     }
     const active = this.activeStore();
-    if (this._tabs().size > 1) {
+    if (this._tabs().size > 1 || this.beta.enabled()) {
       if (!active.hasConversation() && !active.isStreaming) {
         await active.resumeConversation(sessionId);
         return;

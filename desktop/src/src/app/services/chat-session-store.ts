@@ -108,7 +108,10 @@ export interface ModelSelectionInput {
 
 const DEFAULT_MODEL_ALIAS = 'default';
 
-/** Maximum parallel chat tabs; phase 4 moves the SSOT to Rust resources. */
+/**
+ * Maximum parallel chat tabs. TS mirror of `speedwave_runtime::resources::MAX_CHAT_TABS`,
+ * cross-read-tested by `max_chat_tabs_matches_ts_mirror`.
+ */
 export const MAX_CHAT_TABS = 3;
 
 /** Angular services and service-owned callbacks a `ChatSessionStore` needs. */
