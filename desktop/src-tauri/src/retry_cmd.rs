@@ -75,7 +75,14 @@ impl SessionDriver for ChatSessionDriver<'_> {
                 .map_err(|e| format!("session lock poisoned: {e}"))?;
             let project_name = guard.project_name().to_string();
             self.project_name = Some(project_name.clone());
-            std::mem::replace(&mut *guard, ChatSession::new(&project_name))
+            std::mem::replace(
+                &mut *guard,
+                ChatSession::new(
+                    &project_name,
+                    "00000000-0000-4000-8000-000000000000",
+                    std::sync::Arc::new(std::sync::Mutex::new(None)),
+                ),
+            )
         };
         old.stop().map_err(|e| e.to_string())?;
         drop(old);

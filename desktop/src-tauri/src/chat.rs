@@ -1441,6 +1441,8 @@ pub struct PreparedSpawn {
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
+    tab_id: String,
+    pub(crate) transcript: Arc<Mutex<Option<String>>>,
     shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     pending_requests: PendingRequests,
     control: ControlChannel,
@@ -1453,10 +1455,12 @@ pub struct ChatSession {
 }
 
 impl ChatSession {
-    pub fn new(project_name: &str) -> Self {
+    pub fn new(project_name: &str, tab_id: &str, transcript: Arc<Mutex<Option<String>>>) -> Self {
         Self {
             child: None,
             project_name: project_name.to_string(),
+            tab_id: tab_id.to_string(),
+            transcript,
             shared_stdin: None,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             control: ControlChannel::default(),
@@ -1471,6 +1475,10 @@ impl ChatSession {
 
     pub fn project_name(&self) -> &str {
         &self.project_name
+    }
+
+    pub(crate) fn tab_id(&self) -> &str {
+        &self.tab_id
     }
 
     pub(crate) fn control_handle(&self) -> anyhow::Result<ControlHandle> {
@@ -1605,6 +1613,11 @@ impl ChatSession {
         self.launched_with_effort = with_effort;
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self
+            .transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            resume_session_id.map(str::to_string);
 
         let stdout = child
             .stdout
@@ -1671,6 +1684,7 @@ impl ChatSession {
 
         let pending_requests = self.pending_requests.clone();
         let control_for_reader = self.control.clone();
+        let transcript_for_reader = self.transcript.clone();
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
@@ -1899,6 +1913,18 @@ impl ChatSession {
                     got_result = false;
                 }
                 for chunk in chunks {
+                    if let StreamChunk::SystemInit {
+                        session_id: Some(sid),
+                        ..
+                    }
+                    | StreamChunk::Result {
+                        session_id: sid, ..
+                    } = &chunk
+                    {
+                        *transcript_for_reader
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sid.clone());
+                    }
                     emit_sanitized_chunk(&app_handle, chunk, &display_policy);
                 }
                 if let Some(session_id) = result_session_id {
@@ -2850,7 +2876,11 @@ mod tests {
 
     #[test]
     fn interrupt_without_active_session_errors() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let err = s
             .interrupt()
             .expect_err("expected 'no active session' when stdin not set");
@@ -2862,7 +2892,11 @@ mod tests {
 
     #[test]
     fn send_message_rejects_bare_slash_before_session_check() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let err = s
             .send_message_with_emit(&text_only("/"), |_| {})
             .expect_err("bare slash must be rejected");
@@ -2874,7 +2908,11 @@ mod tests {
 
     #[test]
     fn send_message_allows_real_text_through_to_session_check() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let err = s
             .send_message_with_emit(&text_only("hej"), |_| {})
             .expect_err("no active session expected");
@@ -2886,7 +2924,11 @@ mod tests {
 
     #[test]
     fn send_message_matching_control_shape_emits_control_chip_after_stdin_write() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         let result =
@@ -2914,7 +2956,11 @@ mod tests {
 
     #[test]
     fn send_message_stdin_write_failure_propagates_error_and_emits_no_control_chip() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_broken_pipe();
         let result =
@@ -2930,7 +2976,11 @@ mod tests {
 
     #[test]
     fn send_message_plain_text_emits_no_control_chip() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         session
@@ -2941,7 +2991,11 @@ mod tests {
 
     #[test]
     fn send_message_bare_model_without_argument_emits_no_control_chip() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         session
@@ -2952,7 +3006,11 @@ mod tests {
 
     #[test]
     fn send_message_multi_block_never_matches_control_shape_even_when_joined_text_would() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         let blocks = vec![
@@ -2974,7 +3032,11 @@ mod tests {
 
     #[test]
     fn send_message_single_block_control_command_still_matches() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         session
@@ -3178,7 +3240,11 @@ mod tests {
 
     #[test]
     fn fresh_session_has_no_session_info_and_no_control_handle() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
         let err = s.control_handle().err().expect("no stdin yet");
         assert!(err.to_string().contains("no active session"), "{err}");
@@ -3186,7 +3252,11 @@ mod tests {
 
     #[test]
     fn stop_ends_a_control_request_that_is_still_waiting() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.set_test_stdin_sink(Vec::new());
         let handle = s.control_handle().expect("handle");
         let control = s.control.clone();
@@ -3218,7 +3288,11 @@ mod tests {
 
     #[test]
     fn reap_instance_is_noop_without_an_id() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s.instance_id.is_none());
         s.reap_instance();
         assert!(s.instance_id.is_none());
@@ -3227,7 +3301,11 @@ mod tests {
     #[test]
     fn stop_sets_stopping_flag() {
         use std::sync::atomic::Ordering;
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(!s.stopping.load(Ordering::SeqCst));
         s.stop().unwrap();
         assert!(
@@ -3238,7 +3316,11 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent_when_no_session_running() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s.stop().is_ok());
         assert!(s.stop().is_ok());
         assert!(s.child.is_none());
@@ -3249,7 +3331,11 @@ mod tests {
 
     #[test]
     fn stop_grace_period_joins_reader_that_finishes_late() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }));
@@ -3265,7 +3351,11 @@ mod tests {
 
     #[test]
     fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(10));
         }));
@@ -3281,7 +3371,11 @@ mod tests {
 
     #[test]
     fn stop_clears_pending_requests() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-1".to_string(),
             PartialAnswers {
@@ -3306,10 +3400,18 @@ mod tests {
 
     #[test]
     fn second_session_can_be_created_after_stop() {
-        let mut s1 = ChatSession::new("test-project");
+        let mut s1 = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s1.stop().is_ok());
         drop(s1);
-        let mut s2 = ChatSession::new("test-project");
+        let mut s2 = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s2.stop().is_ok());
     }
 
@@ -5296,13 +5398,21 @@ mod tests {
 
     #[test]
     fn chat_session_new_stores_project_name() {
-        let session = ChatSession::new("acme-corp");
+        let session = ChatSession::new(
+            "acme-corp",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert_eq!(session.project_name, "acme-corp");
     }
 
     #[test]
     fn chat_session_new_has_no_child() {
-        let session = ChatSession::new("acme-corp");
+        let session = ChatSession::new(
+            "acme-corp",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(session.child.is_none());
         assert!(session.shared_stdin.is_none());
         assert!(session.pending_requests.lock().unwrap().is_empty());
@@ -5723,7 +5833,11 @@ mod tests {
 
     #[test]
     fn submit_question_answer_no_session_errors_cleanly() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
             make_partial("r1", &[("Q", "")], vec![None]),
@@ -5742,7 +5856,11 @@ mod tests {
 
     #[test]
     fn submit_question_answer_oversize_answer_errors_cleanly() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-y".into(),
             make_partial("r2", &[("Q", "")], vec![None]),
@@ -5759,7 +5877,11 @@ mod tests {
 
     #[test]
     fn fill_slot_invalid_index_errors_and_preserves_entry() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-bad-idx".into(),
             make_partial("r1", &[("Q", "h")], vec![None]),
@@ -5778,7 +5900,11 @@ mod tests {
 
     #[test]
     fn fill_slot_already_answered_errors_and_preserves_entry() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-dup".into(),
             make_partial("r1", &[("Q", "h")], vec![Some("first".into())]),
@@ -5797,7 +5923,11 @@ mod tests {
 
     #[test]
     fn fill_slot_pending_after_partial_completion() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-multi".into(),
             make_partial("r1", &[("Q0", ""), ("Q1", "")], vec![None, None]),
@@ -5815,7 +5945,11 @@ mod tests {
 
     #[test]
     fn fill_slot_completed_removes_entry_and_returns_partial() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-fin".into(),
             make_partial("r1", &[("Q0", "")], vec![None]),
@@ -5834,7 +5968,11 @@ mod tests {
 
     #[test]
     fn restore_partial_clears_specified_slot() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let partial = make_partial(
             "r1",
             &[("Q0", ""), ("Q1", "")],
@@ -6239,19 +6377,46 @@ mod tests {
 
     #[test]
     fn only_a_live_process_launched_with_effort_takes_the_wire() {
-        assert!(!ChatSession::new("myproject").takes_wire_effort());
+        assert!(!ChatSession::new(
+            "myproject",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None))
+        )
+        .takes_wire_effort());
 
-        let mut pinned = ChatSession::new("myproject");
+        let mut pinned = ChatSession::new(
+            "myproject",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         pinned.set_test_process(spawn_test_child(TestChild::Blocked), true);
         assert!(pinned.takes_wire_effort());
 
-        let mut unpinned = ChatSession::new("myproject");
+        let mut unpinned = ChatSession::new(
+            "myproject",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         unpinned.set_test_process(spawn_test_child(TestChild::Blocked), false);
         assert!(!unpinned.takes_wire_effort());
 
-        let mut exited = ChatSession::new("myproject");
+        let mut exited = ChatSession::new(
+            "myproject",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         exited.set_test_process(spawn_test_child(TestChild::Exited), true);
         assert!(!exited.takes_wire_effort());
+    }
+
+    #[test]
+    fn chat_session_exposes_tab_id_and_shares_the_transcript_slot() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let session =
+            ChatSession::new("acme", "550e8400-e29b-41d4-a716-446655440000", slot.clone());
+        assert_eq!(session.tab_id(), "550e8400-e29b-41d4-a716-446655440000");
+        *slot.lock().unwrap() = Some("sid-1".to_string());
+        assert_eq!(session.transcript.lock().unwrap().as_deref(), Some("sid-1"));
     }
 
     #[test]
@@ -6924,7 +7089,11 @@ mod tests {
 
     #[test]
     fn chat_session_new_has_no_session_log_path() {
-        let session = ChatSession::new("test-project");
+        let session = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(session.session_log_path.is_none());
         assert!(session.drain_handles.is_empty());
     }
@@ -6935,7 +7104,11 @@ mod tests {
         let log_path = tmp
             .path()
             .join(".speedwave/logs/default/claude-session.log");
-        let mut session = ChatSession::new("default");
+        let mut session = ChatSession::new(
+            "default",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         session.stop().unwrap();
         assert!(
             !log_path.exists(),

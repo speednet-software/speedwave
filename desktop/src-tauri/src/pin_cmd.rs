@@ -239,7 +239,11 @@ mod tests {
     }
 
     fn no_session() -> SharedChatSession {
-        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new("proj")))
+        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )))
     }
 
     #[test]

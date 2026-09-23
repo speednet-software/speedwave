@@ -7,6 +7,7 @@ mod auth;
 mod auth_commands;
 mod bridges;
 mod chat;
+mod chat_registry;
 mod chat_session_cmd;
 mod claude_settings;
 mod clipboard_bridge;
@@ -690,7 +691,11 @@ fn main() {
         }
     }
 
-    let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
+    let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new(
+        "default",
+        "00000000-0000-4000-8000-000000000000",
+        Arc::new(Mutex::new(None)),
+    )));
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let transcript_store: transcription_cmd::TranscriptStoreHandle =
         Arc::new(speedwave_runtime::transcription::TranscriptStore::new());

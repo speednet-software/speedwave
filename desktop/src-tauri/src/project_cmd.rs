@@ -185,7 +185,11 @@ pub(crate) fn rebind_chat(
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     session.stop().map_err(|e| e.to_string())?;
-    *session = ChatSession::new(project);
+    *session = ChatSession::new(
+        project,
+        "00000000-0000-4000-8000-000000000000",
+        std::sync::Arc::new(std::sync::Mutex::new(None)),
+    );
     session.start(app.clone(), None).map_err(|e| e.to_string())
 }
 

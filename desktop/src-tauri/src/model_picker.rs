@@ -959,6 +959,8 @@ mod tests {
     fn idle_session(project: &str) -> SharedChatSession {
         std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new(
             project,
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         )))
     }
 
