@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 STORE=/var/lib/nerdctl/1935db59/names/default
+TASKS=/run/containerd/io.containerd.runtime.v2.task/default
 NAME=spwcontract_ghost
 DEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 
@@ -14,6 +15,9 @@ setup_file() {
 
 teardown() {
   $ENGINE_EXEC sh -c "nerdctl rm -f $NAME >/dev/null 2>&1; rm -f $STORE/$NAME; true"
+  if [ -n "${BUNDLE_ID:-}" ]; then
+    $ENGINE_EXEC rmdir "$TASKS/$BUNDLE_ID" 2>/dev/null || true
+  fi
 }
 
 @test "rm -f on a missing name exits 0 (cleanup relies on this)" {
@@ -61,4 +65,21 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"create_rc=0"* ]]
   [ "${output##*blocked=}" -ge 2 ]
+}
+
+@test "an existing task bundle fails task create with the collision classifier phrases" {
+  BUNDLE_ID=$($ENGINE_EXEC nerdctl create --name "$NAME" "$IMG" | tr -d '\r\n')
+  [[ "$BUNDLE_ID" =~ ^[0-9a-f]{64}$ ]]
+  $ENGINE_EXEC mkdir -p "$TASKS/$BUNDLE_ID"
+  $ENGINE_EXEC test -d "$TASKS/$BUNDLE_ID"
+  run $ENGINE_EXEC nerdctl start "$NAME"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mkdir "* ]]
+  [[ "$output" == *"io.containerd.runtime.v2.task/default/$BUNDLE_ID: file exists"* ]]
+}
+
+@test "timeout --verbose names the signal it sends (compose up deadline classifier basis)" {
+  run $ENGINE_EXEC timeout --kill-after=1 --verbose 1 sleep 5
+  [ "$status" -eq 124 ]
+  [[ "$output" == *"timeout: sending signal TERM to command"* ]]
 }
