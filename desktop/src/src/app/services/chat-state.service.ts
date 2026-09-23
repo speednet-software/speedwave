@@ -1484,15 +1484,14 @@ export class ChatStateService {
       const project = this.projectState.activeProject();
       if (!project) return;
 
-      const transcriptPromise = this.tauri
+      await this.tauri.invoke('resume_conversation', { project, sessionId });
+      if (gen !== this._sessionGeneration) return;
+      const transcript = await this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
         .catch((err) => {
           this.log.error(`[chat-state] get_conversation failed: ${String(err)}`);
           return null;
         });
-      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
-
-      const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
       if (gen !== this._sessionGeneration) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));

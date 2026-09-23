@@ -345,6 +345,104 @@ describe('ChatStateService', () => {
       expect(service.lastKnownSessionId).toBe('sess-resumed');
     });
 
+    it('shows the resumed transcript when a header new-conversation start finishes during the resume', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingStart = createDeferred();
+      const pendingResume = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'start_chat':
+            await pendingStart.promise;
+            return undefined;
+          case 'resume_conversation':
+            await pendingResume.promise;
+            return undefined;
+          case 'get_conversation':
+            return {
+              session_id: 'sess-resumed',
+              messages: [
+                { role: 'user', content: 'Say hello in one word.', timestamp: null },
+                { role: 'assistant', content: 'Hello', timestamp: null, uuid: 'a-1' },
+                { role: 'user', content: 'Say goodbye in one word.', timestamp: null },
+                { role: 'assistant', content: 'Goodbye', timestamp: null, uuid: 'a-2' },
+              ],
+            };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      service.resetForNewConversation();
+      await service.init();
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      const resuming = service.resumeConversation('sess-resumed');
+      await vi.waitFor(() => {
+        expect(calls).toContain('resume_conversation');
+      });
+      pendingStart.resolve();
+      await pendingStart.promise;
+      pendingResume.resolve();
+      await resuming;
+
+      const replies = service
+        .messagesFromState()
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.blocks.map((b) => ('content' in b ? b.content : '')).join(''));
+      expect(replies).toEqual(['Hello', 'Goodbye']);
+      expect(service.lastKnownSessionId).toBe('sess-resumed');
+    });
+
+    it('reads the resumed transcript only after the resume stopped the session writing it', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingResume = createDeferred();
+      let resumed = false;
+      const hello = { role: 'assistant', content: 'Hello', timestamp: null, uuid: 'a-1' };
+      const goodbye = { role: 'assistant', content: 'Goodbye', timestamp: null, uuid: 'a-2' };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'resume_conversation':
+            await pendingResume.promise;
+            resumed = true;
+            return undefined;
+          case 'get_conversation':
+            return {
+              session_id: 'sess-resumed',
+              messages: resumed ? [hello, goodbye] : [hello],
+            };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const resuming = service.resumeConversation('sess-resumed');
+      pendingResume.resolve();
+      await resuming;
+
+      const replies = service
+        .messagesFromState()
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.blocks.map((b) => ('content' in b ? b.content : '')).join(''));
+      expect(replies).toEqual(['Hello', 'Goodbye']);
+    });
+
     it('keeps the conversation when a reply is still streaming', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
