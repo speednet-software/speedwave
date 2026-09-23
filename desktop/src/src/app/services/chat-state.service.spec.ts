@@ -1837,6 +1837,33 @@ describe('ChatStateService', () => {
       expect(service.lastKnownSessionId).toBeNull();
     });
 
+    it('keeps the resume decider registered across a project switch (the store behind it is discarded)', async () => {
+      const decider = vi.fn(() => Promise.resolve('fresh' as const));
+      service.setResumeDecider(decider);
+      const storeBeforeSwitch = service.activeStore();
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(service.activeStore()).not.toBe(storeBeforeSwitch);
+      projectState.status.set('ready');
+
+      service.seedSessionId('sess-after-switch');
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(decider).toHaveBeenCalledTimes(1);
+      expect(calls).toContain('start_chat');
+      expect(calls).not.toContain('resume_conversation');
+    });
+
     it('interrupts a streaming turn on restart-begin', async () => {
       const stopSpy = vi.spyOn(service, 'stopConversation').mockResolvedValue();
       service.isStreaming = true;

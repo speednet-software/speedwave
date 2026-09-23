@@ -90,6 +90,7 @@ export class ChatStateService {
   private listenerSetup: Promise<void> | null = null;
   private unsubProjectChange: (() => void) | null = null;
   private _sawSwitching = false;
+  private _resumeDecider: (() => Promise<'resume' | 'fresh'>) | null = null;
 
   private readonly _tabs = signal<ReadonlyMap<string, ChatSessionStore>>(new Map());
   private readonly _activeTabId = signal<string>('');
@@ -340,10 +341,14 @@ export class ChatStateService {
   }
 
   /**
-   * Unregistering (null) makes overflow default to auto-resume.
+   * Unregistering (null) makes overflow default to auto-resume. Remembered at the facade
+   * level (`_resumeDecider`) so a project switch, which discards the active store and
+   * replaces it with a fresh one, carries the registration over instead of silently
+   * dropping it.
    * @param cb - Decider callback, or null to unregister.
    */
   setResumeDecider(cb: (() => Promise<'resume' | 'fresh'>) | null): void {
+    this._resumeDecider = cb;
     this.activeStore().setResumeDecider(cb);
   }
 
@@ -576,6 +581,7 @@ export class ChatStateService {
       store.dispose();
     }
     const fresh = this.makeStore();
+    fresh.setResumeDecider(this._resumeDecider);
     this._tabs.set(new Map([[fresh.tabId, fresh]]));
     this._activeTabId.set(fresh.tabId);
   }
