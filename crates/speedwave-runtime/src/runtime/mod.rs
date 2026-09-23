@@ -185,8 +185,6 @@ impl VmExecOutput {
     }
 }
 
-/// Shared `vm_exec` impl for Lima/WSL: spawns the command, pipes `stdin`, waits
-/// with a timeout (kills child on overrun), captures stdout+stderr.
 pub(crate) fn vm_exec_run(
     mut command: Command,
     stdin: &[u8],
@@ -266,7 +264,7 @@ pub trait CommandRunner: Send + Sync {
     }
 
     /// Like `run_with_timeout`, but kills the command once `stop()` turns true: `Ok(false)` then,
-    /// `Ok(true)` when it succeeded. The default ignores `stop` so test runners never spawn.
+    /// `Ok(true)` when it succeeded. The default ignores `stop` and calls `run_with_timeout`.
     fn run_with_timeout_until(
         &self,
         cmd: &str,
@@ -296,6 +294,7 @@ fn run_until(
     loop {
         match child.try_wait()? {
             Some(status) if status.success() => return Ok(true),
+            Some(_) if stop() => return Ok(false),
             Some(status) => {
                 let stderr = stderr_reader
                     .as_ref()
@@ -3193,6 +3192,29 @@ services:
         assert!(
             err.contains("exit code Some(3)") && err.contains("refused"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_runner_run_with_timeout_until_leaves_the_output_of_a_command_stopped_as_it_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let exited = dir.path().join("exited");
+        let script = format!("sleep 30 & touch '{}'; exit 3", exited.display());
+        let start = std::time::Instant::now();
+        let finished = RealRunner
+            .run_with_timeout_until(
+                "sh",
+                &["-c", &script],
+                std::time::Duration::from_secs(20),
+                &|| exited.exists(),
+            )
+            .unwrap();
+        assert!(!finished);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "a command stopped during a teardown must not hold it up for its output, took {:?}",
+            start.elapsed()
         );
     }
 

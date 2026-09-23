@@ -1981,9 +1981,15 @@ mod tests {
             .expect("init_vm_macos must exist");
         let tail = &src[start + 1..];
         let body = &src[start..start + 1 + tail.find("\npub fn ").unwrap_or(tail.len())];
+        let call = body
+            .split("start_vm_unless_torn_down(")
+            .nth(1)
+            .expect("the provisioning start must be one app exit or factory reset can cut short");
+        let args = &call[..call.find(".map_err(").expect("the start error is mapped")];
         assert!(
-            body.contains("start_vm_unless_torn_down("),
-            "the provisioning start must be one app exit or factory reset can cut short"
+            args.contains("&crate::runtime::lima::VM_START_GATE")
+                && args.contains("crate::runtime::engine_teardown_started"),
+            "the provisioning start must share the process-wide gate and teardown flag, got: {args}"
         );
         assert!(
             !body.contains(".run_with_timeout(\"limactl\", &[\"start\""),
