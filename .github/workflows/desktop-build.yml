@@ -121,3 +121,8 @@ jobs:
           else
             npx --prefix ../src tauri build "${ARGS[@]}"
           fi
+
+      - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/check-nsis-update-reset.ps1 -BundleDir "$env:CARGO_TARGET_DIR\release\bundle\nsis"
