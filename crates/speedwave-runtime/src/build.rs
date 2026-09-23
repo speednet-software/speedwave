@@ -2,7 +2,7 @@
 
 use crate::bundle;
 use crate::config::ResolvedIntegrationsConfig;
-use crate::runtime::{EngineTearingDown, VmStatusUnreadable};
+use crate::runtime::{EngineTearingDown, VmNotFound, VmStatusUnreadable};
 use std::path::PathBuf;
 
 /// A container image definition. Build set is selected per project via [`enabled_images`].
@@ -312,6 +312,7 @@ fn images_exist_within(
             Err(e) if e.downcast_ref::<EngineTearingDown>().is_some() => {
                 return Err(e.context(ImageCheckCancelled));
             }
+            Err(e) if e.downcast_ref::<VmNotFound>().is_some() => return Err(e),
             Err(e)
                 if unreachable_since.is_some()
                     || e.downcast_ref::<VmStatusUnreadable>().is_some() =>
@@ -3452,6 +3453,34 @@ mod tests {
             .unwrap();
             assert!(present);
             assert_eq!(handles.ensure_ready_count(), 3);
+        }
+
+        #[test]
+        fn images_exist_stops_at_a_missing_vm_even_after_an_engine_error() {
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_image_exists_default(true)
+                .push_ensure_ready_status_unreadable(
+                    "Cannot read the state of Lima VM 'speedwave': resource temporarily unavailable",
+                )
+                .push_ensure_ready_vm_not_found(
+                    "Lima VM 'speedwave' not found. Run Speedwave.app setup wizard to create it.",
+                )
+                .build();
+            let err = images_exist_within(
+                &rt,
+                &all_enabled(),
+                &fake_manifest(),
+                OPEN_WINDOW,
+                std::time::Duration::ZERO,
+                || true,
+            )
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<crate::runtime::VmNotFound>().is_some(),
+                "the runtime answered that the VM does not exist, got: {err:#}"
+            );
+            assert!(err.downcast_ref::<EngineDidNotAnswer>().is_none());
+            assert_eq!(handles.ensure_ready_count(), 2);
         }
 
         #[test]

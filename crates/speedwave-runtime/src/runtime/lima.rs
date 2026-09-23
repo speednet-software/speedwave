@@ -973,7 +973,9 @@ fn unreadable_vm_status(vm: &str, cause: &anyhow::Error) -> anyhow::Error {
 }
 
 fn missing_vm(vm: &str) -> anyhow::Error {
-    anyhow::anyhow!("Lima VM '{vm}' not found. Run Speedwave.app setup wizard to create it.")
+    super::VmNotFound::error(format!(
+        "Lima VM '{vm}' not found. Run Speedwave.app setup wizard to create it."
+    ))
 }
 
 impl LimaRuntime {
@@ -3286,9 +3288,7 @@ mod tests {
             err.to_string().contains("not found"),
             "an instance limactl does not know is a missing VM, got: {err}"
         );
-        assert!(err
-            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
-            .is_none());
+        assert!(err.downcast_ref::<crate::runtime::VmNotFound>().is_some());
     }
 
     #[test]
@@ -3392,9 +3392,7 @@ mod tests {
             err.to_string().contains("not found"),
             "a VM limactl stopped knowing while it stopped is a missing VM, got: {err}"
         );
-        assert!(err
-            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
-            .is_none());
+        assert!(err.downcast_ref::<crate::runtime::VmNotFound>().is_some());
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "a missing VM ends the wait at once, not at the Stopping deadline"

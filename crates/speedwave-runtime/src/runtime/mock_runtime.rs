@@ -183,6 +183,7 @@ enum ResultCell {
 
 enum ScriptedEnsureReady {
     StatusUnreadable(String),
+    VmNotFound(String),
     Fails(String),
     DuringTeardown,
 }
@@ -268,6 +269,10 @@ impl MockRuntimeBuilder {
     pub fn with_engine_teardown_check(mut self, started: fn() -> bool) -> Self {
         self.engine_teardown_check = started;
         self
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmNotFound`.
+    pub fn push_ensure_ready_vm_not_found(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::VmNotFound(msg.to_string()))
     }
     /// Push a scripted plain `ensure_ready` failure with `msg`.
     pub fn push_ensure_ready_failure(self, msg: &str) -> Self {
@@ -644,6 +649,9 @@ impl ContainerRuntime for MockRuntime {
         match scripted {
             Some(ScriptedEnsureReady::StatusUnreadable(msg)) => {
                 return Err(super::VmStatusUnreadable::error(msg));
+            }
+            Some(ScriptedEnsureReady::VmNotFound(msg)) => {
+                return Err(super::VmNotFound::error(msg));
             }
             Some(ScriptedEnsureReady::Fails(msg)) => anyhow::bail!("{msg}"),
             Some(ScriptedEnsureReady::DuringTeardown) => {

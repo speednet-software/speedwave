@@ -867,10 +867,9 @@ impl WslRuntime {
             .any(|line| line.trim().trim_matches('\0') == distro);
 
         if !distro_exists {
-            anyhow::bail!(
-                "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                distro
-            );
+            return Err(super::VmNotFound::error(format!(
+                "WSL2 distribution '{distro}' not found. Run Speedwave.app setup wizard to import it."
+            )));
         }
 
         crate::provision::ensure_windows_invariants();
@@ -1080,9 +1079,7 @@ mod tests {
             err.to_string().contains("not found"),
             "wsl.exe answered that no distribution exists, got: {err}"
         );
-        assert!(err
-            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
-            .is_none());
+        assert!(err.downcast_ref::<crate::runtime::VmNotFound>().is_some());
     }
 
     #[test]

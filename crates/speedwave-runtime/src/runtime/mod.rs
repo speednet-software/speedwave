@@ -704,6 +704,23 @@ impl std::fmt::Display for VmStatusUnreadable {
 
 impl std::error::Error for VmStatusUnreadable {}
 
+#[derive(Debug)]
+pub(crate) struct VmNotFound(String);
+
+impl VmNotFound {
+    pub(crate) fn error(message: String) -> anyhow::Error {
+        anyhow::Error::new(Self(message))
+    }
+}
+
+impl std::fmt::Display for VmNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for VmNotFound {}
+
 static ENGINE_TEARDOWN_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
