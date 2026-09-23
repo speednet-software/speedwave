@@ -811,14 +811,16 @@ fn is_propagation_error(e: &anyhow::Error) -> bool {
 /// and, via the last arm, ANY `cni.setup … failed` — the named-state cleanup no-ops if none match.
 fn is_stale_cni_error(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
-    is_cni_state_collision(e)
+    s.contains("chain already exists")
         || s.contains("duplicate allocation is not allowed")
+        || s.contains("already has an ip address different")
         || (s.contains("cni.setup") && s.contains("failed"))
 }
 
-fn is_cni_state_collision(e: &anyhow::Error) -> bool {
-    let s = e.to_string().to_lowercase();
-    s.contains("chain already exists") || s.contains("already has an ip address different")
+fn is_cni_id(token: &str, prefix: &str) -> bool {
+    token
+        .strip_prefix(prefix)
+        .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Unique `<prefix><hex…>` identifiers named in `haystack` (e.g. `CNI-…` chains,
@@ -826,11 +828,8 @@ fn is_cni_state_collision(e: &anyhow::Error) -> bool {
 fn scan_cni_ids(haystack: &str, prefix: &str) -> Vec<String> {
     haystack
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-        .filter_map(|tok| {
-            tok.strip_prefix(prefix)
-                .filter(|tail| !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_hexdigit()))
-                .map(|_| tok.to_string())
-        })
+        .filter(|tok| is_cni_id(tok, prefix))
+        .map(str::to_string)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -852,9 +851,23 @@ impl CniTargets {
         }
     }
 
-    fn without(mut self, flushed: &std::collections::BTreeSet<String>) -> Self {
-        self.chains.retain(|id| !flushed.contains(id));
-        self.bridges.retain(|id| !flushed.contains(id));
+    fn colliding_chains_in(err: &anyhow::Error) -> Self {
+        let msg = err.to_string();
+        let collisions = msg
+            .split('\n')
+            .flat_map(|line| line.split("\\n"))
+            .filter(|segment| segment.to_lowercase().contains("chain already exists"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            chains: scan_cni_ids(&collisions, "CNI-"),
+            bridges: Vec::new(),
+        }
+    }
+
+    fn without(mut self, targeted: &std::collections::BTreeSet<String>) -> Self {
+        self.chains.retain(|id| !targeted.contains(id));
+        self.bridges.retain(|id| !targeted.contains(id));
         self
     }
 
@@ -873,14 +886,14 @@ pub(crate) fn cni_cleanup_command(targets: &CniTargets) -> String {
     let mut script = String::from(
         "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n",
     );
-    for ch in &targets.chains {
+    for ch in targets.chains.iter().filter(|id| is_cni_id(id, "CNI-")) {
         script.push_str(&format!(
             "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do case \"$r\" in *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*) continue;; esac; eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
              iptables -t nat -F {ch} 2>/dev/null || true\n\
              iptables -t nat -X {ch} 2>/dev/null || true\n"
         ));
     }
-    for br in &targets.bridges {
+    for br in targets.bridges.iter().filter(|id| is_cni_id(id, "br-")) {
         script.push_str(&format!("ip link delete {br} 2>/dev/null || true\n"));
     }
     script.push_str("true\n");
@@ -1067,8 +1080,8 @@ pub(crate) fn registered_compose_projects() -> Vec<String> {
         .collect()
 }
 
-/// Runs `up`; heals and retries: name-store once, CNI on its first failure and on each collision
-/// with CNI state not flushed yet (capped). Other errors propagate; error = latest `up`'s.
+/// Runs `up`; heals and retries: name-store once, CNI on its first failure and on each
+/// `Chain already exists` naming a chain not targeted yet (capped). Else error = latest `up`'s.
 pub(crate) fn with_engine_state_heal<U, C, N>(
     project: &str,
     up: U,
@@ -1081,22 +1094,31 @@ where
     N: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
 {
     let mut cni_heals = 0;
-    let mut cni_flushed = std::collections::BTreeSet::new();
+    let mut cni_targeted = std::collections::BTreeSet::new();
     let mut name_store_cleanup = Some(name_store_cleanup);
     loop {
         let Err(e) = up() else {
             return Ok(());
         };
         let healed = if is_stale_cni_error(&e) {
-            let targets = CniTargets::named_in(&e).without(&cni_flushed);
-            let collides_on_unflushed_state = is_cni_state_collision(&e) && !targets.is_empty();
-            if cni_heals < MAX_CNI_HEALS && (cni_heals == 0 || collides_on_unflushed_state) {
+            let first = cni_heals == 0;
+            let targets = if first {
+                CniTargets::named_in(&e)
+            } else {
+                CniTargets::colliding_chains_in(&e).without(&cni_targeted)
+            };
+            if cni_heals < MAX_CNI_HEALS && (first || !targets.is_empty()) {
                 cni_heals += 1;
-                cni_flushed.extend(targets.ids().cloned());
-                log::warn!(
-                    "compose up hit a CNI setup failure ({e}); flushing {:?} and retrying (heal {cni_heals}/{MAX_CNI_HEALS})",
-                    targets.ids().collect::<Vec<_>>()
-                );
+                cni_targeted.extend(targets.ids().cloned());
+                let ids = targets.ids().collect::<Vec<_>>();
+                if first {
+                    log::warn!(
+                        "compose up hit a CNI setup failure ({e}); flushing {ids:?} and retrying"
+                    );
+                } else {
+                    log::warn!("compose up hit another stale CNI chain; flushing {ids:?} and retrying (heal {cni_heals}/{MAX_CNI_HEALS})");
+                    log::debug!("CNI setup failure behind heal {cni_heals}: {e}");
+                }
                 if let Err(ce) = cni_cleanup(&targets) {
                     log::warn!("CNI cleanup failed (continuing to retry): {ce}");
                 }
@@ -1398,9 +1420,32 @@ impl Drop for TermGuard {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap and expect"
+)]
 pub(crate) mod test_support {
     use super::CommandRunner;
+
+    pub(crate) fn decode_payload(cmd: &str) -> String {
+        use base64::Engine;
+        let b64 = cmd
+            .strip_prefix("echo ")
+            .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
+            .expect("payload must be `echo <b64> | base64 -d | sh`");
+        assert!(
+            b64.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
+            "payload must be pure base64 (quote-free through the WSL reparse)"
+        );
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .expect("valid base64"),
+        )
+        .expect("utf8 script")
+    }
 
     /// Asserts `remote_cmd` round-trips through `shlex::split` to `expected_argv`.
     /// No `bash -n` — Git Bash on Windows mangles UTF-8 (claude-code#31295).
@@ -1543,6 +1588,7 @@ pub(crate) mod test_support {
     reason = "test code asserts via unwrap/expect"
 )]
 mod tests {
+    use super::test_support::decode_payload;
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
     use std::collections::HashMap;
@@ -3082,108 +3128,6 @@ services:
         assert!(!is_stale_cni_error(&anyhow::anyhow!("no such image: foo")));
     }
 
-    #[test]
-    fn engine_state_heal_cleans_and_retries_once_on_cni_error() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let ups = AtomicUsize::new(0);
-        let cleaned = AtomicUsize::new(0);
-        let r = with_engine_state_heal(
-            "acme",
-            || {
-                if ups.fetch_add(1, Ordering::SeqCst) == 0 {
-                    anyhow::bail!("iptables: Chain already exists")
-                } else {
-                    Ok(())
-                }
-            },
-            |_e| {
-                cleaned.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run on a CNI error") },
-        );
-        assert!(r.is_ok());
-        assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
-        assert_eq!(cleaned.load(Ordering::SeqCst), 1, "cleanup runs once");
-    }
-
-    #[test]
-    fn engine_state_heal_skips_cleanup_and_retry_on_other_error() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let ups = AtomicUsize::new(0);
-        let r = with_engine_state_heal(
-            "acme",
-            || {
-                ups.fetch_add(1, Ordering::SeqCst);
-                anyhow::bail!("no such image")
-            },
-            |_e| -> anyhow::Result<()> { panic!("cleanup must not run on non-CNI error") },
-            |_e| -> anyhow::Result<()> { panic!("cleanup must not run on non-name-store error") },
-        );
-        assert!(r.is_err());
-        assert_eq!(ups.load(Ordering::SeqCst), 1, "up runs once, no retry");
-    }
-
-    #[test]
-    fn engine_state_heal_retries_even_if_cleanup_fails() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let ups = AtomicUsize::new(0);
-        let r = with_engine_state_heal(
-            "acme",
-            || {
-                if ups.fetch_add(1, Ordering::SeqCst) == 0 {
-                    anyhow::bail!("iptables: Chain already exists")
-                } else {
-                    Ok(())
-                }
-            },
-            |_e| anyhow::bail!("cleanup blew up"),
-            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run on a CNI error") },
-        );
-        assert!(
-            r.is_ok(),
-            "cleanup failure is non-fatal; the retry still runs"
-        );
-        assert_eq!(
-            ups.load(Ordering::SeqCst),
-            2,
-            "up retried despite cleanup error"
-        );
-    }
-
-    #[test]
-    fn engine_state_heal_runs_both_classes_across_two_retries() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let ups = AtomicUsize::new(0);
-        let cni_cleaned = AtomicUsize::new(0);
-        let ns_cleaned = AtomicUsize::new(0);
-        let name = own_name("acme", "mcp_hub");
-        let r = with_engine_state_heal(
-            "acme",
-            || match ups.fetch_add(1, Ordering::SeqCst) {
-                0 => anyhow::bail!("iptables: Chain already exists"),
-                1 => Err(ns_conflict_err(&name, DEAD_ID)),
-                _ => Ok(()),
-            },
-            |_e| {
-                cni_cleaned.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_e| {
-                ns_cleaned.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-        );
-        assert!(r.is_ok(), "third up succeeds after both heals: {r:?}");
-        assert_eq!(ups.load(Ordering::SeqCst), 3, "up runs three times");
-        assert_eq!(cni_cleaned.load(Ordering::SeqCst), 1, "CNI heal ran once");
-        assert_eq!(
-            ns_cleaned.load(Ordering::SeqCst),
-            1,
-            "name-store heal ran once"
-        );
-    }
-
     const CHAIN_A: &str = "CNI-d3c42d65590ae0cf2c72261f";
     const CHAIN_B: &str = "CNI-1be9c452999fb96d888571d2";
     const CHAIN_C: &str = "CNI-0f1e2d3c4b5a69788796a5b4";
@@ -3201,6 +3145,12 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         )
     }
 
+    fn bridge_address_failure(bridge: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "failed to call cni.Setup: bridge {bridge} already has an IP address different from 10.4.1.1/24"
+        )
+    }
+
     struct HealRun {
         result: anyhow::Result<()>,
         ups: usize,
@@ -3209,6 +3159,13 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
     }
 
     fn run_heal(failures: Vec<anyhow::Error>) -> HealRun {
+        run_heal_with(failures, || Ok(()))
+    }
+
+    fn run_heal_with(
+        failures: Vec<anyhow::Error>,
+        cni_cleanup_outcome: impl Fn() -> anyhow::Result<()>,
+    ) -> HealRun {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let failures = std::sync::Mutex::new(std::collections::VecDeque::from(failures));
         let ups = AtomicUsize::new(0);
@@ -3220,9 +3177,9 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
                 ups.fetch_add(1, Ordering::SeqCst);
                 failures.lock().unwrap().pop_front().map_or(Ok(()), Err)
             },
-            |targets| {
-                cni_heal_targets.push(targets.ids().cloned().collect());
-                Ok(())
+            |cni_targets| {
+                cni_heal_targets.push(cni_targets.ids().cloned().collect());
+                cni_cleanup_outcome()
             },
             |_e| {
                 name_store_heals += 1;
@@ -3237,10 +3194,73 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         }
     }
 
-    fn targets(ids: &[&[&str]]) -> Vec<Vec<String>> {
-        ids.iter()
-            .map(|heal| heal.iter().map(ToString::to_string).collect())
+    fn heal_targets(heals: &[&[&str]]) -> Vec<Vec<String>> {
+        heals
+            .iter()
+            .map(|ids| ids.iter().map(ToString::to_string).collect())
             .collect()
+    }
+
+    #[test]
+    fn engine_state_heal_cleans_and_retries_on_a_cni_error() {
+        let run = run_heal(vec![anyhow::anyhow!("iptables: Chain already exists")]);
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        assert_eq!(run.ups, 2, "a failed up, then the retry");
+        assert_eq!(run.cni_heal_targets, vec![Vec::<String>::new()]);
+        assert_eq!(run.name_store_heals, 0);
+    }
+
+    #[test]
+    fn engine_state_heal_skips_cleanup_and_retry_on_other_error() {
+        let run = run_heal(vec![anyhow::anyhow!("no such image")]);
+        assert!(run.result.is_err());
+        assert_eq!(run.ups, 1, "no retry");
+        assert!(run.cni_heal_targets.is_empty());
+        assert_eq!(run.name_store_heals, 0);
+    }
+
+    #[test]
+    fn engine_state_heal_retries_even_if_cleanup_fails() {
+        let run = run_heal_with(
+            vec![anyhow::anyhow!("iptables: Chain already exists")],
+            || anyhow::bail!("cleanup blew up"),
+        );
+        assert!(
+            run.result.is_ok(),
+            "a cleanup failure is non-fatal, the retry still runs: {:?}",
+            run.result
+        );
+        assert_eq!(run.ups, 2);
+    }
+
+    #[test]
+    fn engine_state_heal_runs_both_classes_across_two_retries() {
+        let run = run_heal(vec![
+            anyhow::anyhow!("iptables: Chain already exists"),
+            ns_conflict_err(&own_name("acme", "mcp_hub"), DEAD_ID),
+        ]);
+        assert!(
+            run.result.is_ok(),
+            "third up succeeds after both heals: {:?}",
+            run.result
+        );
+        assert_eq!(run.ups, 3);
+        assert_eq!(run.cni_heal_targets.len(), 1);
+        assert_eq!(run.name_store_heals, 1);
+    }
+
+    #[test]
+    fn engine_state_heal_propagates_a_retry_error_outside_every_heal_class() {
+        let run = run_heal(vec![
+            anyhow::anyhow!("iptables: Chain already exists"),
+            anyhow::anyhow!("still broken after cleanup"),
+        ]);
+        let err = run.result.expect_err("the retry's failure must propagate");
+        assert!(
+            err.to_string().contains("still broken after cleanup"),
+            "the retry error propagates, not the first: {err}"
+        );
+        assert_eq!(run.ups, 2, "a failure no heal class matches ends the loop");
     }
 
     #[test]
@@ -3258,7 +3278,7 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         assert_eq!(run.ups, 4, "three failed ups, then success");
         assert_eq!(
             run.cni_heal_targets,
-            targets(&[&[CHAIN_A], &[CHAIN_B], &[CHAIN_C]]),
+            heal_targets(&[&[CHAIN_A], &[CHAIN_B], &[CHAIN_C]]),
             "each heal flushes the chain its own failure names"
         );
         assert_eq!(run.name_store_heals, 0);
@@ -3277,9 +3297,28 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         assert!(run.result.is_ok(), "{:?}", run.result);
         assert_eq!(
             run.cni_heal_targets,
-            targets(&[&[CHAIN_A], &[CHAIN_B]]),
+            heal_targets(&[&[CHAIN_A], &[CHAIN_B]]),
             "a chain flushed earlier may belong to a container the last retry started"
         );
+    }
+
+    #[test]
+    fn engine_state_heal_repeats_only_for_the_chain_a_collision_names() {
+        let run = run_heal(vec![
+            stale_chain_failure(CHAIN_A),
+            anyhow::anyhow!(
+                "{}\n{}",
+                stale_chain_failure(CHAIN_A),
+                masquerade_rule_failure(CHAIN_B)
+            ),
+            stale_chain_failure(CHAIN_C),
+        ]);
+        let err = run
+            .result
+            .expect_err("a chain that failed for another reason is no stale state");
+        assert!(err.to_string().contains(CHAIN_B), "latest error: {err}");
+        assert_eq!(run.ups, 2);
+        assert_eq!(run.cni_heal_targets, heal_targets(&[&[CHAIN_A]]));
     }
 
     #[test]
@@ -3294,7 +3333,25 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
             .expect_err("a chain the heal already flushed must not be healed again");
         assert!(err.to_string().contains(CHAIN_A), "latest error: {err}");
         assert_eq!(run.ups, 2);
-        assert_eq!(run.cni_heal_targets, targets(&[&[CHAIN_A]]));
+        assert_eq!(run.cni_heal_targets, heal_targets(&[&[CHAIN_A]]));
+    }
+
+    #[test]
+    fn engine_state_heal_ends_when_a_failed_cleanup_leaves_the_chain_colliding() {
+        let run = run_heal_with(
+            vec![
+                stale_chain_failure(CHAIN_A),
+                stale_chain_failure(CHAIN_A),
+                stale_chain_failure(CHAIN_B),
+            ],
+            || anyhow::bail!("wsl.exe failed: the cleanup did not run"),
+        );
+        let err = run
+            .result
+            .expect_err("a chain the cleanup could not flush is targeted once");
+        assert!(err.to_string().contains(CHAIN_A), "latest error: {err}");
+        assert_eq!(run.ups, 2);
+        assert_eq!(run.cni_heal_targets, heal_targets(&[&[CHAIN_A]]));
     }
 
     #[test]
@@ -3313,7 +3370,7 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
             "latest error: {err}"
         );
         assert_eq!(run.ups, 2);
-        assert_eq!(run.cni_heal_targets, targets(&[&[CHAIN_A]]));
+        assert_eq!(run.cni_heal_targets, heal_targets(&[&[CHAIN_A]]));
     }
 
     #[test]
@@ -3343,7 +3400,21 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         );
         assert!(err.to_string().contains(CHAIN_B), "latest error: {err}");
         assert_eq!(run.ups, 2);
-        assert_eq!(run.cni_heal_targets, targets(&[&[CHAIN_A]]));
+        assert_eq!(run.cni_heal_targets, heal_targets(&[&[CHAIN_A]]));
+    }
+
+    #[test]
+    fn engine_state_heal_heals_a_collision_after_a_first_heal_that_was_no_collision() {
+        let run = run_heal(vec![
+            masquerade_rule_failure(CHAIN_A),
+            stale_chain_failure(CHAIN_B),
+        ]);
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        assert_eq!(run.ups, 3);
+        assert_eq!(
+            run.cni_heal_targets,
+            heal_targets(&[&[CHAIN_A], &[CHAIN_B]])
+        );
     }
 
     #[test]
@@ -3366,21 +3437,20 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
     }
 
     #[test]
-    fn engine_state_heal_treats_a_new_bridge_as_new_cni_state() {
+    fn engine_state_heal_deletes_a_bridge_only_in_the_first_heal() {
         let run = run_heal(vec![
-            anyhow::anyhow!(
-                "failed to call cni.Setup: bridge br-0a1b2c3d4e5f already has an IP address different from 10.4.1.1/24"
-            ),
-            anyhow::anyhow!(
-                "failed to call cni.Setup: bridge br-6a7b8c9d0e1f already has an IP address different from 10.4.2.1/24"
-            ),
+            bridge_address_failure("br-0a1b2c3d4e5f"),
+            bridge_address_failure("br-6a7b8c9d0e1f"),
         ]);
-        assert!(run.result.is_ok(), "{:?}", run.result);
-        assert_eq!(
-            run.cni_heal_targets,
-            targets(&[&["br-0a1b2c3d4e5f"], &["br-6a7b8c9d0e1f"]])
+        let err = run
+            .result
+            .expect_err("a bridge is shared by every container on its network");
+        assert!(
+            err.to_string().contains("br-6a7b8c9d0e1f"),
+            "latest error: {err}"
         );
-        assert_eq!(run.ups, 3);
+        assert_eq!(run.ups, 2);
+        assert_eq!(run.cni_heal_targets, heal_targets(&[&["br-0a1b2c3d4e5f"]]));
     }
 
     #[test]
@@ -3392,7 +3462,10 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         ]);
         assert!(run.result.is_ok(), "{:?}", run.result);
         assert_eq!(run.ups, 4);
-        assert_eq!(run.cni_heal_targets, targets(&[&[CHAIN_A], &[CHAIN_B]]));
+        assert_eq!(
+            run.cni_heal_targets,
+            heal_targets(&[&[CHAIN_A], &[CHAIN_B]])
+        );
         assert_eq!(run.name_store_heals, 1);
     }
 
@@ -3407,6 +3480,52 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         assert_eq!(run.ups, 2);
         assert_eq!(run.name_store_heals, 1);
         assert!(run.cni_heal_targets.is_empty());
+    }
+
+    #[test]
+    fn cni_targets_take_colliding_chains_only_from_their_own_segment() {
+        let err = anyhow::anyhow!(
+            "{}\n{}",
+            stale_chain_failure(CHAIN_A),
+            masquerade_rule_failure(CHAIN_B)
+        );
+        let colliding: Vec<String> = CniTargets::colliding_chains_in(&err)
+            .ids()
+            .cloned()
+            .collect();
+        assert_eq!(colliding, vec![CHAIN_A.to_string()]);
+        let named: Vec<String> = CniTargets::named_in(&err).ids().cloned().collect();
+        assert_eq!(named, vec![CHAIN_B.to_string(), CHAIN_A.to_string()]);
+    }
+
+    #[test]
+    fn cni_cleanup_command_skips_ids_that_are_not_cni_tokens() {
+        let targets = CniTargets {
+            chains: vec![
+                "CNI-68fe31e0".to_string(),
+                "CNI-$(touch /tmp/pwned)".to_string(),
+                "CNI-".to_string(),
+            ],
+            bridges: vec!["br-deadbeef".to_string(), "br-x;reboot".to_string()],
+        };
+        let script = decode_payload(&cni_cleanup_command(&targets));
+        assert!(
+            script.contains("iptables -t nat -X CNI-68fe31e0"),
+            "{script}"
+        );
+        assert!(script.contains("ip link delete br-deadbeef"), "{script}");
+        assert!(
+            !script.contains("touch"),
+            "a chain id that is no hex token must never reach the root script: {script}"
+        );
+        assert!(
+            !script.contains("reboot"),
+            "a bridge id that is no hex token must never reach the root script: {script}"
+        );
+        assert!(
+            !script.contains("-X CNI- "),
+            "an empty chain id must never reach the root script: {script}"
+        );
     }
 
     #[test]
@@ -3451,25 +3570,6 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
                     .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)),
             "payload must be pure base64, got: {b64}"
         );
-    }
-
-    fn decode_payload(cmd: &str) -> String {
-        use base64::Engine;
-        let b64 = cmd
-            .strip_prefix("echo ")
-            .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
-            .expect("payload must be `echo <b64> | base64 -d | sh`");
-        assert!(
-            b64.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
-            "payload must be pure base64 (quote-free through the WSL reparse)"
-        );
-        String::from_utf8(
-            base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .expect("valid base64"),
-        )
-        .expect("utf8 script")
     }
 
     #[test]
@@ -3598,34 +3698,6 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
                 .iter()
                 .any(|c| c.contains(&"-D".to_string()) && c.iter().any(|a| a.contains("deadbeef"))),
             "guarded line must be skipped, not evaluated"
-        );
-    }
-
-    #[test]
-    fn engine_state_heal_propagates_error_when_retry_also_fails() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let ups = AtomicUsize::new(0);
-        let r = with_engine_state_heal(
-            "acme",
-            || {
-                if ups.fetch_add(1, Ordering::SeqCst) == 0 {
-                    anyhow::bail!("iptables: Chain already exists")
-                } else {
-                    anyhow::bail!("still broken after cleanup")
-                }
-            },
-            |_e| Ok(()),
-            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run on a CNI error") },
-        );
-        let err = r.expect_err("second failure must propagate");
-        assert!(
-            err.to_string().contains("still broken after cleanup"),
-            "the RETRY error propagates (not the first): {err}"
-        );
-        assert_eq!(
-            ups.load(Ordering::SeqCst),
-            2,
-            "exactly one retry, never two"
         );
     }
 
