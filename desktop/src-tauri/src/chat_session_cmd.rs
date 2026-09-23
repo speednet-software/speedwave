@@ -66,8 +66,9 @@ fn start_session_inner(
         .session
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
+    let allow_log_truncate = !registry.other_entry_for_project(project, tab_id);
     let result = session
-        .start(app_handle, resume_session_id)
+        .start(app_handle, resume_session_id, allow_log_truncate)
         .map_err(|e| e.to_string());
     log::info!("session.start result={result:?}");
     result
@@ -727,6 +728,24 @@ mod tests {
         assert!(
             body.contains("spawn_blocking"),
             "submit_question_answer must use spawn_blocking to avoid blocking the main thread"
+        );
+    }
+
+    #[test]
+    fn start_session_inner_computes_allow_log_truncate_from_the_sibling_check() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+
+        let sibling_pos = body.find("other_entry_for_project").expect(
+            "start_session_inner must compute allow_log_truncate via other_entry_for_project",
+        );
+        let start_pos = body
+            .find(".start(app_handle")
+            .expect("start_session_inner must call session.start(app_handle, ...)");
+
+        assert!(
+            sibling_pos < start_pos,
+            "the sibling check must be computed before session.start() is called"
         );
     }
 

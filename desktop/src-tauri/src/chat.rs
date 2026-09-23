@@ -1453,6 +1453,11 @@ fn probe_session_info(
     Some(status)
 }
 
+fn log_tag(tab_id: &str, stream: &str) -> String {
+    let short = tab_id.get(..8).unwrap_or(tab_id);
+    format!("{stream}:{short}")
+}
+
 #[derive(Debug)]
 pub struct PreparedSpawn {
     pub args: Vec<String>,
@@ -1493,10 +1498,6 @@ impl ChatSession {
             launched_with_effort: false,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
-    }
-
-    pub(crate) fn tab_id(&self) -> &str {
-        &self.tab_id
     }
 
     pub(crate) fn control_handle(&self) -> anyhow::Result<ControlHandle> {
@@ -1561,8 +1562,9 @@ impl ChatSession {
         &mut self,
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
+        allow_log_truncate: bool,
     ) -> anyhow::Result<()> {
-        self.start_with_retry(app_handle, resume_session_id, None)
+        self.start_with_retry(app_handle, resume_session_id, None, allow_log_truncate)
     }
 
     pub fn start_with_retry(
@@ -1570,6 +1572,7 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
+        allow_log_truncate: bool,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
         crate::pin_cmd::ensure_effort_pin_migrated_in(
@@ -1666,14 +1669,21 @@ impl ChatSession {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            speedwave_runtime::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            if allow_log_truncate {
+                speedwave_runtime::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            }
             let mut f = speedwave_runtime::log_file::open_log_file(&path);
-            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "started");
+            speedwave_runtime::log_file::write_log_line(
+                &mut f,
+                &log_tag(&self.tab_id, "SESSION"),
+                "started",
+            );
             Some(path)
         };
         self.session_log_path = session_log_path.clone();
 
         let stderr_log_path = session_log_path.clone();
+        let tab_id_for_stderr = self.tab_id.clone();
         if let Some(stderr) = child.stderr.take() {
             let h = std::thread::spawn(move || {
                 let mut log_file = stderr_log_path
@@ -1686,7 +1696,7 @@ impl ChatSession {
                             log::debug!("{l}");
                             speedwave_runtime::log_file::write_log_line(
                                 &mut log_file,
-                                "STDERR",
+                                &log_tag(&tab_id_for_stderr, "STDERR"),
                                 &l,
                             );
                         }
@@ -1757,7 +1767,7 @@ impl ChatSession {
                         for entry in http_collator.push(line) {
                             speedwave_runtime::log_file::write_log_line(
                                 &mut log_file,
-                                "STDOUT",
+                                &log_tag(&tab_id_for_reader, "STDOUT"),
                                 &entry,
                             );
                         }
@@ -1774,7 +1784,7 @@ impl ChatSession {
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
-                        "CONTROL",
+                        &log_tag(&tab_id_for_reader, "CONTROL"),
                         &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
                     );
                     if ctrl.tool_name == ASK_USER_TOOL_NAME {
@@ -1882,7 +1892,7 @@ impl ChatSession {
                     );
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
-                        "CONTROL",
+                        &log_tag(&tab_id_for_reader, "CONTROL"),
                         "unrecognized control_request shape (missing request_id/tool_name/tool_use_id); not auto-responding",
                     );
                     continue;
@@ -1892,14 +1902,14 @@ impl ChatSession {
                 if let Some(entry) = log_entry {
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
-                        entry.prefix,
+                        &log_tag(&tab_id_for_reader, entry.prefix),
                         &entry.message,
                     );
                     if matches!(entry.prefix, "RESULT" | "SYSTEM" | "SESSION" | "RATE_LIMIT") {
                         for merged in http_collator.flush_all_pending_responses() {
                             speedwave_runtime::log_file::write_log_line(
                                 &mut log_file,
-                                "STDOUT",
+                                &log_tag(&tab_id_for_reader, "STDOUT"),
                                 &merged,
                             );
                         }
@@ -1963,7 +1973,11 @@ impl ChatSession {
             }
 
             if let Some(entry) = http_collator.flush() {
-                speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
+                speedwave_runtime::log_file::write_log_line(
+                    &mut log_file,
+                    &log_tag(&tab_id_for_reader, "STDOUT"),
+                    &entry,
+                );
             }
             control_for_reader.fail_all();
 
@@ -2321,7 +2335,11 @@ impl ChatSession {
         }
         if let Some(ref log_path) = self.session_log_path {
             let mut f = speedwave_runtime::log_file::open_log_file(log_path);
-            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "stopped");
+            speedwave_runtime::log_file::write_log_line(
+                &mut f,
+                &log_tag(&self.tab_id, "SESSION"),
+                "stopped",
+            );
         }
         self.session_log_path = None;
         if let Ok(mut map) = self.pending_requests.lock() {
@@ -6459,7 +6477,7 @@ mod tests {
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let session =
             ChatSession::new("acme", "550e8400-e29b-41d4-a716-446655440000", slot.clone());
-        assert_eq!(session.tab_id(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(session.tab_id, "550e8400-e29b-41d4-a716-446655440000");
         *slot.lock().unwrap() = Some("sid-1".to_string());
         assert_eq!(session.transcript.lock().unwrap().as_deref(), Some("sid-1"));
     }
@@ -7611,5 +7629,50 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let after_sig = source
+            .split(fn_signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let brace_start = after_sig.find('{').expect("opening brace not found");
+        let rest = &after_sig[brace_start..];
+        let mut depth = 0i32;
+        let mut end = 0;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > 0, "closing brace not found for {fn_signature}");
+        &rest[..end]
+    }
+
+    #[test]
+    fn log_tag_carries_the_stream_and_the_tab_prefix() {
+        assert_eq!(
+            log_tag("550e8400-e29b-41d4-a716-446655440000", "STDERR"),
+            "STDERR:550e8400"
+        );
+        assert_eq!(log_tag("ab", "SESSION"), "SESSION:ab");
+    }
+
+    #[test]
+    fn start_truncates_the_session_log_only_when_no_sibling_tab_exists() {
+        let source = include_str!("chat.rs");
+        let body = extract_fn_body(source, "pub fn start_with_retry(");
+        assert!(
+            body.contains("allow_log_truncate"),
+            "truncation must be gated by the caller-computed sibling check"
+        );
     }
 }

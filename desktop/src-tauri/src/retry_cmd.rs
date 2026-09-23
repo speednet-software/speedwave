@@ -64,6 +64,7 @@ pub(crate) trait SessionDriver {
 struct ChatSessionDriver<'a> {
     entry: TabEntry,
     tab_id: String,
+    registry: SharedChatSessions,
     app_handle: &'a AppHandle,
 }
 
@@ -95,8 +96,16 @@ impl SessionDriver for ChatSessionDriver<'_> {
             .session
             .lock()
             .map_err(|e| format!("session lock poisoned: {e}"))?;
+        let allow_log_truncate = !self
+            .registry
+            .other_entry_for_project(&self.entry.project, &self.tab_id);
         session
-            .start_with_retry(self.app_handle.clone(), Some(session_id), Some(user_uuid))
+            .start_with_retry(
+                self.app_handle.clone(),
+                Some(session_id),
+                Some(user_uuid),
+                allow_log_truncate,
+            )
             .map_err(|e| e.to_string())
     }
 }
@@ -136,6 +145,7 @@ pub async fn retry_last_turn(
         let mut driver = ChatSessionDriver {
             entry,
             tab_id,
+            registry,
             app_handle: &app_handle,
         };
         retry_last_turn_inner(&session_id, &user_uuid, &mut driver)
@@ -325,6 +335,29 @@ mod tests {
             body.contains("self.entry.transcript.clone()"),
             "the replacement session must keep the tab's transcript slot"
         );
+    }
+
+    #[test]
+    fn the_retry_driver_gates_truncation_on_the_sibling_check() {
+        let source = include_str!("retry_cmd.rs");
+        let impl_block = source
+            .split("impl SessionDriver for ChatSessionDriver<'_> {")
+            .nth(1)
+            .unwrap();
+        let body = &impl_block[..impl_block
+            .find("\nfn tab_entry_for_retry")
+            .unwrap_or(impl_block.len())];
+        let sibling_pos = body.find("other_entry_for_project").expect(
+            "ChatSessionDriver::start_with_retry must compute allow_log_truncate via other_entry_for_project",
+        );
+        let call_pos = body
+            .find(".start_with_retry(")
+            .expect("ChatSessionDriver must call session.start_with_retry");
+        assert!(
+            sibling_pos < call_pos,
+            "the sibling check must run before the session start call"
+        );
+        assert!(body.contains("allow_log_truncate"));
     }
 
     #[test]
