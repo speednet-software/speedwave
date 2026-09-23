@@ -534,10 +534,7 @@ export class ComposerComponent implements AfterViewInit {
     return t.length <= 80 ? t : `${t.slice(0, 77)}…`;
   }
 
-  /**
-   * Placeholder says the session is starting while sending is blocked, else that
-   * the next submit will queue rather than send while a turn streams.
-   */
+  /** Placeholder for the current send state. */
   effectivePlaceholder(): string {
     if (this.sendBlocked()) return 'starting session...';
     if (this.streaming()) return 'queue next message...';

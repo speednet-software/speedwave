@@ -514,10 +514,7 @@ export class ChatStateService {
     this._loadingTranscript.set(false);
   }
 
-  /**
-   * Mark a session start in progress (resume) so `sendMessage` refuses until it ends;
-   * bumps the generation to no-op in-flight starts.
-   */
+  /** Mark a resume's session start in flight until the returned function runs. */
   beginStartingSession(): () => void {
     this.startingSession = true;
     this._sessionGeneration += 1;
