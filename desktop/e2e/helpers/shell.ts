@@ -26,11 +26,13 @@ export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> 
     timeoutMsg: 'restart-now-btn never appeared — provider change did not request a restart',
   });
   await btn.click();
+  let failed = false;
   let restartError = '';
   await browser.waitUntil(
     async () => {
       const error = await $('[data-testid="restart-error"]');
       if (await error.isExisting()) {
+        failed = true;
         restartError = await error.getText();
         return true;
       }
@@ -41,7 +43,7 @@ export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> 
       timeoutMsg: `restart-overlay still visible after ${timeoutMs}ms — restart did not complete`,
     }
   );
-  if (restartError) throw new Error(`restart failed: ${restartError}`);
+  if (failed) throw new Error(`restart failed: ${restartError || '(no error text)'}`);
 }
 
 /**
