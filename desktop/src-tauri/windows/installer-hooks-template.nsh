@@ -24,6 +24,14 @@ Var SpeedwaveDataDirOverride
 
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", i 0)i'
+
+  ${GetFileName} "$INSTDIR" $0
+  ${If} $0 == "${PRODUCTNAME}"
+    RMDir /r "$INSTDIR\build-context"
+    RMDir /r "$INSTDIR\mcp-os"
+    RMDir /r "$INSTDIR\oauth"
+    RMDir /r "$INSTDIR\THIRD-PARTY-LICENSES"
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

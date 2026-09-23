@@ -85,6 +85,18 @@ The bundled Node.js subdir literal `"nodejs"` (the path component the PRE-INSTAL
 | `desktop/src-tauri/windows/installer-hooks.nsh`         | PRE-INSTALL sweep target (`$INSTDIR\nodejs\`) |
 | `crates/speedwave-runtime/src/binary.rs` / `bundle.rs`  | Bundle layout — must use `NODEJS_SUBDIR`      |
 
+## Amendment (2026-09-23): PRE-INSTALL resets the bundled resource trees
+
+**Context.** Tauri's NSIS installer never runs the previous version's uninstaller in update mode ("In update mode, always proceeds without uninstalling")[^10], and the in-app updater always launches it with `/UPDATE`[^11]. A silent (`/S`) install skips that uninstaller as well: it is started from the reinstall page's leave callback, and a silent installer calls no page callback[^12]. The install section then only writes the files of the new release (one `File /a` per bundled resource)[^13], so every file a release stops shipping stays under `$INSTDIR`. The runtime builds container images straight from `$INSTDIR\build-context` (`build.rs::resolve_build_root`, through the `resources-dir` marker), so such a leftover reaches `nerdctl build`. After an in-place 0.17.0 to 0.18.1 update, the hub image compiled `mcp-servers/hub/src/pii-tokenizer.ts`, which 0.18.0 had removed, against the new `hub-types.ts` and failed with `TS2305`, so no project could start. Uninstalling and reinstalling did not help, because the uninstaller deletes only the files its own release shipped and removes the resource directories without `/r`[^14].
+
+**Decision.** `NSIS_HOOK_PREINSTALL` removes with `RMDir /r`[^15] every directory resource that `tauri.windows.conf.json` declares (`build-context`, `mcp-os`, `oauth`, `THIRD-PARTY-LICENSES`), after the sweep and before Tauri writes the new files[^13]. These trees are application payload that every install lays down in full; user data lives under `$PROFILE\.speedwave`. The reset runs only when the last path component of `$INSTDIR` equals `${PRODUCTNAME}`. The default per-user location is `$LOCALAPPDATA\${PRODUCTNAME}`, and the directory page appends the product name to a browsed folder because `InstallDir` ends in it[^16], so every standard install is reset, while a folder typed by hand (which may hold an unrelated `oauth` or `build-context` directory) is never removed recursively. A guard on `$INSTDIR\${MAINBINARYNAME}.exe` was rejected: the reinstall page selects its first choice ("uninstall before installing" on an upgrade) by default and continues only once that uninstaller has deleted the executable[^17], so the guard would skip the reset on exactly the reinstall a stuck user tries first. A file that cannot be removed sets the error flag, and the install proceeds as it did before this amendment[^15].
+
+The MSI needs no equivalent: Tauri's WiX template schedules `MajorUpgrade` after `InstallInitialize`[^18], and Windows Installer then removes the entire previous product, including files the new one no longer ships[^19].
+
+**Guard.** `desktop/src-tauri/src/installer_hooks.rs` pins the hook: the set of `RMDir /r` targets in PREINSTALL must equal the directory resources of `tauri.windows.conf.json`, so a new directory resource fails the test until the hook clears it, and every removal must sit after the sweep, inside the `${PRODUCTNAME}` guard.
+
+**Consequences.** An update or reinstall into a directory named after the product replaces the resource trees wholesale, so no file a release stops shipping reaches the image build or the `claude-resources` sync. Installs that already carry such a file (the 0.17.0 `pii-tokenizer.ts` under 0.18.x) are cleaned by their first update to a release with the reset; until then, deleting that file restores the hub build. An install into a hand-typed folder not named after the product keeps the previous behavior.
+
 [^1]: GitHub issue #613 - "WSL distro not removed on uninstall / factory reset": https://github.com/speednet-software/speedwave/issues/613
 
 [^2]: Tauri NSIS bundler `installerHooks` configuration key: https://v2.tauri.app/reference/config/#nsis
@@ -102,3 +114,23 @@ The bundled Node.js subdir literal `"nodejs"` (the path component the PRE-INSTAL
 [^8]: `PROC_THREAD_ATTRIBUTE_JOB_LIST` - assigns job objects to a child process atomically at creation via `UpdateProcThreadAttribute`, avoiding the spawn-then-assign race: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute
 
 [^9]: `Get-CimInstance` (PowerShell) - queries CIM/WMI classes such as `Win32_Process`: https://learn.microsoft.com/en-us/powershell/module/cimcmdlets/get-ciminstance?view=powershell-7.5
+
+[^10]: Tauri CLI 2.11.4 NSIS template - `PageLeaveReinstall` jumps past the uninstall when `$UpdateMode = 1`: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L318-L321
+
+[^11]: tauri-plugin-updater 2.10.1 - the NSIS installer arguments always include `/UPDATE`: https://github.com/tauri-apps/plugins-workspace/blob/updater-v2.10.1/plugins/updater/src/updater.rs#L812
+
+[^12]: NSIS Scripting Reference 4.12, Silent Installers/Uninstallers - "any callback related to a specific page or page type will not be called": https://nsis.sourceforge.io/Docs/Chapter4.html#silent; the previous uninstaller is started from `PageLeaveReinstall`: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L310-L384
+
+[^13]: Tauri CLI 2.11.4 NSIS template - `NSIS_HOOK_PREINSTALL` is inserted before the `File /a` commands that write the bundled resources: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L641-L655
+
+[^14]: Tauri CLI 2.11.4 NSIS template - the uninstaller deletes each resource file its release shipped and removes the resource directories with `RMDir /REBOOTOK`, without `/r`: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L788-L818
+
+[^15]: NSIS `RMDir` - "If /r is specified the directory will be removed recursively"; "The error flag is set if any file or directory cannot be removed": https://nsis.sourceforge.io/Docs/Chapter4.html#rmdir
+
+[^16]: NSIS `InstallDir` - "the part of this string following the last \ will be used if the user selects 'browse', and may be appended back on to the string at install time": https://nsis.sourceforge.io/Docs/Chapter4.html#ainstalldir; Tauri sets it to `placeholder\${PRODUCTNAME}` and defaults a per-user install to `$LOCALAPPDATA\${PRODUCTNAME}`: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L86-L87 and https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L514
+
+[^17]: Tauri CLI 2.11.4 NSIS template - the reinstall page checks its first radio button by default and aborts unless the uninstaller removed `$INSTDIR\${MAINBINARYNAME}.exe`: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L293 and https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi#L368
+
+[^18]: Tauri CLI 2.11.4 WiX template - `<MajorUpgrade Schedule="afterInstallInitialize" .../>`: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/msi/main.wxs#L41-L43
+
+[^19]: Windows Installer `RemoveExistingProducts` action - "If the Remove field is blank, its value defaults to ALL and the installer removes the entire product"; scheduling it after `InstallInitialize` is a supported placement: https://learn.microsoft.com/en-us/windows/win32/msi/removeexistingproducts-action

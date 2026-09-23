@@ -7,6 +7,7 @@ mod tests {
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
     const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
+    const TAURI_WINDOWS_CONF: &str = include_str!("../tauri.windows.conf.json");
     const INSTALLER_PS1_SOURCES: [(&str, &str); 2] =
         [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)];
 
@@ -58,6 +59,49 @@ mod tests {
             pre.contains(r#"StrCpy $1 "$PROFILE\.speedwave""#),
             "PREINSTALL must fall back to $PROFILE\\.speedwave for SPW_DATA_DIR"
         );
+    }
+
+    #[test]
+    fn preinstall_removes_exactly_the_windows_directory_resources() {
+        let roots = windows_directory_resource_roots();
+        assert!(
+            roots.contains("build-context"),
+            "tauri.windows.conf.json must bundle build-context/ as a directory resource: {roots:?}"
+        );
+        assert_eq!(
+            recursive_removals(section(HOOKS, "NSIS_HOOK_PREINSTALL")),
+            roots,
+            "PREINSTALL must RMDir /r every directory resource Tauri lays down and nothing else: \
+             an /UPDATE install never runs the previous uninstaller, so files a release drops stay behind"
+        );
+    }
+
+    #[test]
+    fn preinstall_resets_resource_trees_after_the_sweep_inside_a_product_named_dir() {
+        let pre = section(HOOKS, "NSIS_HOOK_PREINSTALL");
+        let sweep = pre
+            .find(r#"$\"$PLUGINSDIR\sweep.ps1$\""#)
+            .expect("PREINSTALL must run the sweep");
+        let leaf = pre
+            .find(r#"${GetFileName} "$INSTDIR" $0"#)
+            .expect("PREINSTALL must read the last path component of $INSTDIR");
+        let guard = pre
+            .find(r#"${If} $0 == "${PRODUCTNAME}""#)
+            .expect("PREINSTALL must gate the reset on an install dir named after the product");
+        let end = guard
+            + pre[guard..]
+                .find("${EndIf}")
+                .expect("the reset guard must be closed");
+        assert!(
+            sweep < leaf && leaf < guard,
+            "the reset must follow the sweep, which releases handles held under $INSTDIR"
+        );
+        for (at, _) in pre.match_indices("RMDir /r") {
+            assert!(
+                guard < at && at < end,
+                "every RMDir /r in PREINSTALL must sit inside the product-named-dir guard"
+            );
+        }
     }
 
     #[test]
@@ -526,6 +570,36 @@ mod tests {
             .find("!macroend")
             .unwrap_or_else(|| panic!("unterminated !macro {name}"));
         &after[..end]
+    }
+
+    fn windows_directory_resource_roots() -> std::collections::BTreeSet<String> {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_WINDOWS_CONF).expect("tauri.windows.conf.json must parse");
+        conf["bundle"]["resources"]
+            .as_object()
+            .expect("tauri.windows.conf.json must map bundle.resources")
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|target| target.ends_with('/'))
+            .filter_map(|target| target.split('/').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn recursive_removals(hook: &str) -> std::collections::BTreeSet<String> {
+        hook.lines()
+            .filter_map(|line| line.trim().strip_prefix("RMDir /r "))
+            .map(|target| {
+                target
+                    .strip_prefix(r#""$INSTDIR\"#)
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .filter(|dir| !dir.is_empty() && !dir.contains(['\\', '/', '$']))
+                    .unwrap_or_else(|| {
+                        panic!("RMDir /r must name a single child of $INSTDIR, got {target}")
+                    })
+                    .to_owned()
+            })
+            .collect()
     }
 
     fn render_expected_hooks(
