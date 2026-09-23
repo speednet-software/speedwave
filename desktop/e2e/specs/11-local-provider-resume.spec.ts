@@ -1,5 +1,5 @@
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { confirmRestartAndWait } from '../helpers/shell';
+import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import {
   openSettings,
   openChat,
@@ -34,7 +34,7 @@ describe('Local Provider + Resume', function () {
   });
 
   it('switches the provider to the local server (full restart)', async function () {
-    this.timeout(240_000);
+    this.timeout(RESTART_WAIT_MS + 60_000);
     const local = requireLocalLlm();
     await openSettings();
     await configureLocalProvider(local.baseUrl, local.apiKey);
@@ -76,7 +76,7 @@ describe('Local Provider + Resume', function () {
   });
 
   it('switches back to OpenRouter (provider change works both ways)', async function () {
-    this.timeout(240_000);
+    this.timeout(RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
     await confirmRestartAndWait();

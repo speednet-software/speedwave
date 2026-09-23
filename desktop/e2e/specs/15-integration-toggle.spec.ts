@@ -18,7 +18,7 @@
  */
 
 import { switchToProject, activeProjectSlug, containersRunning } from '../helpers/projects';
-import { confirmRestartAndWait } from '../helpers/shell';
+import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import { openIntegrations, toggleIntegration, rowStatus } from '../helpers/llm';
 
 const NO_LLM_PROJECT = 'e2e-second';
@@ -69,7 +69,7 @@ describe('Integration Toggle', function () {
     });
 
     it('enables an integration and restarts to running', async function () {
-      this.timeout(240_000);
+      this.timeout(RESTART_WAIT_MS + 60_000);
       await toggleIntegration(SERVICE);
       await confirmRestartAndWait();
       await openIntegrations();
@@ -81,7 +81,7 @@ describe('Integration Toggle', function () {
     });
 
     it('disables the integration and restarts', async function () {
-      this.timeout(240_000);
+      this.timeout(RESTART_WAIT_MS + 60_000);
       await toggleIntegration(SERVICE);
       await confirmRestartAndWait();
       await openIntegrations();

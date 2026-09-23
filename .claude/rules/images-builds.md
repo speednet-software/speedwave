@@ -7,6 +7,9 @@ paths:
   - 'crates/speedwave-runtime/src/bundle.rs'
   - 'scripts/bundle-build-context.sh'
   - 'scripts/bundle-build-context.ps1'
+  - '.lima-version'
+  - 'crates/speedwave-runtime/src/consts.rs'
+  - 'crates/speedwave-runtime/src/provision.rs'
 ---
 
 # Container Images & Builds
@@ -26,4 +29,4 @@ paths:
 - **New image checklist:** `IMAGES` entry with `hash_inputs` + `${IMAGE_*}` placeholder + bundle-script list entry (all test-guarded) · **`tzdata`** installed (apk/apt) or zoneinfo COPY'd for scratch images — MANUAL, nothing catches a miss, and without it the injected `TZ` degrades to a numeric offset · `DEBIAN_FRONTEND=noninteractive` on every `apt-get install` (test-guarded — an interactive tzdata prompt hangs BuildKit forever) · SHA256-verify any downloaded binary · resource entry on the service descriptor, never a literal in the template.
 - **Bundle scripts copy the containers tree (`BUNDLE_CONTAINERS_DIR`) and `crates/pii-engine` through `copy_tree` (.sh) / `Copy-Tree` (.ps1)**, which skip `bundle.rs::HOST_BUILD_OUTPUT_DIRS` up front. Never a whole-tree `cp -r`/`Copy-Item -Recurse` there: `make test` runs `test-proxy` in parallel, and a `cargo build` writing `containers/proxy/target` races the copy (a vanished `rustcXXXX` temp file failed the bundle).
 - **Claude-resources are not baked** into the claude image — they sync to the data dir and mount at start; editing a skill in the repo does not reach a running container without sync/restart.
-- **Bumping the nerdctl pin requires a green `make test-engine-contract`** — that suite pins the real-nerdctl name-store/classifier/flock semantics the self-heal (#932) relies on; a pin bump that changes those phrases or exit codes must be caught here before it reaches the renderer.
+- **Bumping the nerdctl pin (`.lima-version`, `consts::NERDCTL_FULL_VERSION`) or the WSL rootfs (`consts::WSL_ROOTFS_*`) requires a green engine contract (`_tests/e2e/engine-contract.bats`) on the bumped engine.** The suite pins the real-engine semantics the self-heal (#932) and the compose up deadline rely on: nerdctl's name-store/classifier/flock phrases, containerd's task-bundle and registered-task collision texts, and the guest coreutils `timeout --signal=KILL --verbose` line together with its immediate kill of a TERM-ignoring child. `make test-engine-contract` drives only the local macOS dev VM (`ENGINE_CONTRACT_EXEC`) and proves a bump only once that VM runs the bumped engine; the WSL rootfs is exercised only by the rig pipeline's engine-contract step (`scripts/e2e-vm.sh`, live window), which also covers a freshly provisioned production-style Lima install. The Lima guest image has no pin to bump: `provision.rs` points at the floating Ubuntu 24.04 release, which only a newly created VM reads, so its drift surfaces only in that fresh rig install. A change to those phrases or exit codes must be caught there before it reaches the renderer.

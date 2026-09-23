@@ -763,6 +763,64 @@ pub fn ensure_exec_healthy(
     })
 }
 
+const COMPOSE_UP_TIMEOUT_SECS: u64 = 180;
+const COMPOSE_UP_DEADLINE_FRAGMENT: &str = "timeout: sending signal KILL";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpMode<'a> {
+    Diverged,
+    All,
+    Service(&'a str),
+    Rejoin(&'a str),
+}
+
+impl<'a> UpMode<'a> {
+    pub(crate) fn after_task_collision(self) -> UpMode<'a> {
+        match self {
+            UpMode::Service(service) => UpMode::Rejoin(service),
+            other => other,
+        }
+    }
+}
+
+pub(crate) fn compose_up_argv(compose_file: &str, project: &str, mode: UpMode<'_>) -> Vec<String> {
+    let limit = COMPOSE_UP_TIMEOUT_SECS.to_string();
+    let mode_args = match mode {
+        UpMode::Diverged => vec!["--remove-orphans"],
+        UpMode::All => vec!["--force-recreate", "--remove-orphans"],
+        UpMode::Service(service) => vec!["--force-recreate", service],
+        UpMode::Rejoin(service) => vec![service],
+    };
+    [
+        "timeout",
+        "--signal=KILL",
+        "--verbose",
+        limit.as_str(),
+        "nerdctl",
+        "compose",
+        "-f",
+        compose_file,
+        "-p",
+        project,
+        "up",
+        "-d",
+    ]
+    .into_iter()
+    .chain(mode_args)
+    .map(str::to_string)
+    .collect()
+}
+
+pub(crate) fn explain_compose_up_deadline(e: anyhow::Error) -> anyhow::Error {
+    if e.to_string().contains(COMPOSE_UP_DEADLINE_FRAGMENT) {
+        anyhow::anyhow!(
+            "compose up did not finish within {COMPOSE_UP_TIMEOUT_SECS}s and was stopped: {e}"
+        )
+    } else {
+        e
+    }
+}
+
 /// Max `compose_validate` attempts; 100/200/400/800/1600 ms backoff (~3.1 s) for
 /// the guest to see the host write through virtiofs (300 ms was too short).
 const COMPOSE_VALIDATE_MAX_ATTEMPTS: u32 = 6;
@@ -975,6 +1033,25 @@ pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(Str
     out
 }
 
+const TASK_CREATE_COLLISION_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+const TASK_BUNDLE_DIR_FRAGMENT: &str = "io.containerd.runtime.v2.task/";
+const TASK_ALREADY_EXISTS_FRAGMENT: &str = ": already exists";
+
+fn is_task_create_collision(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    (s.contains("mkdir ") && s.contains(TASK_BUNDLE_DIR_FRAGMENT) && s.contains("file exists"))
+        || names_an_existing_task(&s)
+}
+
+fn names_an_existing_task(s: &str) -> bool {
+    s.match_indices("task ").any(|(i, needle)| {
+        let rest = &s[i + needle.len()..];
+        rest.len() > 64
+            && rest.as_bytes()[..64].iter().all(u8::is_ascii_hexdigit)
+            && rest[64..].starts_with(TASK_ALREADY_EXISTS_FRAGMENT)
+    })
+}
+
 /// Shared fail-closed per-entry heal function + flock gate. The destructive `rm`
 /// runs under the store's own flock (the lock nerdctl's name-store uses).
 fn name_store_script_header(layout: &NameStoreLayout) -> String {
@@ -1080,24 +1157,53 @@ pub(crate) fn registered_compose_projects() -> Vec<String> {
         .collect()
 }
 
-/// Runs `up`; heals and retries: name-store once, CNI on its first failure and on each
-/// `Chain already exists` naming a chain not targeted yet (capped). Else error = latest `up`'s.
-pub(crate) fn with_engine_state_heal<U, C, N>(
+pub(crate) fn with_engine_state_heal<U, R, C, N>(
     project: &str,
     up: U,
-    mut cni_cleanup: C,
+    rejoin: R,
+    cni_cleanup: C,
     name_store_cleanup: N,
 ) -> anyhow::Result<()>
 where
     U: Fn() -> anyhow::Result<()>,
+    R: Fn() -> anyhow::Result<()>,
     C: FnMut(&CniTargets) -> anyhow::Result<()>,
     N: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
+{
+    with_engine_state_heal_settling(
+        project,
+        up,
+        rejoin,
+        cni_cleanup,
+        name_store_cleanup,
+        std::thread::sleep,
+    )
+}
+
+fn with_engine_state_heal_settling<U, R, C, N, S>(
+    project: &str,
+    up: U,
+    rejoin: R,
+    mut cni_cleanup: C,
+    name_store_cleanup: N,
+    mut settle: S,
+) -> anyhow::Result<()>
+where
+    U: Fn() -> anyhow::Result<()>,
+    R: Fn() -> anyhow::Result<()>,
+    C: FnMut(&CniTargets) -> anyhow::Result<()>,
+    N: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
+    S: FnMut(std::time::Duration),
 {
     let mut cni_heals = 0;
     let mut cni_targeted = std::collections::BTreeSet::new();
     let mut name_store_cleanup = Some(name_store_cleanup);
+    let mut task_collision_retried = false;
+    let mut rejoin_next = false;
     loop {
-        let Err(e) = up() else {
+        let attempt = if rejoin_next { rejoin() } else { up() };
+        rejoin_next = false;
+        let Err(e) = attempt else {
             return Ok(());
         };
         let healed = if is_stale_cni_error(&e) {
@@ -1122,6 +1228,7 @@ where
                 if let Err(ce) = cni_cleanup(&targets) {
                     log::warn!("CNI cleanup failed (continuing to retry): {ce}");
                 }
+                task_collision_retried = false;
                 true
             } else {
                 false
@@ -1133,10 +1240,17 @@ where
                     if let Err(ce) = cleanup(&e) {
                         log::warn!("name-store cleanup failed (continuing to retry): {ce}");
                     }
+                    task_collision_retried = false;
                     true
                 }
                 None => false,
             }
+        } else if is_task_create_collision(&e) && !task_collision_retried {
+            task_collision_retried = true;
+            log::warn!("compose up raced another start of the same container ({e}); retrying once in {TASK_CREATE_COLLISION_SETTLE:?}");
+            settle(TASK_CREATE_COLLISION_SETTLE);
+            rejoin_next = true;
+            true
         } else {
             false
         };
@@ -3026,6 +3140,296 @@ services:
         );
     }
 
+    fn task_bundle_collision_err() -> anyhow::Error {
+        anyhow::anyhow!(
+            "limactl failed: time=\"2026-09-23T00:31:30+02:00\" level=fatal \
+             msg=\"mkdir /run/containerd/io.containerd.runtime.v2.task/default/\
+             572494980b1f1310f4fae98c7648e2058a1c19c047af6749bfc549f363e2e7de: file exists\"\n\
+             time=\"2026-09-23T00:31:30+02:00\" level=fatal msg=\"error while creating container \
+             speedwave_acme_proxy: error while creating container speedwave_acme_proxy: exit status 1\""
+        )
+    }
+
+    fn heal_recording_settles<U>(up: U) -> (anyhow::Result<()>, Vec<std::time::Duration>)
+    where
+        U: Fn() -> anyhow::Result<()>,
+    {
+        let mut settles = Vec::new();
+        let r = with_engine_state_heal_settling(
+            "acme",
+            &up,
+            &up,
+            |_t| -> anyhow::Result<()> { panic!("CNI cleanup must not run on a task collision") },
+            |_e| -> anyhow::Result<()> {
+                panic!("name-store cleanup must not run on a task collision")
+            },
+            |d| settles.push(d),
+        );
+        (r, settles)
+    }
+
+    fn task_already_registered_err() -> anyhow::Error {
+        anyhow::anyhow!(
+            "wsl.exe failed: time=\"2026-09-23T15:19:29+02:00\" level=fatal \
+             msg=\"1 errors:\\ntask \
+             1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: \
+             already exists\"\ntime=\"2026-09-23T15:19:29+02:00\" level=fatal \
+             msg=\"error while starting existing container speedwave_e2e-second_proxy: \
+             error while creating container speedwave_e2e-second_proxy: exit status 1\""
+        )
+    }
+
+    #[test]
+    fn engine_state_heal_waits_then_retries_once_when_another_start_holds_the_task_bundle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let (r, settles) = heal_recording_settles(|| {
+            if ups.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(task_bundle_collision_err())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(r.is_ok(), "the retry after the collision succeeds: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
+        assert_eq!(
+            settles,
+            vec![TASK_CREATE_COLLISION_SETTLE],
+            "waits once before the retry"
+        );
+    }
+
+    #[test]
+    fn engine_state_heal_retries_a_task_bundle_collision_only_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let (r, settles) = heal_recording_settles(|| {
+            ups.fetch_add(1, Ordering::SeqCst);
+            Err(task_bundle_collision_err())
+        });
+        let err = r.expect_err("a collision that persists must propagate");
+        assert!(err.to_string().contains("file exists"), "got: {err}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "exactly one retry");
+        assert_eq!(settles.len(), 1, "one wait for the one retry");
+    }
+
+    #[test]
+    fn engine_state_heal_does_not_retry_a_file_exists_outside_the_task_bundles() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let (r, settles) = heal_recording_settles(|| {
+            ups.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!(
+                "level=fatal msg=\"mkdir /var/lib/nerdctl/1935db59/containers/default/\
+                 572494980b1f1310f4fae98c7648e2058a1c19c047af6749bfc549f363e2e7de: file exists\""
+            )
+        });
+        assert!(r.is_err());
+        assert_eq!(ups.load(Ordering::SeqCst), 1, "no retry for another path");
+        assert!(settles.is_empty(), "no wait without a retry");
+    }
+
+    #[test]
+    fn engine_state_heal_waits_then_retries_once_when_another_start_already_registered_the_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let (r, settles) = heal_recording_settles(|| {
+            if ups.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(task_already_registered_err())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(r.is_ok(), "the retry after the collision succeeds: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
+        assert_eq!(
+            settles,
+            vec![TASK_CREATE_COLLISION_SETTLE],
+            "waits once before the retry"
+        );
+    }
+
+    #[test]
+    fn engine_state_heal_does_not_retry_an_already_exists_that_names_no_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for raw in [
+            "level=fatal msg=\"task 1d5a4194: already exists\"",
+            "level=fatal msg=\"network speedwave_acme_network already exists\"",
+            "level=fatal msg=\"task \u{00e9}\
+             1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: already exists\"",
+        ] {
+            let ups = AtomicUsize::new(0);
+            let (r, settles) = heal_recording_settles(|| {
+                ups.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("{raw}")
+            });
+            assert!(r.is_err(), "{raw}");
+            assert_eq!(ups.load(Ordering::SeqCst), 1, "no retry for: {raw}");
+            assert!(settles.is_empty(), "no wait for: {raw}");
+        }
+    }
+
+    #[test]
+    fn engine_state_heal_rejoins_the_raced_container_instead_of_rerunning_up() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let mut settles = Vec::new();
+        let r = with_engine_state_heal_settling(
+            "acme",
+            || {
+                calls.lock().unwrap().push("up");
+                Err(task_already_registered_err())
+            },
+            || {
+                calls.lock().unwrap().push("rejoin");
+                Ok(())
+            },
+            |_t| -> anyhow::Result<()> { panic!("CNI cleanup must not run on a task collision") },
+            |_e| -> anyhow::Result<()> {
+                panic!("name-store cleanup must not run on a task collision")
+            },
+            |d| settles.push(d),
+        );
+        assert!(r.is_ok(), "the rejoin settles the race: {r:?}");
+        assert_eq!(*calls.lock().unwrap(), ["up", "rejoin"]);
+        assert_eq!(settles, vec![TASK_CREATE_COLLISION_SETTLE]);
+    }
+
+    #[test]
+    fn a_task_collision_rejoins_a_single_service_without_recreating_it_again() {
+        assert_eq!(
+            UpMode::Service("proxy").after_task_collision(),
+            UpMode::Rejoin("proxy")
+        );
+        assert_eq!(
+            UpMode::Rejoin("proxy").after_task_collision(),
+            UpMode::Rejoin("proxy")
+        );
+        assert_eq!(UpMode::All.after_task_collision(), UpMode::All);
+        assert_eq!(UpMode::Diverged.after_task_collision(), UpMode::Diverged);
+        let argv = compose_up_argv("/c/compose.yml", "acme", UpMode::Rejoin("proxy"));
+        assert_eq!(argv[argv.len() - 3..], ["up", "-d", "proxy"], "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "--force-recreate"), "{argv:?}");
+    }
+
+    #[test]
+    fn engine_state_heal_allows_another_task_collision_retry_after_a_cni_heal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = AtomicUsize::new(0);
+        let calls = std::sync::Mutex::new(Vec::new());
+        let attempt = |kind: &'static str| {
+            calls.lock().unwrap().push(kind);
+            match attempts.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(task_bundle_collision_err()),
+                1 => anyhow::bail!(
+                    "iptables -t nat -N CNI-7d758820f15d96676b3d9851: Chain already exists"
+                ),
+                2 => Err(task_already_registered_err()),
+                _ => Ok(()),
+            }
+        };
+        let cni_cleaned = AtomicUsize::new(0);
+        let mut settles = Vec::new();
+        let r = with_engine_state_heal_settling(
+            "e2e-second",
+            || attempt("up"),
+            || attempt("rejoin"),
+            |_t| {
+                cni_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run") },
+            |d| settles.push(d),
+        );
+        assert!(
+            r.is_ok(),
+            "the race after the CNI heal gets its own retry: {r:?}"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["up", "rejoin", "up", "rejoin"],
+            "a collision is followed by a rejoin, any other heal by a full up"
+        );
+        assert_eq!(cni_cleaned.load(Ordering::SeqCst), 1, "CNI heal ran once");
+        assert_eq!(settles.len(), 2, "one wait per collision retry");
+    }
+
+    #[test]
+    fn engine_state_heal_heals_all_three_classes_in_one_up() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = AtomicUsize::new(0);
+        let calls = std::sync::Mutex::new(Vec::new());
+        let name = own_name("acme", "mcp_hub");
+        let attempt = |kind: &'static str| {
+            calls.lock().unwrap().push(kind);
+            match attempts.fetch_add(1, Ordering::SeqCst) {
+                0 => anyhow::bail!("iptables: Chain already exists"),
+                1 => Err(ns_conflict_err(&name, DEAD_ID)),
+                2 => Err(task_bundle_collision_err()),
+                _ => Ok(()),
+            }
+        };
+        let cni_cleaned = AtomicUsize::new(0);
+        let ns_cleaned = AtomicUsize::new(0);
+        let mut settles = Vec::new();
+        let r = with_engine_state_heal_settling(
+            "acme",
+            || attempt("up"),
+            || attempt("rejoin"),
+            |_t| {
+                cni_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_e| {
+                ns_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |d| settles.push(d),
+        );
+        assert!(r.is_ok(), "the fourth up succeeds after three heals: {r:?}");
+        assert_eq!(*calls.lock().unwrap(), ["up", "up", "up", "rejoin"]);
+        assert_eq!(cni_cleaned.load(Ordering::SeqCst), 1, "CNI heal ran once");
+        assert_eq!(
+            ns_cleaned.load(Ordering::SeqCst),
+            1,
+            "name-store heal ran once"
+        );
+        assert_eq!(settles.len(), 1, "one wait for the collision retry");
+    }
+
+    #[test]
+    fn engine_contract_bats_pins_the_task_collision_and_up_deadline_phrases() {
+        let bats = include_str!("../../../../_tests/e2e/engine-contract.bats");
+        assert!(
+            bats.contains(&format!(
+                "TASKS=/run/containerd/{TASK_BUNDLE_DIR_FRAGMENT}{}",
+                consts::CONTAINERD_NAMESPACE
+            )),
+            "engine-contract.bats TASKS= must be the task bundle root the collision heal keys on"
+        );
+        assert!(
+            bats.contains(&format!("task $PAUSED_ID{TASK_ALREADY_EXISTS_FRAGMENT}")),
+            "engine-contract.bats must pin containerd's registered-task text the heal keys on"
+        );
+        assert!(
+            bats.contains(&format!("{COMPOSE_UP_DEADLINE_FRAGMENT} to command")),
+            "engine-contract.bats must pin the timeout line explain_compose_up_deadline keys on"
+        );
+    }
+
+    #[test]
+    fn e2e_restart_wait_outlasts_an_up_stopped_at_the_deadline_and_its_rollback() {
+        let helper = include_str!("../../../../desktop/e2e/helpers/shell.ts");
+        let wait_ms: u64 = helper
+            .lines()
+            .find_map(|line| line.strip_prefix("export const RESTART_WAIT_MS = "))
+            .and_then(|value| value.trim_end_matches(';').replace('_', "").parse().ok())
+            .expect("shell.ts must export RESTART_WAIT_MS as a numeric literal");
+        assert!(
+            wait_ms >= 2 * COMPOSE_UP_TIMEOUT_SECS * 1000,
+            "RESTART_WAIT_MS ({wait_ms} ms) must outlast an up stopped at the deadline plus its rollback up"
+        );
+    }
+
     #[test]
     fn is_propagation_error_matches_undefined_network() {
         assert!(is_propagation_error(&anyhow::anyhow!(
@@ -3171,12 +3575,14 @@ time="2026-09-23T01:10:08+02:00" level=fatal msg="error while starting existing 
         let ups = AtomicUsize::new(0);
         let mut cni_heal_targets = Vec::new();
         let mut name_store_heals = 0;
+        let up = || {
+            ups.fetch_add(1, Ordering::SeqCst);
+            failures.lock().unwrap().pop_front().map_or(Ok(()), Err)
+        };
         let result = with_engine_state_heal(
             "acme",
-            || {
-                ups.fetch_add(1, Ordering::SeqCst);
-                failures.lock().unwrap().pop_front().map_or(Ok(()), Err)
-            },
+            up,
+            up,
             |cni_targets| {
                 cni_heal_targets.push(cni_targets.ids().cloned().collect());
                 cni_cleanup_outcome()
