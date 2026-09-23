@@ -776,6 +776,109 @@ fn collect_directory_entries(
     Ok(())
 }
 
+/// List of the files a release ships, written into each staged build-context tree by
+/// `bundle-build-context.{sh,ps1}` and read by [`prune_unshipped_files`].
+pub(crate) const SHIPPED_FILES_LIST: &str = ".speedwave-shipped-files";
+/// Build-context trees that carry a [`SHIPPED_FILES_LIST`].
+pub(crate) const SHIPPED_TREES: [&str; 2] = ["containers", "mcp-servers"];
+
+/// Removes from each build-context tree under `build_root` the files its [`SHIPPED_FILES_LIST`]
+/// does not name, without following links. A tree without a list is left alone, and a list that
+/// does not describe its tree is refused before anything is removed. Returns the removed paths.
+pub fn prune_unshipped_files(build_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for tree in SHIPPED_TREES {
+        let root = build_root.join(tree);
+        let list_path = root.join(SHIPPED_FILES_LIST);
+        let list = match std::fs::read_to_string(&list_path) {
+            Ok(list) => list,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", list_path.display())),
+        };
+        let shipped = parse_shipped_files(&list, &list_path)?;
+        let mut files = std::collections::HashMap::new();
+        let mut links = std::collections::HashSet::new();
+        collect_tree_entries(&root, &root, &mut files, &mut links)?;
+        files.remove(&SHIPPED_FILES_LIST.to_lowercase());
+        if let Some(missing) = shipped
+            .iter()
+            .find(|entry| !files.contains_key(*entry) && !links.contains(*entry))
+        {
+            anyhow::bail!(
+                "{} names {missing}, which {} does not hold: the list does not describe this tree",
+                list_path.display(),
+                root.display()
+            );
+        }
+        for (entry, path) in files {
+            if !shipped.contains(&entry) {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                removed.push(path);
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn parse_shipped_files(
+    list: &str,
+    list_path: &Path,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let mut shipped = std::collections::HashSet::new();
+    for line in list.lines() {
+        let entry = line.trim_end_matches('\r');
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.contains('\\') || entry.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            anyhow::bail!(
+                "{} names {entry:?}, which is not a relative path inside its tree",
+                list_path.display()
+            );
+        }
+        shipped.insert(entry.to_lowercase());
+    }
+    if shipped.is_empty() {
+        anyhow::bail!("{} names no file", list_path.display());
+    }
+    Ok(shipped)
+}
+
+fn collect_tree_entries(
+    root: &Path,
+    dir: &Path,
+    files: &mut std::collections::HashMap<String, PathBuf>,
+    links: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("listing {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading the type of {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_tree_entries(root, &path, files, links)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .with_context(|| format!("{} is outside {}", path.display(), root.display()))?
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+            .to_lowercase();
+        if file_type.is_symlink() {
+            links.insert(rel);
+        } else {
+            files.insert(rel, path);
+        }
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -2045,5 +2148,195 @@ mod tests {
             tauri_cfg.contains(&expected),
             "tauri.macos.conf.json must bundle {expected}; rename it there too"
         );
+    }
+
+    fn plant(root: &Path, files: &[&str]) {
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, file).unwrap();
+        }
+    }
+
+    fn write_list(tree: &Path, entries: &str) {
+        std::fs::create_dir_all(tree).unwrap();
+        std::fs::write(tree.join(SHIPPED_FILES_LIST), entries).unwrap();
+    }
+
+    fn relative_files(root: &Path) -> Vec<String> {
+        let mut files = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    dirs.push(entry.path());
+                } else {
+                    let rel = entry.path().strip_prefix(root).unwrap().to_path_buf();
+                    files.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn prune_unshipped_files_removes_every_file_the_lists_do_not_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(
+            root,
+            &[
+                "containers/Containerfile.claude",
+                "containers/claude-resources/skills/current/SKILL.md",
+                "containers/claude-resources/skills/retired/SKILL.md",
+                "mcp-servers/hub/src/index.ts",
+                "mcp-servers/hub/src/pii-tokenizer.ts",
+            ],
+        );
+        write_list(
+            &root.join("containers"),
+            "Containerfile.claude\nclaude-resources/skills/current/SKILL.md\n",
+        );
+        write_list(&root.join("mcp-servers"), "hub/src/index.ts\n");
+
+        let mut removed: Vec<String> = prune_unshipped_files(root)
+            .unwrap()
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        removed.sort();
+
+        assert_eq!(
+            removed,
+            [
+                "containers/claude-resources/skills/retired/SKILL.md",
+                "mcp-servers/hub/src/pii-tokenizer.ts",
+            ]
+        );
+        assert_eq!(
+            relative_files(root),
+            [
+                "containers/.speedwave-shipped-files",
+                "containers/Containerfile.claude",
+                "containers/claude-resources/skills/current/SKILL.md",
+                "mcp-servers/.speedwave-shipped-files",
+                "mcp-servers/hub/src/index.ts",
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_unshipped_files_matches_names_case_insensitively_and_tolerates_crlf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(root, &["mcp-servers/hub/src/Hub-Types.ts"]);
+        write_list(&root.join("mcp-servers"), "hub/src/hub-types.ts\r\n");
+
+        assert!(prune_unshipped_files(root).unwrap().is_empty());
+        assert_eq!(
+            relative_files(&root.join("mcp-servers")),
+            [".speedwave-shipped-files", "hub/src/Hub-Types.ts"]
+        );
+    }
+
+    #[test]
+    fn prune_unshipped_files_leaves_a_tree_without_a_list_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(root, &["mcp-servers/hub/src/pii-tokenizer.ts"]);
+
+        assert!(prune_unshipped_files(root).unwrap().is_empty());
+        assert_eq!(
+            relative_files(root),
+            ["mcp-servers/hub/src/pii-tokenizer.ts"]
+        );
+    }
+
+    #[test]
+    fn prune_unshipped_files_refuses_a_list_that_does_not_describe_the_tree() {
+        for (entries, why) in [
+            ("", "an empty list"),
+            (
+                "hub/src/index.ts\nhub/src/missing.ts\n",
+                "a listed file that is missing",
+            ),
+            ("../escape.ts\n", "a parent component"),
+            ("/etc/passwd\n", "an absolute path"),
+            ("hub\\src\\index.ts\n", "a backslash"),
+            ("hub/./src/index.ts\n", "a dot component"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            plant(
+                root,
+                &["mcp-servers/hub/src/index.ts", "mcp-servers/orphan.ts"],
+            );
+            write_list(&root.join("mcp-servers"), entries);
+
+            assert!(
+                prune_unshipped_files(root).is_err(),
+                "a list with {why} must be refused"
+            );
+            assert_eq!(
+                relative_files(&root.join("mcp-servers")),
+                [".speedwave-shipped-files", "hub/src/index.ts", "orphan.ts"],
+                "a refused list with {why} must not remove anything"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_unshipped_files_leaves_links_and_what_they_point_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("build-context");
+        let outside = tmp.path().join("outside");
+        plant(&outside, &["keep.ts"]);
+        plant(&root, &["mcp-servers/hub/src/index.ts"]);
+        std::os::unix::fs::symlink(&outside, root.join("mcp-servers/hub/linked")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("keep.ts"),
+            root.join("mcp-servers/hub/linked-file.ts"),
+        )
+        .unwrap();
+        write_list(&root.join("mcp-servers"), "hub/src/index.ts\n");
+
+        assert!(prune_unshipped_files(&root).unwrap().is_empty());
+        assert!(root.join("mcp-servers/hub/linked").is_symlink());
+        assert!(root.join("mcp-servers/hub/linked-file.ts").is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep.ts")).unwrap(),
+            "keep.ts"
+        );
+    }
+
+    #[test]
+    fn bundle_scripts_write_the_shipped_files_list_into_every_shipped_tree() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        for script in ["bundle-build-context.sh", "bundle-build-context.ps1"] {
+            let body = std::fs::read_to_string(repo_root.join("scripts").join(script)).unwrap();
+            assert!(
+                body.contains(SHIPPED_FILES_LIST),
+                "scripts/{script} must write {SHIPPED_FILES_LIST}, which prune_unshipped_files reads"
+            );
+            let lists_trees = body.lines().any(|line| {
+                line.contains("for") && SHIPPED_TREES.iter().all(|tree| line.contains(tree))
+            });
+            assert!(
+                lists_trees,
+                "scripts/{script} must write the list for every tree in SHIPPED_TREES ({SHIPPED_TREES:?})"
+            );
+        }
     }
 }

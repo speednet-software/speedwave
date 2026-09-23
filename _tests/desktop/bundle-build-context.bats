@@ -92,6 +92,24 @@ teardown() {
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
 }
 
+@test "bundle script lists every file each build-context tree ships, once staging is complete" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    local tree list
+    for tree in containers mcp-servers; do
+        list="$DEST/build-context/$tree/.speedwave-shipped-files"
+        [ -s "$list" ]
+        diff -u \
+            <(cd "$DEST/build-context/$tree" && find . \( -type f -o -type l \) ! -path ./.speedwave-shipped-files |
+                sed 's#^\./##' | LC_ALL=C sort) \
+            "$list"
+    done
+    [ "$(grep -cx 'hub/src/index.ts' "$DEST/build-context/mcp-servers/.speedwave-shipped-files")" -eq 1 ]
+    [ "$(grep -cx '.dockerignore' "$DEST/build-context/containers/.speedwave-shipped-files")" -eq 1 ]
+    [ "$(grep -c 'speedwave-shipped-files' "$DEST/build-context/containers/.speedwave-shipped-files")" -eq 0 ]
+    [ "$(find "$DEST/build-context" -maxdepth 1 -name '.*.speedwave-shipped-files' | wc -l)" -eq 0 ]
+}
+
 @test "bundle script copies Containerfile.claude" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]

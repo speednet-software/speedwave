@@ -403,7 +403,34 @@ fn reconcile_id_changed(state: &bundle::BundleState, manifest: &bundle::BundleMa
     state.applied_bundle_id.as_deref() != Some(manifest.bundle_id.as_str())
 }
 
+fn prune_unshipped_build_context() {
+    let build_root = match build::resolve_build_root() {
+        Ok(root) => root,
+        Err(e) => {
+            log::warn!("skipped removing files this release does not ship: {e:#}");
+            return;
+        }
+    };
+    match build::with_build_lock(|| bundle::prune_unshipped_files(&build_root)) {
+        Ok(removed) => {
+            for path in removed {
+                log::info!(
+                    "removed {}, which this release does not ship",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => log::warn!(
+            "could not remove the files this release does not ship from {}: {e:#}",
+            build_root.display()
+        ),
+    }
+}
+
 fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        prune_unshipped_build_context();
+    }
     log::info!("loading current bundle manifest");
     let manifest = bundle::load_current_bundle_manifest().map_err(|e| {
         let msg = format!("Failed to load bundle manifest: {e:#}");
@@ -1253,6 +1280,32 @@ mod tests {
         assert!(
             !fn_body.contains(".contains("),
             "reconcile_compose_port must not probe the compose text for a port substring"
+        );
+    }
+
+    #[test]
+    fn reconcile_prunes_unshipped_files_on_windows_before_hashing_the_build_context() {
+        let source = include_str!("reconcile.rs");
+        let fn_body = extract_fn_body_braced(source, "fn reconcile_bundle_update_inner(");
+        let prune_pos = fn_body.find("prune_unshipped_build_context()").expect(
+            "reconcile_bundle_update_inner must prune the files this release does not ship",
+        );
+        let manifest_pos = fn_body
+            .find("load_current_bundle_manifest(")
+            .expect("reconcile_bundle_update_inner must load the bundle manifest");
+        assert!(
+            prune_pos < manifest_pos,
+            "the prune must run before the manifest hashes the build context, or the image tags \
+             would describe files the build no longer sees"
+        );
+        assert!(
+            fn_body[..prune_pos].contains(r#"cfg!(target_os = "windows")"#),
+            "only Windows installs update in place; a macOS .app is replaced whole and is signed"
+        );
+        let prune_body = extract_fn_body_braced(source, "fn prune_unshipped_build_context(");
+        assert!(
+            prune_body.contains("with_build_lock("),
+            "the prune must hold the build lock so no build reads a tree it is changing"
         );
     }
 

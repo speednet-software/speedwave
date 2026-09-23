@@ -77,6 +77,8 @@ trap 'rm -f "$EMBED"' EXIT
   echo ""
   emit_materialize_macro firewall
   echo ""
+  emit_materialize_macro reset
+  echo ""
   emit_materialize_macro run-hidden vbs
 } > "$EMBED"
 

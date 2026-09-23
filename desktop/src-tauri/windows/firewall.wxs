@@ -6,7 +6,7 @@
   <Fragment>
     <CustomAction Id="SpeedwaveFirewallInstallSetData"
                   Property="SpeedwaveFirewallInstallDeferred"
-                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]resources\windows\firewall.ps1&quot; -Mode install"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]windows\firewall.ps1&quot; -Mode install"
                   Execute="immediate"
                   Return="check" />
     <CustomAction Id="SpeedwaveFirewallInstallDeferred"
@@ -18,7 +18,7 @@
 
     <CustomAction Id="SpeedwaveFirewallUninstallSetData"
                   Property="SpeedwaveFirewallUninstallDeferred"
-                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]resources\windows\firewall.ps1&quot; -Mode uninstall"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]windows\firewall.ps1&quot; -Mode uninstall"
                   Execute="immediate"
                   Return="check" />
     <CustomAction Id="SpeedwaveFirewallUninstallDeferred"

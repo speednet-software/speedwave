@@ -146,6 +146,16 @@ foreach ($svc in $services) {
     }
 }
 
+foreach ($staged in @("$dest\build-context\containers", "$dest\build-context\mcp-servers")) {
+    $treeDir = (Resolve-Path -LiteralPath $staged).ProviderPath
+    [string[]]$shipped = @(Get-ChildItem -LiteralPath $treeDir -Recurse -Force |
+        Where-Object { -not $_.PSIsContainer } |
+        ForEach-Object { $_.FullName.Substring($treeDir.Length + 1).Replace('\', '/') } |
+        Where-Object { $_ -ne '.speedwave-shipped-files' })
+    [Array]::Sort($shipped, [System.StringComparer]::Ordinal)
+    [System.IO.File]::WriteAllText((Join-Path $treeDir '.speedwave-shipped-files'), (($shipped -join "`n") + "`n"), $utf8NoBom)
+}
+
 
 function Stage-Host-Worker {
     param([string]$worker, [string]$bundle)
