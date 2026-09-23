@@ -52,6 +52,7 @@
         [isStreaming]="chat.isStreamingFromState()"
         [loadingTranscript]="chat.loadingTranscriptFromState()"
         [lastAssistantIndex]="lastAssistantIndex()"
+        [conversationKey]="chat.activeTabId()"
         (questionAnswered)="onQuestionAnswered($event)"
       />
       <div class="shrink-0 border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pb-3 pt-3 md:px-6">

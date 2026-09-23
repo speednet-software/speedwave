@@ -1403,7 +1403,7 @@ describe('ChatComponent', () => {
       const tab1 = chatState.activeTabId();
       await chatState.openTab();
       fixture.detectChanges();
-      await Promise.resolve();
+      await fixture.whenStable();
 
       const store1 = chatState.tabs().get(tab1)!;
       expect(store1.composerDraft()).toBe('draft on tab one');
@@ -1413,9 +1413,37 @@ describe('ChatComponent', () => {
 
       chatState.activateTab(tab1);
       fixture.detectChanges();
-      await Promise.resolve();
+      await fixture.whenStable();
 
       expect(composer.text.value).toBe('draft on tab one');
+      expect(el.scrollTop).toBe(250);
+    });
+
+    it('does not snap a restored mid-scroll tab to the bottom when new content streams into it', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 250;
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(250);
+
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'new content' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
       expect(el.scrollTop).toBe(250);
     });
 

@@ -2,9 +2,11 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  Injector,
   OnDestroy,
   OnInit,
   ViewChild,
+  afterNextRender,
   computed,
   effect,
   inject,
@@ -101,6 +103,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private tauri = inject(TauriService);
   private router = inject(Router);
   private log = inject(LoggerService);
+  private readonly injector = inject(Injector);
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
 
@@ -164,19 +167,22 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Restores the incoming tab's composer draft immediately and its scroll offset on the next
-   * microtask, after the view has rebound, so the list's auto-scroll cannot overwrite it.
+   * Restores the incoming tab's composer draft immediately and its scroll offset via
+   * `afterNextRender`, after the view has rebound, so the list's auto-scroll cannot overwrite it.
    * @param tabId - Id of the tab being switched to.
    */
   private restoreIncomingTabState(tabId: string): void {
     const store = this.chat.tabs().get(tabId);
     if (!store) return;
     this.composer?.setText(store.composerDraft());
-    queueMicrotask(() => {
-      const el = this.messageList?.scrollContainer?.nativeElement;
-      if (!el) return;
-      el.scrollTop = store.scrollPosition ?? el.scrollHeight;
-    });
+    afterNextRender(
+      () => {
+        const el = this.messageList?.scrollContainer?.nativeElement;
+        if (!el) return;
+        el.scrollTop = store.scrollPosition ?? el.scrollHeight;
+      },
+      { injector: this.injector }
+    );
   }
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
