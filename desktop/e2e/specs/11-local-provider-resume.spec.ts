@@ -20,7 +20,7 @@ import {
   modelRowsUnpriced,
 } from '../helpers/llm';
 import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
-import { localLlmUnreachable } from '../helpers/preflight';
+import { localModelUnavailable } from '../helpers/preflight';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
@@ -31,7 +31,7 @@ describe('Local Provider + Resume', function () {
       await switchToProject(E2E_PROJECT_NAME);
     }
     expect(await activeProjectSlug()).toBe(E2E_PROJECT_NAME);
-    if (localLlmUnreachable()) this.skip();
+    if (localModelUnavailable()) this.skip();
   });
 
   it('switches the provider to the local server (full restart)', async function () {
