@@ -249,7 +249,8 @@ pub(crate) fn session_info_state_inner(
     let Some(session_arc) = registry.any_for_project(project) else {
         return SessionInfoState::Unavailable;
     };
-    match session_arc.try_lock() {
+    let guard = session_arc.try_lock();
+    match guard {
         Ok(session) => session.session_info_state(),
         Err(_) => SessionInfoState::Unavailable,
     }
