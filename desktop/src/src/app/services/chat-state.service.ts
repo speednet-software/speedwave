@@ -739,29 +739,23 @@ export class ChatStateService {
       ) {
         try {
           if (!sameConversation()) return;
-          if (this.startingSession) {
+          const result = await this.tauri.invoke<ProjectList>('list_projects');
+          if (!sameConversation()) return;
+          const retryBlocked = this.sessionStartInFlightFromState()
+            ? 'Session is still starting (containers may be restarting). Please try again in a moment.'
+            : result.active_project && project !== null && result.active_project !== project
+              ? 'The active project changed outside this window. Select the project again, then resend the message.'
+              : null;
+          if (retryBlocked) {
             this.isStreaming = false;
             this._messages = [
               ...this._messages,
               {
                 role: 'assistant',
-                blocks: [
-                  {
-                    type: 'error',
-                    content:
-                      'Session is still starting (containers may be restarting). Please try again in a moment.',
-                  },
-                ],
+                blocks: [{ type: 'error', content: retryBlocked }],
                 timestamp: Date.now(),
               },
             ];
-            this.notifyChange();
-            return;
-          }
-          const result = await this.tauri.invoke<ProjectList>('list_projects');
-          if (!sameConversation()) return;
-          if (result.active_project && project !== null && result.active_project !== project) {
-            this.isStreaming = false;
             this.notifyChange();
             return;
           }
