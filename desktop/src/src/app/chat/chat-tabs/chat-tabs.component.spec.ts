@@ -115,6 +115,30 @@ describe('ChatTabsComponent', () => {
     expect(title.length).toBeLessThanOrEqual(25);
   });
 
+  it('truncates by code points so a surrogate pair at the boundary is never split', () => {
+    const store = new FakeStore();
+    store.setMessages([userMessage('😀'.repeat(30))]);
+    chat.setTabs([['t1', store]]);
+    fixture.detectChanges();
+
+    const title = titleFor(tabEls()[0]);
+    const points = Array.from(title);
+    expect(points).toHaveLength(25);
+    expect(points.slice(0, 24).every((p) => p === '😀')).toBe(true);
+    expect(points[24]).toBe('…');
+  });
+
+  it('falls back to "New chat" when the first user message has no text block', () => {
+    const store = new FakeStore();
+    store.setMessages([
+      { role: 'user', blocks: [{ type: 'image', media_type: 'image/png' }], timestamp: 0 },
+    ]);
+    chat.setTabs([['t1', store]]);
+    fixture.detectChanges();
+
+    expect(titleFor(tabEls()[0])).toBe('New chat');
+  });
+
   it('marks the active tab and updates it via activateTab', () => {
     const s1 = new FakeStore();
     const s2 = new FakeStore();
@@ -151,6 +175,21 @@ describe('ChatTabsComponent', () => {
       '[data-testid="chat-tab-activate"]'
     ) as HTMLButtonElement;
     activateBtn.click();
+
+    expect(chat.activateTab).toHaveBeenCalledWith('t2');
+  });
+
+  it('clicking the row body activates the tab', () => {
+    const s1 = new FakeStore();
+    const s2 = new FakeStore();
+    chat.setTabs([
+      ['t1', s1],
+      ['t2', s2],
+    ]);
+    chat.setActive('t1');
+    fixture.detectChanges();
+
+    tabEls()[1].click();
 
     expect(chat.activateTab).toHaveBeenCalledWith('t2');
   });
@@ -249,21 +288,52 @@ describe('ChatTabsComponent', () => {
     expect(plus.title).toBe('');
   });
 
-  it('exposes tab semantics for accessibility (role, aria-selected, labels)', () => {
+  it('exposes tab semantics for accessibility (role on the focusable button, labels)', () => {
     const store = new FakeStore();
     chat.setTabs([['t1', store]]);
     chat.setActive('t1');
     fixture.detectChanges();
 
     const tab = tabEls()[0];
-    expect(tab.getAttribute('role')).toBe('tab');
-    expect(tab.getAttribute('aria-selected')).toBe('true');
+    expect(tab.getAttribute('role')).toBe('presentation');
+    const activateBtn = tab.querySelector('[data-testid="chat-tab-activate"]') as HTMLElement;
+    expect(activateBtn.getAttribute('role')).toBe('tab');
+    expect(activateBtn.getAttribute('aria-selected')).toBe('true');
     const closeBtn = tab.querySelector('[data-testid="chat-tab-close"]') as HTMLElement;
     expect(closeBtn.getAttribute('aria-label')).toBeTruthy();
     const plus = fixture.nativeElement.querySelector(
       '[data-testid="chat-tabs-new"]'
     ) as HTMLElement;
     expect(plus.getAttribute('aria-label')).toBeTruthy();
+  });
+
+  it('marks an inactive tab unselected on its tab button', () => {
+    const s1 = new FakeStore();
+    const s2 = new FakeStore();
+    chat.setTabs([
+      ['t1', s1],
+      ['t2', s2],
+    ]);
+    chat.setActive('t1');
+    fixture.detectChanges();
+
+    const inactiveBtn = tabEls()[1].querySelector(
+      '[data-testid="chat-tab-activate"]'
+    ) as HTMLElement;
+    expect(inactiveBtn.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('carries the overflow layout classes (container scrolls, tabs shrink)', () => {
+    const store = new FakeStore();
+    chat.setTabs([['t1', store]]);
+    fixture.detectChanges();
+
+    const tablist = fixture.nativeElement.querySelector('[role="tablist"]') as HTMLElement;
+    expect(tablist.classList.contains('overflow-x-auto')).toBe(true);
+    expect(tablist.classList.contains('min-w-0')).toBe(true);
+    const tab = tabEls()[0];
+    expect(tab.classList.contains('min-w-[110px]')).toBe(true);
+    expect(tab.classList.contains('max-w-[200px]')).toBe(true);
   });
 
   it('renders Unicode titles verbatim without over-truncating', () => {

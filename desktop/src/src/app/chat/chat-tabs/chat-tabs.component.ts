@@ -19,8 +19,9 @@ interface ChatTabRow {
 
 function truncateTitle(text: string): string {
   const trimmed = text.trim();
-  if (trimmed.length <= TITLE_MAX_CHARS) return trimmed;
-  return `${trimmed.slice(0, TITLE_MAX_CHARS).trimEnd()}…`;
+  const points = Array.from(trimmed);
+  if (points.length <= TITLE_MAX_CHARS) return trimmed;
+  return `${points.slice(0, TITLE_MAX_CHARS).join('').trimEnd()}…`;
 }
 
 function tabTitle(store: ChatSessionStore): string {
@@ -49,18 +50,18 @@ function tabTitle(store: ChatSessionStore): string {
           <div
             class="group flex min-w-[110px] max-w-[200px] flex-1 items-stretch border-r border-[var(--line)]"
             [class]="row.active ? 'bg-[var(--bg-2)]' : 'hover-bg'"
-            role="tab"
+            role="presentation"
             data-testid="chat-tab"
             [attr.data-active]="row.active ? 'true' : null"
-            [attr.aria-selected]="row.active ? 'true' : 'false'"
+            (click)="chat.activateTab(row.id)"
           >
             <button
               type="button"
               class="flex min-w-0 flex-1 items-center gap-1.5 px-3 text-left"
+              role="tab"
               data-testid="chat-tab-activate"
-              [attr.aria-current]="row.active ? 'true' : null"
+              [attr.aria-selected]="row.active ? 'true' : 'false'"
               [attr.aria-label]="'Switch to tab: ' + row.title"
-              (click)="chat.activateTab(row.id)"
             >
               @if (row.streaming) {
                 <span
@@ -125,7 +126,7 @@ export class ChatTabsComponent {
   });
 
   /**
-   * Closes the tab without letting the click bubble into the sibling activate button's row.
+   * Closes the tab without letting the click bubble into the row's click-to-activate handler.
    * @param event - The close button's click event.
    * @param id - Id of the tab to close.
    */
