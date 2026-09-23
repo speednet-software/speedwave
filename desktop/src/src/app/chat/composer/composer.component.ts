@@ -539,8 +539,8 @@ export class ComposerComponent implements AfterViewInit {
    * their next submit will queue rather than send immediately.
    */
   effectivePlaceholder(): string {
-    if (this.streaming()) return 'queue next message...';
     if (this.sendBlocked()) return 'starting session...';
+    if (this.streaming()) return 'queue next message...';
     return this.placeholder();
   }
 

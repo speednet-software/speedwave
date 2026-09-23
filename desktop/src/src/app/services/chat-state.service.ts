@@ -69,9 +69,6 @@ export type {
   QueuedMessage,
 };
 
-const SESSION_START_TIMEOUT_MS = 30_000;
-const SESSION_START_POLL_MS = 500;
-
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
 
 export const NEW_CONVERSATION_FAILED =
@@ -380,9 +377,6 @@ export class ChatStateService {
   }
   private _sessionGeneration = 0;
 
-  /** How the most recent session start ended; gates a waiting `sendMessage`'s resend. */
-  private _lastStartOutcome: StartOutcome | null = null;
-
   /** Durable session id; survives a container restart that nulls live stats. */
   private _lastKnownSessionId: string | null = null;
   private _optimisticSessionId: string | null = null;
@@ -522,14 +516,12 @@ export class ChatStateService {
 
   /**
    * Mark a session start in progress (resume) so `sendMessage` refuses until it ends;
-   * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
+   * bumps the generation to no-op in-flight starts.
    */
-  beginStartingSession(): (outcome?: StartOutcome) => void {
+  beginStartingSession(): () => void {
     this.startingSession = true;
-    this._lastStartOutcome = null;
     this._sessionGeneration += 1;
-    return (outcome: StartOutcome = 'started') => {
-      this._lastStartOutcome = outcome;
+    return () => {
       this.startingSession = false;
     };
   }
@@ -630,7 +622,6 @@ export class ChatStateService {
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
-      this._lastStartOutcome = null;
       this._deferredEffort.set(null);
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
@@ -659,7 +650,6 @@ export class ChatStateService {
       } finally {
         if (gen === this._sessionGeneration) {
           this.startingSession = false;
-          this._lastStartOutcome = outcome;
         }
       }
       return outcome;
@@ -731,6 +721,13 @@ export class ChatStateService {
 
     const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
     const generation = this._sessionGeneration;
+    const turnId = this._turnId;
+    const project = this.projectState.activeProject();
+    const sameConversation = (): boolean =>
+      generation === this._sessionGeneration &&
+      turnId === this._turnId &&
+      project === this.projectState.activeProject() &&
+      this.projectState.status() !== 'switching';
     try {
       await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
@@ -742,59 +739,28 @@ export class ChatStateService {
         errStr.includes('Broken pipe')
       ) {
         try {
+          if (!sameConversation()) return;
           if (this.startingSession) {
-            const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
-            while (this.startingSession && Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, SESSION_START_POLL_MS));
-            }
-            if (generation !== this._sessionGeneration) return;
-            if (this.startingSession) {
-              this.isStreaming = false;
-              this._messages = [
-                ...this._messages,
-                {
-                  role: 'assistant',
-                  blocks: [
-                    {
-                      type: 'error',
-                      content:
-                        'Session is still starting (containers may be restarting). Please try again in a moment.',
-                    },
-                  ],
-                  timestamp: Date.now(),
-                },
-              ];
-              this.notifyChange();
-              return;
-            }
-            if (this._lastStartOutcome !== 'started') {
-              this.isStreaming = false;
-              this.notifyChange();
-              return;
-            }
-            try {
-              await this.tauri.invoke('send_message', invokeArgs);
-            } catch (postWaitErr) {
-              this.isStreaming = false;
-              this._messages = [
-                ...this._messages,
-                {
-                  role: 'assistant',
-                  blocks: [
-                    {
-                      type: 'error',
-                      content: `Failed to send message after session started: ${postWaitErr}`,
-                    },
-                  ],
-                  timestamp: Date.now(),
-                },
-              ];
-              this.notifyChange();
-            }
+            this.isStreaming = false;
+            this._messages = [
+              ...this._messages,
+              {
+                role: 'assistant',
+                blocks: [
+                  {
+                    type: 'error',
+                    content:
+                      'Session is still starting (containers may be restarting). Please try again in a moment.',
+                  },
+                ],
+                timestamp: Date.now(),
+              },
+            ];
+            this.notifyChange();
             return;
           }
           const result = await this.tauri.invoke<ProjectList>('list_projects');
-          if (generation !== this._sessionGeneration) return;
+          if (!sameConversation()) return;
           if (result.active_project) {
             this.startingSession = true;
             this._deferredEffort.set(null);
@@ -803,7 +769,7 @@ export class ChatStateService {
             } finally {
               if (generation === this._sessionGeneration) this.startingSession = false;
             }
-            if (generation !== this._sessionGeneration) return;
+            if (!sameConversation()) return;
             await this.tauri.invoke('send_message', invokeArgs);
             return;
           }
@@ -827,10 +793,12 @@ export class ChatStateService {
           const retryMsg = String(retryErr);
           if (isNotAuthenticatedError(retryMsg)) {
             this.projectState.status.set('auth_required');
+            if (!sameConversation()) return;
             this.isStreaming = false;
             this.notifyChange();
             return;
           }
+          if (!sameConversation()) return;
           this.isStreaming = false;
           this._messages = [
             ...this._messages,
@@ -1547,7 +1515,7 @@ export class ChatStateService {
       }
     } finally {
       this.endTranscriptLoad();
-      endStartingSession(outcome);
+      endStartingSession();
       this._resumeInProgress = false;
       if (gen !== this._sessionGeneration) {
         this._optimisticSessionId = null;

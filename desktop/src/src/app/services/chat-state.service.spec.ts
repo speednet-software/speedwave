@@ -674,6 +674,7 @@ describe('ChatStateService', () => {
     it('drops a send that fails while a resume replaces the conversation', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
+      const pendingResume = createDeferred();
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
@@ -681,6 +682,9 @@ describe('ChatStateService', () => {
           case 'send_message':
             void service.resumeConversation('sess-resumed');
             throw new Error('no active session');
+          case 'resume_conversation':
+            await pendingResume.promise;
+            return undefined;
           case 'get_conversation':
             return {
               session_id: 'sess-resumed',
@@ -698,6 +702,9 @@ describe('ChatStateService', () => {
       };
 
       await service.sendMessage('written before the resume');
+      expect(service.messages).toHaveLength(0);
+
+      pendingResume.resolve();
       await vi.waitFor(() => {
         expect(service.sessionStartInFlightFromState()).toBe(false);
       });
@@ -708,61 +715,194 @@ describe('ChatStateService', () => {
       expect(service.isStreaming).toBe(false);
     });
 
-    it('resends once a start that began during the failed send ends without replacing the conversation', async () => {
-      const internals = service as unknown as {
-        startingSession: boolean;
-        _lastStartOutcome: string | null;
-      };
-      const calls: string[] = [];
-      mockTauri.invokeHandler = async (cmd: string) => {
-        calls.push(cmd);
-        if (cmd === 'send_message' && calls.filter((c) => c === 'send_message').length === 1) {
-          internals.startingSession = true;
-          setTimeout(() => {
-            calls.push('start:end');
-            internals._lastStartOutcome = 'started';
-            internals.startingSession = false;
-          }, 20);
-          throw new Error('no active session');
-        }
-        return undefined;
-      };
-
-      await service.sendMessage('Raced send');
-
-      expect(calls).not.toContain('start_chat');
-      expect(calls.filter((c) => c === 'send_message' || c === 'start:end')).toEqual([
-        'send_message',
-        'start:end',
-        'send_message',
-      ]);
-      expect(service.messages).toHaveLength(1);
-      expect(service.messages[0].role).toBe('user');
-    });
-
-    it('does not resend when a start that began during the failed send fails', async () => {
-      const internals = service as unknown as {
-        startingSession: boolean;
-        _lastStartOutcome: string | null;
-      };
+    it('shows the still-starting error instead of resending when a start began during the failed send', async () => {
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
         if (cmd === 'send_message') {
-          internals.startingSession = true;
-          setTimeout(() => {
-            internals._lastStartOutcome = 'failed';
-            internals.startingSession = false;
-          }, 20);
+          (service as unknown as { startingSession: boolean }).startingSession = true;
           throw new Error('no active session');
         }
         return undefined;
       };
 
-      await service.sendMessage('hi');
+      await service.sendMessage('hello');
+
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(calls).not.toContain('start_chat');
+      expect(service.isStreaming).toBe(false);
+      const lastMsg = service.messages[service.messages.length - 1];
+      expect(lastMsg.role).toBe('assistant');
+      expect((lastMsg.blocks[0] as { content: string }).content).toContain(
+        'Session is still starting'
+      );
+    });
+
+    it("does not resend after the user stops the turn during the retry's own start", async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingRetryStart = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            if (calls.filter((c) => c === 'send_message').length === 1) {
+              throw new Error('session exited (exit status: 1)');
+            }
+            return undefined;
+          case 'start_chat':
+            return pendingRetryStart.promise;
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const sending = service.sendMessage('never mind');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      await service.stopConversation();
+      pendingRetryStart.resolve();
+      await sending;
 
       expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
       expect(service.isStreaming).toBe(false);
+      expect(service.sessionStartInFlightFromState()).toBe(false);
+    });
+
+    it('does not start a retry session when the project starts switching while the retry looks it up', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingLookup = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            throw new Error('session exited (exit status: 1)');
+          case 'list_projects':
+            if (calls.includes('send_message')) await pendingLookup.promise;
+            return { projects: [{ name: 'other', dir: '/tmp/other' }], active_project: 'other' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const sending = service.sendMessage('written before the switch');
+      await vi.waitFor(() => {
+        expect(calls.lastIndexOf('list_projects')).toBeGreaterThan(calls.indexOf('send_message'));
+      });
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      pendingLookup.resolve();
+      await sending;
+
+      expect(calls).not.toContain('start_chat');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+    });
+
+    it('leaves a newer turn streaming when a superseded retry start fails with sign-in required', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingRetryStart = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            if (calls.filter((c) => c === 'send_message').length === 1) {
+              throw new Error('session exited (exit status: 1)');
+            }
+            return undefined;
+          case 'start_chat':
+            return calls.filter((c) => c === 'start_chat').length === 1
+              ? pendingRetryStart.promise
+              : undefined;
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const sending = service.sendMessage('written before New');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      service.resetForNewConversation();
+      await service.init();
+      await vi.waitFor(() => {
+        expect(service.sessionStartInFlightFromState()).toBe(false);
+      });
+      await service.sendMessage('first message of the new chat');
+      pendingRetryStart.reject(
+        new Error('Claude is not authenticated. Please authenticate first.')
+      );
+      await sending;
+
+      expect(projectState.status()).toBe('auth_required');
+      expect(service.isStreaming).toBe(true);
+    });
+
+    it('keeps the error of a superseded retry start out of the new chat', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingRetryStart = createDeferred();
+      const pendingNewStart = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            throw new Error('session exited (exit status: 1)');
+          case 'start_chat':
+            return calls.filter((c) => c === 'start_chat').length === 1
+              ? pendingRetryStart.promise
+              : pendingNewStart.promise;
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const sending = service.sendMessage('written before New');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      service.resetForNewConversation();
+      await service.init();
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c === 'start_chat')).toHaveLength(2);
+      });
+      pendingRetryStart.reject(new Error('boom'));
+      await sending;
+
+      expect(service.messages).toHaveLength(0);
+      expect(service.sessionStartInFlightFromState()).toBe(true);
+
+      pendingNewStart.resolve();
+      await vi.waitFor(() => {
+        expect(service.sessionStartInFlightFromState()).toBe(false);
+      });
     });
 
     it("keeps a new chat's start in flight when the retry's own start ends after it, and does not resend", async () => {
@@ -3735,37 +3875,6 @@ describe('ChatStateService', () => {
       });
       await service.sendMessage('hello');
       expect(projectState.status()).toBe('auth_required');
-    });
-  });
-
-  describe('session startup timeout', () => {
-    it('shows error when startingSession does not clear within deadline', async () => {
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'send_message') {
-          (service as unknown as { startingSession: boolean }).startingSession = true;
-          throw new Error('no active session');
-        }
-        return undefined;
-      };
-
-      const base = 1000000;
-      let nowCall = 0;
-      const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
-        nowCall++;
-        return nowCall <= 5 ? base : base + 60_000;
-      });
-
-      await service.sendMessage('hello');
-      spy.mockRestore();
-
-      expect(service.messages).toHaveLength(2);
-      const lastMsg = service.messages[1];
-      expect(lastMsg.role).toBe('assistant');
-      expect(lastMsg.blocks[0].type).toBe('error');
-      expect((lastMsg.blocks[0] as { content: string }).content).toContain(
-        'Session is still starting'
-      );
-      expect(service.isStreaming).toBe(false);
     });
   });
 
