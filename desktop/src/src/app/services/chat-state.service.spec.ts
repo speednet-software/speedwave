@@ -630,6 +630,25 @@ describe('ChatStateService', () => {
       );
     });
 
+    it('reports a busy session as a failed send without starting a new session', async () => {
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'send_message') throw new Error('chat session is busy');
+        return undefined;
+      };
+
+      await service.sendMessage('Hello');
+
+      expect(calls.filter((cmd) => cmd === 'send_message')).toHaveLength(1);
+      expect(calls).not.toContain('start_chat');
+      expect(calls).not.toContain('list_projects');
+      expect(service.isStreaming).toBe(false);
+      const errorBlock = service.messages[1].blocks[0] as { type: string; content: string };
+      expect(errorBlock.type).toBe('error');
+      expect(errorBlock.content).toMatch(/^Failed to send message: .*chat session is busy/);
+    });
+
     it('auto-retries on "session exited" by re-sending', async () => {
       let sendAttempt = 0;
       mockTauri.invokeHandler = async (cmd: string) => {

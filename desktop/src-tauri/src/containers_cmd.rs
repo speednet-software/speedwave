@@ -108,6 +108,30 @@ impl SwitchResult {
     }
 }
 
+pub(crate) async fn finish_switch_task(
+    task: tokio::task::JoinHandle<SwitchResult>,
+    new_project: &str,
+    teardown: impl FnOnce(String) -> Option<String> + Send + 'static,
+) -> SwitchResult {
+    let join_error = match task.await {
+        Ok(result) => return result,
+        Err(join_error) => join_error,
+    };
+    log::error!("project switch task did not finish: {join_error}");
+    let project = new_project.to_string();
+    let cleanup_error = tokio::task::spawn_blocking(move || teardown(project))
+        .await
+        .unwrap_or_else(|je| Some(format!("teardown of '{new_project}' did not finish: {je}")));
+    SwitchResult::failed(
+        format!("Project switch did not finish: {join_error}"),
+        cleanup_error,
+    )
+}
+
+pub(crate) fn teardown_new_project(project: String) -> Option<String> {
+    teardown_only(&project, &speedwave_runtime::runtime::detect_runtime())
+}
+
 pub(crate) fn teardown_only(
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -495,7 +519,7 @@ pub async fn add_project(
 
     let prev_clone = previous.clone();
     let new_clone = name.clone();
-    let switch_result = tokio::task::spawn_blocking(move || {
+    let switch_task = tokio::task::spawn_blocking(move || {
         if let Err(e) = ensure_images_ready() {
             return SwitchResult::failed(e, None);
         }
@@ -516,9 +540,8 @@ pub async fn add_project(
                 speedwave_runtime::build::user_facing_engine_error(&e)
             })
         })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    });
+    let switch_result = finish_switch_task(switch_task, &name, teardown_new_project).await;
 
     let pending_teardown = match switch_result {
         SwitchResult::Failed {
@@ -532,7 +555,15 @@ pub async fn add_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
+    let rebind_name = name.clone();
+    let rebind_app = app.clone();
+    let rebind_state = chat_state.inner().clone();
+    let rebind_result = tokio::task::spawn_blocking(move || {
+        crate::rebind_chat(&rebind_name, &rebind_app, &rebind_state)
+    })
+    .await
+    .unwrap_or_else(|je| Err(format!("join error: {je}")));
+    if let Err(e) = rebind_result {
         log::warn!("rebind_chat failed after adding project: {e}");
     }
 
@@ -2055,6 +2086,93 @@ mod tests {
     use super::*;
     use crate::types::{CustomPolicyDtoInput, SecurityPolicyCustomPatternInput};
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
+
+    fn recording_teardown(
+        result: Option<String>,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl FnOnce(String) -> Option<String> + Send + 'static,
+    ) {
+        let torn_down = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = torn_down.clone();
+        (torn_down, move |project| {
+            record.lock().unwrap().push(project);
+            result
+        })
+    }
+
+    #[tokio::test]
+    async fn a_switch_task_that_panics_tears_the_new_project_down_and_fails() {
+        let (torn_down, teardown) = recording_teardown(None);
+        let task =
+            tokio::task::spawn_blocking(|| -> SwitchResult { panic!("the switch step panicked") });
+        match finish_switch_task(task, "beta", teardown).await {
+            SwitchResult::Failed {
+                error,
+                cleanup_error,
+            } => {
+                assert!(
+                    error.starts_with("Project switch did not finish"),
+                    "{error}"
+                );
+                assert_eq!(cleanup_error, None);
+            }
+            SwitchResult::Succeeded { .. } => {
+                panic!("a panicked switch must not read as a finished one")
+            }
+        }
+        assert_eq!(*torn_down.lock().unwrap(), vec!["beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_teardown_after_a_panicked_switch_is_reported() {
+        let (_, teardown) = recording_teardown(Some("teardown of 'beta' failed: boom".to_string()));
+        let task =
+            tokio::task::spawn_blocking(|| -> SwitchResult { panic!("the switch step panicked") });
+        let SwitchResult::Failed { cleanup_error, .. } =
+            finish_switch_task(task, "beta", teardown).await
+        else {
+            panic!("a panicked switch must fail");
+        };
+        assert_eq!(
+            cleanup_error.as_deref(),
+            Some("teardown of 'beta' failed: boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_switch_task_keeps_its_result_without_a_teardown() {
+        let (torn_down, teardown) = recording_teardown(None);
+        let task = tokio::task::spawn_blocking(|| SwitchResult::Succeeded {
+            teardown: Some("alpha".to_string()),
+        });
+        let SwitchResult::Succeeded { teardown: previous } =
+            finish_switch_task(task, "beta", teardown).await
+        else {
+            panic!("a finished switch must keep its result");
+        };
+        assert_eq!(previous.as_deref(), Some("alpha"));
+        assert!(torn_down.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_project_rebinds_the_chat_on_a_blocking_thread() {
+        let source = include_str!("containers_cmd.rs");
+        let body = &source[source
+            .find("pub async fn add_project(")
+            .expect("add_project must exist")..];
+        let body = &body[..body.find("\n}\n").expect("function end")];
+        let rebind = body
+            .find("crate::rebind_chat(")
+            .expect("add_project must rebind the chat");
+        let spawn = body[..rebind]
+            .rfind("spawn_blocking(")
+            .expect("the rebind must run on a blocking thread");
+        assert!(
+            !body[spawn..rebind].contains(';'),
+            "the rebind must be the body of its spawn_blocking closure"
+        );
+    }
 
     #[test]
     fn start_container_errors_route_through_the_owning_helper() {

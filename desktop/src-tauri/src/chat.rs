@@ -1431,6 +1431,34 @@ fn probe_session_info(
     Some(status)
 }
 
+#[derive(Clone)]
+struct AwaitedResult(Arc<std::sync::atomic::AtomicBool>);
+
+impl AwaitedResult {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    }
+
+    fn observe(&self, chunks: &[StreamChunk]) {
+        if chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }))
+        {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        } else if !chunks.is_empty() {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn message_written(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_awaited(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedSpawn {
     pub args: Vec<String>,
@@ -1450,6 +1478,7 @@ pub struct ChatSession {
     instance_id: Option<String>,
     launched_with_effort: bool,
     stopping: Arc<std::sync::atomic::AtomicBool>,
+    awaited_result: AwaitedResult,
 }
 
 impl ChatSession {
@@ -1466,6 +1495,7 @@ impl ChatSession {
             instance_id: None,
             launched_with_effort: false,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            awaited_result: AwaitedResult::new(),
         }
     }
 
@@ -1674,6 +1704,8 @@ impl ChatSession {
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
+        self.awaited_result = AwaitedResult::new();
+        let awaited_for_reader = self.awaited_result.clone();
 
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
@@ -1707,7 +1739,6 @@ impl ChatSession {
                 .as_deref()
                 .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
-            let mut got_result = false;
             let mut http_collator = speedwave_runtime::http_debug_collator::Collator::new();
             for line in reader.lines() {
                 let line = match line {
@@ -1867,9 +1898,6 @@ impl ChatSession {
                         }
                     }
                 }
-                let is_terminal = chunks
-                    .iter()
-                    .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
@@ -1893,21 +1921,19 @@ impl ChatSession {
                         }
                     });
                 }
-                if is_terminal {
-                    got_result = true;
-                } else if !chunks.is_empty() {
-                    got_result = false;
-                }
+                awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
                     emit_sanitized_chunk(&app_handle, chunk, &display_policy);
                 }
                 if let Some(session_id) = result_session_id {
-                    drain_queued_message(
+                    if drain_queued_message(
                         &app_handle,
                         &session_id,
                         &stdin_for_reader,
                         &display_policy,
-                    );
+                    ) {
+                        awaited_for_reader.message_written();
+                    }
                 }
             }
 
@@ -1917,7 +1943,7 @@ impl ChatSession {
             control_for_reader.fail_all();
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
-            if !got_result && !stopping {
+            if awaited_for_reader.is_awaited() && !stopping {
                 log::warn!("stdout reader stream ended without result");
                 let chunk = StreamChunk::Error {
                     content:
@@ -2018,6 +2044,7 @@ impl ChatSession {
         writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
         drop(stdin);
+        self.awaited_result.message_written();
 
         if let [WireContentBlock::Text { text }] = blocks {
             if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text)
@@ -2286,15 +2313,15 @@ fn drain_queued_message(
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
     policy: &DisplayPolicy,
-) {
+) -> bool {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
         Some(m) => m,
-        None => return,
+        None => return false,
     };
     write_and_emit_drained_message(session_id, &drained.text, stdin, |chunk| {
         emit_sanitized_chunk(app_handle, chunk, policy)
-    });
+    })
 }
 
 fn write_and_emit_drained_message(
@@ -2302,22 +2329,22 @@ fn write_and_emit_drained_message(
     text: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
     mut emit: impl FnMut(StreamChunk),
-) {
+) -> bool {
     let payload = build_user_message(&text_only(text));
     match stdin.lock() {
         Ok(mut handle) => {
             if let Err(e) = writeln!(handle, "{}", payload) {
                 log::warn!("failed to write queued message to stdin: {e}");
-                return;
+                return false;
             }
             if let Err(e) = handle.flush() {
                 log::warn!("failed to flush queued message to stdin: {e}");
-                return;
+                return false;
             }
         }
         Err(e) => {
             log::warn!("stdin lock poisoned while draining queued message: {e}");
-            return;
+            return false;
         }
     }
     if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text) {
@@ -2332,6 +2359,7 @@ fn write_and_emit_drained_message(
         text: text.to_string(),
     });
     log::debug!("queue drained: {} bytes for session", text.len());
+    true
 }
 
 #[cfg(test)]
@@ -3033,6 +3061,121 @@ mod tests {
 
         assert_eq!(emitted.len(), 1);
         assert!(matches!(emitted[0], StreamChunk::QueueDrained { .. }));
+    }
+
+    fn finished_turn() -> StreamChunk {
+        StreamChunk::Result {
+            session_id: "sess-1".to_string(),
+            total_cost: None,
+            usage: None,
+            result_text: None,
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+            context_usage: None,
+        }
+    }
+
+    #[test]
+    fn a_result_is_awaited_until_one_arrives_and_again_after_the_next_message() {
+        let awaited = AwaitedResult::new();
+        assert!(
+            awaited.is_awaited(),
+            "a process that dies before its first output line must be reported"
+        );
+        awaited.observe(&[finished_turn()]);
+        assert!(!awaited.is_awaited());
+        awaited.message_written();
+        assert!(
+            awaited.is_awaited(),
+            "the previous turn's result must not cover a message sent after it"
+        );
+    }
+
+    #[test]
+    fn turn_output_keeps_the_result_awaited_and_an_error_or_empty_batch_does_not() {
+        let awaited = AwaitedResult::new();
+        awaited.observe(&[StreamChunk::Error {
+            content: "boom".to_string(),
+            turn_ended: false,
+        }]);
+        assert!(!awaited.is_awaited());
+        awaited.observe(&[]);
+        assert!(!awaited.is_awaited());
+        awaited.observe(&[StreamChunk::Text {
+            content: "hi".to_string(),
+        }]);
+        assert!(awaited.is_awaited());
+        awaited.observe(&[
+            StreamChunk::Text {
+                content: "bye".to_string(),
+            },
+            finished_turn(),
+        ]);
+        assert!(!awaited.is_awaited());
+    }
+
+    #[test]
+    fn a_message_sent_after_a_finished_turn_awaits_its_own_result() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session.awaited_result.observe(&[finished_turn()]);
+        session
+            .send_message_with_emit(&text_only("next question"), |_| {})
+            .unwrap();
+        assert!(session.awaited_result.is_awaited());
+    }
+
+    #[test]
+    fn a_message_that_fails_to_reach_the_process_awaits_nothing() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_broken_pipe();
+        session.awaited_result.observe(&[finished_turn()]);
+        session
+            .send_message_with_emit(&text_only("next question"), |_| {})
+            .unwrap_err();
+        assert!(!session.awaited_result.is_awaited());
+    }
+
+    #[test]
+    fn a_drained_message_reports_whether_it_reached_the_process() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        assert!(write_and_emit_drained_message(
+            "sess-1",
+            "queued",
+            &stdin,
+            |_| {}
+        ));
+        let broken = Arc::new(Mutex::new(test_broken_pipe_stdin()));
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        assert!(!write_and_emit_drained_message(
+            "sess-1",
+            "queued",
+            &broken,
+            |chunk| emitted.push(chunk)
+        ));
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn the_stdout_reader_reports_an_unexpected_end_from_the_shared_result_state() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")];
+        for wiring in [
+            "awaited_for_reader.observe(&chunks)",
+            "awaited_for_reader.message_written()",
+            "awaited_for_reader.is_awaited() && !stopping",
+        ] {
+            assert!(body.contains(wiring), "the reader must use `{wiring}`");
+        }
     }
 
     #[test]
