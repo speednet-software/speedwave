@@ -466,7 +466,7 @@ pub(crate) async fn get_context_usage(
             ControlQuery::ContextUsage,
             control_channel::parse_context_usage,
         )
-        .map(ContextUsage::without_free_space)
+        .map(ContextUsage::drawn_categories_only)
     })
     .await
     .map_err(|e| e.to_string())?

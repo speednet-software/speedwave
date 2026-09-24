@@ -9,15 +9,14 @@ const IN_TWO_HOURS = NOW + 2 * 3_600_000 + 40 * 60_000;
 const NEXT_TUESDAY = Date.parse('2026-09-22T21:00:00Z');
 
 const CATEGORIES: ClaudeContextCategory[] = [
-  { name: 'System prompt', tokens: 3_902, is_deferred: false },
-  { name: 'System tools', tokens: 31_484, is_deferred: false },
-  { name: 'MCP tools (deferred)', tokens: 90_000, is_deferred: true },
-  { name: 'Custom agents', tokens: 238, is_deferred: false },
-  { name: 'Memory files', tokens: 6_529, is_deferred: false },
-  { name: 'Skills', tokens: 4_414, is_deferred: false },
-  { name: 'Autocompact buffer', tokens: 33_000, is_deferred: false },
-  { name: 'Brand new category', tokens: 1_000, is_deferred: false },
-  { name: 'Messages', tokens: 0, is_deferred: false },
+  { name: 'System prompt', tokens: 3_902 },
+  { name: 'System tools', tokens: 31_484 },
+  { name: 'Custom agents', tokens: 238 },
+  { name: 'Memory files', tokens: 6_529 },
+  { name: 'Skills', tokens: 4_414 },
+  { name: 'Autocompact buffer', tokens: 33_000 },
+  { name: 'Brand new category', tokens: 1_000 },
+  { name: 'Messages', tokens: 0 },
 ];
 
 const FIVE_HOUR: PlanLimitWindow = {
@@ -109,11 +108,10 @@ describe('UsagePopoverComponent', () => {
       expect(parseFloat(segments[1].style.width)).toBeCloseTo(3.1484, 4);
     });
 
-    it('draws neither deferred tools nor empty categories: they are not in the context', () => {
+    it('draws no empty category', () => {
       render(null);
 
       const text = el().querySelector('[data-testid="usage-context"]')?.textContent ?? '';
-      expect(text).not.toContain('deferred');
       expect(text).not.toContain('Messages');
     });
 
