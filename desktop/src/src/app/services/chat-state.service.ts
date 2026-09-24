@@ -156,29 +156,25 @@ export class ChatStateService {
   private readonly _pendingModelOverride = signal<string | null>(null);
   private readonly _pendingEffortOverride = signal<string | null>(null);
   private _effortPick = 0;
+  private _effortApply: Promise<void> = Promise.resolve();
   readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
   private readonly _deferredEffort = signal<string | null>(null);
-  /** Effort level saved for the next session because the live one holds its launch effort. */
+  /** Effort level saved for the next session because the live one did not take it. */
   readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
 
   private flushPendingModelOverride(): void {
     if (this.isStreaming) return;
     const model = this._pendingModelOverride();
-    if (model) {
-      this._pendingModelOverride.set(null);
-      void this.switchLiveModel(model);
-      return;
-    }
     const effort = this._pendingEffortOverride();
-    if (effort) {
-      this._pendingEffortOverride.set(null);
-      void this.applyEffortToConversation(effort, this._effortPick);
-    }
+    this._pendingModelOverride.set(null);
+    this._pendingEffortOverride.set(null);
+    if (model) void this.switchLiveModel(model);
+    if (effort) void this.applyEffortToConversation(effort, this._effortPick);
   }
 
   /**
-   * Persists the effort pin, then applies it: queued while the chat is busy, wired as `/effort` into
-   * a live conversation (deferred to the next session if it holds its launch effort), else respawned.
+   * Persists the effort pin, then applies it: queued while the chat is busy, sent to a live
+   * conversation as an `apply_flag_settings` control request, else respawned.
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
@@ -209,35 +205,29 @@ export class ChatStateService {
     return this.isStreaming || this._resumeInProgress || this.startingSession;
   }
 
-  private async applyEffortToConversation(level: string, pick: number): Promise<void> {
+  private applyEffortToConversation(level: string, pick: number): Promise<void> {
+    const applying = this._effortApply.then(() => this.sendEffortToSession(level, pick));
+    this._effortApply = applying.catch(() => undefined);
+    return applying;
+  }
+
+  private async sendEffortToSession(level: string, pick: number): Promise<void> {
     const project = this.projectState.activeProject();
-    if (!project) return;
+    if (!project || pick !== this._effortPick) return;
     if (this._lastKnownSessionId === null || this.chatBusy()) {
       this._pendingEffortOverride.set(level);
       return;
     }
     const generation = this._sessionGeneration;
-    const takesWire = await this.sessionTakesWireEffort(project);
-    if (generation !== this._sessionGeneration || pick !== this._effortPick) return;
-    if (!takesWire) {
-      this._deferredEffort.set(level);
-      return;
-    }
-    if (this.chatBusy()) {
-      this._pendingEffortOverride.set(level);
-      return;
-    }
-    this._deferredEffort.set(null);
-    await this.sendMessage(`/effort ${level}`);
-  }
-
-  private async sessionTakesWireEffort(project: string): Promise<boolean> {
+    let applied = true;
     try {
-      return (await this.tauri.invoke<boolean>('get_chat_takes_wire_effort', { project })) === true;
+      await this.tauri.invoke('apply_chat_effort', { project, level });
     } catch (e: unknown) {
-      this.log.warn(`[chat-state] get_chat_takes_wire_effort failed: ${String(e)}`);
-      return false;
+      applied = false;
+      this.log.warn(`[chat-state] apply_chat_effort failed: ${String(e)}`);
     }
+    if (generation !== this._sessionGeneration || pick !== this._effortPick) return;
+    this._deferredEffort.set(applied ? null : level);
   }
 
   /** Resumes the live conversation so it launches with the deferred effort; its background tasks stop. */

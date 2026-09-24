@@ -1187,8 +1187,8 @@ fn main() {
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::get_chat_session_info,
-            chat_session_cmd::get_chat_takes_wire_effort,
             chat_session_cmd::switch_chat_model,
+            chat_session_cmd::apply_chat_effort,
             chat_session_cmd::get_plan_usage,
             chat_session_cmd::get_context_usage,
             retry_cmd::retry_last_turn,
@@ -1273,6 +1273,8 @@ fn main() {
             system_settings_cmd::open_audio_capture_pane,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_spawn_args,
+            #[cfg(feature = "e2e")]
+            e2e_support::e2e_last_applied_effort,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_restart_app,
         ])

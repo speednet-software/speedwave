@@ -3,6 +3,7 @@ import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
+import { waitForAppliedEffort } from '../helpers/applied-effort';
 import { clearModelPinFile, clearEffortPinFile } from '../helpers/host-files';
 import {
   anthropicCatalog,
@@ -336,25 +337,18 @@ describe('Slash Popover + Model/Effort Selector', function () {
       await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000 });
       await (await $('[data-testid="effort-stop-max"]')).click();
       await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000, reverse: true });
-      const deferred = await $('[data-testid="effort-deferred-notice"]');
-      await deferred.waitForExist({
-        timeout: 30_000,
-        timeoutMsg: 'a pick in a session launched without --effort never showed the deferred notice',
-      });
-      expect(await deferred.getText()).toContain('Effort Max applies from the next session');
-      expect(
-        await $('[data-testid="control-chip"][data-command="effort"]').isExisting()
-      ).toBe(false);
+      await waitForAppliedEffort('max');
+      expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
+      expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
+        false
+      );
+      await sendMessageAndWait('Say hi in one word, at the new effort.');
       expect(JSON.stringify(await lastSpawnArgs())).toBe(JSON.stringify(argsBeforeEffortPick));
 
-      await (await $('[data-testid="effort-deferred-restart"]')).click();
-      await deferred.waitForExist({ timeout: 30_000, reverse: true });
-      const resumedArgs = await waitForFreshSpawnArgs(argsBeforeEffortPick);
-      expect(resumedArgs).toContain('--resume');
-      expect(resumedArgs.filter((a) => a === '--effort').length).toBe(1);
-      expect(resumedArgs[resumedArgs.indexOf('--effort') + 1]).toBe('max');
-
       await startNewConversation();
+      const newConversationArgs = await waitForFreshSpawnArgs(argsBeforeEffortPick);
+      expect(newConversationArgs.filter((a) => a === '--effort').length).toBe(1);
+      expect(newConversationArgs[newConversationArgs.indexOf('--effort') + 1]).toBe('max');
 
       const priorArgs = await lastSpawnArgs();
       await restartAppAndReconnect();
@@ -451,10 +445,10 @@ describe('Slash Popover + Model/Effort Selector', function () {
         async () => (await (await $('[data-testid="effort-segment"]')).getText()).trim() === 'Low',
         { timeout: 10_000, timeoutMsg: 'effort-segment never showed Low after the pick' }
       );
-      await $('[data-testid="control-chip"][data-command="effort"]').waitForExist({
-        timeout: 30_000,
-        timeoutMsg: 'effort control-chip never rendered after picking low',
-      });
+      await waitForAppliedEffort('low');
+      expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
+        false
+      );
 
       await (await $('[data-testid="effort-segment"]')).click();
       await $('[data-testid="effort-popover-header"]').waitForExist({ timeout: 10_000 });

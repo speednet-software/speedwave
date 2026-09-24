@@ -28,6 +28,30 @@ pub fn e2e_last_spawn_args() -> Vec<String> {
     last_spawn_args()
 }
 
+#[cfg(any(test, feature = "e2e"))]
+static LAST_APPLIED_EFFORT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(any(test, feature = "e2e"))]
+pub fn record_applied_effort(level: &str) {
+    if let Ok(mut guard) = LAST_APPLIED_EFFORT.lock() {
+        *guard = Some(level.to_string());
+    }
+}
+
+#[cfg(any(test, feature = "e2e"))]
+pub fn last_applied_effort() -> Option<String> {
+    LAST_APPLIED_EFFORT
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "e2e")]
+#[tauri::command]
+pub fn e2e_last_applied_effort() -> Option<String> {
+    last_applied_effort()
+}
+
 #[cfg(feature = "e2e")]
 #[tauri::command]
 pub fn e2e_restart_app(app: tauri::AppHandle) {
@@ -76,6 +100,13 @@ mod tests {
         record_spawn_args(&["first".to_string()]);
         record_spawn_args(&["second".to_string()]);
         assert_eq!(last_spawn_args(), vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn the_applied_effort_record_keeps_the_latest_level() {
+        record_applied_effort("low");
+        record_applied_effort("max");
+        assert_eq!(last_applied_effort().as_deref(), Some("max"));
     }
 
     #[test]

@@ -635,6 +635,60 @@ recovers with a fresh `start_chat`, not a resume, under the old history. The not
 itself is cleared by every spawn the frontend starts (a start, a resume, a retry,
 and the send recovery), since each of those launches with the pin.
 
+**Amendment (SPEED-707, 2026-09-24: a composer pick reaches a live session as an
+`apply_flag_settings` control request).** Speedwave no longer writes `/effort` into
+a live chat process and no longer asks whether the process launched with
+`--effort`. `ChatStateService.applyEffortToConversation` calls
+`chat_session_cmd.rs::apply_chat_effort`, which validates the level against
+`defaults::EFFORT_LEVELS`, sends
+`{subtype: "apply_flag_settings", settings: {effortLevel: <level>}}` through the
+session's control channel (`control_channel.rs::ControlHandle::apply_effort`) and
+waits for the answer after it has released the session mutex, as
+`switch_chat_model` does. The Agent SDK types describe the request as merging the
+settings "into the flag settings layer, dynamically updating the active
+configuration", a layer that sits above user, project and local settings and below
+managed policy, and `effortLevel` there also accepts `max` for the session[^8].
+`PreparedSpawn::with_effort`, `ChatSession::takes_wire_effort` and
+`get_chat_takes_wire_effort` are gone.
+
+Measured on the pinned 2.1.267 and on 2.1.282 (the darwin-arm64 binaries, checked
+against their release manifests, run with the stream-json arguments of
+`chat.rs::build_claude_args` against a stub `/v1/messages`):
+
+- Fable 5 spawned without `--effort`, the hold model of this decision: the first
+  request carried `output_config.effort: high`, the request after
+  `apply_flag_settings` with `low` carried `low`, and after `max` it carried `max`.
+  Each request was answered `success` at once, and nothing else was written to
+  stdout.
+- Opus 5.5 on 2.1.282, spawned with `--effort high`, behaved the same.
+- `set_model` keeps the flag-layer level: after `low` was applied on Opus 4.8 and
+  the session switched to Sonnet 5, the Sonnet request carried `low`.
+- No `settings.json` was created in the isolated config directory, so `effort_pin`
+  stays the only store and every spawn still passes `--effort <pin>`.
+- An unknown level (`turbo`) was answered `success` too, which is why the command
+  validates the level before it writes anything.
+- `CLAUDE_CODE_EFFORT_LEVEL` outranks the request: with the variable set to `high`,
+  the request after `apply_flag_settings` with `low` kept `high`. Speedwave never
+  sets that variable (ADR-017).
+
+The request needs no launch flag, so the condition of the SPEED-650 amendment is
+removed together with the notice an unpinned project saw on its first pick. It
+also keeps effort picks out of a change the 2.1.282 bump brings: there an
+`/effort` or `/model` input written during a tool-using turn runs after that turn
+as an input of its own, with its own `init` and `result` (`num_turns: 0`), which
+ends the user's turn in the chat (the second defect of the SPEED-696 amendment).
+A `/effort` the user types still goes to Claude Code as an input.
+
+The timing rules of the SPEED-650 amendment stand: a pick made while a turn streams
+or a session starts or resumes waits for the turn end or the resume, and only the
+latest pick is applied. Picks go to the session one at a time, in pick order
+(`ChatStateService` chains them), and a pick superseded while it waits is dropped.
+A turn end releases a pending model pick and a pending effort pick together, since
+neither is an input any more. A rejected request, a timeout
+(`control_channel::APPLY_EFFORT_TIMEOUT`, 10 s) or a session with no live process
+keeps the pin and shows the notice with Restart now, which is the notice's only
+remaining role. No automatic respawn is added, for the reasons above.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the
@@ -938,3 +992,5 @@ stays selectable without typing its id.
 [^6]: Claude Code settings - "Claude Code reads some keys only once, at session start, so an edit to one of them doesn't reach the running session," naming `model` among them; `/model` in `-p` mode "applies to the current session only and isn't saved as your default." https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
 
 [^7]: `@anthropic-ai/claude-agent-sdk` 0.3.267, the SDK release for Claude Code 2.1.267: `Query.setModel(model?)` "Change the model used for subsequent responses. Only available in streaming input mode", and `SDKControlSetModelRequest` (`subtype: 'set_model'`), whose `model` field reads "Omitted, null, or 'default' resets to the session default model". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
+
+[^8]: `@anthropic-ai/claude-agent-sdk` 0.3.267: `Query.applyFlagSettings(settings)` "Merge the provided settings into the flag settings layer, dynamically updating the active configuration. ... Flag settings sit above user/project/local settings and below managed policy settings in the precedence order", with "`effortLevel` additionally accepts `'max'`, which is session-scoped"; the request type `SDKControlApplyFlagSettingsRequest` (`subtype: 'apply_flag_settings'`, `settings`). https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts

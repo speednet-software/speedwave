@@ -2639,15 +2639,18 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    function reportTakesWireEffort(takesWire: boolean): void {
-      const base = mockTauri.invokeHandler;
-      mockTauri.invokeHandler = async (cmd, args) =>
-        cmd === 'get_chat_takes_wire_effort' ? takesWire : base(cmd, args);
+    const appliedEffort = (level: string) => (cmd: string, args: unknown) =>
+      cmd === 'apply_chat_effort' &&
+      JSON.stringify(args) === JSON.stringify({ project: 'test', level });
+    const wiredEffortInput = (cmd: string, args: unknown) =>
+      cmd === 'send_message' && JSON.stringify(args).includes('/effort');
+
+    function indexOfCall(calls: unknown[][], match: (cmd: string, args: unknown) => boolean) {
+      return calls.findIndex(([cmd, args]) => match(cmd as string, args));
     }
 
-    it('applyEffortSelection in a conversation launched with --effort writes the pin, checks the process, then wires /effort', async () => {
+    it('applyEffortSelection in a conversation writes the pin, then applies it as a control request with no /effort input', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
-      reportTakesWireEffort(true);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -2660,28 +2663,25 @@ describe('ChatStateService', () => {
       } as never);
       await Promise.resolve();
       expect(service.hasConversation()).toBe(true);
+      const messagesBefore = service.messagesFromState().length;
       invokeSpy.mockClear();
 
       await service.applyEffortSelection('low');
-      const pinCallIdx = invokeSpy.mock.calls.findIndex(([cmd]) => cmd === 'set_effort_pin');
-      const effortSendIdx = invokeSpy.mock.calls.findIndex(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort low')
-      );
-      const checkIdx = invokeSpy.mock.calls.findIndex(
-        ([cmd, args]) =>
-          cmd === 'get_chat_takes_wire_effort' &&
-          JSON.stringify(args) === JSON.stringify({ project: 'test' })
-      );
+
+      const calls = invokeSpy.mock.calls;
+      const pinCallIdx = indexOfCall(calls, (cmd) => cmd === 'set_effort_pin');
       expect(pinCallIdx).toBeGreaterThanOrEqual(0);
-      expect(checkIdx).toBeGreaterThan(pinCallIdx);
-      expect(effortSendIdx).toBeGreaterThan(checkIdx);
-      expect(invokeSpy.mock.calls.find(([cmd]) => cmd === 'resume_conversation')).toBeUndefined();
-      expect(invokeSpy.mock.calls.find(([cmd]) => cmd === 'get_conversation')).toBeUndefined();
+      expect(indexOfCall(calls, appliedEffort('low'))).toBeGreaterThan(pinCallIdx);
+      expect(indexOfCall(calls, wiredEffortInput)).toBe(-1);
+      expect(indexOfCall(calls, (cmd) => cmd === 'resume_conversation')).toBe(-1);
+      expect(indexOfCall(calls, (cmd) => cmd === 'get_conversation')).toBe(-1);
+      expect(service.messagesFromState()).toHaveLength(messagesBefore);
+      expect(service.isStreaming).toBe(false);
+      expect(service.deferredEffort()).toBeNull();
     });
 
-    it('applyEffortSelection mid-stream queues and flushes the wire /effort after the turn', async () => {
+    it('applyEffortSelection mid-stream queues the pick and applies it after the turn', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
-      reportTakesWireEffort(true);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -2692,24 +2692,19 @@ describe('ChatStateService', () => {
       service.isStreaming = true;
 
       await service.applyEffortSelection('xhigh');
-      let effortSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort ')
-      );
-      expect(effortSend).toBeUndefined();
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
 
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: { session_id: 'sess-live' },
       } as never);
       await vi.waitFor(() => {
-        effortSend = invokeSpy.mock.calls.find(
-          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort xhigh')
-        );
-        expect(effortSend).toBeDefined();
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('xhigh'))).toBeGreaterThan(-1);
       });
+      expect(indexOfCall(invokeSpy.mock.calls, wiredEffortInput)).toBe(-1);
     });
 
-    it('applyEffortSelection blocks the wire and sets an error when the pin write fails', async () => {
+    it('applyEffortSelection applies nothing and sets an error when the pin write fails', async () => {
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
@@ -2722,10 +2717,8 @@ describe('ChatStateService', () => {
 
       await service.applyEffortSelection('low');
 
-      const effortSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
-      );
-      expect(effortSend).toBeUndefined();
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+      expect(indexOfCall(invokeSpy.mock.calls, wiredEffortInput)).toBe(-1);
       expect(service.modelSelectionError()).toContain('locked config');
     });
 
@@ -2740,17 +2733,17 @@ describe('ChatStateService', () => {
       await service.applyEffortSelection('low');
       await new Promise((r) => setTimeout(r, 0));
 
-      const pinCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'set_effort_pin');
-      expect(pinCall).toBeDefined();
-      const startCalls = invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat');
-      expect(startCalls.length).toBeGreaterThan(0);
-      const effortSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_effort_pin')).toBeGreaterThan(
+        -1
       );
-      expect(effortSend).toBeUndefined();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat').length).toBeGreaterThan(
+        0
+      );
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+      expect(indexOfCall(invokeSpy.mock.calls, wiredEffortInput)).toBe(-1);
     });
 
-    it('applyEffortSelection on a live session with no conversation yet respawns instead of wiring /effort', async () => {
+    it('applyEffortSelection on a live session with no conversation yet respawns instead of applying', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       projectState.activeProject.set('test');
@@ -2767,24 +2760,16 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
-      const effortSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
-      );
-      expect(effortSend).toBeUndefined();
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
     });
 
     it('applyEffortSelection while the first turn streams before any session id queues it for the turn end', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
-      reportTakesWireEffort(true);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.isStreaming = true;
 
       await service.applyEffortSelection('max');
-      expect(
-        invokeSpy.mock.calls.find(
-          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
-        )
-      ).toBeUndefined();
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
 
       service.handleStreamChunk({
@@ -2796,21 +2781,18 @@ describe('ChatStateService', () => {
         data: { session_id: 'sess-first' },
       } as never);
       await vi.waitFor(() => {
-        const effortSend = invokeSpy.mock.calls.find(
-          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort max')
-        );
-        expect(effortSend).toBeDefined();
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
       });
     });
 
-    describe('a conversation whose process may hold the launch effort (SPEED-650)', () => {
-      const LIVE = 'sess-held';
+    describe('an effort pick on a live conversation (SPEED-707)', () => {
+      const LIVE = 'sess-live';
 
-      function liveConversation(takesWire: boolean): void {
+      function liveConversation(apply: () => Promise<unknown> = async () => undefined): void {
         TestBed.inject(ProjectStateService).activeProject.set('test');
         TestBed.inject(ProjectStateService).status.set('ready');
         mockTauri.invokeHandler = async (cmd: string) =>
-          cmd === 'get_chat_takes_wire_effort' ? takesWire : undefined;
+          cmd === 'apply_chat_effort' ? apply() : undefined;
         service.handleStreamChunk({
           chunk_type: 'SystemInit',
           data: { model: 'claude-fable-5', session_id: LIVE },
@@ -2824,18 +2806,29 @@ describe('ChatStateService', () => {
         mockTauri.invokeHandler = async (c, args) => (c === cmd ? answer() : base(c, args));
       }
 
-      function indexOfCall(calls: unknown[][], match: (cmd: string, args: unknown) => boolean) {
-        return calls.findIndex(([cmd, args]) => match(cmd as string, args));
-      }
-
-      const wiredEffort = (level: string) => (cmd: string, args: unknown) =>
-        cmd === 'send_message' && JSON.stringify(args).includes(`/effort ${level}`);
-      const wiredModel = (cmd: string) => cmd === 'switch_chat_model';
-      const checked = (cmd: string) => cmd === 'get_chat_takes_wire_effort';
+      const rejected = (message: string) => async () => {
+        throw new Error(message);
+      };
+      const switchedModel = (cmd: string) => cmd === 'switch_chat_model';
       const restarted = (cmd: string) => cmd === 'resume_conversation';
 
-      it('defers the pick to the next session when the process holds its launch effort', async () => {
-        liveConversation(false);
+      it('takes the pick live: no notice, no chip, no turn and no restart', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.applyEffortSelection('low');
+
+        const calls = invokeSpy.mock.calls;
+        expect(indexOfCall(calls, appliedEffort('low'))).toBeGreaterThan(-1);
+        expect(indexOfCall(calls, restarted)).toBe(-1);
+        expect(service.deferredEffort()).toBeNull();
+        expect(service.messagesFromState()).toHaveLength(1);
+        expect(service.isStreaming).toBe(false);
+      });
+
+      it('keeps the pin and shows the notice when Claude Code rejects the pick', async () => {
+        liveConversation(rejected('Claude Code rejected the control request: nope'));
         await Promise.resolve();
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
@@ -2843,29 +2836,61 @@ describe('ChatStateService', () => {
 
         const calls = invokeSpy.mock.calls;
         expect(indexOfCall(calls, (cmd) => cmd === 'set_effort_pin')).toBeGreaterThan(-1);
-        expect(indexOfCall(calls, checked)).toBeGreaterThan(-1);
-        expect(indexOfCall(calls, wiredEffort('low'))).toBe(-1);
+        expect(indexOfCall(calls, appliedEffort('low'))).toBeGreaterThan(-1);
         expect(indexOfCall(calls, restarted)).toBe(-1);
         expect(service.deferredEffort()).toBe('low');
         expect(service.messagesFromState()).toHaveLength(1);
       });
 
-      it('defers the pick when the check fails, rather than wiring a /effort that may be refused', async () => {
-        liveConversation(true);
-        overrideInvoke('get_chat_takes_wire_effort', async () => {
-          throw new Error('ipc closed');
-        });
+      it('shows the notice when the pick times out', async () => {
+        liveConversation(
+          rejected("control request 'apply_flag_settings' got no response within 10000 ms")
+        );
         await Promise.resolve();
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         await service.applyEffortSelection('medium');
 
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('medium'))).toBe(-1);
         expect(service.deferredEffort()).toBe('medium');
       });
 
-      it('a later pick replaces the deferred level', async () => {
-        liveConversation(false);
+      it('shows the notice when no live process takes the pick', async () => {
+        liveConversation(rejected('no active session'));
+        await Promise.resolve();
+
+        await service.applyEffortSelection('high');
+
+        expect(service.deferredEffort()).toBe('high');
+      });
+
+      it('warns when the pick fails, naming the command', async () => {
+        liveConversation(rejected('no active session'));
+        await Promise.resolve();
+
+        await service.applyEffortSelection('medium');
+
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('apply_chat_effort failed')
+        );
+      });
+
+      it('a later pick the session takes clears the notice', async () => {
+        let applies = 0;
+        liveConversation(async () => {
+          applies += 1;
+          if (applies === 1) throw new Error('no active session');
+          return undefined;
+        });
+        await Promise.resolve();
+
+        await service.applyEffortSelection('low');
+        expect(service.deferredEffort()).toBe('low');
+        await service.applyEffortSelection('max');
+
+        expect(service.deferredEffort()).toBeNull();
+      });
+
+      it('a later failed pick replaces the deferred level', async () => {
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
 
         await service.applyEffortSelection('low');
@@ -2875,7 +2900,7 @@ describe('ChatStateService', () => {
       });
 
       it('Restart now resumes the conversation, which launches with the pin, and clears the notice', async () => {
-        liveConversation(false);
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
         await service.applyEffortSelection('max');
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -2891,7 +2916,7 @@ describe('ChatStateService', () => {
       });
 
       it('Restart now does nothing while the project is not ready', async () => {
-        liveConversation(false);
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
         await service.applyEffortSelection('max');
         TestBed.inject(ProjectStateService).status.set('switching');
@@ -2902,8 +2927,21 @@ describe('ChatStateService', () => {
         expect(indexOfCall(invokeSpy.mock.calls, restarted)).toBe(-1);
       });
 
+      it('Restart now does nothing while a turn streams', async () => {
+        liveConversation(rejected('no active session'));
+        await Promise.resolve();
+        await service.applyEffortSelection('max');
+        service.isStreaming = true;
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.restartForDeferredEffort();
+
+        expect(indexOfCall(invokeSpy.mock.calls, restarted)).toBe(-1);
+        expect(service.deferredEffort()).toBe('max');
+      });
+
       it('a start of a new process clears the notice, since that spawn carries the pin', async () => {
-        liveConversation(false);
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
         await service.applyEffortSelection('max');
         expect(service.deferredEffort()).toBe('max');
@@ -2917,7 +2955,7 @@ describe('ChatStateService', () => {
       });
 
       it('a send that restarts a dead process clears the notice', async () => {
-        liveConversation(false);
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
         await service.applyEffortSelection('max');
         let sends = 0;
@@ -2937,35 +2975,8 @@ describe('ChatStateService', () => {
         expect(service.deferredEffort()).toBeNull();
       });
 
-      it('warns when the check fails, so a broken command does not pass for a hold', async () => {
-        liveConversation(true);
-        overrideInvoke('get_chat_takes_wire_effort', async () => {
-          throw new Error('command get_chat_takes_wire_effort not found');
-        });
-        await Promise.resolve();
-
-        await service.applyEffortSelection('medium');
-
-        expect(mockLogger.warn).toHaveBeenCalledWith(
-          expect.stringContaining('get_chat_takes_wire_effort failed')
-        );
-      });
-
-      it('Restart now does nothing while a turn streams', async () => {
-        liveConversation(false);
-        await Promise.resolve();
-        await service.applyEffortSelection('max');
-        service.isStreaming = true;
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-
-        await service.restartForDeferredEffort();
-
-        expect(indexOfCall(invokeSpy.mock.calls, restarted)).toBe(-1);
-        expect(service.deferredEffort()).toBe('max');
-      });
-
       it('a new conversation clears the notice', async () => {
-        liveConversation(false);
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
         await service.applyEffortSelection('max');
 
@@ -2974,50 +2985,58 @@ describe('ChatStateService', () => {
         expect(service.deferredEffort()).toBeNull();
       });
 
-      it('wires /effort into a live process that launched with --effort and shows no notice', async () => {
-        liveConversation(true);
-        await Promise.resolve();
-        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-
-        await service.applyEffortSelection('xhigh');
-
-        const calls = invokeSpy.mock.calls;
-        expect(indexOfCall(calls, wiredEffort('xhigh'))).toBeGreaterThan(
-          indexOfCall(calls, checked)
-        );
-        expect(service.deferredEffort()).toBeNull();
-      });
-
-      it('a pick made mid-stream is checked when the turn ends', async () => {
-        liveConversation(false);
+      it('a pick made mid-stream is applied when the turn ends, and a failure then shows the notice', async () => {
+        liveConversation(rejected('no active session'));
         await Promise.resolve();
         service.isStreaming = true;
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         await service.applyEffortSelection('xhigh');
-        expect(indexOfCall(invokeSpy.mock.calls, checked)).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
         expect(service.deferredEffort()).toBeNull();
 
         service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
         await vi.waitFor(() => {
           expect(service.deferredEffort()).toBe('xhigh');
         });
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('xhigh'))).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('xhigh'))).toBeGreaterThan(-1);
       });
 
-      it('wires a pick while a queued message is about to drain, since nothing is restarted', async () => {
-        liveConversation(true);
+      it('applies a pick while a queued message is about to drain, since nothing is restarted', async () => {
+        liveConversation();
         service._setState({ pendingQueue: { text: 'next question', queued_at: 1 } });
         await Promise.resolve();
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         await service.applyEffortSelection('medium');
 
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('medium'))).toBeGreaterThan(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('medium'))).toBeGreaterThan(-1);
+      });
+
+      it('never ends the turn of a queued message that drains while the pick is applied', async () => {
+        const answer = createDeferred<void>();
+        liveConversation(() => answer.promise);
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('low');
+
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        service.handleStreamChunk({
+          chunk_type: 'QueueDrained',
+          data: { text: 'next question' },
+        } as never);
+        answer.resolve();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(service.isStreaming).toBe(true);
+        expect(service.isStreamingFromState()).toBe(true);
+        const texts = service.messagesFromState().map((m) => JSON.stringify(m.blocks));
+        expect(texts.some((t) => t.includes('next question'))).toBe(true);
+        expect(service.deferredEffort()).toBeNull();
       });
 
       it('applies only the latest of two quick picks', async () => {
-        liveConversation(true);
+        liveConversation();
         const firstPin = createDeferred<void>();
         let pinWrites = 0;
         overrideInvoke('set_effort_pin', async () => {
@@ -3034,51 +3053,54 @@ describe('ChatStateService', () => {
         service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
         await new Promise((r) => setTimeout(r, 10));
 
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('max'))).toBeGreaterThan(-1);
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('low'))).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBe(-1);
       });
 
-      it('drops a pick whose check returns after a newer pick', async () => {
-        liveConversation(true);
-        const firstCheck = createDeferred<boolean>();
-        let checks = 0;
-        overrideInvoke('get_chat_takes_wire_effort', async () => {
-          checks += 1;
-          return checks === 1 ? firstCheck.promise : true;
+      it('sends picks one at a time, in pick order, and drops one superseded while it waits', async () => {
+        const firstAnswer = createDeferred<void>();
+        let applies = 0;
+        liveConversation(async () => {
+          applies += 1;
+          if (applies === 1) await firstAnswer.promise;
         });
         await Promise.resolve();
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const first = service.applyEffortSelection('low');
         await vi.waitFor(() => {
-          expect(checks).toBe(1);
+          expect(applies).toBe(1);
         });
-        await service.applyEffortSelection('max');
-        firstCheck.resolve(true);
-        await first;
-        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        const second = service.applyEffortSelection('medium');
+        const third = service.applyEffortSelection('max');
         await new Promise((r) => setTimeout(r, 10));
+        expect(applies).toBe(1);
 
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('max'))).toBeGreaterThan(-1);
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('low'))).toBe(-1);
+        firstAnswer.resolve();
+        await Promise.all([first, second, third]);
+
+        const applied = invokeSpy.mock.calls
+          .filter(([cmd]) => cmd === 'apply_chat_effort')
+          .map(([, args]) => (args as { level: string }).level);
+        expect(applied).toEqual(['low', 'max']);
+        expect(service.deferredEffort()).toBeNull();
       });
 
-      it('drops the pick when the conversation is replaced while the check runs', async () => {
-        liveConversation(false);
-        const check = createDeferred<boolean>();
-        let checks = 0;
-        overrideInvoke('get_chat_takes_wire_effort', () => {
-          checks += 1;
-          return check.promise;
+      it('drops the outcome when the conversation is replaced while the pick is applied', async () => {
+        const answer = createDeferred<void>();
+        let applies = 0;
+        liveConversation(() => {
+          applies += 1;
+          return answer.promise;
         });
         await Promise.resolve();
 
         const applying = service.applyEffortSelection('low');
         await vi.waitFor(() => {
-          expect(checks).toBe(1);
+          expect(applies).toBe(1);
         });
         service.resetForNewConversation();
-        check.resolve(false);
+        answer.reject(new Error('no active session'));
         await applying;
 
         expect(service.deferredEffort()).toBeNull();
@@ -3086,16 +3108,13 @@ describe('ChatStateService', () => {
 
       it('holds a pick flushed at a turn end without a session id until one arrives', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        mockTauri.invokeHandler = async (cmd: string) =>
-          cmd === 'get_chat_takes_wire_effort' ? true : undefined;
         service.isStreaming = true;
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         await service.applyEffortSelection('low');
         service.handleStreamChunk({ chunk_type: 'Result', data: {} } as never);
         await new Promise((r) => setTimeout(r, 0));
-        expect(indexOfCall(invokeSpy.mock.calls, checked)).toBe(-1);
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('low'))).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
 
         service.handleStreamChunk({
           chunk_type: 'SystemInit',
@@ -3103,7 +3122,7 @@ describe('ChatStateService', () => {
         });
         service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
         await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('low'))).toBeGreaterThan(-1);
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBeGreaterThan(-1);
         });
       });
 
@@ -3112,7 +3131,6 @@ describe('ChatStateService', () => {
         const resumed = createDeferred<void>();
         mockTauri.invokeHandler = async (cmd: string) => {
           if (cmd === 'resume_conversation') return resumed.promise;
-          if (cmd === 'get_chat_takes_wire_effort') return true;
           if (cmd === 'get_conversation') {
             return {
               session_id: LIVE,
@@ -3125,17 +3143,41 @@ describe('ChatStateService', () => {
 
         const resuming = service.resumeConversation(LIVE);
         await service.applyEffortSelection('high');
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('high'))).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
         resumed.resolve();
         await resuming;
 
         await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('high'))).toBeGreaterThan(-1);
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('high'))).toBeGreaterThan(-1);
         });
       });
 
+      it('a turn end applies a pending model pick and a pending effort pick together', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('max');
+        await service.applyModelSelection({
+          catalogId: 'claude-haiku-4-5',
+          wireId: 'claude-haiku-4-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+          isDefault: false,
+          contextTokens: null,
+        });
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
+        expect(service.pendingModelOverride()).toBeNull();
+      });
+
       it('an error that ends the turn applies a pending effort pick', async () => {
-        liveConversation(true);
+        liveConversation();
         await Promise.resolve();
         service.isStreaming = true;
         await service.applyEffortSelection('max');
@@ -3147,12 +3189,12 @@ describe('ChatStateService', () => {
         });
 
         await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('max'))).toBeGreaterThan(-1);
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
         });
       });
 
       it('an error that ends the turn applies a pending model pick', async () => {
-        liveConversation(true);
+        liveConversation();
         await Promise.resolve();
         service.isStreaming = true;
         await service.applyModelSelection({
@@ -3171,13 +3213,13 @@ describe('ChatStateService', () => {
         });
 
         await vi.waitFor(() => {
-          expect(indexOfCall(invokeSpy.mock.calls, wiredModel)).toBeGreaterThan(-1);
+          expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
         });
         expect(service.pendingModelOverride()).toBeNull();
       });
 
       it('an error that may arrive mid-turn leaves the pending picks queued', async () => {
-        liveConversation(true);
+        liveConversation();
         await Promise.resolve();
         service.isStreaming = true;
         await service.applyEffortSelection('max');
@@ -3194,9 +3236,8 @@ describe('ChatStateService', () => {
         service.handleStreamChunk({ chunk_type: 'Error', data: { content: 'rate limit' } });
         await new Promise((r) => setTimeout(r, 0));
 
-        expect(indexOfCall(invokeSpy.mock.calls, wiredModel)).toBe(-1);
-        expect(indexOfCall(invokeSpy.mock.calls, wiredEffort('max'))).toBe(-1);
-        expect(indexOfCall(invokeSpy.mock.calls, checked)).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
         expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
       });
     });

@@ -14,11 +14,13 @@ const SUBTYPE_INITIALIZE: &str = "initialize";
 const SUBTYPE_GET_USAGE: &str = "get_usage";
 const SUBTYPE_GET_CONTEXT_USAGE: &str = "get_context_usage";
 const SUBTYPE_SET_MODEL: &str = "set_model";
+const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlQuery {
@@ -72,6 +74,17 @@ pub(crate) fn build_set_model_request(request_id: &str, model: &str) -> serde_js
         "type": MSG_TYPE_CONTROL_REQUEST,
         "request_id": request_id,
         "request": { "subtype": SUBTYPE_SET_MODEL, "model": model },
+    })
+}
+
+pub(crate) fn build_apply_effort_request(request_id: &str, level: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": MSG_TYPE_CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": {
+            "subtype": SUBTYPE_APPLY_FLAG_SETTINGS,
+            "settings": { "effortLevel": level },
+        },
     })
 }
 
@@ -210,8 +223,29 @@ impl ControlChannel {
         locked_stdin: &mut W,
         model: &str,
     ) -> Result<PendingControl, ControlError> {
-        let pending = self.register(SUBTYPE_SET_MODEL);
-        let payload = build_set_model_request(&pending.request_id, model);
+        self.send_session_change(locked_stdin, SUBTYPE_SET_MODEL, |id| {
+            build_set_model_request(id, model)
+        })
+    }
+
+    pub(crate) fn send_apply_effort<W: Write>(
+        &self,
+        locked_stdin: &mut W,
+        level: &str,
+    ) -> Result<PendingControl, ControlError> {
+        self.send_session_change(locked_stdin, SUBTYPE_APPLY_FLAG_SETTINGS, |id| {
+            build_apply_effort_request(id, level)
+        })
+    }
+
+    fn send_session_change<W: Write>(
+        &self,
+        locked_stdin: &mut W,
+        subtype: &'static str,
+        build: impl FnOnce(&str) -> serde_json::Value,
+    ) -> Result<PendingControl, ControlError> {
+        let pending = self.register(subtype);
+        let payload = build(&pending.request_id);
         if let Err(e) = writeln!(locked_stdin, "{payload}").and_then(|()| locked_stdin.flush()) {
             pending.forget();
             return Err(ControlError::Write(e.to_string()));
@@ -264,6 +298,25 @@ impl ControlHandle {
 
     pub(crate) fn query(&self, query: ControlQuery) -> Result<serde_json::Value, ControlError> {
         self.channel.request(&self.stdin, query, query.timeout())
+    }
+
+    pub(crate) fn apply_effort(&self, level: &str) -> Result<(), ControlError> {
+        self.apply_effort_within(level, APPLY_EFFORT_TIMEOUT)
+    }
+
+    pub(crate) fn apply_effort_within(
+        &self,
+        level: &str,
+        timeout: Duration,
+    ) -> Result<(), ControlError> {
+        let pending = {
+            let mut stdin = self
+                .stdin
+                .lock()
+                .map_err(|e| ControlError::Write(format!("stdin lock poisoned: {e}")))?;
+            self.channel.send_apply_effort(&mut *stdin, level)?
+        };
+        pending.wait(timeout).map(|_| ())
     }
 }
 
@@ -546,6 +599,7 @@ mod tests {
             assert!(q.timeout() > Duration::ZERO, "{q:?}");
         }
         assert!(SET_MODEL_TIMEOUT > Duration::ZERO);
+        assert!(APPLY_EFFORT_TIMEOUT > Duration::ZERO);
     }
 
     #[test]
@@ -768,6 +822,115 @@ mod tests {
                 subtype: "set_model",
                 timeout: Duration::from_millis(30),
             }
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn apply_effort_request_matches_the_sdk_envelope() {
+        let v = build_apply_effort_request("req_apply_flag_settings_1", "xhigh");
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "control_request",
+                "request_id": "req_apply_flag_settings_1",
+                "request": {
+                    "subtype": "apply_flag_settings",
+                    "settings": { "effortLevel": "xhigh" },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn an_effort_change_written_under_the_callers_lock_resolves_on_its_answer() {
+        let channel = ControlChannel::default();
+        let mut sink = Vec::new();
+
+        let pending = channel
+            .send_apply_effort(&mut sink, "low")
+            .expect("written");
+
+        let text = String::from_utf8(sink).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let sent: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(sent["request"]["settings"]["effortLevel"], "low");
+        let id = sent["request_id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("req_apply_flag_settings_"), "{id}");
+        assert_eq!(channel.pending_ids(), vec![id.clone()]);
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        });
+        assert_eq!(channel.route_response(&answer), Routed::Delivered);
+        assert_eq!(
+            pending.wait(Duration::from_secs(5)),
+            Ok(serde_json::Value::Null)
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_rejected_effort_change_carries_claude_codes_text() {
+        let channel = ControlChannel::default();
+        let pending = channel
+            .send_apply_effort(&mut Vec::new(), "max")
+            .expect("written");
+        let id = channel.pending_ids().pop().expect("a waiter");
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "error", "request_id": id, "error": "not allowed" },
+        });
+
+        assert_eq!(channel.route_response(&answer), Routed::Delivered);
+        assert_eq!(
+            pending.wait(Duration::from_secs(5)),
+            Err(ControlError::Rejected("not allowed".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_unanswered_effort_change_times_out_and_forgets_its_waiter() {
+        let channel = ControlChannel::default();
+        let pending = channel
+            .send_apply_effort(&mut Vec::new(), "medium")
+            .expect("written");
+
+        let err = pending
+            .wait(Duration::from_millis(30))
+            .expect_err("no answer");
+
+        assert_eq!(
+            err,
+            ControlError::Timeout {
+                subtype: "apply_flag_settings",
+                timeout: Duration::from_millis(30),
+            }
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_change_that_cannot_be_written_leaves_no_waiter() {
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let channel = ControlChannel::default();
+
+        let err = channel
+            .send_apply_effort(&mut FailWriter, "low")
+            .err()
+            .expect("write must fail");
+
+        assert!(
+            matches!(&err, ControlError::Write(e) if e.contains("gone")),
+            "{err}"
         );
         assert!(channel.pending_ids().is_empty());
     }

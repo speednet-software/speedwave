@@ -238,28 +238,6 @@ fn control_query_inner<T>(
         .map_err(|e| e.to_string())
 }
 
-fn takes_wire_effort_inner(session_arc: &SharedChatSession, project: &str) -> bool {
-    let _serialize = START_SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut session = session_arc
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    session.project_name() == project && session.takes_wire_effort()
-}
-
-#[tauri::command]
-pub(crate) async fn get_chat_takes_wire_effort(
-    project: String,
-    state: tauri::State<'_, SharedChatSession>,
-) -> Result<bool, String> {
-    check_project(&project)?;
-    let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || takes_wire_effort_inner(&session_arc, &project))
-        .await
-        .map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 pub(crate) async fn get_chat_session_info(
     project: String,
@@ -310,6 +288,50 @@ pub(crate) async fn switch_chat_model(
     validate_model_pick(&model)?;
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || switch_model_inner(&session_arc, &project, &model))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn validate_effort_pick(level: &str) -> Result<(), String> {
+    if speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
+        Ok(())
+    } else {
+        Err(format!("unknown effort level: {level}"))
+    }
+}
+
+fn apply_effort_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+    level: &str,
+) -> Result<(), String> {
+    let handle = {
+        let session = lock_session_for_input(session_arc)?;
+        if session.project_name() != project {
+            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+        }
+        session.control_handle().map_err(|e| e.to_string())?
+    };
+    log::info!("applying effort {level} to the chat session");
+    handle.apply_effort(level).map_err(|e| {
+        log::warn!("the chat session did not take effort {level}: {e}");
+        e.to_string()
+    })?;
+    #[cfg(feature = "e2e")]
+    crate::e2e_support::record_applied_effort(level);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn apply_chat_effort(
+    project: String,
+    level: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<(), String> {
+    check_project(&project)?;
+    validate_effort_pick(&level)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || apply_effort_inner(&session_arc, &project, &level))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -387,81 +409,61 @@ mod tests {
     }
 
     #[test]
-    fn a_live_process_launched_with_effort_takes_the_wire() {
-        let mut session = ChatSession::new("acme");
-        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        assert!(takes_wire_effort_inner(&session_arc, "acme"));
-        assert!(
-            !takes_wire_effort_inner(&session_arc, "other"),
-            "another project's session says nothing about this one"
-        );
+    fn effort_picks_are_validated_before_they_reach_the_session() {
+        for level in speedwave_runtime::defaults::EFFORT_LEVELS {
+            assert_eq!(validate_effort_pick(level), Ok(()), "{level}");
+        }
+        for bad in ["", "turbo", "High", " low", "low\n", "auto"] {
+            assert!(validate_effort_pick(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
-    fn a_process_without_effort_or_without_life_does_not_take_the_wire() {
-        let never_spawned: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
-        assert!(!takes_wire_effort_inner(&never_spawned, "acme"));
+    fn an_effort_pick_needs_a_live_session_of_the_same_project() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
 
-        let mut unpinned = ChatSession::new("acme");
-        unpinned.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), false);
-        let unpinned: SharedChatSession = Arc::new(Mutex::new(unpinned));
-        assert!(!takes_wire_effort_inner(&unpinned, "acme"));
+        let other = apply_effort_inner(&session_arc, "other", "low");
+        let idle = apply_effort_inner(&session_arc, "acme", "low");
 
-        let mut exited = ChatSession::new("acme");
-        exited.set_test_process(chat::spawn_test_child(chat::TestChild::Exited), true);
-        let exited: SharedChatSession = Arc::new(Mutex::new(exited));
-        assert!(!takes_wire_effort_inner(&exited, "acme"));
+        assert_eq!(other, Err(MSG_NO_SESSION_FOR_PROJECT.to_string()));
+        assert!(idle.unwrap_err().contains("no active session"));
     }
 
     #[test]
-    fn the_wire_effort_answer_waits_for_a_start_in_progress() {
-        let mut session = ChatSession::new("acme");
-        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        let starting = START_SERIALIZE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let reader = {
-            let session_arc = session_arc.clone();
-            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
-        };
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(
-            !reader.is_finished(),
-            "a start stopping the old process holds only START_SERIALIZE, and must not read as a hold"
-        );
-        drop(starting);
-        assert!(reader.join().unwrap());
+    fn an_effort_pick_on_a_session_held_by_another_command_says_it_is_busy() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let _held = session_arc.lock().unwrap();
+
+        let picked = apply_effort_inner(&session_arc, "acme", "high");
+
+        assert_eq!(picked, Err(MSG_SESSION_BUSY.to_string()));
     }
 
     #[test]
-    fn the_wire_effort_answer_waits_for_the_session_lock() {
-        let mut session = ChatSession::new("acme");
-        session.set_test_process(chat::spawn_test_child(chat::TestChild::Blocked), true);
-        let session_arc: SharedChatSession = Arc::new(Mutex::new(session));
-        let held = session_arc.lock().unwrap();
-        let reader = {
-            let session_arc = session_arc.clone();
-            std::thread::spawn(move || takes_wire_effort_inner(&session_arc, "acme"))
-        };
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(
-            !reader.is_finished(),
-            "a busy session must not read as a held one"
-        );
-        drop(held);
-        assert!(reader.join().unwrap());
-    }
-
-    #[test]
-    fn get_chat_takes_wire_effort_uses_spawn_blocking() {
+    fn an_effort_pick_releases_the_session_lock_before_it_waits_for_the_answer() {
         let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "async fn get_chat_takes_wire_effort(");
-        assert!(
-            body.contains("spawn_blocking"),
-            "the blocking session lock must not run on the async runtime"
-        );
+        let body = extract_fn_body(source, "fn apply_effort_inner(");
+        let locked = body
+            .find("lock_session_for_input")
+            .expect("the pick takes the session lock");
+        let released = body.find("};").expect("the lock lives in a block");
+        let waited = body
+            .find(".apply_effort(")
+            .expect("the pick waits for the answer");
+        assert!(locked < released && released < waited);
+    }
+
+    #[test]
+    fn apply_chat_effort_validates_before_spawn_blocking() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "async fn apply_chat_effort(");
+        let checked = body
+            .find("validate_effort_pick")
+            .expect("apply_chat_effort must validate the level");
+        let spawned = body
+            .find("spawn_blocking")
+            .expect("the session lock must not run on the async runtime");
+        assert!(checked < spawned);
     }
 
     #[test]
