@@ -28,6 +28,7 @@ import {
   requireOpenrouterKey,
   requireOpenrouterModel,
   useCheapOpenRouterModel,
+  lastAssistantText,
   queueMessageViaEnter,
   waitForTurnStart,
   waitForTurnComplete,
@@ -227,6 +228,23 @@ describe('Slash Popover + Model/Effort Selector', function () {
     const badgeText = await (await $('[data-testid="composer-model-badge"]')).getText();
     expect(badgeText.trim().length).toBeGreaterThan(0);
     await useCheapOpenRouterModel();
+  });
+
+  it('OpenRouter: an effort pick reaches the live session, which keeps answering', async function () {
+    this.timeout(180_000);
+    try {
+      await sendMessageAndWait('Reply with the single word: ok.');
+      await pickComposerEffort('low');
+      expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
+      expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
+        false
+      );
+
+      await sendMessageAndWait('Reply with the single word: yes.');
+      expect((await lastAssistantText()).toLowerCase()).toContain('yes');
+    } finally {
+      clearEffortPinFile(E2E_PROJECT_NAME);
+    }
   });
 
   describe('Anthropic model + effort persistence (SPEED-535)', function () {

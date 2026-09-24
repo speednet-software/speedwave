@@ -293,7 +293,7 @@ export class ModelSelectorComponent {
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
-  protected readonly showEffortControl = computed(() => this.summary() !== null);
+  private readonly providerKnown = computed(() => this.summary() !== null);
 
   protected readonly pickerPending = computed(
     () => this.isAnthropic() && this.control.sessionInfoState(this.projectId()).state === 'pending'
@@ -343,9 +343,7 @@ export class ModelSelectorComponent {
     return row ? row.default_effort : (this.currentModelEntry()?.default_effort ?? null);
   });
 
-  protected readonly showEffortSegment = computed(
-    () => this.showEffortControl() && this.effortStops().length > 0
-  );
+  protected readonly showEffortSegment = computed(() => this.effortStops().length > 0);
 
   protected readonly effectiveEffortLevel = computed<string | null>(() => {
     const stops = this.effortStops();
@@ -384,7 +382,7 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.loadEffortState(id);
+      if (this.providerKnown() && id) void this.loadEffortState(id);
     });
     effect(() => {
       const id = this.projectId();
@@ -405,7 +403,7 @@ export class ModelSelectorComponent {
       const ended = live === '' && this.lastSessionModel !== '';
       this.lastSessionModel = live;
       const id = this.projectId();
-      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
+      if (changed && this.providerKnown() && id) void this.loadEffortState(id);
       if (ended) {
         this.lastPicked.set('');
         if (id && !this.summary()?.model) void this.loadModelHint(id);
@@ -416,7 +414,7 @@ export class ModelSelectorComponent {
       const changed = err !== '' && err !== this.lastModelError;
       this.lastModelError = err;
       const id = this.projectId();
-      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
+      if (changed && this.providerKnown() && id) void this.loadEffortState(id);
     });
   }
 

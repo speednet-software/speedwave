@@ -1127,6 +1127,14 @@ describe('ModelSelectorComponent', () => {
         );
     }
 
+    function expectHandleWithoutPosition(): void {
+      const handle = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
+        .nativeElement as HTMLElement;
+      expect(handle.className).toContain('opacity-0');
+      expect(handle.getAttribute('aria-valuetext')).toBe('Default');
+      expect(handle.getAttribute('aria-valuenow')).toBeNull();
+    }
+
     for (const kind of ['open_router', 'local'] as const) {
       it(`${kind}: offers every effort level from the summary, in order, and reads its pin`, async () => {
         await openRoutedEffortPopover(kind, null);
@@ -1150,7 +1158,7 @@ describe('ModelSelectorComponent', () => {
 
       const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
       expect(segment.nativeElement.textContent.trim()).toBe('Default');
-      expect(fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))).toBeNull();
+      expectHandleWithoutPosition();
     });
 
     it('a stop click emits effortSelected with the routed pick', async () => {
@@ -1187,7 +1195,7 @@ describe('ModelSelectorComponent', () => {
       fixture.detectChanges();
 
       expect(stops()).toEqual(EFFORT_LEVELS);
-      expect(fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))).toBeNull();
+      expectHandleWithoutPosition();
     });
   });
 

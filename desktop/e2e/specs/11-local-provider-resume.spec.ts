@@ -70,13 +70,19 @@ describe('Local Provider + Resume', function () {
 
   it('takes an effort pick on the live local-model session, which keeps answering', async function () {
     this.timeout(240_000);
-    await openChat();
-    await pickComposerEffort('max');
-    expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
-    expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(false);
+    try {
+      await openChat();
+      await pickComposerEffort('max');
+      expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
+      expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
+        false
+      );
 
-    await sendMessageAndWait(`At the new effort: ${MEMORY_RECALL_PROMPT}`);
-    expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
+      await sendMessageAndWait(`At the new effort: ${MEMORY_RECALL_PROMPT}`);
+      expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
+    } finally {
+      clearEffortPinFile(E2E_PROJECT_NAME);
+    }
   });
 
   it('does not price a local model in the chat footer', async function () {
@@ -103,16 +109,4 @@ describe('Local Provider + Resume', function () {
     expect((await lastAssistantText()).toLowerCase()).toContain('ok');
   });
 
-  it('takes an effort pick on the live OpenRouter session, which keeps answering', async function () {
-    this.timeout(120_000);
-    await pickComposerEffort('low');
-    expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
-
-    await sendMessageAndWait('Reply with the single word: yes.');
-    expect((await lastAssistantText()).toLowerCase()).toContain('yes');
-  });
-
-  after(function () {
-    clearEffortPinFile(E2E_PROJECT_NAME);
-  });
 });

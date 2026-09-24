@@ -308,18 +308,9 @@ describe('Project Management', function () {
         reverse: true,
         timeoutMsg: 'removed project still listed in the switcher',
       });
-      const stillListed = await browser.executeAsync((name: string, done: (r: boolean) => void) => {
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: {
-              invoke: (cmd: string) => Promise<{ projects: Array<{ name: string }> }>;
-            };
-          }
-        ).__TAURI_INTERNALS__
-          .invoke('list_projects')
-          .then((r) => done(r.projects.some((p) => p.name === name)))
-          .catch(() => done(true));
-      }, THIRD_PROJECT_NAME);
+      const listed = await invokeCommand<{ projects: Array<{ name: string }> }>('list_projects');
+      const stillListed =
+        !listed.ok || listed.value.projects.some((p) => p.name === THIRD_PROJECT_NAME);
       expect(stillListed).toBe(false);
       expect(await activeProjectSlug()).toBe('e2e-test');
       await pill.click();

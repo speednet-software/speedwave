@@ -242,9 +242,11 @@ describe('EffortSliderComponent', () => {
     expect(slider().getAttribute('aria-valuetext')).toBe('Low');
   });
 
-  it('shows no handle and no filled stop when activeLevel is not one of the stops', () => {
+  it('hides the handle and fills no stop when activeLevel is not one of the stops', () => {
     setInputs(NO_XHIGH_STOPS, 'xhigh');
-    expect(slider()).toBeNull();
+    expect(slider().className).toContain('opacity-0');
+    expect(slider().getAttribute('aria-valuenow')).toBeNull();
+    expect(slider().getAttribute('aria-valuetext')).toBe('Default');
     for (const level of NO_XHIGH_STOPS) {
       expect(stopEl(level).className).toContain('bg-[var(--line-strong)]');
     }
@@ -257,10 +259,38 @@ describe('EffortSliderComponent', () => {
 
     const header = fixture.nativeElement.querySelector('[data-testid="effort-popover-header"]');
     expect(header.textContent).toContain('Effort Default');
-    expect(slider()).toBeNull();
+    expect(slider().className).toContain('opacity-0');
     stopEl('max').click();
 
     expect(emitted).toEqual(['max']);
+  });
+
+  it('keeps the hidden handle a focusable slider that the arrow keys move onto an end stop', () => {
+    setInputs(FULL_STOPS, '', false);
+    const emitted: string[] = [];
+    fixture.componentInstance.levelSelected.subscribe((l) => emitted.push(l));
+    expect(slider().getAttribute('role')).toBe('slider');
+    expect(slider().getAttribute('tabindex')).toBe('0');
+
+    slider().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    fixture.detectChanges();
+    expect(slider().getAttribute('aria-valuetext')).toBe('Low');
+    expect(slider().className).not.toContain('opacity-0');
+
+    setInputs([...FULL_STOPS], '', false);
+    expect(slider().className).toContain('opacity-0');
+    slider().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    fixture.detectChanges();
+    expect(slider().getAttribute('aria-valuetext')).toBe('Max');
+    slider().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+
+    expect(emitted).toEqual(['max']);
+  });
+
+  it('names every stop for a screen reader', () => {
+    setInputs(FULL_STOPS, 'high');
+    expect(stopEl('xhigh').getAttribute('aria-label')).toBe('Effort Xhigh');
+    expect(stopEl('low').getAttribute('aria-label')).toBe('Effort Low');
   });
 
   it('ignores a non-primary button press: a following move over the track leaves the level unchanged and emits nothing', () => {

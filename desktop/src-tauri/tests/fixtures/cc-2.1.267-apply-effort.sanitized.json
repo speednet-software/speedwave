@@ -1,7 +1,7 @@
 {
   "claude_code_version": "2.1.267",
   "captured": "2026-09-24",
-  "note": "apply_flag_settings {settings: {effortLevel}} sent on stdin between turns of a stream-json session (the arguments of chat.rs::build_claude_args, --model claude-fable-5 and no --effort) against a stub /v1/messages, with a settings.json already in the config directory. requests[i] is output_config.effort of the model request of the turn after applied[i]. responses holds Claude Code's answer to each request; nothing else reached stdout before it.",
+  "note": "apply_flag_settings {settings: {effortLevel}} sent on stdin between turns of a stream-json session (the arguments of chat.rs::build_claude_args, --model claude-fable-5 and no --effort) against a stub /v1/messages, with a settings.json already in the config directory. requests[i] is output_config.effort of the model request of the turn after applied[i]. responses holds Claude Code's answer to each request; nothing else reached stdout before it. claude_json_keys_added lists the keys .claude.json in the config directory gained between the first turn and the last.",
   "applied": [
     "launch",
     "low",
@@ -37,5 +37,10 @@
       }
     }
   },
-  "settings_json_unchanged": true
+  "settings_json_unchanged": true,
+  "claude_json_keys_added": [
+    "unpinFable5LaunchEffort",
+    "unpinOpus47LaunchEffort",
+    "unpinOpus48LaunchEffort"
+  ]
 }

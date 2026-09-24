@@ -2144,8 +2144,8 @@ impl ChatSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_control_ids(&self) -> Vec<String> {
-        self.control.pending_ids()
+    pub(crate) fn control_channel_for_test(&self) -> ControlChannel {
+        self.control.clone()
     }
 
     #[cfg(test)]
@@ -4289,6 +4289,14 @@ mod tests {
     fn lines_written_until_stdin_closed(
         capture: std::thread::JoinHandle<Vec<u8>>,
     ) -> Vec<serde_json::Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !capture.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stdin was never closed: a handle to it is still alive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let text = String::from_utf8(capture.join().unwrap()).unwrap();
         assert!(
             text.is_empty() || text.ends_with('\n'),

@@ -17,8 +17,8 @@ export function capitalizeLevel(level: string): string {
 }
 
 /**
- * Discrete effort slider over the caller's stops (low to max), with no handle while the level is
- * unknown; a stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
+ * Discrete effort slider over the caller's stops (low to max); an unknown level shows no handle but
+ * keeps it focusable. A stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
  */
 @Component({
   selector: 'app-effort-slider',
@@ -34,32 +34,32 @@ export function capitalizeLevel(level: string): string {
           <button
             type="button"
             [attr.data-testid]="'effort-stop-' + level"
-            [attr.aria-label]="level"
+            [attr.aria-label]="'Effort ' + capitalize(level)"
             class="absolute h-2 w-2 -translate-x-1/2 rounded-full"
             [class]="i <= displayedIndex() ? 'bg-[var(--teal)]' : 'bg-[var(--line-strong)]'"
             [style.left.%]="stopPercent(i)"
             (click)="applyIndex(i)"
           ></button>
         }
-        @if (displayedIndex() >= 0) {
-          <div
-            data-testid="effort-slider"
-            role="slider"
-            tabindex="0"
-            class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)]"
-            [class.opacity-40]="!pinned()"
-            [style.left.%]="stopPercent(displayedIndex())"
-            [attr.aria-valuemin]="0"
-            [attr.aria-valuemax]="stops().length - 1"
-            [attr.aria-valuenow]="displayedIndex()"
-            [attr.aria-valuetext]="capitalizedDisplayedLevel()"
-            (keydown)="onKeydown($event)"
-            (pointerdown)="onHandlePointerDown($event)"
-            (pointermove)="onHandlePointerMove($event, track)"
-            (pointerup)="onHandlePointerUp($event)"
-            (pointercancel)="onHandlePointerCancel()"
-          ></div>
-        }
+        <div
+          data-testid="effort-slider"
+          role="slider"
+          tabindex="0"
+          aria-label="Effort"
+          class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)]"
+          [class.opacity-40]="!pinned() && hasPosition()"
+          [class.opacity-0]="!hasPosition()"
+          [style.left.%]="stopPercent(hasPosition() ? displayedIndex() : 0)"
+          [attr.aria-valuemin]="0"
+          [attr.aria-valuemax]="stops().length - 1"
+          [attr.aria-valuenow]="hasPosition() ? displayedIndex() : null"
+          [attr.aria-valuetext]="hasPosition() ? capitalizedDisplayedLevel() : 'Default'"
+          (keydown)="onKeydown($event)"
+          (pointerdown)="onHandlePointerDown($event)"
+          (pointermove)="onHandlePointerMove($event, track)"
+          (pointerup)="onHandlePointerUp($event)"
+          (pointercancel)="onHandlePointerCancel()"
+        ></div>
       </div>
       <div class="mono mt-2 flex justify-between text-[10px] text-[var(--ink-mute)]">
         <span>Faster</span>
@@ -91,6 +91,10 @@ export class EffortSliderComponent {
 
   protected readonly displayedIndex = computed(() => this.pending() ?? this.committedIndex());
 
+  protected readonly hasPosition = computed(() => this.displayedIndex() >= 0);
+
+  protected readonly capitalize = capitalizeLevel;
+
   protected readonly headerLevel = computed(() =>
     this.pinned() ? this.capitalizedDisplayedLevel() : 'Default'
   );
@@ -114,12 +118,13 @@ export class EffortSliderComponent {
 
   protected onKeydown(event: KeyboardEvent): void {
     const max = this.stops().length - 1;
+    const current = this.displayedIndex();
     if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
       event.preventDefault();
-      this.pending.set(Math.min(max, this.displayedIndex() + 1));
+      this.pending.set(current < 0 ? 0 : Math.min(max, current + 1));
     } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
       event.preventDefault();
-      this.pending.set(Math.max(0, this.displayedIndex() - 1));
+      this.pending.set(current < 0 ? max : Math.max(0, current - 1));
     } else if (event.key === 'Enter') {
       event.preventDefault();
       this.applyIndex(this.displayedIndex());

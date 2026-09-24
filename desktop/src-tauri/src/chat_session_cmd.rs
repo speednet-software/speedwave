@@ -219,10 +219,18 @@ fn control_handle_for(
     let session = session_arc
         .try_lock()
         .map_err(|_| MSG_SESSION_BUSY.to_string())?;
+    take_from_project_session(&session, project, ChatSession::control_handle)
+}
+
+fn take_from_project_session<T>(
+    session: &ChatSession,
+    project: &str,
+    take: impl FnOnce(&ChatSession) -> anyhow::Result<T>,
+) -> Result<T, String> {
     if session.project_name() != project {
         return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
     }
-    session.control_handle().map_err(|e| e.to_string())
+    take(session).map_err(|e| e.to_string())
 }
 
 fn control_query_inner<T>(
@@ -268,10 +276,7 @@ fn live_session_input<T>(
     take: impl FnOnce(&ChatSession) -> anyhow::Result<T>,
 ) -> Result<T, String> {
     let session = lock_session_for_input(session_arc)?;
-    if session.project_name() != project {
-        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
-    }
-    take(&session).map_err(|e| e.to_string())
+    take_from_project_session(&session, project, take)
 }
 
 fn switch_model_inner(
@@ -404,25 +409,36 @@ mod tests {
         pick: fn(&SharedChatSession) -> Result<(), String>,
     ) {
         let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
-        session_arc.lock().unwrap().set_test_stdin_sink(Vec::new());
+        let control = {
+            let mut session = session_arc.lock().unwrap();
+            session.set_test_stdin_sink(Vec::new());
+            session.control_channel_for_test()
+        };
         let picker = {
             let session_arc = session_arc.clone();
             std::thread::spawn(move || pick(&session_arc))
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let Ok(mut session) = session_arc.try_lock() {
-                if !session.pending_control_ids().is_empty() {
-                    session.stop().unwrap();
-                    break;
-                }
+        while control.pending_ids().is_empty() {
+            if picker.is_finished() {
+                panic!(
+                    "the pick ended before it waited for Claude Code: {:?}",
+                    picker.join()
+                );
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the pick held the session lock while it waited for Claude Code"
+                "the pick never registered its request"
             );
             std::thread::yield_now();
         }
+
+        let mut session = session_arc
+            .try_lock()
+            .expect("the pick holds the session lock while it waits for Claude Code");
+        session.stop().unwrap();
+        drop(session);
+
         assert_eq!(
             picker.join().unwrap(),
             Err(control_channel::ControlError::SessionEnded.to_string())

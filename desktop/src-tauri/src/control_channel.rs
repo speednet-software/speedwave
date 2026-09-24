@@ -805,6 +805,24 @@ mod tests {
     }
 
     #[test]
+    fn an_effort_change_stores_no_level_outside_the_pin() {
+        let capture = apply_effort_capture();
+        let added: Vec<&str> = capture["claude_json_keys_added"]
+            .as_array()
+            .expect("the capture records the keys .claude.json gained")
+            .iter()
+            .map(|key| key.as_str().unwrap())
+            .collect();
+
+        assert!(
+            added
+                .iter()
+                .all(|key| key.starts_with("unpin") && key.ends_with("LaunchEffort")),
+            "apply_flag_settings may record only launch-hold releases in .claude.json: {added:?}"
+        );
+    }
+
+    #[test]
     fn claude_codes_answer_to_an_effort_change_resolves_the_pick() {
         let capture = apply_effort_capture();
         for level in ["low", "max"] {

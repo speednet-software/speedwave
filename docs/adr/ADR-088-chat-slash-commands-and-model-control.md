@@ -638,9 +638,9 @@ and the send recovery), since each of those launches with the pin.
 **Amendment (SPEED-707, 2026-09-24: a composer pick reaches a live session as an
 `apply_flag_settings` control request).** Speedwave no longer writes `/effort` into
 a live chat process and no longer asks whether the process launched with
-`--effort`. `ChatStateService.applyEffortToConversation` calls
+`--effort`. `ChatStateService.sendEffortToSession` calls
 `chat_session_cmd.rs::apply_chat_effort`, which validates the level against
-`defaults::EFFORT_LEVELS`, sends
+`defaults::EFFORT_LEVELS` (`pin_cmd::validate_effort_level`), sends
 `{subtype: "apply_flag_settings", settings: {effortLevel: <level>}}` through the
 session's control channel (`control_channel.rs::ControlHandle::apply_effort`) and
 waits for the answer after it has released the session mutex, as
@@ -660,11 +660,19 @@ against their release manifests, run with the stream-json arguments of
   request carried `output_config.effort: high`, the request after
   `apply_flag_settings` with `low` carried `low`, and after `max` it carried `max`.
   Each request was answered `success` at once and nothing else was written to
-  stdout. `settings.json` was left byte for byte unchanged, so `effort_pin` stays
-  the only store and every spawn still passes `--effort <pin>`. This run is
-  recorded in `desktop/src-tauri/tests/fixtures/cc-<version>-apply-effort.sanitized.json`;
+  stdout. `settings.json` was left byte for byte unchanged.
+  - On 2.1.267 the config directory's `.claude.json` gained the launch-hold release
+    flags `unpinFable5LaunchEffort`, `unpinOpus47LaunchEffort` and
+    `unpinOpus48LaunchEffort`. They store no level; a later process started without
+    `--effort`, such as a CLI session, simply starts without the hold.
+  - On 2.1.282 `.claude.json` gained nothing.
+
+  `effort_pin` therefore stays the only level store, and every spawn still passes
+  `--effort <pin>`. This run is recorded in
+  `desktop/src-tauri/tests/fixtures/cc-<version>-apply-effort.sanitized.json`;
   `control_channel.rs::the_apply_effort_capture_is_of_the_pinned_claude_code` fails
   on every Claude Code bump until it is recorded again from the new binary.
+
 - Opus 5.5 on 2.1.282, spawned with `--effort high`, behaved the same.
 - `set_model` keeps the flag-layer level: after `low` was applied on Opus 4.8 and
   the session switched to Sonnet 5, the Sonnet request carried `low`.
@@ -712,22 +720,35 @@ e2e spec 11 picks a level on the live local session and on the live OpenRouter
 session, and checks that the next turn still answers.
 
 The timing rules of the SPEED-650 amendment stand: a pick made while a turn streams,
-or while a session starts or resumes, waits for the turn end or the resume. Only the
-latest pick is applied:
+or while a session starts or resumes, waits. It is applied at the turn end, when the
+resume completes, or when a fresh start completes. A session that has not reported
+an id yet keeps it until its first turn ends. Only the latest pick is applied:
 
-- Picks go to the session one at a time, in pick order; `ChatStateService` chains
-  them.
+- Picks go to the session one at a time, in pick order. `ChatStateService.sendEffortToSession`
+  calls the command, and `applyEffortToConversation` chains the calls.
 - A pick is dropped once a newer one is made, even while the newer one is still
   saving its pin.
 - The pins are written in pick order.
 - When the newest pick's pin cannot be written, the session is sent the level the
   pin holds, so the session never keeps a level the composer no longer shows.
-- A pick belongs to the project it was made in. After a project change it is neither
-  sent nor queued, and its outcome raises no notice.
+- A pick belongs to the project it was made in. It counts only while the app is
+  settled on that project (`ProjectStateService.isSettledOn`: that project is active
+  and no switch runs). A pick made before or during a switch is therefore neither
+  sent nor queued, and its error and notice never reach the other project. The switch
+  also clears the composer's selection error.
+- Model picks follow the same project rule, and a model pick made while a fresh
+  session starts is queued as well, instead of starting a second session.
 
 A turn end releases a pending model pick and a pending effort pick together, since
-neither is an input any more. A Stop that interrupts the turn releases them too,
-because the interrupted turn's own `result` is dropped while nothing streams.
+neither is an input any more. A Stop the user clicks releases them too, because the
+interrupted turn's own `result` is dropped while nothing streams. The Stop a container
+restart begins with releases nothing: the restart resumes the conversation in a
+process that launches with the pins.
+
+A pick in a chat with no conversation yet still restarts the idle session, so the
+session launches with the pin. Before the first message the chat has no session id
+that tells a live process from none, and a session without a conversation has no work
+a restart could lose.
 
 Any failure of the request keeps the pin and shows the notice with Restart now,
 which is the notice's only remaining role. The failures are:
@@ -735,14 +756,21 @@ which is the notice's only remaining role. The failures are:
 - a rejection;
 - a timeout (`control_channel::APPLY_EFFORT_TIMEOUT`, 10 s);
 - a session with no live process;
-- a session another command holds;
-- a session of another project.
+- a session another command holds (`chat session is busy`).
 
 A request made after the process's output has ended fails at once, because the
 stdout reader closes the control channel when the stream ends. A timed-out request
 may still be applied late. The notice therefore says that the level is saved for new
 sessions and that this session did not confirm it, never that the session keeps its
 old level. No automatic respawn is added, for the reasons above.
+
+Two limits remain:
+
+- A `CLAUDE_CODE_EFFORT_LEVEL` the user puts into the project's `claude.env`
+  outranks every pick, as measured above. Each pick is then answered `success` and
+  changes nothing, and no notice says so.
+- An upstream that rejects a level fails every turn with its error until the user
+  picks another level. Only the three upstreams above were checked.
 
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
