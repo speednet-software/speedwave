@@ -242,6 +242,22 @@ fn reject_routed_mid_conversation_system(
     )
 }
 
+/// Cap on a logged upstream connection error: long enough for reqwest's full source chain.
+const MAX_LOGGED_UPSTREAM_ERROR: usize = 600;
+
+/// `err` and every `source()` under it, joined with `: `; reqwest's own Display stops at
+/// "error sending request", which hides whether DNS, TCP or TLS failed.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
+}
+
 /// Terminal status for a forwarded request: failure on an upstream ≥400, an aborted byte
 /// stream, or an in-band SSE `error` frame; success otherwise.
 fn resolve_request_status(
@@ -355,9 +371,16 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
+            let cause = bound_for_log(&error_chain(&e.without_url()), MAX_LOGGED_UPSTREAM_ERROR);
+            log::warn!(
+                "upstream request for model '{}' via prefix '{}' to {} failed: {cause}",
+                bound_for_log(&model, MAX_LOGGED_ERROR_MESSAGE),
+                route.prefix,
+                upstream_host(&route.base_url)
+            );
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("upstream error: {e}")})),
+                Json(json!({"error": format!("upstream error: {cause}")})),
             )
                 .into_response();
         }
@@ -836,6 +859,34 @@ mod tests {
             RequestStatus::Failure,
             "an in-band error must fail the request even on a clean 200 stream"
         );
+    }
+
+    #[test]
+    fn error_chain_follows_every_source() {
+        let inner =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
+        let outer = std::io::Error::other(inner);
+        assert_eq!(error_chain(&outer), "Connection refused");
+        let wrapped = std::io::Error::other(ChainLayer(outer));
+        assert_eq!(
+            error_chain(&wrapped),
+            "client error (Connect): Connection refused"
+        );
+    }
+
+    #[derive(Debug)]
+    struct ChainLayer(std::io::Error);
+
+    impl std::fmt::Display for ChainLayer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("client error (Connect)")
+        }
+    }
+
+    impl std::error::Error for ChainLayer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
     }
 
     #[test]

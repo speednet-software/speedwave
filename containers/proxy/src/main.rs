@@ -967,6 +967,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unreachable_upstream_answers_502_naming_the_connection_cause() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let cfg = Arc::new(config_pointing_at(
+            &closed,
+            usage_dir.path().join("usage.jsonl"),
+        ));
+        let resp = build_router(cfg)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = parsed["error"].as_str().unwrap();
+        assert!(error.starts_with("upstream error: "), "{error}");
+        assert!(
+            error.contains("os error"),
+            "the 502 must carry the root cause, not only reqwest's top line: {error}"
+        );
+        assert!(
+            !error.contains("http://") && !error.contains("/v1/messages"),
+            "the upstream URL stays out of the error, only its host is logged: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn v1_messages_audits_detections_to_audit_dir() {
         let usage_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();

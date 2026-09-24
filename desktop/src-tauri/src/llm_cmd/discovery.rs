@@ -182,7 +182,10 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe GET {url} failed on host transport: {e}");
+                log::warn!(
+                    "LLM probe GET {url} failed on host transport: {}",
+                    crate::http_util::error_chain(&e)
+                );
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -208,7 +211,10 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe POST {url} failed on host transport: {e}");
+                log::warn!(
+                    "LLM probe POST {url} failed on host transport: {}",
+                    crate::http_util::error_chain(&e)
+                );
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -708,6 +714,26 @@ pub struct DiscoverLlmModelsArgs {
     pub custom_headers: Option<Option<String>>,
 }
 
+/// Discovers over the VM transport; when that fails, logs the VM error with its cause at info
+/// (expected for a server on the host's loopback) and retries over the host transport.
+async fn discover_via_vm_then_host<H: ProbeTransport>(
+    provider: &str,
+    base_url: &str,
+    vm: &dyn ProbeTransport,
+    host: impl FnOnce() -> Result<H, String>,
+) -> Result<DiscoverResult, String> {
+    match do_discover_llm_models(provider, base_url, vm).await {
+        Ok(result) => Ok(result),
+        Err(vm_err) => {
+            log::info!(
+                "VM probe for LLM model discovery failed, retrying via host transport: {vm_err}"
+            );
+            let host_transport = host()?;
+            do_discover_llm_models(provider, base_url, &host_transport).await
+        }
+    }
+}
+
 pub(crate) async fn discover_llm_models_with_fallback(
     provider: &str,
     base_url: &str,
@@ -728,15 +754,11 @@ pub(crate) async fn discover_llm_models_with_fallback(
     let vm_available = runtime.is_available();
     let result = if vm_available {
         let vm_transport = VmProbe::new(bearer.clone(), headers.clone(), timeout);
-        let vm_res = do_discover_llm_models(provider, base_url, &vm_transport).await;
-        if vm_res.is_ok() {
-            vm_res
-        } else {
-            log::info!("VM probe failed for LLM model discovery, retrying via host transport");
+        discover_via_vm_then_host(provider, base_url, &vm_transport, || {
             let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
-            let host_transport = HostProbe::new(client, timeout);
-            do_discover_llm_models(provider, base_url, &host_transport).await
-        }
+            Ok(HostProbe::new(client, timeout))
+        })
+        .await
     } else {
         let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
         let host_transport = HostProbe::new(client, timeout);
@@ -1940,5 +1962,106 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "empty");
+    }
+
+    struct FailingTransport(&'static str);
+
+    #[async_trait::async_trait]
+    impl ProbeTransport for FailingTransport {
+        async fn get(&self, _url: &str) -> Result<ProbeResponse, String> {
+            Err(self.0.to_string())
+        }
+        async fn post(
+            &self,
+            _url: &str,
+            _body: &serde_json::Value,
+        ) -> Result<ProbeResponse, String> {
+            Err(self.0.to_string())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn vm_probe_failure_is_logged_with_its_cause_before_the_host_retry() {
+        let logger = test_logger();
+        let _ = logger.take();
+        let vm = FailingTransport(
+            "LLM model discovery: curl in VM failed: curl: (6) Could not resolve host: llm.example",
+        );
+        let res = discover_via_vm_then_host("openrouter", "", &vm, || {
+            Ok(CatalogTransport(OPENROUTER_CATALOG.to_vec()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            res.models.len(),
+            3,
+            "the host transport answers after the VM"
+        );
+        let records = logger.take();
+        assert!(
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Info
+                    && msg.contains("retrying via host transport")
+                    && msg.contains("Could not resolve host: llm.example")
+            }),
+            "the VM error must be logged at info before the host retry; got: {records:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn vm_probe_success_never_builds_the_host_transport() {
+        let vm = CatalogTransport(OPENROUTER_CATALOG.to_vec());
+        let mut host_built = false;
+        let res = discover_via_vm_then_host("openrouter", "", &vm, || {
+            host_built = true;
+            Err::<CatalogTransport, String>("unused".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(res.models.len(), 3);
+        assert!(!host_built);
+    }
+
+    #[tokio::test]
+    async fn host_transport_build_error_is_returned_after_a_vm_failure() {
+        let vm = FailingTransport("VM probe failed: no route to host");
+        let err = discover_via_vm_then_host("openrouter", "", &vm, || {
+            Err::<CatalogTransport, String>("Failed to build HTTP client: boom".into())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Failed to build HTTP client: boom");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn host_probe_logs_the_cause_of_a_refused_connection() {
+        let logger = test_logger();
+        let _ = logger.take();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let transport = HostProbe::new(
+            crate::http_util::build_hardened_client(None).unwrap(),
+            Duration::from_secs(5),
+        );
+        let err = transport
+            .get(&format!("http://127.0.0.1:{port}/v1/models"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("LLM model discovery: request failed:"),
+            "the user-facing error keeps its shape: {err}"
+        );
+        let records = logger.take();
+        let address = format!("127.0.0.1:{port}");
+        assert!(
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Warn && msg.contains(&address) && msg.contains("os error")
+            }),
+            "one host probe warning must name both the address and the refused connection; \
+             got: {records:?}"
+        );
     }
 }
