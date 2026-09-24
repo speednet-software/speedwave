@@ -313,6 +313,30 @@ so a pick with no live session applies it through the re-render above, while
 a live-session wire `/model` leaves the running container on the previous
 window until its next render.
 
+**Amendment (SPEED-696, 2026-09-24: the soft-impose answer stays out of the
+chat, and a model the user sends disarms it).** The soft-impose above had two
+defects, both found on the e2e rig. First, Claude Code answers the injected
+`/model` with its own `result`: `num_turns: 0`, after a `<synthetic>` "Set model
+to … for this session only" message. The stdout reader emitted that `result`
+to the chat like any turn end. When the user sent a message before it arrived,
+that `result` ended the user's turn, and the listener then dropped the turn's
+answer. Second, the decision compared the observed model with the
+configuration read at spawn. Claude Code emits `system/init` for every input
+it starts, a local command included, so a composer pick made after the spawn
+was switched back at the next input.
+
+A capture from the pinned 2.1.267 binary
+(`desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`)
+shows the order: the input in progress when `init` arrives answers first, and
+the injected command answers second. The reader now withholds that second
+`result` when it is a command result (`num_turns: 0`); a result of any other
+shape still reaches the chat, with a warning in the log. A withheld `result`
+is neither emitted nor used to drain the message queue. A `/model` the user
+sends, directly or from the queue, settles the session's model
+(`chat.rs::ModelSettled`, checked and set under the stdin lock on both sides),
+and no soft-impose fires after it. The first-turn gap recorded above is
+unchanged.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a

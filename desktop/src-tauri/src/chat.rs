@@ -399,7 +399,6 @@ pub struct StreamParser {
     previous_session_cost: Option<f64>,
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
-    soft_impose_done: bool,
 }
 
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
@@ -415,7 +414,6 @@ impl StreamParser {
             previous_session_cost: None,
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
-            soft_impose_done: false,
         }
     }
 
@@ -1224,17 +1222,69 @@ struct SoftImposeConfig {
     entry_model: Option<String>,
 }
 
+#[derive(Clone, Default)]
+struct ModelSettled(Arc<std::sync::atomic::AtomicBool>);
+
+impl ModelSettled {
+    fn settle(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_settled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn settles_model(text: &str) -> bool {
+    matches!(
+        speedwave_runtime::slash::parse_control_command(text),
+        Some(("model", _))
+    )
+}
+
+#[derive(Default)]
+struct SoftImposeResult {
+    results_ahead: Option<u8>,
+}
+
+impl SoftImposeResult {
+    fn written(&mut self) {
+        self.results_ahead = Some(1);
+    }
+
+    fn withholds(&mut self, result_line: &serde_json::Value) -> bool {
+        match self.results_ahead {
+            None => false,
+            Some(0) => {
+                self.results_ahead = None;
+                let command_result = result_line["num_turns"].as_u64() == Some(0);
+                if !command_result {
+                    log::warn!(
+                        "the result after the soft-imposed /model is not a command result; \
+                         passing it to the chat"
+                    );
+                }
+                command_result
+            }
+            Some(ahead) => {
+                self.results_ahead = Some(ahead - 1);
+                false
+            }
+        }
+    }
+}
+
 fn maybe_soft_impose(
-    parser: &mut StreamParser,
+    settled: &ModelSettled,
     cfg: &SoftImposeConfig,
     init_line: &serde_json::Value,
-    mut write: impl FnMut(&str),
-) {
-    if parser.soft_impose_done {
-        return;
+    write: impl FnOnce(&str) -> bool,
+) -> bool {
+    if settled.is_settled() {
+        return false;
     }
     let Some(observed) = init_line["model"].as_str().filter(|s| !s.is_empty()) else {
-        return;
+        return false;
     };
     let Some(cmd) = soft_impose_message(
         cfg.kind,
@@ -1242,12 +1292,13 @@ fn maybe_soft_impose(
         cfg.entry_model.as_deref(),
         observed,
     ) else {
-        return;
+        return false;
     };
-    parser.soft_impose_done = true;
+    settled.settle();
     let wire_line = build_user_message(&text_only(&cmd)).to_string();
-    write(&wire_line);
+    let written = write(&wire_line);
     log::debug!("soft-imposing model at spawn: {cmd}");
+    written
 }
 
 pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
@@ -1479,6 +1530,7 @@ pub struct ChatSession {
     launched_with_effort: bool,
     stopping: Arc<std::sync::atomic::AtomicBool>,
     awaited_result: AwaitedResult,
+    model_settled: ModelSettled,
 }
 
 impl ChatSession {
@@ -1496,6 +1548,7 @@ impl ChatSession {
             launched_with_effort: false,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             awaited_result: AwaitedResult::new(),
+            model_settled: ModelSettled::default(),
         }
     }
 
@@ -1706,6 +1759,8 @@ impl ChatSession {
         let stopping_for_reader = self.stopping.clone();
         self.awaited_result = AwaitedResult::new();
         let awaited_for_reader = self.awaited_result.clone();
+        self.model_settled = ModelSettled::default();
+        let settled_for_reader = self.model_settled.clone();
 
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
@@ -1722,6 +1777,7 @@ impl ChatSession {
 
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
+            let mut soft_impose_result = SoftImposeResult::default();
             if let Some(seed) = resume_seed {
                 parser.restore_session_snapshot(
                     TurnUsage {
@@ -1898,6 +1954,15 @@ impl ChatSession {
                         }
                     }
                 }
+                let chunks = if msg_type == "result" && soft_impose_result.withholds(&parsed) {
+                    log::debug!(
+                        "soft-imposed /model answered: {}",
+                        parsed["result"].as_str().unwrap_or("")
+                    );
+                    Vec::new()
+                } else {
+                    chunks
+                };
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
@@ -1906,20 +1971,27 @@ impl ChatSession {
                     .iter()
                     .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
                 {
-                    maybe_soft_impose(&mut parser, &soft_impose_cfg, &parsed, |line| {
-                        match stdin_for_reader.lock() {
-                            Ok(mut stdin) => {
-                                if let Err(e) = writeln!(stdin, "{}", line) {
-                                    log::error!("soft-impose stdin write failed: {e}");
-                                } else if let Err(e) = stdin.flush() {
-                                    log::error!("soft-impose stdin flush failed: {e}");
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("stdin mutex poisoned: {e}; dropping soft-impose")
+                    match stdin_for_reader.lock() {
+                        Ok(mut stdin) => {
+                            let written = maybe_soft_impose(
+                                &settled_for_reader,
+                                &soft_impose_cfg,
+                                &parsed,
+                                |line| {
+                                    let sent =
+                                        writeln!(stdin, "{line}").and_then(|()| stdin.flush());
+                                    if let Err(e) = &sent {
+                                        log::error!("soft-impose stdin write failed: {e}");
+                                    }
+                                    sent.is_ok()
+                                },
+                            );
+                            if written {
+                                soft_impose_result.written();
                             }
                         }
-                    });
+                        Err(e) => log::error!("stdin mutex poisoned: {e}; dropping soft-impose"),
+                    }
                 }
                 awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
@@ -1930,6 +2002,7 @@ impl ChatSession {
                         &app_handle,
                         &session_id,
                         &stdin_for_reader,
+                        &settled_for_reader,
                         &display_policy,
                     ) {
                         awaited_for_reader.message_written();
@@ -2041,6 +2114,9 @@ impl ChatSession {
         let mut stdin = shared
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+        if matches!(blocks, [WireContentBlock::Text { text }] if settles_model(text)) {
+            self.model_settled.settle();
+        }
         writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
         drop(stdin);
@@ -2312,6 +2388,7 @@ fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    settled: &ModelSettled,
     policy: &DisplayPolicy,
 ) -> bool {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
@@ -2319,7 +2396,7 @@ fn drain_queued_message(
         Some(m) => m,
         None => return false,
     };
-    write_and_emit_drained_message(session_id, &drained.text, stdin, |chunk| {
+    write_and_emit_drained_message(session_id, &drained.text, stdin, settled, |chunk| {
         emit_sanitized_chunk(app_handle, chunk, policy)
     })
 }
@@ -2328,11 +2405,15 @@ fn write_and_emit_drained_message(
     session_id: &str,
     text: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    settled: &ModelSettled,
     mut emit: impl FnMut(StreamChunk),
 ) -> bool {
     let payload = build_user_message(&text_only(text));
     match stdin.lock() {
         Ok(mut handle) => {
+            if settles_model(text) {
+                settled.settle();
+            }
             if let Err(e) = writeln!(handle, "{}", payload) {
                 log::warn!("failed to write queued message to stdin: {e}");
                 return false;
@@ -3023,11 +3104,20 @@ mod tests {
     #[test]
     fn drained_control_shaped_text_emits_control_chip_then_queue_drained_and_writes_stdin_once() {
         let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
         let mut emitted: Vec<StreamChunk> = Vec::new();
-        write_and_emit_drained_message("sess-1", "/model claude-sonnet-5", &stdin, |chunk| {
-            emitted.push(chunk)
-        });
+        write_and_emit_drained_message(
+            "sess-1",
+            "/model claude-sonnet-5",
+            &stdin,
+            &settled,
+            |chunk| emitted.push(chunk),
+        );
 
+        assert!(
+            settled.is_settled(),
+            "a queued model pick must stop the session-start soft-impose"
+        );
         assert_eq!(
             emitted.len(),
             2,
@@ -3054,13 +3144,23 @@ mod tests {
     #[test]
     fn drained_plain_text_emits_only_queue_drained() {
         let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
         let mut emitted: Vec<StreamChunk> = Vec::new();
-        write_and_emit_drained_message("sess-1", "what is 2+2?", &stdin, |chunk| {
+        write_and_emit_drained_message("sess-1", "what is 2+2?", &stdin, &settled, |chunk| {
             emitted.push(chunk)
         });
 
         assert_eq!(emitted.len(), 1);
         assert!(matches!(emitted[0], StreamChunk::QueueDrained { .. }));
+        assert!(!settled.is_settled());
+    }
+
+    #[test]
+    fn a_drained_effort_pick_leaves_the_soft_impose_armed() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        write_and_emit_drained_message("sess-1", "/effort high", &stdin, &settled, |_| {});
+        assert!(!settled.is_settled());
     }
 
     fn finished_turn() -> StreamChunk {
@@ -3140,12 +3240,37 @@ mod tests {
     }
 
     #[test]
+    fn a_model_pick_sent_to_the_session_stops_the_soft_impose() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model openrouter/openai/gpt-4o-mini"), |_| {})
+            .unwrap();
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_plain_message_or_an_effort_pick_leaves_the_soft_impose_armed() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/effort high"), |_| {})
+            .unwrap();
+        session
+            .send_message_with_emit(&text_only("what model are you?"), |_| {})
+            .unwrap();
+        assert!(!session.model_settled.is_settled());
+    }
+
+    #[test]
     fn a_drained_message_reports_whether_it_reached_the_process() {
         let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
         assert!(write_and_emit_drained_message(
             "sess-1",
             "queued",
             &stdin,
+            &settled,
             |_| {}
         ));
         let broken = Arc::new(Mutex::new(test_broken_pipe_stdin()));
@@ -3154,6 +3279,7 @@ mod tests {
             "sess-1",
             "queued",
             &broken,
+            &settled,
             |chunk| emitted.push(chunk)
         ));
         assert!(emitted.is_empty());
@@ -3173,6 +3299,42 @@ mod tests {
             "awaited_for_reader.observe(&chunks)",
             "awaited_for_reader.message_written()",
             "awaited_for_reader.is_awaited() && !stopping",
+        ] {
+            assert!(body.contains(wiring), "the reader must use `{wiring}`");
+        }
+    }
+
+    #[test]
+    fn the_stdout_reader_withholds_the_soft_impose_answer_before_it_counts_or_drains() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body: String = body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")]
+            .split_whitespace()
+            .collect();
+        let withheld = body
+            .find("soft_impose_result.withholds(&parsed)")
+            .expect("the reader must withhold the soft-impose answer");
+        for later in [
+            "letresult_session_id",
+            "awaited_for_reader.observe(&chunks)",
+        ] {
+            let at = body
+                .find(later)
+                .unwrap_or_else(|| panic!("the reader must use `{later}`"));
+            assert!(
+                withheld < at,
+                "the soft-impose answer must be withheld before `{later}`"
+            );
+        }
+        for wiring in [
+            "soft_impose_result.written()",
+            "maybe_soft_impose(&settled_for_reader,",
+            "&stdin_for_reader,&settled_for_reader,",
         ] {
             assert!(body.contains(wiring), "the reader must use `{wiring}`");
         }
@@ -3795,31 +3957,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn soft_impose_fires_once_on_mismatch_and_writes_wrapped_stdin_line() {
-        let mut parser = StreamParser::new();
-        let mut captured: Vec<String> = Vec::new();
-        let cfg = SoftImposeConfig {
+    fn local_llama() -> SoftImposeConfig {
+        SoftImposeConfig {
             kind: speedwave_runtime::config::LlmProviderKind::Local,
             entry_id: "local".to_string(),
             entry_model: Some("llama-3.1-70b".to_string()),
-        };
-        let init_line = serde_json::json!({
+        }
+    }
+
+    fn init_with_model(model: &str) -> serde_json::Value {
+        serde_json::json!({
             "type": "system",
             "subtype": "init",
             "session_id": "sess-1",
-            "model": "wrong-observed-model",
-        });
+            "model": model,
+        })
+    }
+
+    #[test]
+    fn soft_impose_fires_once_on_mismatch_and_writes_wrapped_stdin_line() {
+        let settled = ModelSettled::default();
+        let mut captured: Vec<String> = Vec::new();
+        let init_line = init_with_model("wrong-observed-model");
+        let mut parser = StreamParser::new();
         let (chunk, _log) = parser.parse_system_message(&init_line);
         assert!(matches!(chunk, Some(StreamChunk::SystemInit { .. })));
 
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
+        let first = maybe_soft_impose(&settled, &local_llama(), &init_line, |line| {
             captured.push(line.to_string());
+            true
         });
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
+        let second = maybe_soft_impose(&settled, &local_llama(), &init_line, |line| {
             captured.push(line.to_string());
+            true
         });
 
+        assert!(first);
+        assert!(!second);
         assert_eq!(captured.len(), 1, "must fire exactly once across two calls");
         let expected = build_user_message(&text_only("/model local/llama-3.1-70b")).to_string();
         assert_eq!(captured[0], expected);
@@ -3833,50 +4007,186 @@ mod tests {
 
     #[test]
     fn soft_impose_does_not_fire_when_models_match() {
-        let mut parser = StreamParser::new();
+        let settled = ModelSettled::default();
         let mut captured: Vec<String> = Vec::new();
-        let cfg = SoftImposeConfig {
-            kind: speedwave_runtime::config::LlmProviderKind::Local,
-            entry_id: "local".to_string(),
-            entry_model: Some("llama-3.1-70b".to_string()),
-        };
-        let init_line = serde_json::json!({
-            "type": "system",
-            "subtype": "init",
-            "session_id": "sess-1",
-            "model": "local/llama-3.1-70b",
-        });
-        parser.parse_system_message(&init_line);
+        let written = maybe_soft_impose(
+            &settled,
+            &local_llama(),
+            &init_with_model("local/llama-3.1-70b"),
+            |line| {
+                captured.push(line.to_string());
+                true
+            },
+        );
 
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
-            captured.push(line.to_string());
-        });
-
+        assert!(!written);
         assert!(captured.is_empty());
     }
 
     #[test]
     fn soft_impose_never_fires_for_anthropic() {
-        let mut parser = StreamParser::new();
+        let settled = ModelSettled::default();
         let mut captured: Vec<String> = Vec::new();
         let cfg = SoftImposeConfig {
             kind: speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
             entry_id: "anthropic".to_string(),
             entry_model: Some("claude-sonnet-5".to_string()),
         };
-        let init_line = serde_json::json!({
-            "type": "system",
-            "subtype": "init",
-            "session_id": "sess-1",
-            "model": "totally-different",
-        });
-        parser.parse_system_message(&init_line);
 
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
-            captured.push(line.to_string());
-        });
+        let written = maybe_soft_impose(
+            &settled,
+            &cfg,
+            &init_with_model("totally-different"),
+            |line| {
+                captured.push(line.to_string());
+                true
+            },
+        );
 
+        assert!(!written);
         assert!(captured.is_empty());
+    }
+
+    #[test]
+    fn a_model_the_user_picked_after_spawn_is_not_switched_back() {
+        let settled = ModelSettled::default();
+        settled.settle();
+        let mut captured: Vec<String> = Vec::new();
+
+        let written = maybe_soft_impose(
+            &settled,
+            &local_llama(),
+            &init_with_model("local/qwen3.8-27b"),
+            |line| {
+                captured.push(line.to_string());
+                true
+            },
+        );
+
+        assert!(!written);
+        assert!(
+            captured.is_empty(),
+            "the spawn-time model must not replace the one the user picked: {captured:?}"
+        );
+    }
+
+    #[test]
+    fn a_soft_impose_that_fails_to_reach_the_process_is_not_counted_or_retried() {
+        let settled = ModelSettled::default();
+        let init_line = init_with_model("wrong-observed-model");
+        let mut attempts = 0;
+
+        let first = maybe_soft_impose(&settled, &local_llama(), &init_line, |_| {
+            attempts += 1;
+            false
+        });
+        let second = maybe_soft_impose(&settled, &local_llama(), &init_line, |_| {
+            attempts += 1;
+            true
+        });
+
+        assert!(!first);
+        assert!(!second);
+        assert_eq!(attempts, 1);
+    }
+
+    fn result_line(num_turns: u64) -> serde_json::Value {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "num_turns": num_turns,
+            "session_id": "sess-1",
+        })
+    }
+
+    #[test]
+    fn only_the_result_after_the_one_in_progress_is_the_soft_impose_answer() {
+        let mut pending = SoftImposeResult::default();
+        pending.written();
+
+        assert!(!pending.withholds(&result_line(1)));
+        assert!(pending.withholds(&result_line(0)));
+        assert!(
+            !pending.withholds(&result_line(0)),
+            "a later /model the user sent must still end its turn in the chat"
+        );
+    }
+
+    #[test]
+    fn a_turn_result_in_the_soft_impose_slot_still_reaches_the_chat() {
+        let mut pending = SoftImposeResult::default();
+        pending.written();
+
+        assert!(!pending.withholds(&result_line(1)));
+        assert!(!pending.withholds(&result_line(1)));
+        assert!(!pending.withholds(&result_line(0)));
+    }
+
+    #[test]
+    fn nothing_is_withheld_without_a_soft_impose() {
+        let mut pending = SoftImposeResult::default();
+        assert!(!pending.withholds(&result_line(0)));
+        assert!(!pending.withholds(&result_line(1)));
+    }
+
+    #[test]
+    fn the_captured_soft_impose_answer_never_ends_a_turn_in_the_chat() {
+        let fixture = include_str!("../tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson");
+        let cfg = SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            entry_id: "openrouter".to_string(),
+            entry_model: Some("openai/gpt-4o-mini".to_string()),
+        };
+        let mut parser = StreamParser::new();
+        let settled = ModelSettled::default();
+        let mut pending = SoftImposeResult::default();
+        let mut written: Vec<String> = Vec::new();
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+
+        for line in fixture.lines() {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            let (chunks, _log) = parser.parse_line(&parsed);
+            let chunks = if parsed["type"] == "result" && pending.withholds(&parsed) {
+                Vec::new()
+            } else {
+                chunks
+            };
+            if chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
+                && maybe_soft_impose(&settled, &cfg, &parsed, |wire| {
+                    written.push(wire.to_string());
+                    true
+                })
+            {
+                pending.written();
+            }
+            emitted.extend(chunks);
+        }
+
+        assert_eq!(
+            written,
+            vec![
+                build_user_message(&text_only("/model openrouter/openai/gpt-4o-mini")).to_string()
+            ]
+        );
+        let turn_ends: Vec<Option<String>> = emitted
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Result { result_text, .. } => Some(result_text.clone()),
+                StreamChunk::Error { .. } => Some(None),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            turn_ends,
+            vec![
+                Some("stub reply".to_string()),
+                Some("stub reply".to_string())
+            ],
+            "the chat must see the two answered turns and not the /model confirmation"
+        );
     }
 
     #[test]
