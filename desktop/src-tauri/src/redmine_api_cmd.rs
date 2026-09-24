@@ -1,14 +1,9 @@
-// Redmine API proxy — Tauri commands for direct Redmine API calls.
-// Used during integration configuration before the MCP container exists.
-
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::http_util::read_body_limited;
 #[cfg(test)]
 use crate::http_util::MAX_RESPONSE_BODY_BYTES;
-
-// ── Response DTOs ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct RedmineUser {
@@ -38,8 +33,6 @@ pub(crate) struct RedmineEnumerations {
     pub priorities: Vec<RedmineEnumEntry>,
     pub activities: Vec<RedmineEnumEntry>,
 }
-
-// ── Internal DTOs for Redmine JSON responses ────────────────────────────
 
 #[derive(Deserialize)]
 struct RedmineCurrentUserWrapper {
@@ -88,20 +81,15 @@ struct RedmineActivitiesResponse {
     time_entry_activities: Vec<RawEnumEntry>,
 }
 
-// ── URL validation ───────────────────────────────────────────────────────
-
 /// Validates and normalizes a Redmine host URL for API use. Allows private on-premise IPs
 /// (RFC1918/ULA/CGNAT) with a warning; blocks loopback, link-local, creds, non-HTTP schemes.
 pub(crate) fn validate_redmine_host_url(url: &str) -> Result<String, String> {
-    // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
         return Err("URL must not contain backslashes".to_string());
     }
 
-    // Parse URL first to check for RFC1918 before delegating to base validation
     let candidate: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
 
-    // Private on-premise: validate scheme/host ourselves; Redmine policy blocks loopback.
     let parsed = if crate::url_validation::is_private_on_premise(
         &candidate,
         crate::url_validation::PrivatePolicy::BlockLoopback,
@@ -124,35 +112,25 @@ pub(crate) fn validate_redmine_host_url(url: &str) -> Result<String, String> {
         );
         candidate
     } else {
-        // Non-RFC1918: delegate to base validation (blocks loopback, link-local, metadata)
         crate::url_validation::validate_url(url)?
     };
 
-    // Reject embedded credentials
     if parsed.password().is_some() || !parsed.username().is_empty() {
         return Err("URL must not contain embedded credentials".to_string());
     }
 
-    // Warn about cleartext HTTP
     if parsed.scheme() == "http" {
         log::warn!("Redmine credentials will be transmitted in cleartext over HTTP");
     }
 
-    // Strip trailing slash for consistent URL construction.
     let result = parsed.as_str().trim_end_matches('/').to_string();
 
     Ok(result)
 }
 
-// read_body_limited + MAX_RESPONSE_BODY_BYTES moved to `crate::http_util`.
-
-// ── HTTP client helper ───────────────────────────────────────────────────
-
 fn build_redmine_client() -> Result<reqwest::Client, String> {
     crate::http_util::build_hardened_client(None)
 }
-
-// ── Core logic (separated from Tauri commands for testability) ─────────
 
 /// Core credential validation logic. Accepts a pre-validated base URL string.
 async fn do_validate_credentials(
@@ -184,7 +162,6 @@ async fn do_validate_credentials(
 
     let status = resp.status();
 
-    // Redirect — blocked by policy, but check status code
     if status.is_redirection() {
         return Ok(RedmineValidationResult {
             valid: false,
@@ -322,8 +299,6 @@ async fn do_fetch_enumerations(
     })
 }
 
-// ── Tauri commands ───────────────────────────────────────────────────────
-
 /// Validates Redmine credentials by calling `/users/current.json`.
 /// Returns a `RedmineValidationResult` with the authenticated user's info on success.
 #[tauri::command]
@@ -409,14 +384,10 @@ async fn fetch_enum_endpoint<T: serde::de::DeserializeOwned>(
     })
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions use unwrap")]
 mod tests {
     use super::*;
-
-    // ── URL validation: happy path ──────────────────────────────────────
 
     #[test]
     fn validate_url_allows_https_redmine() {
@@ -424,8 +395,6 @@ mod tests {
         assert!(result.is_ok(), "HTTPS Redmine URL should be valid");
         assert_eq!(result.unwrap(), "https://redmine.company.com");
     }
-
-    // ── URL validation: RFC1918 allowed with warn ───────────────────────
 
     #[test]
     fn validate_url_allows_rfc1918_192_168() {
@@ -457,11 +426,8 @@ mod tests {
         );
     }
 
-    // ── URL validation: CGNAT (RFC 6598) allowed — Tailscale support ────
-
     #[test]
     fn validate_url_allows_cgnat_lower_boundary() {
-        // RFC 6598 CGNAT (100.64.0.0/10) is accepted as on-premise (Tailscale).
         let result = validate_redmine_host_url("http://100.64.1.1:3000/");
         assert!(
             result.is_ok(),
@@ -472,7 +438,6 @@ mod tests {
 
     #[test]
     fn validate_url_allows_cgnat_upper_boundary() {
-        // Last address in 100.64.0.0/10 — must still be classified as on-premise.
         let result = validate_redmine_host_url("http://100.127.255.254/");
         assert!(
             result.is_ok(),
@@ -483,17 +448,13 @@ mod tests {
 
     #[test]
     fn validate_url_rejects_just_outside_cgnat() {
-        // 100.128.x.x is outside /10 — a public IP, not CGNAT/on-premise.
         let result = validate_redmine_host_url("http://100.128.0.1/");
-        // Public IP — allowed with a warn.
         assert!(
             result.is_ok(),
             "100.128.0.1 (outside CGNAT) should still resolve as a public IP: {:?}",
             result.err()
         );
     }
-
-    // ── URL validation: path preserved ──────────────────────────────────
 
     #[test]
     fn validate_url_preserves_path() {
@@ -506,8 +467,6 @@ mod tests {
         );
     }
 
-    // ── URL validation: trailing slash stripped ──────────────────────────
-
     #[test]
     fn validate_url_strips_trailing_slash() {
         let result = validate_redmine_host_url("https://redmine.com/");
@@ -519,8 +478,6 @@ mod tests {
         );
     }
 
-    // ── URL validation: reject credentials ──────────────────────────────
-
     #[test]
     fn validate_url_rejects_credentials() {
         let result = validate_redmine_host_url("http://user:pass@redmine.com");
@@ -530,8 +487,6 @@ mod tests {
             "Error should mention credentials"
         );
     }
-
-    // ── URL validation: reject backslashes ──────────────────────────────
 
     #[test]
     fn validate_url_rejects_backslashes() {
@@ -543,8 +498,6 @@ mod tests {
         );
     }
 
-    // ── URL validation: HTTP cleartext warn ─────────────────────────────
-
     #[test]
     fn validate_url_allows_http_with_cleartext_warn() {
         let result = validate_redmine_host_url("http://redmine.company.com");
@@ -554,8 +507,6 @@ mod tests {
             result.err()
         );
     }
-
-    // ── URL validation: delegated to base ───────────────────────────────
 
     #[test]
     fn validate_url_rejects_ftp() {
@@ -613,19 +564,14 @@ mod tests {
         assert!(result.is_err(), "Decimal IP loopback should be blocked");
     }
 
-    // ── URL validation: octal IP ──────────────────────────────────────
-
     #[test]
     fn validate_url_octal_ip_blocked() {
-        // 0177.0.0.1 parses as 127.0.0.1 (octal) and is blocked as loopback.
         let result = validate_redmine_host_url("http://0177.0.0.1/");
         assert!(
             result.is_err(),
             "Octal IP 0177.0.0.1 (= 127.0.0.1) should be blocked"
         );
     }
-
-    // ── URL validation: Windows paths ───────────────────────────────────
 
     #[test]
     fn validate_url_rejects_unc_path() {
@@ -638,8 +584,6 @@ mod tests {
         let result = validate_redmine_host_url("file:///C:/redmine");
         assert!(result.is_err(), "file:// URL should be rejected");
     }
-
-    // ── DTO parsing tests ───────────────────────────────────────────────
 
     #[test]
     fn parse_users_current_valid() {
@@ -736,9 +680,6 @@ mod tests {
         let resp: RedmineProjectsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.total_count, None);
     }
-
-    // ── HTTP integration tests (mockito) ────────────────────────────────
-    // Runs on 127.0.0.1, calling do_* core fns directly (bypassing URL validation); TLS/timeout not covered.
 
     #[tokio::test]
     async fn http_401_returns_invalid() {
@@ -861,7 +802,6 @@ mod tests {
     async fn enumerations_partial_failure() {
         let mut server = mockito::Server::new_async().await;
 
-        // projects: 200 OK
         let m1 = server
             .mock("GET", "/projects.json?limit=100")
             .with_status(200)
@@ -870,21 +810,18 @@ mod tests {
             .create_async()
             .await;
 
-        // statuses: 404
         let m2 = server
             .mock("GET", "/issue_statuses.json")
             .with_status(404)
             .create_async()
             .await;
 
-        // trackers: 500
         let m3 = server
             .mock("GET", "/trackers.json")
             .with_status(500)
             .create_async()
             .await;
 
-        // priorities: 200 OK
         let m4 = server
             .mock("GET", "/enumerations/issue_priorities.json")
             .with_status(200)
@@ -893,7 +830,6 @@ mod tests {
             .create_async()
             .await;
 
-        // activities: 200 OK
         let m5 = server
             .mock("GET", "/enumerations/time_entry_activities.json")
             .with_status(200)
@@ -983,7 +919,6 @@ mod tests {
 
     #[tokio::test]
     async fn connection_refused_returns_error() {
-        // Bind a port then drop the listener so nothing is listening on connect.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -996,8 +931,6 @@ mod tests {
             result
         );
     }
-
-    // ── Truncation detection integration tests ──────────────────────────
 
     async fn mock_all_empty_except_projects(
         server: &mut mockito::Server,
@@ -1098,9 +1031,6 @@ mod tests {
         );
     }
 
-    // is_private_on_premise helper + coverage moved to url_validation.rs (ADR-041).
-    // See url_validation::tests for private_on_premise_*_policy tests.
-
     #[test]
     fn validate_url_allows_ipv6_ula_for_redmine() {
         let result = validate_redmine_host_url("http://[fd00::1]:3000/");
@@ -1111,14 +1041,10 @@ mod tests {
         );
     }
 
-    // ── MAX_RESPONSE_BODY_BYTES constant ────────────────────────────────
-
     #[test]
     fn max_response_body_bytes_is_5mb() {
         assert_eq!(MAX_RESPONSE_BODY_BYTES, 5 * 1024 * 1024);
     }
-
-    // ── read_body_limited: happy path / edge cases ──────────────────────
 
     #[tokio::test]
     async fn body_exactly_at_limit_accepted() {
@@ -1167,7 +1093,6 @@ mod tests {
             result.is_err(),
             "Body one byte over limit should be rejected"
         );
-        // Error is "too large" (Content-Length pre-check) or "exceeded" (streaming check).
         let err = result.unwrap_err();
         assert!(
             err.contains("too large") || err.contains("exceeded"),
@@ -1219,11 +1144,8 @@ mod tests {
         );
     }
 
-    // ── read_body_limited: error paths ──────────────────────────────────
-
     #[tokio::test]
     async fn body_too_large_content_length_preflight_rejected() {
-        // Exercises the Content-Length pre-flight guard; assert "bytes, limit" to distinguish from the streaming guard.
         let mut server = mockito::Server::new_async().await;
         let body = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
         let _mock = server
@@ -1251,7 +1173,6 @@ mod tests {
     #[tokio::test]
     async fn body_too_large_chunked_rejected() {
         let mut server = mockito::Server::new_async().await;
-        // Body exceeding MAX_RESPONSE_BODY_BYTES without Content-Length header
         let body = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
         let _mock = server
             .mock("GET", "/test")
@@ -1293,7 +1214,6 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let oversized = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
 
-        // Projects endpoint returns oversized body
         let _m1 = server
             .mock("GET", "/projects.json?limit=100")
             .with_status(200)

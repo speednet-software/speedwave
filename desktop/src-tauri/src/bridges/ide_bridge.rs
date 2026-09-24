@@ -13,8 +13,6 @@ use super::host_bridge::{
     LockBodyContext, OriginPolicy, SubprotocolPolicy,
 };
 
-// Re-export internals used by tests (and historical callers expecting
-// them through `crate::ide_bridge::*`).
 #[cfg(test)]
 pub(crate) use super::host_bridge::constant_time_eq;
 pub(crate) use super::host_bridge::AuthState;
@@ -23,9 +21,6 @@ pub(crate) use super::host_bridge::AuthState;
 pub(crate) const IDE_BRIDGE_AUTH_HEADER: &str = "x-claude-code-ide-authorization";
 /// Display name written into the IDE Bridge lock file.
 pub(crate) const IDE_BRIDGE_DISPLAY_NAME: &str = "Speedwave";
-
-// ── Lock file schema: no `wsUrl`/`port` field — Claude Code derives the port from the
-// FILENAME (`12345.lock`). PID hard-coded to 1 (init), the only PID always alive in-container. ──
 
 #[derive(Serialize, Deserialize)]
 pub struct IdeLockFile {
@@ -40,8 +35,6 @@ pub struct IdeLockFile {
     #[serde(rename = "authToken")]
     pub auth_token: String,
 }
-
-// ── JSON-RPC 2.0 protocol types (MCP layer) ─────────────────────────────────
 
 #[derive(Deserialize, Debug)]
 pub struct JsonRpcRequest {
@@ -97,8 +90,6 @@ pub(crate) fn jsonrpc_method_not_found(id: serde_json::Value) -> JsonRpcResponse
 pub(crate) fn jsonrpc_parse_error() -> JsonRpcResponse {
     jsonrpc_error(serde_json::Value::Null, -32700, "Parse error")
 }
-
-// ── MCP tools/list — 12 IDE tools that Claude discovers via MCP ─────────────
 
 fn mcp_tools_list() -> serde_json::Value {
     use serde_json::json;
@@ -214,8 +205,6 @@ fn mcp_tools_list() -> serde_json::Value {
     ]})
 }
 
-// ── MCP tools/call — stub responses when no upstream IDE is configured ──────
-
 fn mcp_tool_result(text: &str) -> serde_json::Value {
     use serde_json::json;
     json!({
@@ -255,8 +244,6 @@ fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_js
         }
     }
 }
-
-// ── JSON-RPC dispatcher (MCP method handler) ────────────────────────────────
 
 pub(crate) fn dispatch_method(
     method: &str,
@@ -325,8 +312,6 @@ pub(crate) fn handle_jsonrpc_message(text: &str) -> Option<JsonRpcResponse> {
     }
 }
 
-// ── Upstream IDE — proxy target read from `~/.claude/ide/<port>.lock` ───────
-
 #[derive(Clone)]
 pub struct UpstreamIde {
     pub ide_name: String,
@@ -348,15 +333,11 @@ impl std::fmt::Debug for UpstreamIde {
 /// Parameters: `(event_kind, detail_message)`.
 pub type EventCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
-// ── IdeBridge — thin facade on top of HostBridge in Endpoint mode ───────────
-
 pub struct IdeBridge {
     /// `Some` in production (created via `new()`); `None` in test-only `new_with_paths()`,
     /// which exercises lock-file helpers without a real listener.
     inner: Option<HostBridge>,
 
-    // Mirrored from `inner` (production) or supplied by the caller (`new_with_paths`).
-    // Tests read these directly via field access.
     _tcp_port: u16,
     lock_file_path: PathBuf,
     /// `_`-prefix: only read inside `#[cfg(test)] fn write_lock_file`.
@@ -374,8 +355,6 @@ impl IdeBridge {
             .endpoint(AuthScheme::Header(IDE_BRIDGE_AUTH_HEADER))
             .origin_policy(OriginPolicy::RejectIfPresent)
             .subprotocol(SubprotocolPolicy { accepted: &["mcp"] })
-            // Claude Code (in the container) dials the port from the lock FILENAME; under
-            // WSL2 mirrored mode that must be the relay port, not the raw bind port (ADR-080).
             .container_facing_lock(true)
             .lock_body(|ctx: LockBodyContext<'_>| {
                 let lock = IdeLockFile {
@@ -393,7 +372,6 @@ impl IdeBridge {
         let inner = HostBridge::new(config)?;
         let tcp_port = inner.port();
         let lock_file_path = inner.lock_file_path();
-        // Re-wrap HostBridge's token as the legacy AuthState handle.
         let auth = Arc::new(Mutex::new(AuthState::new(inner.auth_token())));
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);
         Ok(Self {
@@ -532,15 +510,11 @@ impl Drop for IdeBridge {
     }
 }
 
-// ── Event emission helper ────────────────────────────────────────────────────
-
 fn emit_event(cb: &Option<EventCallback>, kind: &str, detail: &str) {
     if let Some(cb) = cb {
         cb(kind, detail);
     }
 }
-
-// ── Connection handler: already authenticated by HostBridge → choose proxy vs stub ──────────
 
 async fn handle_authenticated_connection(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -651,8 +625,6 @@ async fn proxy_to_upstream_with_timing<S>(
 
     let ide_tx_claude = ide_tx.clone();
     let claude_to_ide = async {
-        // No idle timeout: a healthy interactive session may legitimately be
-        // silent for hours; EOF/error is the only claude-side termination.
         loop {
             match claude_read.next().await {
                 Some(Ok(m)) => {
@@ -701,8 +673,6 @@ async fn proxy_to_upstream_with_timing<S>(
     };
 
     let ide_to_claude = async {
-        // Heartbeat pongs arrive at least every heartbeat interval from a
-        // live IDE, so prolonged read silence means the peer is gone.
         loop {
             match tokio::time::timeout(timing.ide_silence_timeout, ide_read.next()).await {
                 Ok(Some(Ok(Message::Close(frame)))) => {
@@ -721,8 +691,6 @@ async fn proxy_to_upstream_with_timing<S>(
         }
     };
 
-    // Fail-fast supervision: the first leg to finish closes the whole
-    // connection — a half-open proxy black-holes Claude's IDE RPCs.
     let reason = tokio::select! {
         r = claude_to_ide => r,
         r = ide_to_claude => r,
@@ -779,9 +747,6 @@ async fn handle_with_stubs<S>(
         }
     }
 }
-
-// ── Legacy test-only helpers: pre-HostBridge `run_websocket_on_tcp` + lock-file writer,
-// kept behind `#[cfg(test)]` for legacy integration tests. ──────────────────────────────
 
 #[cfg(test)]
 fn find_available_port() -> anyhow::Result<u16> {
@@ -937,8 +902,6 @@ async fn handle_test_connection<S>(
 
     emit_event(&event_cb, "disconnected", "Claude WebSocket closed");
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test module")]
@@ -1264,10 +1227,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_ide_bridge_new_returns_valid_instance() {
         let bridge = IdeBridge::new().unwrap();
         assert!(bridge._tcp_port > 0, "TCP port should be assigned");
-        // Assert the bridge-specific suffix only; the data-dir prefix varies per test.
         assert!(
             bridge
                 .lock_file_path
@@ -1381,9 +1344,6 @@ mod tests {
         assert!(!super::constant_time_eq("short", "longer-string"));
         assert!(super::constant_time_eq("", ""));
     }
-
-    // ── WebSocket integration tests — exercise the legacy `run_websocket_on_tcp` entry
-    // point (HostBridge's accept loop is covered separately in `host_bridge::tests`). ──
 
     async fn start_test_bridge(
         token: &str,
@@ -1539,18 +1499,15 @@ mod tests {
 
         let close_msg = tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next()).await;
         match close_msg {
-            Ok(Some(Ok(Message::Close(_)))) => { /* expected */ }
-            Ok(None) => { /* stream ended — also acceptable */ }
-            Ok(Some(Err(_))) => { /* connection error — acceptable, means it was closed */ }
+            Ok(Some(Ok(Message::Close(_)))) => {}
+            Ok(None) => {}
+            Ok(Some(Err(_))) => {}
             Err(_) => panic!("timed out waiting for Close frame after upstream change"),
             other => panic!("unexpected message after upstream change: {:?}", other),
         }
 
         let _ = tx.send(());
     }
-
-    // ── Upstream-proxy integration tests: a duplex pair plays Claude, a real TCP WebSocket
-    // server plays the IDE. Short ProxyTiming keeps liveness/heartbeat observable in test time. ──
 
     fn short_proxy_timing() -> super::ProxyTiming {
         super::ProxyTiming {
@@ -1691,7 +1648,6 @@ mod tests {
             .unwrap();
         assert_eq!(first.as_deref(), Some(r#"{"n":1}"#));
 
-        // Idle well past every proxy-side timeout, then talk again.
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
 
         client

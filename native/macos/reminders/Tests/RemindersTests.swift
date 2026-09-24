@@ -4,21 +4,23 @@ import XCTest
 @testable import reminders_cli
 
 final class RemindersTests: XCTestCase {
+    private let warsaw = TimeZone(identifier: "Europe/Warsaw")!
+    private let newYork = TimeZone(identifier: "America/New_York")!
 
-    // MARK: - CLI Argument Parsing
+    private func wallClock(_ c: DateComponents) -> [Int?] {
+        [c.year, c.month, c.day, c.hour, c.minute, c.second]
+    }
+
 
     func testCommandListAdvertisesAllCommands() {
-        // commandList drives both the usage and unknown-command messages in runCLI.
         for cmd in ["check_permission", "list_lists", "list_reminders",
-                    "get_reminder", "create_reminder", "complete_reminder"] {
+                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder"] {
             XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
                           "commandList must advertise '\(cmd)'")
         }
     }
 
     func testTagRegexCompilesAndMatches() {
-        // Asserts the lazily-compiled static tagRegex initializer succeeded (no fatalError)
-        // and that extractTags, its only consumer, works end to end.
         XCTAssertEqual(extractTags(from: "[#a] [#b] text"), ["a", "b"])
         XCTAssertEqual(stripTags(from: "[#a] text"), "text")
     }
@@ -44,12 +46,244 @@ final class RemindersTests: XCTestCase {
         let data = emptyJSON.data(using: .utf8)!
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(parsed)
-        // Default limit should be used when not specified
         let limit = parsed?["limit"] as? Int ?? 20
         XCTAssertEqual(limit, 20)
     }
 
-    // MARK: - Tag Extraction from Notes
+
+    private func typoReminder(_ store: EKEventStore) throws -> EKReminder {
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "KAcper chce na uop"
+        reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01T10:00:00"))
+        reminder.priority = 5
+        reminder.notes = "[#hr]\nAsk about the start date"
+        return reminder
+    }
+
+    func testUpdateReminderWithoutIdIsAMissingField() {
+        XCTAssertThrowsError(try updateReminder(store: EKEventStore(), params: [:])) { error in
+            guard case CLIError.missingField("id") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testUpdateReminderWithUnknownIdIsNotFoundInsteadOfSilentSuccess() {
+        let params: [String: Any] = ["id": "speedwave-test-no-such-reminder", "name": "x"]
+        XCTAssertThrowsError(try updateReminder(store: EKEventStore(), params: params)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-reminder"), message)
+        }
+    }
+
+    func testApplyReminderUpdateWithOnlyNameKeepsEveryOtherField() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        let dueBefore = reminder.dueDateComponents
+        try applyReminderUpdate(["id": "r-1", "name": "Kacper chce na UoP"], to: reminder, store: store)
+        XCTAssertEqual(reminder.title, "Kacper chce na UoP")
+        XCTAssertEqual(reminder.dueDateComponents, dueBefore)
+        XCTAssertEqual(reminder.priority, 5)
+        XCTAssertEqual(reminder.notes, "[#hr]\nAsk about the start date")
+        XCTAssertFalse(reminder.isCompleted)
+    }
+
+    func testApplyReminderUpdateChangesPriorityAndDueDate() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        try applyReminderUpdate(["id": "r-1", "priority": 1, "due_date": "2026-08-01"], to: reminder, store: store)
+        XCTAssertEqual(reminder.priority, 1)
+        let due = try XCTUnwrap(reminder.dueDateComponents)
+        XCTAssertEqual([due.year, due.month, due.day], [2026, 8, 1])
+        XCTAssertTrue(isAllDay(due))
+        XCTAssertEqual(reminder.title, "KAcper chce na uop")
+    }
+
+    func testApplyReminderUpdateNullDueDateAlsoDropsRecurrence() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        reminder.addRecurrenceRule(EKRecurrenceRule(recurrenceWith: .weekly, interval: 1, end: nil))
+        XCTAssertTrue(reminder.hasRecurrenceRules)
+        try applyReminderUpdate(["id": "r-1", "due_date": NSNull()], to: reminder, store: store)
+        XCTAssertNil(reminder.dueDateComponents)
+        XCTAssertFalse(reminder.hasRecurrenceRules)
+        XCTAssertEqual(reminder.title, "KAcper chce na uop")
+    }
+
+    func testApplyReminderUpdateRejectsAnImpossibleDueDate() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        XCTAssertThrowsError(try applyReminderUpdate(["id": "r-1", "due_date": "2026-02-30"], to: reminder, store: store)) { error in
+            guard case CLIError.invalidDate("2026-02-30") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testApplyReminderUpdateToAnUnknownListIsNotFound() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        let params: [String: Any] = ["id": "r-1", "list_id": "speedwave-test-no-such-list"]
+        XCTAssertThrowsError(try applyReminderUpdate(params, to: reminder, store: store)) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertTrue(message.contains("speedwave-test-no-such-list"), message)
+        }
+    }
+
+    func testApplyReminderUpdateCompletedFalseReopensAndClearsTheCompletionDate() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        reminder.isCompleted = true
+        reminder.completionDate = Date()
+        try applyReminderUpdate(["id": "r-1", "completed": false], to: reminder, store: store)
+        XCTAssertFalse(reminder.isCompleted)
+        XCTAssertNil(reminder.completionDate)
+        XCTAssertNil(reminderToDict(reminder)["completed_date"])
+    }
+
+    func testApplyReminderUpdateTagsAndNotesEachKeepTheOther() throws {
+        let store = EKEventStore()
+        let reminder = try typoReminder(store)
+        try applyReminderUpdate(["id": "r-1", "tags": ["hr", "urgent"]], to: reminder, store: store)
+        XCTAssertEqual(reminder.notes, "[#hr] [#urgent]\nAsk about the start date")
+        try applyReminderUpdate(["id": "r-1", "notes": "Start in October"], to: reminder, store: store)
+        XCTAssertEqual(reminder.notes, "[#hr] [#urgent]\nStart in October")
+        try applyReminderUpdate(["id": "r-1", "tags": [String]()], to: reminder, store: store)
+        XCTAssertEqual(reminder.notes, "Start in October")
+    }
+
+    func testUpdateReminderJSONNullArrivesAsNSNull() throws {
+        let data = "{\"id\": \"r-1\", \"due_date\": null}".data(using: .utf8)!
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertTrue(params["due_date"] is NSNull)
+        XCTAssertNil(params["due_date"] as? String)
+        XCTAssertNil(params["name"])
+    }
+
+
+    func testDueDateDateOnlyIsAllDayFloatingGregorian() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15"))
+        XCTAssertEqual(c.year, 2026)
+        XCTAssertEqual(c.month, 6)
+        XCTAssertEqual(c.day, 15)
+        XCTAssertNil(c.hour, "all-day reminders carry no time fields")
+        XCTAssertNil(c.minute)
+        XCTAssertNil(c.timeZone, "due dates are floating")
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testDueDateWithOffsetBecomesTheWallClockOfEachZone() throws {
+        let inWarsaw = try XCTUnwrap(dueDateComponents(from: "2026-06-15T07:00:00Z", timeZone: warsaw))
+        let inNewYork = try XCTUnwrap(dueDateComponents(from: "2026-06-15T07:00:00Z", timeZone: newYork))
+        XCTAssertEqual(wallClock(inWarsaw), [2026, 6, 15, 9, 0, 0])
+        XCTAssertEqual(wallClock(inNewYork), [2026, 6, 15, 3, 0, 0])
+        for c in [inWarsaw, inNewYork] {
+            XCTAssertNil(c.timeZone)
+            XCTAssertEqual(c.calendar?.identifier, .gregorian)
+        }
+    }
+
+    func testDueDateWithNumericOffsetCanLandOnThePreviousLocalDay() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T01:30:00+02:00", timeZone: newYork))
+        XCTAssertEqual(wallClock(c), [2026, 6, 14, 19, 30, 0])
+    }
+
+    func testDueDateWithoutOffsetIsTheSameWallClockInEveryZone() throws {
+        for zone in [warsaw, newYork] {
+            let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:00", timeZone: zone))
+            XCTAssertEqual(wallClock(c), [2026, 6, 15, 9, 30, 0], zone.identifier)
+            XCTAssertNil(c.timeZone)
+        }
+    }
+
+    func testDueDateWithoutOffsetIgnoresFractionalSeconds() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:15.250"))
+        XCTAssertEqual([c.hour, c.minute, c.second], [9, 30, 15])
+    }
+
+    func testDueDateRejectsGarbageAndImpossibleDates() {
+        XCTAssertNil(dueDateComponents(from: "tomorrow"))
+        XCTAssertNil(dueDateComponents(from: "2026-02-30"))
+        XCTAssertNil(dueDateComponents(from: "2026-6-1"))
+        XCTAssertNil(dueDateComponents(from: "٢٠٢٦-٠١-٠١"), "ICU \\d matches non-ASCII digits; refuse them")
+        XCTAssertNil(dueDateComponents(from: ""))
+    }
+
+    func testDueDateRejectsImpossibleTimedDatesInEveryShape() {
+        XCTAssertNil(dueDateComponents(from: "2026-02-30T09:30:00"))
+        XCTAssertNil(dueDateComponents(from: "2026-02-30T09:30:00Z"))
+        XCTAssertNil(dueDateComponents(from: "2026-06-15T25:00:00"))
+        XCTAssertNil(dueDateComponents(from: "2026-06-15T23:60:00"))
+    }
+
+    func testDueDateWallClockKeepsDstGapTimeAsTyped() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-03-29T02:30:00"))
+        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 3, 29, 2, 30, 0])
+        XCTAssertNil(c.timeZone)
+    }
+
+
+    func testDueDateStringAllDayIsDateOnly() {
+        let c = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 6, day: 5)
+        XCTAssertEqual(dueDateString(from: c), "2026-06-05")
+    }
+
+    func testDueDateStringFormatsFloatingTimeInTheGivenZone() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:00"))
+        XCTAssertEqual(dueDateString(from: c, timeZone: warsaw), "2026-06-15T09:30:00+02:00")
+        XCTAssertEqual(dueDateString(from: c, timeZone: newYork), "2026-06-15T09:30:00-04:00")
+        XCTAssertEqual(dueDateString(from: c, timeZone: TimeZone(identifier: "UTC")!), "2026-06-15T09:30:00+00:00")
+    }
+
+    func testDueDateFormatThenParseIsLosslessForEveryInputShape() throws {
+        let inputs = ["2026-06-15", "2026-06-15T09:30:00", "2026-06-15T07:00:00Z", "2026-12-31T23:30:00+02:00"]
+        for zone in [warsaw, newYork] {
+            for input in inputs {
+                let c = try XCTUnwrap(dueDateComponents(from: input, timeZone: zone), input)
+                let formatted = try XCTUnwrap(dueDateString(from: c, timeZone: zone), input)
+                XCTAssertEqual(
+                    dueDateComponents(from: formatted, timeZone: zone), c,
+                    "\(input) in \(zone.identifier) via \(formatted)"
+                )
+            }
+        }
+    }
+
+    func testDueDateStringPrefersTheZoneStoredOnTheComponents() throws {
+        var c = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 1, day: 10, hour: 8)
+        c.timeZone = newYork
+        XCTAssertEqual(dueDateString(from: c, timeZone: warsaw), "2026-01-10T08:00:00-05:00")
+    }
+
+    func testDueDateStringWithoutDateIsNil() {
+        XCTAssertNil(dueDateString(from: DateComponents(hour: 9)))
+    }
+
+    func testReminderToDictEmitsAllDayFlagAndDateOnlyDueDate() throws {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Pay rent"
+        reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01"))
+        let dict = reminderToDict(reminder)
+        XCTAssertEqual(dict["due_date"] as? String, "2026-07-01")
+        XCTAssertEqual(dict["all_day"] as? Bool, true)
+    }
+
+    func testReminderToDictTimedDueDateIsNotAllDay() throws {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Standup"
+        reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01T10:00:00"))
+        let dict = reminderToDict(reminder, timeZone: warsaw)
+        XCTAssertEqual(dict["all_day"] as? Bool, false)
+        XCTAssertEqual(dict["due_date"] as? String, "2026-07-01T10:00:00+02:00")
+    }
+
+    func testReminderToDictWithoutDueDateOmitsAllDay() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Someday"
+        let dict = reminderToDict(reminder)
+        XCTAssertNil(dict["due_date"])
+        XCTAssertNil(dict["all_day"])
+    }
+
 
     func testExtractTagsSingleTag() {
         let tags = extractTags(from: "[#work] Some notes")
@@ -76,7 +310,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(tags, ["work"])
     }
 
-    // MARK: - Strip Tags from Notes
 
     func testStripTagsSingleTag() {
         let clean = stripTags(from: "[#work] Some notes")
@@ -98,7 +331,6 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(clean, "")
     }
 
-    // MARK: - Combine Tags with Notes
 
     func testCombineTagsWithNotes() {
         let result = combineTags(["work", "urgent"], with: "Some notes")
@@ -140,29 +372,64 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(result, "[#work]")
     }
 
-    // MARK: - Permission Access
+
+    func testMergeNotesTagsOnlyKeepsBodyByteForByte() {
+        let existing = "[#Work] hello\n\n\n\nworld  \n"
+        XCTAssertEqual(mergeNotes(existing: existing, notes: nil, tags: ["x"]), "[#x]\nhello\n\n\n\nworld  \n")
+    }
+
+    func testMergeNotesNotesOnlyKeepsMarkersAsStored() {
+        let existing = "[#Work] [#urgent]\nold text"
+        XCTAssertEqual(mergeNotes(existing: existing, notes: "new text", tags: nil), "[#Work] [#urgent]\nnew text")
+    }
+
+    func testMergeNotesLeavesLiteralMarkerTextInBodyAlone() {
+        let existing = "See ticket [#123] for details"
+        XCTAssertEqual(mergeNotes(existing: existing, notes: nil, tags: ["work"]), "[#work]\nSee ticket [#123] for details")
+    }
+
+    func testMergeNotesBothGivenBehavesLikeCreate() {
+        XCTAssertEqual(mergeNotes(existing: "[#old]\nx", notes: "  fresh  ", tags: ["A", "a"]), "[#a]\nfresh")
+    }
+
+    func testMergeNotesEmptyTagsAloneClearTheTagsAndKeepTheBody() {
+        XCTAssertEqual(mergeNotes(existing: "[#work] [#urgent]\nbody", notes: nil, tags: []), "body")
+    }
+
+    func testMergeNotesClearingBothYieldsNil() {
+        XCTAssertNil(mergeNotes(existing: "[#old]\ntext", notes: "", tags: []))
+        XCTAssertNil(mergeNotes(existing: nil, notes: nil, tags: []))
+    }
+
+    func testMergeNotesWithoutStoredMarkersDoesNotInventAny() {
+        XCTAssertEqual(mergeNotes(existing: "plain", notes: "changed", tags: nil), "changed")
+        XCTAssertEqual(mergeNotes(existing: "plain", notes: nil, tags: ["t"]), "[#t]\nplain")
+    }
+
+    func testSplitLeadingTagsSeparatesMarkerRunFromBody() {
+        let split = splitLeadingTags("[#a] [#b]\nbody\nmore")
+        XCTAssertEqual(split.markers, "[#a] [#b]")
+        XCTAssertEqual(split.body, "body\nmore")
+        let none = splitLeadingTags("body [#inline]")
+        XCTAssertEqual(none.markers, "")
+        XCTAssertEqual(none.body, "body [#inline]")
+    }
+
 
     func testRequestReminderAccessReturnsTuple() {
-        // Compile-time check: requestReminderAccess returns (granted: Bool, error: Error?)
         let store = EKEventStore()
         let result: (granted: Bool, error: Error?) = requestReminderAccess(store: store, timeout: 0.001)
-        // With a near-zero timeout, we just verify the return type
         XCTAssertNotNil(result)
     }
 
-    // MARK: - EventStoreGate — file-scope struct reachable via @testable import
 
     func testRemindersEventStoreGateConformsToPermissionGate() {
-        // Compile-time + smoke: EventStoreGate is file-scope and reachable from tests.
-        // Calling authorizationStatus() on a real EKEventStore is a pure read.
         let store = EKEventStore()
         let gate: PermissionGate = EventStoreGate(store: store)
         let _: RawAuthorizationStatus = gate.authorizationStatus()
     }
 
     func testRemindersEventStoreGateProducesRawStatus() {
-        // Sanity: at runtime, the gate's raw status is one of the documented cases.
-        // Reminders does not support .writeOnly (Calendar-only), but other cases are valid.
         let store = EKEventStore()
         let gate = EventStoreGate(store: store)
         let raw = gate.authorizationStatus()
@@ -174,7 +441,6 @@ final class RemindersTests: XCTestCase {
         }
     }
 
-    // MARK: - reminderToDict Output Keys
 
     func testReminderToDictOutputContainsListIdAndListName() throws {
         let store = EKEventStore()
@@ -209,15 +475,16 @@ final class RemindersTests: XCTestCase {
         XCTAssertEqual(dict["list_name"] as? String, "", "nil calendar -> empty list_name")
     }
 
-    func testReminderToDictCompletedDateKey() {
+    func testReminderToDictCompletedDateIsLocalTimeWithOffset() throws {
         let store = EKEventStore()
         let reminder = EKReminder(eventStore: store)
         reminder.title = "Done"
         reminder.calendar = store.defaultCalendarForNewReminders()
         reminder.isCompleted = true
-        reminder.completionDate = Date()
-        let dict = reminderToDict(reminder)
-        XCTAssertNotNil(dict["completed_date"], "reminderToDict must emit completed_date (not completion_date)")
-        XCTAssertNil(dict["completion_date"], "reminderToDict must not emit old completion_date key")
+        reminder.completionDate = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        let inWarsaw = reminderToDict(reminder, timeZone: warsaw)
+        XCTAssertEqual(inWarsaw["completed_date"] as? String, "2026-06-15T09:00:00+02:00")
+        XCTAssertEqual(reminderToDict(reminder, timeZone: newYork)["completed_date"] as? String, "2026-06-15T03:00:00-04:00")
+        XCTAssertNil(inWarsaw["completion_date"], "reminderToDict must not emit old completion_date key")
     }
 }

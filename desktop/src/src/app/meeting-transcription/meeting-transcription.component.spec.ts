@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { signal } from '@angular/core';
+import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
 import type {
@@ -20,23 +20,27 @@ describe('MeetingTranscriptionComponent', () => {
     subscribeToTranscript: ReturnType<typeof vi.fn>;
     resumeActiveRecording: ReturnType<typeof vi.fn>;
     recommendedModel: ReturnType<typeof vi.fn>;
-    // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
-    captureWarning: typeof captureWarningSig;
+    captureWarnings: typeof captureWarningsSig;
     recordingSessionId: typeof recordingSessionIdSig;
+    recording: Signal<boolean>;
     recordingSource: typeof recordingSourceSig;
     recordingLanguage: typeof recordingLanguageSig;
+    recordingLive: typeof recordingLiveSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
-  const captureWarningSig = signal<CaptureWarning | null>(null);
+  const captureWarningsSig = signal<readonly CaptureWarning[]>([]);
   const recordingSessionIdSig = signal<string | null>(null);
   const recordingSourceSig = signal<AudioSource | null>(null);
   const recordingLanguageSig = signal<Language | null>(null);
+  const recordingLiveSig = signal<boolean | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -53,10 +57,11 @@ describe('MeetingTranscriptionComponent', () => {
 
   beforeEach(async () => {
     activeSig.set(null);
-    captureWarningSig.set(null);
+    captureWarningsSig.set([]);
     recordingSessionIdSig.set(null);
     recordingSourceSig.set(null);
     recordingLanguageSig.set(null);
+    recordingLiveSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
@@ -69,18 +74,22 @@ describe('MeetingTranscriptionComponent', () => {
           supports_microphone: false,
           note: null,
         },
-        backends: ['cpu'],
+        gpu_class: 'none' as const,
+        accel_label: 'CPU',
       })),
       listAudioSources: vi.fn(async () => []),
-      // Gate predicate matches recording-controls hasModel — any downloaded model lifts it.
+      liveTranscriptPreferred: vi.fn(() => true),
+      setLiveTranscriptPreferred: vi.fn(),
       listModels: vi.fn(async () => models(true)),
       list: vi.fn(async () => []),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
-      captureWarning: captureWarningSig,
+      captureWarnings: captureWarningsSig,
       recordingSessionId: recordingSessionIdSig,
+      recording: computed(() => recordingSessionIdSig() !== null),
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,
+      recordingLive: recordingLiveSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
@@ -101,7 +110,6 @@ describe('MeetingTranscriptionComponent', () => {
     expect(fixture.nativeElement.querySelector('app-live-transcript')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('app-session-list')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
-    // The model manager moved to Settings — no model UI in the tab.
     expect(fixture.nativeElement.querySelector('app-model-manager')).toBeNull();
   });
 
@@ -112,11 +120,9 @@ describe('MeetingTranscriptionComponent', () => {
     const gate = fixture.nativeElement.querySelector('[data-testid="model-required-gate"]');
     expect(gate).not.toBeNull();
     expect(gate.textContent.toLowerCase()).toContain('model required');
-    // The link points at the transcription section in Settings.
     const link = fixture.nativeElement.querySelector('[data-testid="download-model-link"]');
     expect(link).not.toBeNull();
     expect(link.getAttribute('href')).toContain('/settings');
-    // Neither the panes nor the header chrome render behind the gate.
     expect(fixture.nativeElement.querySelector('app-recording-controls')).toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="quality-disclaimer"]')).toBeNull();
     expect(fixture.nativeElement.querySelector('header')).toBeNull();
@@ -132,12 +138,10 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('clears the gate when the window regains focus after a Settings download', async () => {
-    // Start with no model → gate up.
     svc.listModels.mockResolvedValue(models(false));
     await component.ngOnInit();
     fixture.detectChanges();
     expect(component.modelReady()).toBe(false);
-    // The user downloads the model in Settings, then returns → focus re-checks.
     svc.listModels.mockResolvedValue(models(true));
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
@@ -150,7 +154,6 @@ describe('MeetingTranscriptionComponent', () => {
   it('registers the focus/visibility listeners even if resumeActiveRecording rejects', async () => {
     svc.resumeActiveRecording.mockRejectedValueOnce(new Error('subscribe_transcript failed'));
     await component.ngOnInit();
-    // A rejection above must not have prevented the listeners from being wired up.
     svc.listModels.mockClear();
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
@@ -161,7 +164,6 @@ describe('MeetingTranscriptionComponent', () => {
     await component.ngOnInit();
     await component.ngOnDestroy();
     svc.listModels.mockClear();
-    // A focus event after destroy must not trigger another model check.
     window.dispatchEvent(new Event('focus'));
     await Promise.resolve();
     expect(svc.listModels).not.toHaveBeenCalled();
@@ -193,13 +195,19 @@ describe('MeetingTranscriptionComponent', () => {
     expect(svc.detach).toHaveBeenCalled();
   });
 
+  it('keeps the live stream attached on destroy while a recording runs', async () => {
+    recordingSessionIdSig.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
+  });
+
   it('renders no capture-warning banner without a warning', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="capture-warning"]')).toBeNull();
   });
 
   it('renders the silent-system-audio warning with a settings link', () => {
-    captureWarningSig.set('system_audio_silent');
+    captureWarningsSig.set(['system_audio_silent']);
     fixture.detectChanges();
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
     expect(banner).not.toBeNull();
@@ -208,10 +216,36 @@ describe('MeetingTranscriptionComponent', () => {
   });
 
   it('renders the stalled-microphone warning without a settings link', () => {
-    captureWarningSig.set('microphone_stalled');
+    captureWarningsSig.set(['microphone_stalled']);
     fixture.detectChanges();
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
     expect(banner.textContent).toContain('microphone stopped');
     expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
+  });
+
+  it('renders the dropped-audio warning without blaming the transcriber', () => {
+    captureWarningsSig.set(['audio_dropped']);
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('audio was dropped');
+    expect(banner.textContent).not.toContain('transcriber');
+  });
+
+  it('renders one banner per raised warning, with the same copy as a lone one', () => {
+    captureWarningsSig.set(['microphone_stalled', 'audio_dropped']);
+    fixture.detectChanges();
+    const banners = fixture.nativeElement.querySelectorAll('[data-testid="capture-warning"]');
+    expect(banners.length).toBe(2);
+    expect(banners[0].textContent).toContain('microphone stopped');
+    expect(banners[1].textContent).toContain('audio was dropped');
+  });
+
+  it('gives the settings link only to the silent-system-audio row', () => {
+    captureWarningsSig.set(['system_audio_silent', 'microphone_stalled']);
+    fixture.detectChanges();
+    const banners = fixture.nativeElement.querySelectorAll('[data-testid="capture-warning"]');
+    expect(banners.length).toBe(2);
+    expect(banners[0].querySelector('[data-testid="open-audio-settings"]')).not.toBeNull();
+    expect(banners[1].querySelector('[data-testid="open-audio-settings"]')).toBeNull();
   });
 });

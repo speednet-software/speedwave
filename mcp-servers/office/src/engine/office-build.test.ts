@@ -55,7 +55,6 @@ describe('createDocx', () => {
       'docx_build.py',
       expect.arrayContaining(['create'])
     );
-    // The image path was resolved.
     expect(resolveInputFile).toHaveBeenCalledWith('pic.png');
   });
 

@@ -13,7 +13,7 @@
  */
 
 import { switchToProject, activeProjectSlug, containersRunning } from '../helpers/projects';
-import { confirmRestartAndWait, requestBackendRestart } from '../helpers/shell';
+import { confirmRestartAndWait, requestBackendRestart, RESTART_WAIT_MS } from '../helpers/shell';
 import { openIntegrations, toggleIntegration, rowStatus } from '../helpers/llm';
 
 const LLM_PROJECT = 'e2e-test';
@@ -39,7 +39,6 @@ describe('Restart Deferral', function () {
     });
     await later.click();
 
-    // Modal dismissed, no restart happens, containers keep the old config.
     await $('[data-testid="restart-now-btn"]').waitForExist({ timeout: 10_000, reverse: true });
     for (let i = 0; i < 5; i++) {
       expect(await $('[data-testid="restart-overlay"]').isExisting()).toBe(false);
@@ -47,13 +46,11 @@ describe('Restart Deferral', function () {
     }
     expect(await containersRunning(LLM_PROJECT)).toBe(true);
 
-    // The config change was saved: the row no longer reads disabled.
     expect(await rowStatus(SERVICE)).not.toBe('disabled');
   });
 
   it('applies the deferred change on a palette-requested restart', async function () {
-    this.timeout(300_000);
-    // requestRestart() re-surfaces the modal; confirming applies the change.
+    this.timeout(RESTART_WAIT_MS + 120_000);
     await requestBackendRestart();
 
     await openIntegrations();
@@ -65,7 +62,7 @@ describe('Restart Deferral', function () {
   });
 
   it('cleans up: disables the integration again', async function () {
-    this.timeout(300_000);
+    this.timeout(RESTART_WAIT_MS + 120_000);
     await toggleIntegration(SERVICE);
     await confirmRestartAndWait();
     await openIntegrations();

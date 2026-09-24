@@ -1,6 +1,3 @@
-// Diagnostic export — collects logs, compose config, and system info into a
-// sanitized ZIP archive for support diagnostics.
-
 /// Inputs for building a diagnostics ZIP — extracted for testability.
 pub(crate) struct DiagnosticsInput {
     /// Directory containing `.log` files (app logs).
@@ -17,6 +14,8 @@ pub(crate) struct DiagnosticsInput {
     pub claude_session_log: Option<std::path::PathBuf>,
     /// Path to the container entrypoint's startup diagnostics log.
     pub entrypoint_log: Option<std::path::PathBuf>,
+    /// Path to the proxy's usage JSONL (ZIP-only; not shown in `/logs`).
+    pub proxy_usage_log: Option<std::path::PathBuf>,
 }
 
 /// Writes one ZIP entry; content always passes through `log_sanitizer::sanitize()` first
@@ -45,7 +44,6 @@ pub(crate) fn build_diagnostics_zip(
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // App logs: one /logs source ("desktop") → N `logs/<file>` entries.
     if let Some(ref log_dir) = input.log_dir {
         if let Ok(entries) = std::fs::read_dir(log_dir) {
             let mut log_paths: Vec<_> = entries
@@ -66,7 +64,6 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // Entry names come from the DIAGNOSTIC_SOURCES registry, keyed by source.
     let zip_entry = |key: &str| -> &'static str {
         speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES
             .iter()
@@ -79,18 +76,16 @@ pub(crate) fn build_diagnostics_zip(
         write_sanitized_entry(&mut zip, options, zip_entry("compose"), logs)?;
     }
 
-    // Single-file sources keyed to the registry. Existence-gated.
     let single_files = [
         (&input.serial_log, "lima"),
         (&input.mcp_os_log, "mcp-os"),
         (&input.claude_session_log, "claude"),
         (&input.compose_path, "compose-yml"),
         (&input.entrypoint_log, "entrypoint"),
+        (&input.proxy_usage_log, "proxy-usage"),
     ];
     for (maybe_path, key) in single_files {
         if let Some(path) = maybe_path {
-            // claude-home is container-writable: the no-follow read (Unix O_NOFOLLOW,
-            // Windows reparse rejection) keeps symlink-swapped host files out of the ZIP.
             match speedwave_runtime::fs_perms::read_regular_file_no_follow(path) {
                 Ok(Some(content)) => {
                     write_sanitized_entry(&mut zip, options, zip_entry(key), &content)?;
@@ -102,7 +97,6 @@ pub(crate) fn build_diagnostics_zip(
                         "diagnostics source {} is unreadable, recording a placeholder: {reason}",
                         path.display()
                     );
-                    // Placeholder entry so the ZIP records WHY a source is absent.
                     let name = format!("{}.unavailable.txt", zip_entry(key));
                     write_sanitized_entry(
                         &mut zip,
@@ -115,7 +109,6 @@ pub(crate) fn build_diagnostics_zip(
         }
     }
 
-    // System info: compile-time constants, no secrets — the one raw entry.
     let sys_info = format!(
         "os: {}\narch: {}\nversion: {}\nclaude_pinned: {}\n",
         std::env::consts::OS,
@@ -153,8 +146,6 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
         let rt = speedwave_runtime::runtime::detect_runtime();
         let container_logs = rt.compose_logs(&project, 5000).ok();
 
-        // File-source paths resolved from the SSOT registry (platform-gated), so
-        // /logs and the ZIP can't drift.
         let data_dir = speedwave_runtime::consts::data_dir();
         let resolve = |key: &str| {
             speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
@@ -168,6 +159,7 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             compose_path: resolve("compose-yml"),
             claude_session_log: resolve("claude"),
             entrypoint_log: resolve("entrypoint"),
+            proxy_usage_log: resolve("proxy-usage"),
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -178,8 +170,6 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
 }
-
-// ── Tests ──
 
 #[cfg(test)]
 #[expect(
@@ -222,8 +212,6 @@ mod tests {
         assert!(result.is_err(), "empty project name should be rejected");
     }
 
-    // -- build_diagnostics_zip tests --
-
     /// Helper: read a ZIP entry as a UTF-8 string.
     fn read_zip_entry(zip_path: &std::path::Path, entry_name: &str) -> Option<String> {
         let file = std::fs::File::open(zip_path).ok()?;
@@ -248,20 +236,25 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("diag.zip");
 
-        // Create a fake log directory with one log file
         let log_dir = tmp.path().join("logs");
         std::fs::create_dir_all(&log_dir).unwrap();
         std::fs::write(log_dir.join("app.log"), "INFO started").unwrap();
-        // Non-.log file should be ignored
         std::fs::write(log_dir.join("app.txt"), "ignored").unwrap();
 
-        // Create a fake compose.yml
         let compose_path = tmp.path().join("compose.yml");
         std::fs::write(
             &compose_path,
             "version: '3'\nservices:\n  claude:\n    image: test\n",
         )
         .unwrap();
+
+        let usage_path = tmp.path().join("usage.jsonl");
+        std::fs::write(
+            &usage_path,
+            r#"{"ts":"2026-09-14T14:07:28.000+02:00","model":"claude-fable-5","status":"failure","prompt_tokens":2,"completion_tokens":2,"latency_ms":26770}"#,
+        )
+        .unwrap();
+        assert!(usage_path.exists(), "usage.jsonl plant must land on disk");
 
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
@@ -271,6 +264,7 @@ mod tests {
             compose_path: Some(compose_path),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: Some(usage_path),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -293,11 +287,19 @@ mod tests {
             "ZIP should contain compose.yml: {names:?}"
         );
         assert!(
+            names.contains(&"proxy/usage.jsonl".to_string()),
+            "ZIP should contain proxy usage.jsonl: {names:?}"
+        );
+        let usage_content = read_zip_entry(&zip_path, "proxy/usage.jsonl").unwrap();
+        assert!(
+            usage_content.contains("\"status\":\"failure\""),
+            "usage.jsonl entry should carry the failure status: {usage_content}"
+        );
+        assert!(
             names.contains(&"system-info.txt".to_string()),
             "ZIP should contain system info: {names:?}"
         );
 
-        // Verify system-info.txt has expected fields
         let sys_info = read_zip_entry(&zip_path, "system-info.txt").unwrap();
         assert!(sys_info.contains("os:"), "system info should contain OS");
         assert!(
@@ -340,6 +342,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -385,6 +388,7 @@ mod tests {
             compose_path: Some(compose_path),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -405,11 +409,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("diag-tokens.zip");
 
-        // Create a fake log dir with a tokens/ subdirectory
         let log_dir = tmp.path().join("logs");
         std::fs::create_dir_all(&log_dir).unwrap();
         std::fs::write(log_dir.join("app.log"), "normal log").unwrap();
-        // tokens/ dir alongside logs — should never appear
         let tokens_dir = tmp.path().join("tokens");
         std::fs::create_dir_all(tokens_dir.join("slack")).unwrap();
         std::fs::write(
@@ -426,6 +428,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -457,6 +460,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -485,6 +489,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -513,6 +518,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -547,6 +553,7 @@ mod tests {
             compose_path: None,
             claude_session_log: Some(session_log),
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -568,7 +575,7 @@ mod tests {
         let log = tmp.path().join(".speedwave-entrypoint.log");
         std::fs::write(
             &log,
-            "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n",
+            "2026-07-13T12:00:01+02:00 ERROR FAIL example-plugin: clone failed\n",
         )
         .unwrap();
         let out = tmp.path().join("diag.zip");
@@ -580,6 +587,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: Some(log),
+            proxy_usage_log: None,
         };
         build_diagnostics_zip(&out, &input).unwrap();
 
@@ -616,6 +624,7 @@ mod tests {
             "password=hunter2hunter2",
             "Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "xoxp-another-secret-token-value",
+            "Bearer sk-ant-api03-usagejsonlleaktoken0000",
         ];
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
@@ -623,9 +632,9 @@ mod tests {
             container_logs: Some(secrets[2].into()),
             mcp_os_log: Some(mk("mcp.log", secrets[3])),
             compose_path: Some(mk("compose.yml", secrets[0])),
-            // Carries the Bearer token (secrets[4]).
             claude_session_log: Some(mk("claude.log", secrets[4])),
             entrypoint_log: Some(mk("entrypoint.log", secrets[5])),
+            proxy_usage_log: Some(mk("usage.jsonl", secrets[6])),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -650,7 +659,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("diag-unavailable.zip");
 
-        // A directory is rejected by read_regular_file_no_follow on every platform.
         let unreadable = tmp.path().join("compose.yml");
         std::fs::create_dir(&unreadable).unwrap();
         let readable = tmp.path().join("mcp.log");
@@ -664,6 +672,7 @@ mod tests {
             compose_path: Some(unreadable),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -683,7 +692,6 @@ mod tests {
             "placeholder must carry the reason: {placeholder}"
         );
 
-        // The readable source next to it is packed normally, with no placeholder.
         let mcp_entry = format!("mcp-os/{}", speedwave_runtime::consts::MCP_OS_LOG_FILE);
         assert!(
             names.contains(&mcp_entry),
@@ -700,6 +708,44 @@ mod tests {
         );
     }
 
+    /// Placeholder contract for the proxy usage-log source, mirroring the other
+    /// single-file sources.
+    #[test]
+    fn diagnostics_zip_proxy_usage_records_placeholder_when_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-usage-unavailable.zip");
+
+        let unreadable = tmp.path().join("usage.jsonl");
+        std::fs::create_dir(&unreadable).unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: None,
+            entrypoint_log: None,
+            proxy_usage_log: Some(unreadable),
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&"proxy/usage.jsonl.unavailable.txt".to_string()),
+            "unreadable source must leave a placeholder entry: {names:?}"
+        );
+        assert!(
+            !names.contains(&"proxy/usage.jsonl".to_string()),
+            "no regular entry for the unreadable source: {names:?}"
+        );
+        let placeholder = read_zip_entry(&zip_path, "proxy/usage.jsonl.unavailable.txt").unwrap();
+        assert!(
+            placeholder.starts_with("unavailable: "),
+            "placeholder must carry the reason: {placeholder}"
+        );
+    }
+
     /// A missing source stays absent: no entry AND no placeholder.
     #[test]
     fn diagnostics_zip_missing_source_leaves_no_placeholder() {
@@ -713,6 +759,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: Some(tmp.path().join("nope.jsonl")),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
         let names = zip_entry_names(&zip_path);
@@ -729,7 +776,6 @@ mod tests {
     fn diagnostics_zip_placeholder_reason_is_sanitized() {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("diag-placeholder-redact.zip");
-        // Token-shaped path segment; a directory fails the no-follow read everywhere.
         let unreadable = tmp.path().join("xoxb-1234567890-abcdefghij");
         std::fs::create_dir(&unreadable).unwrap();
         let input = DiagnosticsInput {
@@ -740,6 +786,7 @@ mod tests {
             compose_path: Some(unreadable),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
         let placeholder =
@@ -773,13 +820,12 @@ mod tests {
             compose_path: Some(mk("compose.yml")),
             claude_session_log: Some(mk("claude.log")),
             entrypoint_log: Some(mk("entrypoint.log")),
+            proxy_usage_log: Some(mk("usage.jsonl")),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
         let registry_entries: Vec<&str> = DIAGNOSTIC_SOURCES.iter().map(|s| s.zip_entry).collect();
         for name in zip_entry_names(&zip_path) {
-            // system-info.txt is the non-source trailing write; `logs/<file>` are dynamic;
-            // `<zip_entry>.unavailable.txt` is the unreadable-source placeholder.
             let traced = name == "system-info.txt"
                 || name.starts_with("logs/")
                 || registry_entries.contains(&name.as_str())

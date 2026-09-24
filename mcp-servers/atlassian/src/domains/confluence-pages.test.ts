@@ -62,7 +62,6 @@ describe('search (CQL via v1)', () => {
       limit: 100,
     });
     expect(res).toHaveLength(1);
-    // v1 search results carry no usable version detail → null ("unknown").
     expect(res[0]).toMatchObject({ id: '1', title: 'P', space_key: 'DEV', version: null });
   });
 
@@ -72,7 +71,7 @@ describe('search (CQL via v1)', () => {
       results: [
         { id: '1', type: 'page', title: 'A', space: { key: 'DEV' } },
         { id: '2', type: 'page', title: 'B', space: { key: 'OPS' } },
-        { id: '3', type: 'page', title: 'C' }, // no space → dropped when allowlist set
+        { id: '3', type: 'page', title: 'C' },
       ],
     });
     const c = createConfluencePagesClient(client);
@@ -89,9 +88,7 @@ describe('search (CQL via v1)', () => {
 describe('get', () => {
   it('fetches a page (v2), resolves the space key, enforces the allowlist', async () => {
     client = stubClient(['DEV']);
-    client.get
-      .mockResolvedValueOnce(v2Page()) // page
-      .mockResolvedValueOnce({ key: 'DEV' }); // space lookup
+    client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'DEV' });
     const c = createConfluencePagesClient(client);
     const page = await c.get('123', { includeBody: true });
     expect(client.get).toHaveBeenNthCalledWith(1, '/wiki/api/v2/pages/123', {
@@ -135,7 +132,6 @@ describe('get', () => {
     const notFound = Object.assign(new Error('not found'), { response: { status: 404 } });
     client.get.mockResolvedValueOnce(v2Page()).mockRejectedValueOnce(notFound);
     const c = createConfluencePagesClient(client);
-    // A 404 (unresolvable key) is treated as "not in the allowlist" → ScopeError.
     await expect(c.get('123')).rejects.toThrow(ScopeError);
   });
 
@@ -165,8 +161,8 @@ describe('getByTitle', () => {
   it('resolves the space id, queries by exact title, returns the first match', async () => {
     client = stubClient(['DEV']);
     client.get
-      .mockResolvedValueOnce({ results: [{ id: '900', key: 'DEV' }] }) // resolveSpaceId
-      .mockResolvedValueOnce({ results: [v2Page()] }); // pages by title
+      .mockResolvedValueOnce({ results: [{ id: '900', key: 'DEV' }] })
+      .mockResolvedValueOnce({ results: [v2Page()] });
     const c = createConfluencePagesClient(client);
     const page = await c.getByTitle('DEV', 'My Page', { includeBody: true });
     expect(client.get).toHaveBeenNthCalledWith(1, '/wiki/api/v2/spaces', { keys: 'DEV', limit: 1 });
@@ -176,7 +172,6 @@ describe('getByTitle', () => {
       limit: 1,
       'body-format': 'storage',
     });
-    // space_key resolved from the cache populated by resolveSpaceId — no extra GET.
     expect(page).toMatchObject({ id: '123', space_key: 'DEV' });
   });
 
@@ -213,9 +208,9 @@ describe('getByTitle', () => {
   it('rethrows a non-404 space lookup failure with the page and space IDs', async () => {
     client = stubClient(['DEV']);
     client.get
-      .mockResolvedValueOnce({ results: [{ id: '900' }] }) // resolveSpaceId (no key → cache not primed)
-      .mockResolvedValueOnce({ results: [v2Page()] }) // pages by title
-      .mockRejectedValueOnce(new Error('ETIMEDOUT')); // resolveSpaceKey inside enrich
+      .mockResolvedValueOnce({ results: [{ id: '900' }] })
+      .mockResolvedValueOnce({ results: [v2Page()] })
+      .mockRejectedValueOnce(new Error('ETIMEDOUT'));
     const c = createConfluencePagesClient(client);
     await expect(c.getByTitle('DEV', 'My Page')).rejects.toThrow(/'900'.*'123'/s);
   });
@@ -268,15 +263,14 @@ describe('create', () => {
     const c = createConfluencePagesClient(client);
     const page = await c.create({ spaceKey: 'DEV', title: 'New', body: { text: 'x' } });
     expect(page.space_key).toBeUndefined();
-    // Only resolveSpaceId's GET: enrich() skips resolving the page's own space.
     expect(client.get).toHaveBeenCalledTimes(1);
   });
 
   it('rethrows a non-404 space lookup failure with the page and space IDs', async () => {
     client = stubClient(['DEV']);
-    client.get.mockResolvedValueOnce({ results: [{ id: '900' }] }); // resolveSpaceId (no key)
+    client.get.mockResolvedValueOnce({ results: [{ id: '900' }] });
     client.post.mockResolvedValueOnce(v2Page());
-    client.get.mockRejectedValueOnce(new Error('ETIMEDOUT')); // resolveSpaceKey inside enrich
+    client.get.mockRejectedValueOnce(new Error('ETIMEDOUT'));
     const c = createConfluencePagesClient(client);
     await expect(c.create({ spaceKey: 'DEV', title: 'New', body: { text: 'x' } })).rejects.toThrow(
       /'900'.*'123'/s
@@ -286,9 +280,7 @@ describe('create', () => {
 
 describe('update', () => {
   it('fetches the current page, increments the version, and PUTs', async () => {
-    client.get
-      .mockResolvedValueOnce(v2Page()) // current page (version 3)
-      .mockResolvedValueOnce({ key: 'DEV' }); // resolveSpaceKey
+    client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'DEV' });
     client.put.mockResolvedValueOnce(v2Page({ version: { number: 4 } }));
     const c = createConfluencePagesClient(client);
     const page = await c.update('123', { title: 'Renamed', body: { storage: '<p>new</p>' } });
@@ -349,15 +341,12 @@ describe('update', () => {
 
   it('primes the space-key cache so a following get() needs no extra space GET', async () => {
     client = stubClient(['DEV']);
-    // update(): page GET + space GET (primes cache) + PUT.
     client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'DEV' });
     client.put.mockResolvedValueOnce(v2Page({ version: { number: 4 } }));
-    // get(): page GET only — space key for spaceId 900 is already cached.
     client.get.mockResolvedValueOnce(v2Page());
     const c = createConfluencePagesClient(client);
     await c.update('123', { title: 'x' });
     await c.get('123');
-    // 3 GETs (update's page + update's space + get's page), not 4.
     expect(client.get).toHaveBeenCalledTimes(3);
   });
 });
@@ -388,9 +377,7 @@ describe('getChildren', () => {
 
   it('enforces the space allowlist before listing children', async () => {
     client = stubClient(['DEV']);
-    client.get
-      .mockResolvedValueOnce(v2Page()) // page lookup for enforcement
-      .mockResolvedValueOnce({ key: 'OPS' }); // space lookup → outside allowlist
+    client.get.mockResolvedValueOnce(v2Page()).mockResolvedValueOnce({ key: 'OPS' });
     const c = createConfluencePagesClient(client);
     await expect(c.getChildren('123')).rejects.toThrow(ScopeError);
   });
@@ -398,8 +385,8 @@ describe('getChildren', () => {
   it('lists children when the page space is in the allowlist', async () => {
     client = stubClient(['DEV']);
     client.get
-      .mockResolvedValueOnce(v2Page()) // page lookup
-      .mockResolvedValueOnce({ key: 'DEV' }) // space lookup → allowed
+      .mockResolvedValueOnce(v2Page())
+      .mockResolvedValueOnce({ key: 'DEV' })
       .mockResolvedValueOnce({ results: [{ id: '124', status: 'current', title: 'Child' }] });
     const c = createConfluencePagesClient(client);
     expect((await c.getChildren('123'))[0]).toMatchObject({ id: '124', title: 'Child' });
@@ -428,9 +415,9 @@ describe('normalisation edge cases', () => {
   it('caches a resolved space key across calls (no second space GET)', async () => {
     client = stubClient(['DEV']);
     client.get
-      .mockResolvedValueOnce(v2Page()) // get #1 page
-      .mockResolvedValueOnce({ key: 'DEV' }) // get #1 space
-      .mockResolvedValueOnce(v2Page()); // get #2 page (no space GET → cache hit)
+      .mockResolvedValueOnce(v2Page())
+      .mockResolvedValueOnce({ key: 'DEV' })
+      .mockResolvedValueOnce(v2Page());
     const c = createConfluencePagesClient(client);
     await c.get('123');
     await c.get('123');
@@ -498,11 +485,10 @@ describe('normalisation edge cases', () => {
   });
 
   it('resolveSpaceId is the only space GET when no allowlist is configured', async () => {
-    client.get.mockResolvedValueOnce({ results: [{ id: '900', key: 'DEV' }] }); // resolveSpaceId
+    client.get.mockResolvedValueOnce({ results: [{ id: '900', key: 'DEV' }] });
     client.post.mockResolvedValueOnce(v2Page());
     const c = createConfluencePagesClient(client);
     await c.create({ spaceKey: 'DEV', title: 'T', body: { text: 'x' } });
-    // create's enrich() skips resolving the page's own space (no allowlist).
     expect(client.get).toHaveBeenCalledTimes(1);
   });
 

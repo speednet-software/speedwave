@@ -1,13 +1,10 @@
-# Tauri build output
 src-tauri/target/
 src-tauri/gen/
 
-# Angular / frontend
 node_modules/
 dist/
 .angular/
 *.tsbuildinfo
 
-# Environment
 .env
 .env.local

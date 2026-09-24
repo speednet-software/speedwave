@@ -2,6 +2,22 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MessageMetadataComponent } from './message-metadata.component';
 import type { ChatMessage } from '../../models/chat';
+import { AnthropicModelsService } from '../../services/anthropic-models.service';
+import { TauriService } from '../../services/tauri.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
+import type { AnthropicModel } from '../../models/llm';
+
+const FIXTURE: AnthropicModel[] = [
+  {
+    id: 'claude-opus-4-8',
+    family: 'Opus 4.8',
+    context_tokens: 1_000_000,
+    latest: true,
+    premium: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
+  },
+];
 
 function baseAssistant(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -313,23 +329,63 @@ describe('MessageMetadataComponent', () => {
     expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
   });
 
-  it('keeps a single [1m] suffix when the raw id ends with one', () => {
-    // Preserve a single `[1m]` suffix on the prettified id.
-    setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m]' } }));
+  it('never shows the 1M suffix of a raw id', () => {
+    for (const model of ['claude-opus-4-7[1m]', 'claude-opus-4-7[1m][1m]']) {
+      setEntry(baseAssistant({ meta: { model } }));
 
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
-      'opus-4.7[1m]'
-    );
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
+    }
   });
 
-  it('collapses repeated [1m] suffixes (regression: opus-4-7[1m][1m])', () => {
-    // Dedupe a doubled `[1m][1m]` suffix to a single `[1m]`.
-    setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m][1m]' } }));
+  it('drops the snapshot date of a raw id', () => {
+    setEntry(baseAssistant({ meta: { model: 'claude-haiku-4-5-20251001' } }));
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
-      'opus-4.7[1m]'
-    );
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('haiku-4.5');
+  });
+
+  describe('with the catalog loaded', () => {
+    beforeEach(async () => {
+      const mockTauri = new MockTauriService();
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'list_anthropic_models' ? FIXTURE : undefined;
+
+      TestBed.resetTestingModule();
+      await TestBed.configureTestingModule({
+        imports: [MessageMetadataComponent],
+        providers: [{ provide: TauriService, useValue: mockTauri }],
+      }).compileComponents();
+
+      fixture = TestBed.createComponent(MessageMetadataComponent);
+      await TestBed.inject(AnthropicModelsService).list();
+    });
+
+    it('renders the catalog family label when the model is in the catalog', () => {
+      setEntry(baseAssistant({ meta: { model: 'claude-opus-4-8' } }));
+
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('Opus 4.8');
+    });
+
+    it('renders a 1M session and a 200k session of one model with the same label', () => {
+      const labels = ['claude-opus-4-8[1m]', 'claude-opus-4-8'].map((model) => {
+        setEntry(baseAssistant({ meta: { model } }));
+        return (fixture.nativeElement as HTMLElement)
+          .querySelector('[data-testid="meta-model"]')
+          ?.textContent?.trim();
+      });
+
+      expect(labels).toEqual(['Opus 4.8', 'Opus 4.8']);
+    });
+
+    it('falls back to the regex formatting for non-catalog ids', () => {
+      setEntry(baseAssistant({ meta: { model: 'local/unsloth/Qwen3.6-35B-A3B' } }));
+
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
+        'local/unsloth/Qwen3.6-35B-A3B'
+      );
+    });
   });
 });

@@ -39,8 +39,6 @@ fn every_builtin_template_resolves_to_a_policy_the_engine_accepts() {
             )
         });
 
-        // Library rules appear iff their tokenize/log pair has a flag on; every
-        // shipped template's `rules` list (additive, on top of the library) is empty today.
         let expected_builtin_rules = template
             .categories
             .values()

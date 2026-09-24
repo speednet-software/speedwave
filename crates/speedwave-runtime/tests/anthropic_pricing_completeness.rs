@@ -8,8 +8,6 @@
 
 use speedwave_runtime::defaults::{ModelPricing, ANTHROPIC_MODELS};
 
-/// Per-MTok rates must be real positive prices, not placeholder zeros — a zero
-/// rate renders a misleading $0.000 turn in the cost meter.
 fn assert_priced(model_id: &str, label: &str, p: &ModelPricing) {
     assert!(
         p.input > 0.0,
@@ -35,7 +33,6 @@ fn assert_priced(model_id: &str, label: &str, p: &ModelPricing) {
 
 #[test]
 fn every_catalog_entry_is_priced() {
-    // Guard the base rate of every catalog id.
     assert!(
         !ANTHROPIC_MODELS.is_empty(),
         "catalog must not be empty — the cost meter has nothing to price"
@@ -47,7 +44,6 @@ fn every_catalog_entry_is_priced() {
 
 #[test]
 fn million_context_entries_have_a_priced_1m_variant() {
-    // Require `pricing_1m` exactly when the family is 1M-context.
     for m in ANTHROPIC_MODELS {
         let is_million = m.context_tokens >= 1_000_000;
         match (&m.pricing_1m, is_million) {
@@ -67,7 +63,6 @@ fn million_context_entries_have_a_priced_1m_variant() {
 
 #[test]
 fn catalog_serializes_pricing_for_the_frontend() {
-    // Wire form must carry `input`/`output` under `pricing` (and `pricing_1m` for 1M families).
     let value =
         serde_json::to_value(ANTHROPIC_MODELS).expect("catalog must serialize for the frontend");
     let entries = value.as_array().expect("catalog serializes as an array");
@@ -91,4 +86,53 @@ fn catalog_serializes_pricing_for_the_frontend() {
             "pricing_1m presence on the wire must mirror a 1M context window"
         );
     }
+}
+
+#[test]
+fn million_context_variants_bill_at_standard_rates() {
+    for m in ANTHROPIC_MODELS {
+        if let Some(p1m) = &m.pricing_1m {
+            assert_eq!(
+                p1m, &m.pricing,
+                "{}: the [1m] variant must bill at the base rate",
+                m.id
+            );
+        }
+    }
+}
+
+#[test]
+fn fable_5_1_cache_hit_is_the_lone_025x_multiplier() {
+    let fable_5_1 = ANTHROPIC_MODELS
+        .iter()
+        .find(|m| m.id == "claude-fable-5-1")
+        .expect("claude-fable-5-1 must be in the catalog");
+    assert!((fable_5_1.pricing.cached_input - fable_5_1.pricing.input * 0.025).abs() < 1e-9);
+    for m in ANTHROPIC_MODELS {
+        if m.id == "claude-fable-5-1" {
+            continue;
+        }
+        assert!(
+            (m.pricing.cached_input - m.pricing.input * 0.1).abs() < 1e-9,
+            "{}: expected the standard 0.1x cache-hit multiplier, got cached_input={}",
+            m.id,
+            m.pricing.cached_input
+        );
+    }
+}
+
+#[test]
+fn sonnet_5_is_priced_below_sonnet_46() {
+    let find = |id: &str| {
+        ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from catalog"))
+    };
+    let s5 = find("claude-sonnet-5");
+    let s46 = find("claude-sonnet-4-6");
+    assert!(s5.pricing.input < s46.pricing.input);
+    assert!(s5.pricing.cached_input < s46.pricing.cached_input);
+    assert!(s5.pricing.cache_write < s46.pricing.cache_write);
+    assert!(s5.pricing.output < s46.pricing.output);
 }

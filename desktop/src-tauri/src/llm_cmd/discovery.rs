@@ -1,6 +1,3 @@
-//! LLM model discovery via HTTP probes (threat model: ADR-041).
-//! Probes `/v1/models` (+ Ollama `/api/show`) for models and context windows.
-
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -15,10 +12,6 @@ use crate::llm_cmd::{
 };
 use crate::url_validation::{is_private_on_premise, validate_url, PrivatePolicy};
 
-// ---------------------------------------------------------------------------
-// Public DTO surfaced through Tauri to the frontend
-
-/// One discovered model; `context_tokens` is `None` when unavailable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscoveredModel {
     pub id: String,
@@ -26,7 +19,6 @@ pub struct DiscoveredModel {
     pub context_tokens: Option<u32>,
 }
 
-/// Discovery result: model list + optional messages-endpoint flag (`None` = undetermined).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoverResult {
     pub models: Vec<DiscoveredModel>,
@@ -34,11 +26,6 @@ pub struct DiscoverResult {
     pub messages_endpoint_ok: Option<bool>,
 }
 
-// ---------------------------------------------------------------------------
-// Pure parsers (tested in isolation, no HTTP)
-
-/// Parses `POST /api/show` response; extracts context window from the
-/// architecture-specific `*.context_length` key.
 fn parse_ollama_show(body: &[u8]) -> Option<u32> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let model_info = v.get("model_info")?.as_object()?;
@@ -51,7 +38,6 @@ fn parse_ollama_show(body: &[u8]) -> Option<u32> {
             return non_zero_u32(n);
         }
     }
-    // Fallback: any `<something>.context_length` key.
     for (k, val) in model_info {
         if k.ends_with(".context_length") {
             if let Some(n) = val.as_u64() {
@@ -62,26 +48,17 @@ fn parse_ollama_show(body: &[u8]) -> Option<u32> {
     None
 }
 
-/// Converts a server-reported context-length to `u32`, treating overflow and
-/// `0` as "unknown".
 fn non_zero_u32(n: u64) -> Option<u32> {
     u32::try_from(n).ok().filter(|&v| v > 0)
 }
 
-// ---------------------------------------------------------------------------
-// URL validation (shared between discover and save paths)
-
-/// Validates a base URL for a local LLM provider (policy: ADR-041). Allows
-/// loopback/private/public with `warn!`; rejects link-local/metadata/reserved, creds, backslashes, query, fragment, non-HTTP schemes.
 pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
-    // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
         return Err("URL must not contain backslashes".to_string());
     }
 
     let candidate: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
 
-    // Reject query and fragment up front — LLM endpoints are canonical paths.
     if candidate.query().is_some() {
         return Err("URL must not contain a query string".to_string());
     }
@@ -89,7 +66,6 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
         return Err("URL must not contain a fragment".to_string());
     }
 
-    // On-premise/localhost: validate scheme/host here; else delegate to validate_url.
     let host_is_localhost = matches!(
         candidate.host(),
         Some(url::Host::Domain(d)) if d.eq_ignore_ascii_case("localhost")
@@ -105,7 +81,6 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
                     ))
                 }
             }
-            // Host guaranteed present here by the on-premise/localhost classifier.
             let host = candidate.host_str().unwrap_or("<bug:no-host>");
             if host_is_localhost || is_loopback_host(&candidate) {
                 log::warn!("Allowing loopback address for local LLM: {}", host);
@@ -115,18 +90,15 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
             candidate
         } else {
             let v = validate_url(url)?;
-            // Host guaranteed present: `validate_url` Ok implies `Some`.
             let host = v.host_str().unwrap_or("<bug:no-host>");
             log::warn!("Allowing public address for local LLM: {}", host);
             v
         };
 
-    // Reject embedded credentials.
     if parsed.password().is_some() || !parsed.username().is_empty() {
         return Err("URL must not contain embedded credentials".to_string());
     }
 
-    // Warn about cleartext HTTP.
     if parsed.scheme() == "http" {
         log::warn!("LLM traffic will be transmitted in cleartext over HTTP");
     }
@@ -134,8 +106,6 @@ pub(crate) fn validate_llm_base_url(url: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
-/// Returns true when the parsed URL's host is an IPv4/IPv6 loopback address
-/// (native or IPv6-mapped). Used purely to pick the right `warn!` message.
 fn is_loopback_host(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(v4)) => v4.is_loopback(),
@@ -150,21 +120,13 @@ fn is_loopback_host(url: &url::Url) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// URL normalisation pipeline
-
-/// Strips `/v1`, rewrites container host aliases, runs SSRF validation.
-/// Returns the validated `url::Url` ready for endpoint path composition.
 fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, String> {
-    // 1. Strip trailing /v1 (Ollama docs sometimes include it).
     let normalized = speedwave_runtime::compose::strip_trailing_v1(base_url);
 
-    // 2. Parse URL; early-Err on malformed input.
     let mut parsed: url::Url = normalized
         .parse()
         .map_err(|e: url::ParseError| format!("Invalid base_url: {e}"))?;
 
-    // 3. Rewrite container-side host aliases (host.docker.internal etc.) to loopback.
     if let Some(host_str) = parsed.host_str() {
         if let Some(loopback) = crate::http_util::rewrite_container_alias_to_loopback(host_str) {
             parsed
@@ -173,22 +135,12 @@ fn normalize_and_validate_discovery_url(base_url: &str) -> Result<url::Url, Stri
         }
     }
 
-    // 4. SSRF-safe validation (same function used by the save path).
     validate_llm_base_url(parsed.as_str())
 }
 
-// Probe transport — "HTTP from host" vs "HTTP from VM"; the VM path (Apple VZ
-// NAT / WSL2 mirrored) reaches corporate-VPN servers the host cannot route to.
-
-/// Minimal HTTP transport for the discovery probe; `body` capped at
-/// [`MAX_RESPONSE_BODY_BYTES`]. Auth headers are pre-configured on the impl.
 #[async_trait::async_trait]
 pub(crate) trait ProbeTransport: Send + Sync {
-    /// `GET url` with `Accept: application/json`. Returns `(status, body)`.
-    /// Errors: transport-layer failures (DNS, connection, timeout, redirect).
     async fn get(&self, url: &str) -> Result<ProbeResponse, String>;
-    /// `POST url` with `Content-Type: application/json` and `body` as the
-    /// request body. Same status/error semantics as `get`.
     async fn post(&self, url: &str, body: &serde_json::Value) -> Result<ProbeResponse, String>;
 }
 
@@ -208,8 +160,6 @@ impl ProbeResponse {
     }
 }
 
-/// Host-side probe via `reqwest`. Cannot reach corporate-VPN endpoints that
-/// only route through the VM's interface — see `VmProbe` for that path.
 pub(crate) struct HostProbe {
     client: reqwest::Client,
     timeout: Duration,
@@ -232,7 +182,10 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe GET {url} failed on host transport: {e}");
+                log::warn!(
+                    "LLM probe GET {url} failed on host transport: {}",
+                    crate::http_util::error_chain(&e)
+                );
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -258,7 +211,10 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe POST {url} failed on host transport: {e}");
+                log::warn!(
+                    "LLM probe POST {url} failed on host transport: {}",
+                    crate::http_util::error_chain(&e)
+                );
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -276,8 +232,6 @@ impl ProbeTransport for HostProbe {
     }
 }
 
-/// VM-side probe via `vm_exec` + `curl`; reaches corporate-VPN endpoints
-/// (Apple VZ / WSL2 inherit host routing).
 pub(crate) struct VmProbe {
     bearer: Option<String>,
     custom_headers: Option<String>,
@@ -320,8 +274,6 @@ impl ProbeTransport for VmProbe {
     }
 }
 
-/// Builds the curl argv (auth headers + write-out trailer), runs it via blocking
-/// `vm_exec` (called from async via `spawn_blocking`), returns the `ProbeResponse`.
 async fn run_vm_curl(
     method: &str,
     url: &str,
@@ -387,7 +339,6 @@ fn run_vm_curl_blocking(
             if line.is_empty() {
                 continue;
             }
-            // Reject `Authorization` in custom_headers (mirrors HostProbe/save guard).
             if line
                 .split_once(':')
                 .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
@@ -409,7 +360,6 @@ fn run_vm_curl_blocking(
     args.push(url.into());
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    // Headroom for curl spawn + connect on top of curl's own --max-time.
     let exec_timeout = timeout + Duration::from_secs(2);
     let out = runtime
         .vm_exec("curl", &args_ref, &[], exec_timeout)
@@ -463,14 +413,8 @@ fn run_vm_curl_blocking(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Core logic (parameterized timeout for testing)
-
-/// Bounded fan-out concurrency for `/api/show` probes.
 const MAX_OLLAMA_PROBE_CONCURRENCY: usize = 8;
 
-/// Extracts per-entry context from inline `/v1/models` metadata, falling back
-/// to Ollama `/api/show` (one sanity call bounds the fan-out).
 async fn discover_local(
     base: &url::Url,
     transport: &dyn ProbeTransport,
@@ -483,12 +427,10 @@ async fn discover_local(
         return Ok(Vec::new());
     }
 
-    // If every entry already has context, we're done — no fallback calls.
     if entries.iter().all(|m| m.context_tokens.is_some()) {
         return Ok(entries);
     }
 
-    // Try one Ollama `/api/show` sanity call on the first missing entry.
     let first_missing = entries
         .iter()
         .find(|m| m.context_tokens.is_none())
@@ -504,12 +446,10 @@ async fn discover_local(
         .ok();
     let sanity_ok = sanity.as_ref().map(|r| r.is_success()).unwrap_or(false);
     if !sanity_ok {
-        // Server does not implement `/api/show` — return the list as-is.
         return Ok(entries);
     }
     let first_ctx = sanity.as_ref().and_then(|r| parse_ollama_show(&r.body));
 
-    // Fan out for the remaining missing entries (skip the one we just probed).
     let missing: Vec<(usize, String)> = entries
         .iter()
         .enumerate()
@@ -544,21 +484,15 @@ async fn discover_local(
     Ok(out)
 }
 
-// Discovery Err contract — string-matched by `classifyDiscoveryFailure` in
-// `llm-provider.component.ts`; pinned by `discovery_err_contract_matches_ts`.
 const ERR_AUTH: &str = "auth";
 const ERR_EMPTY: &str = "empty";
 const ERR_UNSUPPORTED: &str = "unsupported";
 const ERR_HTML_RESPONSE: &str = "LLM server returned an HTML response";
-/// Trailing space is load-bearing: the TS side slices the status after it.
 const ERR_HTTP_STATUS_PREFIX: &str = "LLM server returned HTTP ";
 
-/// Status/content-type guard for `/v1/models`. Err strings are the discovery
-/// contract consts above (matched in `llm-provider.component.ts`).
 fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> {
     if !resp.is_success() {
         if resp.status == 401 || resp.status == 403 {
-            // Reachable but auth rejected — never log the key.
             log::warn!(
                 "{} returned HTTP {} (auth) during LLM model discovery — bad or missing API key",
                 url,
@@ -593,8 +527,6 @@ fn enforce_json_response(resp: &ProbeResponse, url: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Parses an OpenAI-shape `/v1/models` response: `id` plus inline context from
-/// `meta.n_ctx_train` or `max_context_length` (`None` when neither present).
 fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>, String> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("failed to parse /v1/models response: {e}"))?;
@@ -622,6 +554,12 @@ fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>,
                     .get("max_context_length")
                     .and_then(|n| n.as_u64())
                     .and_then(non_zero_u32)
+            })
+            .or_else(|| {
+                entry
+                    .get("max_input_tokens")
+                    .and_then(|n| n.as_u64())
+                    .and_then(non_zero_u32)
             });
         out.push(DiscoveredModel {
             id,
@@ -631,11 +569,8 @@ fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>,
     Ok(out)
 }
 
-/// Public OpenRouter model catalog — fixed URL, never user input.
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
-/// Parses the OpenRouter `/api/v1/models` catalog, keeping only models that list
-/// `"tools"` in `supported_parameters` (Claude Code needs tool calling).
 fn parse_openrouter_models(body: &[u8]) -> Result<Vec<DiscoveredModel>, String> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("failed to parse OpenRouter models response: {e}"))?;
@@ -676,24 +611,41 @@ async fn discover_openrouter(
     parse_openrouter_models(&resp.body)
 }
 
-/// Tri-state credential resolver: transient UI value wins over stored on-disk;
-/// `Some(None)` / `Some(Some(""))` means "no auth".
+fn stored_credential(provider: &str, project: Option<&str>, file: &str) -> Option<String> {
+    stored_credential_in(
+        speedwave_runtime::consts::data_dir(),
+        provider,
+        project,
+        file,
+    )
+}
+
+fn stored_credential_in(
+    data_dir: &std::path::Path,
+    provider: &str,
+    project: Option<&str>,
+    file: &str,
+) -> Option<String> {
+    if !speedwave_runtime::config::is_local_provider(Some(provider)) {
+        return None;
+    }
+    project.and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt_in(data_dir, p, file))
+}
+
 fn resolve_transient_credential(
     field: Option<&Option<String>>,
-    active_project: Option<&str>,
+    provider: &str,
+    project: Option<&str>,
     file: &str,
 ) -> Option<String> {
     match field {
-        None => active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, file)),
+        None => stored_credential(provider, project, file),
         Some(None) => None,
         Some(Some(s)) if s.is_empty() => None,
         Some(Some(s)) => strip_bearer_prefix(s),
     }
 }
 
-/// Probes `POST /v1/messages` with a 1-token request to detect endpoint support.
-/// Uses a real model id so a 404 isn't mistaken for a missing endpoint (ADR-041).
 async fn probe_messages_endpoint(
     base: &url::Url,
     model: Option<&str>,
@@ -709,7 +661,6 @@ async fn probe_messages_endpoint(
     match resp {
         Ok(r) => {
             let status = r.status;
-            // 2xx/4xx (not 404/405) = ok; 404/405 = missing; else = unknown.
             match status {
                 404 | 405 => Some(false),
                 s if (200..500).contains(&s) => Some(true),
@@ -720,8 +671,6 @@ async fn probe_messages_endpoint(
     }
 }
 
-/// Discovers models from a local LLM server; `timeout` applies per HTTP call.
-/// Returns `Err("empty")` when the server responds OK but lists no models.
 pub(crate) async fn do_discover_llm_models(
     provider: &str,
     base_url: &str,
@@ -731,7 +680,6 @@ pub(crate) async fn do_discover_llm_models(
         return Err(ERR_UNSUPPORTED.to_string());
     }
 
-    // Fixed catalog URL — no user-supplied base_url to validate.
     if provider == "openrouter" {
         let models = discover_openrouter(transport).await?;
         if models.is_empty() {
@@ -745,18 +693,15 @@ pub(crate) async fn do_discover_llm_models(
 
     let validated = normalize_and_validate_discovery_url(base_url)?;
 
-    // Non-anthropic providers route through `discover_local`; legacy names accepted on read.
-    let (raw_models, messages_endpoint_ok) = match provider {
-        "local" | "ollama" | "lmstudio" | "llamacpp" => {
-            // List first, then probe with a real model id so a "model not found"
-            // 404 isn't read as a missing endpoint (Ollama false-positive).
+    let (raw_models, messages_endpoint_ok) =
+        if speedwave_runtime::config::is_local_provider(Some(provider)) {
             let models = discover_local(&validated, transport).await?;
             let first_model = models.first().map(|m| m.id.as_str());
             let sanity = probe_messages_endpoint(&validated, first_model, transport).await;
             (models, sanity)
-        }
-        _ => return Err(ERR_UNSUPPORTED.to_string()),
-    };
+        } else {
+            return Err(ERR_UNSUPPORTED.to_string());
+        };
 
     let models: Vec<DiscoveredModel> = raw_models
         .into_iter()
@@ -779,11 +724,6 @@ pub(crate) async fn do_discover_llm_models(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Tauri command (thin wrapper)
-
-/// Tri-state credential params (same for `custom_headers`): `None` = stored token;
-/// `Some(None)`/`Some(Some(""))` = no auth; `Some(Some(v))` = transient value.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverLlmModelsArgs {
@@ -793,6 +733,71 @@ pub struct DiscoverLlmModelsArgs {
     pub api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub custom_headers: Option<Option<String>>,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+fn credential_project(args: &DiscoverLlmModelsArgs, active: Option<String>) -> Option<String> {
+    args.project.clone().or(active)
+}
+
+/// Discovers over the VM transport; when that fails, logs the VM error with its cause at info
+/// (expected for a server on the host's loopback) and retries over the host transport.
+async fn discover_via_vm_then_host<H: ProbeTransport>(
+    provider: &str,
+    base_url: &str,
+    vm: &dyn ProbeTransport,
+    host: impl FnOnce() -> Result<H, String>,
+) -> Result<DiscoverResult, String> {
+    match do_discover_llm_models(provider, base_url, vm).await {
+        Ok(result) => Ok(result),
+        Err(vm_err) => {
+            log::info!(
+                "VM probe for LLM model discovery failed, retrying via host transport: {vm_err}"
+            );
+            let host_transport = host()?;
+            do_discover_llm_models(provider, base_url, &host_transport).await
+        }
+    }
+}
+
+pub(crate) async fn discover_llm_models_with_fallback(
+    provider: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    custom_headers: Option<&str>,
+    active_project: Option<&str>,
+) -> Result<DiscoverResult, String> {
+    let bearer = api_key
+        .and_then(strip_bearer_prefix)
+        .or_else(|| stored_credential(provider, active_project, "api_key"));
+    let headers = custom_headers
+        .map(str::to_string)
+        .or_else(|| stored_credential(provider, active_project, "custom_headers"));
+    let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
+    let runtime = speedwave_runtime::runtime::detect_runtime();
+    let vm_available = runtime.is_available();
+    let result = if vm_available {
+        let vm_transport = VmProbe::new(bearer.clone(), headers.clone(), timeout);
+        discover_via_vm_then_host(provider, base_url, &vm_transport, || {
+            let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
+            Ok(HostProbe::new(client, timeout))
+        })
+        .await
+    } else {
+        let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
+        let host_transport = HostProbe::new(client, timeout);
+        do_discover_llm_models(provider, base_url, &host_transport).await
+    };
+    match &result {
+        Ok(r) => log::info!(
+            "LLM model discovery succeeded: {} model(s), messages_endpoint_ok={:?}",
+            r.models.len(),
+            r.messages_endpoint_ok
+        ),
+        Err(e) => log::warn!("LLM model discovery failed: {e}"),
+    }
+    result
 }
 
 #[tauri::command]
@@ -807,45 +812,28 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
-    let bearer = resolve_transient_credential(args.api_key.as_ref(), active.as_deref(), "api_key");
+    let project = credential_project(&args, active);
+    let bearer = resolve_transient_credential(
+        args.api_key.as_ref(),
+        &args.provider,
+        project.as_deref(),
+        "api_key",
+    );
     let headers = resolve_transient_credential(
         args.custom_headers.as_ref(),
-        active.as_deref(),
+        &args.provider,
+        project.as_deref(),
         "custom_headers",
     );
-    let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
-    // Try VM probe first (reaches VPN servers); fall back to host probe silently.
-    let runtime = speedwave_runtime::runtime::detect_runtime();
-    let vm_available = runtime.is_available();
-    let result = if vm_available {
-        let vm_transport = VmProbe::new(bearer.clone(), headers.clone(), timeout);
-        let vm_res = do_discover_llm_models(&args.provider, &args.base_url, &vm_transport).await;
-        if vm_res.is_ok() {
-            vm_res
-        } else {
-            log::info!("VM probe failed for LLM model discovery, retrying via host transport");
-            let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
-            let host_transport = HostProbe::new(client, timeout);
-            do_discover_llm_models(&args.provider, &args.base_url, &host_transport).await
-        }
-    } else {
-        let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
-        let host_transport = HostProbe::new(client, timeout);
-        do_discover_llm_models(&args.provider, &args.base_url, &host_transport).await
-    };
-    match &result {
-        Ok(r) => log::info!(
-            "LLM model discovery succeeded: {} model(s), messages_endpoint_ok={:?}",
-            r.models.len(),
-            r.messages_endpoint_ok
-        ),
-        Err(e) => log::warn!("LLM model discovery failed: {e}"),
-    }
-    result
+    discover_llm_models_with_fallback(
+        &args.provider,
+        &args.base_url,
+        bearer.as_deref(),
+        headers.as_deref(),
+        None,
+    )
+    .await
 }
-
-// ---------------------------------------------------------------------------
-// Tests
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
@@ -853,14 +841,10 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
-    /// Convenience extractor — discovery returns rich `DiscoveredModel`s but
-    /// most happy-path assertions only care about the id list.
     fn model_ids(models: &[DiscoveredModel]) -> Vec<&str> {
         models.iter().map(|m| m.id.as_str()).collect()
     }
 
-    /// Test shim: legacy `(provider, url, client, timeout)` signature wrapping
-    /// the host transport, so mockito tests skip building a `HostProbe`.
     async fn do_discover_llm_models(
         provider: &str,
         base_url: &str,
@@ -871,9 +855,6 @@ mod tests {
         super::do_discover_llm_models(provider, base_url, &transport).await
     }
 
-    // ── Cross-language discovery-error contract ─────────────────────────
-
-    /// Extracts the first single-quoted TS literal after `marker` in `src`.
     fn ts_string_after<'a>(src: &'a str, marker: &str) -> &'a str {
         let start = src
             .find(marker)
@@ -887,8 +868,6 @@ mod tests {
 
     #[test]
     fn discovery_err_contract_matches_ts() {
-        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
-        // `classifyDiscoveryFailure` string-matches the Rust Err sentinels.
         let src =
             include_str!("../../../src/src/app/settings/llm-provider/llm-provider.component.ts");
         assert_eq!(
@@ -904,8 +883,6 @@ mod tests {
             );
         }
     }
-
-    // ── normalize_and_validate_discovery_url ────────────────────────────
 
     #[test]
     fn normalize_strips_v1_suffix() {
@@ -939,11 +916,8 @@ mod tests {
         );
     }
 
-    // ── Pure parsers ────────────────────────────────────────────────────
-
     #[test]
     fn parse_ollama_show_resolves_arch_specific_context_length() {
-        // Real /api/show shape: `general.architecture` selects the `<arch>.context_length` key.
         let body = br#"{
             "license": "...",
             "modelfile": "...",
@@ -958,7 +932,6 @@ mod tests {
 
     #[test]
     fn parse_ollama_show_falls_back_to_any_context_length_key() {
-        // Missing `general.architecture`: still grab any `<X>.context_length`.
         let body = br#"{
             "model_info": {
                 "llama.context_length": 8192
@@ -983,12 +956,8 @@ mod tests {
         assert_eq!(parse_ollama_show(b"not json"), None);
     }
 
-    // ── zero-context_tokens guard ───────────────────────────────────────
-    // `non_zero_u32` flips a server-reported `0` (or overflow) to `None`.
-
     #[test]
     fn parse_ollama_show_treats_zero_context_length_as_unknown() {
-        // Arch-specific key path.
         let body = br#"{
             "model_info": {
                 "general.architecture": "llama",
@@ -1000,7 +969,6 @@ mod tests {
 
     #[test]
     fn parse_ollama_show_treats_zero_in_fallback_scan_as_unknown() {
-        // Generic *.context_length scan path — same zero handling.
         let body = br#"{
             "model_info": {
                 "qwen2.context_length": 0
@@ -1017,30 +985,23 @@ mod tests {
         assert_eq!(super::non_zero_u32(u32::MAX as u64 + 1), None);
     }
 
-    // ── validate_llm_base_url: branch coverage ──────────────────────────
-    // LLM-specific delta: branch selection and policy (loopback allowed).
-
     #[test]
     fn validate_allows_localhost_hostname() {
-        // `localhost` is special-cased and allowed under the LLM policy.
         assert!(validate_llm_base_url("http://localhost:11434").is_ok());
     }
 
     #[test]
     fn validate_allows_loopback_ipv4() {
-        // On-premise arm (AllowLoopback).
         assert!(validate_llm_base_url("http://127.0.0.1:11434").is_ok());
     }
 
     #[test]
     fn validate_allows_rfc1918() {
-        // On-premise arm (RFC 1918).
         assert!(validate_llm_base_url("http://192.168.1.1").is_ok());
     }
 
     #[test]
     fn validate_blocks_link_local_metadata() {
-        // Delegation arm → url_validation rejects.
         let err = validate_llm_base_url("http://169.254.169.254").unwrap_err();
         assert!(
             err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
@@ -1050,13 +1011,11 @@ mod tests {
 
     #[test]
     fn validate_allows_public_ipv4() {
-        // Delegation arm → url_validation accepts public IPs.
         assert!(validate_llm_base_url("http://8.8.8.8").is_ok());
     }
 
     #[test]
     fn validate_allows_public_domain() {
-        // Delegation arm — unknown DNS name is treated as public (align with Redmine).
         assert!(validate_llm_base_url("http://my-ollama.lan").is_ok());
     }
 
@@ -1082,11 +1041,8 @@ mod tests {
 
     #[test]
     fn validate_allows_mapped_loopback() {
-        // Delta vs Redmine — under AllowLoopback, IPv6-mapped loopback is OK.
         assert!(validate_llm_base_url("http://[::ffff:127.0.0.1]").is_ok());
     }
-
-    // Schema / format rejections
 
     #[test]
     fn validate_blocks_file_scheme() {
@@ -1153,9 +1109,6 @@ mod tests {
         assert!(validate_llm_base_url("http://localhost:11434#frag").is_err());
     }
 
-    // ── Log capture tests ───────────────────────────────────────────────
-    // Process-global TestLogger behind `serial_test::serial`.
-
     struct TestLogger {
         records: Mutex<Vec<(log::Level, String)>>,
     }
@@ -1189,7 +1142,6 @@ mod tests {
     fn test_logger() -> &'static TestLogger {
         static LOGGER: OnceLock<TestLogger> = OnceLock::new();
         let logger = LOGGER.get_or_init(TestLogger::new);
-        // Only the first `set_logger` succeeds; later calls Err (ignored).
         let _ = log::set_logger(logger);
         log::set_max_level(log::LevelFilter::Trace);
         logger
@@ -1244,8 +1196,6 @@ mod tests {
         );
     }
 
-    // ── Command-level (anthropic short-circuit, alias rewrite) ──────────
-
     #[tokio::test]
     async fn do_discover_rejects_anthropic() {
         let client = build_llm_probe_client().unwrap();
@@ -1258,6 +1208,36 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, "unsupported");
+    }
+
+    #[tokio::test]
+    async fn discover_routes_every_local_provider_kind_via_ssot() {
+        let mut server = mockito::Server::new_async().await;
+        let _models_mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"test-model"}]}"#)
+            .create_async()
+            .await;
+        let _messages_mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(r#"{}"#)
+            .create_async()
+            .await;
+
+        let client = build_llm_probe_client().unwrap();
+        for provider in speedwave_runtime::config::LOCAL_PROVIDERS {
+            assert!(speedwave_runtime::config::is_local_provider(Some(provider)));
+            let result =
+                do_discover_llm_models(provider, &server.url(), &client, Duration::from_secs(2))
+                    .await;
+            assert!(
+                !matches!(result, Err(ref e) if e == ERR_UNSUPPORTED),
+                "provider '{provider}' accepted by is_local_provider must not return unsupported"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1276,7 +1256,6 @@ mod tests {
     #[tokio::test]
     async fn do_discover_rejects_metadata_ip() {
         let client = build_llm_probe_client().unwrap();
-        // We never issue the request — validate_llm_base_url rejects first.
         assert!(do_discover_llm_models(
             "ollama",
             "http://169.254.169.254",
@@ -1289,7 +1268,6 @@ mod tests {
 
     #[tokio::test]
     async fn do_discover_rewrites_docker_internal_via_mockito() {
-        // host.docker.internal:{port} must rewrite to 127.0.0.1 to reach the mock.
         let mut server = mockito::Server::new_async().await;
         let port = server.host_with_port();
         let port = port.split(':').nth(1).unwrap();
@@ -1315,11 +1293,8 @@ mod tests {
         assert_eq!(model_ids(&result.models), vec!["test-model"]);
     }
 
-    // ── Integration tests via mockito ───────────────────────────────────
-
     #[tokio::test]
     async fn integration_legacy_ollama_alias_routes_to_unified_path() {
-        // Legacy `provider="ollama"` routes through `discover_local` (`/v1/models`).
         let mut server = mockito::Server::new_async().await;
         let _models_mock = server
             .mock("GET", "/v1/models")
@@ -1328,7 +1303,6 @@ mod tests {
             .with_body(r#"{"data":[{"id":"llama3.3"},{"id":"qwen2.5"}]}"#)
             .create_async()
             .await;
-        // /api/show sanity probe returns 404 → both models stay context_tokens: None.
         let _show_mock = server
             .mock("POST", "/api/show")
             .with_status(404)
@@ -1350,7 +1324,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_legacy_lmstudio_alias_routes_to_unified_path() {
-        // Legacy `provider="lmstudio"`: context extracted inline from `/v1/models`.
         let mut server = mockito::Server::new_async().await;
         let _models_mock = server
             .mock("GET", "/v1/models")
@@ -1402,7 +1375,6 @@ mod tests {
 
     #[tokio::test]
     async fn discover_rejects_custom_provider_after_removal() {
-        // Regression guard: removed `custom` provider now returns `Err("unsupported")`.
         let client = build_llm_probe_client().unwrap();
         let err = do_discover_llm_models(
             "custom",
@@ -1415,10 +1387,8 @@ mod tests {
         assert_eq!(err, "unsupported");
     }
 
-    // Generic HTTP-layer tests via llama.cpp; cover status/content-type/timeout/redirect.
     #[tokio::test]
     async fn integration_returns_err_on_500() {
-        // Non-auth HTTP error keeps the verbatim status string (→ server-error in UI).
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1487,7 +1457,6 @@ mod tests {
         server
             .mock("GET", "/v1/models")
             .with_status(200)
-            // Mixed-case + charset param — check is case-insensitive + prefix.
             .with_header("content-type", "TEXT/HTML; charset=UTF-8")
             .with_body("<!doctype html><html>...</html>")
             .create_async()
@@ -1502,7 +1471,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_accepts_mixed_case_json_content_type() {
-        // Content-type check must accept `application/json; charset=utf-8` (any casing).
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1565,7 +1533,6 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_chunked_body(|w| {
-                // Sleep longer than the test's 100ms timeout before writing.
                 std::thread::sleep(Duration::from_secs(2));
                 w.write_all(b"{}")?;
                 Ok(())
@@ -1585,7 +1552,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_redirect_not_followed() {
-        // 302 → second server must never be hit (`Policy::none()` blocks redirects).
         let mut target = mockito::Server::new_async().await;
         let never_hit = target
             .mock("GET", "/v1/models")
@@ -1613,12 +1579,11 @@ mod tests {
         .is_err());
 
         initial.assert_async().await;
-        never_hit.assert_async().await; // expect(0) — confirms redirect NOT followed
+        never_hit.assert_async().await;
     }
 
     #[tokio::test]
     async fn integration_redirect_to_metadata_ip_not_followed() {
-        // 302 → metadata IP; 500ms timeout asserts the URL was never fetched.
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/v1/models")
@@ -1637,9 +1602,6 @@ mod tests {
 
         assert!(result.is_err());
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // discover_local — per-entry inline context + `/v1/messages` sanity probe
 
     #[test]
     fn parse_openai_models_with_context_extracts_llamacpp_shape() {
@@ -1666,8 +1628,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_models_with_context_extracts_litellm_shape() {
+        let body = br#"{"data":[
+            {"id":"gemma-4-26b-a4b","object":"model","max_input_tokens":262144,"max_output_tokens":32768},
+            {"id":"small-model","object":"model","max_input_tokens":32768,"max_output_tokens":8192},
+            {"id":"qwen3-coder-30b","object":"model"},
+            {"id":"zero-window","object":"model","max_input_tokens":0}
+        ]}"#;
+        let out = parse_openai_models_with_context(body).unwrap();
+        assert_eq!(out[0].context_tokens, Some(262_144));
+        assert_eq!(out[1].context_tokens, Some(32_768));
+        assert_eq!(out[2].context_tokens, None);
+        assert_eq!(out[3].context_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_models_with_context_prefers_the_server_context_over_litellm_model_info() {
+        let body = br#"{"data":[
+            {"id":"llama","meta":{"n_ctx_train":8192},"max_input_tokens":262144},
+            {"id":"qwen","max_context_length":32768,"max_input_tokens":262144}
+        ]}"#;
+        let out = parse_openai_models_with_context(body).unwrap();
+        assert_eq!(out[0].context_tokens, Some(8192));
+        assert_eq!(out[1].context_tokens, Some(32_768));
+    }
+
+    #[test]
     fn parse_openai_models_with_context_handles_mixed_dialect() {
-        // One entry from llama.cpp (meta), one from LM Studio (max_context_length).
         let body = br#"{"data":[
             {"id":"llama","meta":{"n_ctx_train":8192}},
             {"id":"qwen","max_context_length":32768}
@@ -1679,7 +1666,6 @@ mod tests {
 
     #[test]
     fn parse_openai_models_with_context_returns_none_when_absent() {
-        // Generic OpenAI server — only `id` available.
         let body = br#"{"data":[{"id":"foo"},{"id":"bar"}]}"#;
         let out = parse_openai_models_with_context(body).unwrap();
         assert_eq!(out.len(), 2);
@@ -1696,7 +1682,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_with_inline_meta_skips_fallback_calls() {
-        // Inline context → exactly 2 calls (`/v1/models` + `/v1/messages`), no `/api/show`.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1713,7 +1698,6 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        // `/api/show` must NOT be hit — assert it would error if called.
         let no_show_mock = server
             .mock("POST", "/api/show")
             .with_status(500)
@@ -1735,9 +1719,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discover_llm_models_with_fallback_returns_first_local_model_via_host_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"llama-3.3-70b"},{"id":"llama-3.1-8b"}]}"#)
+            .create_async()
+            .await;
+        let result = discover_llm_models_with_fallback("ollama", &server.url(), None, None, None)
+            .await
+            .expect("discovery must succeed against the mocked server");
+        assert_eq!(
+            result.models.first().map(|m| m.id.as_str()),
+            Some("llama-3.3-70b")
+        );
+    }
+
+    #[tokio::test]
     async fn integration_local_messages_probe_uses_real_model_not_ping() {
-        // Regression (Ollama): the endpoint exists but a nonexistent model 404s.
-        // Probe must use a real model from /v1/models → Some(true), not Some(false).
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1747,7 +1748,6 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        // The probe with the real model succeeds.
         let real_model_mock = server
             .mock("POST", "/v1/messages")
             .match_body(mockito::Matcher::PartialJsonString(
@@ -1758,7 +1758,6 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        // A probe with the bogus "ping" model must NOT be issued.
         let ping_mock = server
             .mock("POST", "/v1/messages")
             .match_body(mockito::Matcher::PartialJsonString(
@@ -1782,7 +1781,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_warns_when_messages_endpoint_missing() {
-        // 404 on `/v1/messages` → `messages_endpoint_ok: Some(false)`; inline meta, no `/api/show`.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1798,7 +1796,6 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        // No `/api/show` because inline meta supplies the context window.
         let no_show_mock = server
             .mock("POST", "/api/show")
             .with_status(500)
@@ -1819,7 +1816,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_falls_back_to_ollama_show_when_no_inline_meta() {
-        // No inline meta: expect 1 + N `/api/show` calls (sanity + fan-out).
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1864,7 +1860,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_local_generic_openai_gateway_stays_under_three_calls_for_context() {
-        // Generic gateway: 1 `/v1/models` + 1 sanity `/api/show` (404) + 1 `/v1/messages` = 3.
         let mut server = mockito::Server::new_async().await;
         let models_mock = server
             .mock("GET", "/v1/models")
@@ -1874,7 +1869,6 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        // Sanity call (first missing) — expect exactly 1, no fan-out.
         let show_mock = server
             .mock("POST", "/api/show")
             .with_status(404)
@@ -1903,13 +1897,11 @@ mod tests {
         messages_mock.assert_async().await;
     }
 
-    // resolve_transient_credential — tri-state semantics
-    // ─────────────────────────────────────────────────────────────────────
-
     #[test]
     fn resolve_credential_some_some_strips_bearer_prefix() {
         let r = resolve_transient_credential(
             Some(&Some("Bearer sk-test".to_string())),
+            "local",
             None,
             "api_key",
         );
@@ -1918,17 +1910,72 @@ mod tests {
 
     #[test]
     fn resolve_credential_some_none_means_no_auth() {
-        let r = resolve_transient_credential(Some(&None), None, "api_key");
+        let r = resolve_transient_credential(Some(&None), "local", None, "api_key");
         assert_eq!(r, None, "Some(None) explicitly means no auth");
     }
 
     #[test]
     fn resolve_credential_some_empty_string_means_no_auth() {
-        let r = resolve_transient_credential(Some(&Some(String::new())), None, "api_key");
+        let r = resolve_transient_credential(Some(&Some(String::new())), "local", None, "api_key");
         assert_eq!(r, None, "Some(Some(\"\")) means no auth");
     }
 
-    // ── OpenRouter catalog discovery ────────────────────────────────────
+    fn discover_args(provider: &str, project: Option<&str>) -> DiscoverLlmModelsArgs {
+        DiscoverLlmModelsArgs {
+            provider: provider.to_string(),
+            base_url: String::new(),
+            api_key: None,
+            custom_headers: None,
+            project: project.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_probe_reads_the_stored_credentials_of_the_forms_project_else_the_active_one() {
+        let active = || Some("alpha".to_string());
+
+        let named = credential_project(&discover_args("local", Some("beta")), active());
+        let unnamed = credential_project(&discover_args("local", None), active());
+
+        assert_eq!(named.as_deref(), Some("beta"));
+        assert_eq!(unnamed.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn only_a_local_provider_reads_the_stored_local_server_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (file, value) in [
+            ("api_key", "sk-local-server"),
+            ("custom_headers", "X-Team: a"),
+        ] {
+            let path =
+                speedwave_runtime::compose::tokens_path_in(tmp.path(), "alpha", "local-llm", file)
+                    .expect("token path");
+            std::fs::create_dir_all(path.parent().expect("token dir")).expect("create token dir");
+            std::fs::write(&path, format!("{value}\n")).expect("write token");
+        }
+
+        for (file, value) in [
+            ("api_key", "sk-local-server"),
+            ("custom_headers", "X-Team: a"),
+        ] {
+            assert_eq!(
+                stored_credential_in(tmp.path(), "local", Some("alpha"), file).as_deref(),
+                Some(value)
+            );
+            for provider in ["openrouter", "anthropic"] {
+                assert_eq!(
+                    stored_credential_in(tmp.path(), provider, Some("alpha"), file),
+                    None,
+                    "{provider} {file}"
+                );
+            }
+        }
+        assert_eq!(
+            stored_credential_in(tmp.path(), "local", None, "api_key"),
+            None
+        );
+    }
 
     const OPENROUTER_CATALOG: &[u8] = br#"{"data":[
         {"id":"deepseek/deepseek-v3.2","context_length":163840,
@@ -1967,7 +2014,6 @@ mod tests {
         );
     }
 
-    /// Canned transport: serves one body for the catalog URL, fails the rest.
     struct CatalogTransport(Vec<u8>);
 
     #[async_trait::async_trait]
@@ -2006,5 +2052,106 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "empty");
+    }
+
+    struct FailingTransport(&'static str);
+
+    #[async_trait::async_trait]
+    impl ProbeTransport for FailingTransport {
+        async fn get(&self, _url: &str) -> Result<ProbeResponse, String> {
+            Err(self.0.to_string())
+        }
+        async fn post(
+            &self,
+            _url: &str,
+            _body: &serde_json::Value,
+        ) -> Result<ProbeResponse, String> {
+            Err(self.0.to_string())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn vm_probe_failure_is_logged_with_its_cause_before_the_host_retry() {
+        let logger = test_logger();
+        let _ = logger.take();
+        let vm = FailingTransport(
+            "LLM model discovery: curl in VM failed: curl: (6) Could not resolve host: llm.example",
+        );
+        let res = discover_via_vm_then_host("openrouter", "", &vm, || {
+            Ok(CatalogTransport(OPENROUTER_CATALOG.to_vec()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            res.models.len(),
+            3,
+            "the host transport answers after the VM"
+        );
+        let records = logger.take();
+        assert!(
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Info
+                    && msg.contains("retrying via host transport")
+                    && msg.contains("Could not resolve host: llm.example")
+            }),
+            "the VM error must be logged at info before the host retry; got: {records:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn vm_probe_success_never_builds_the_host_transport() {
+        let vm = CatalogTransport(OPENROUTER_CATALOG.to_vec());
+        let mut host_built = false;
+        let res = discover_via_vm_then_host("openrouter", "", &vm, || {
+            host_built = true;
+            Err::<CatalogTransport, String>("unused".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(res.models.len(), 3);
+        assert!(!host_built);
+    }
+
+    #[tokio::test]
+    async fn host_transport_build_error_is_returned_after_a_vm_failure() {
+        let vm = FailingTransport("VM probe failed: no route to host");
+        let err = discover_via_vm_then_host("openrouter", "", &vm, || {
+            Err::<CatalogTransport, String>("Failed to build HTTP client: boom".into())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Failed to build HTTP client: boom");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn host_probe_logs_the_cause_of_a_refused_connection() {
+        let logger = test_logger();
+        let _ = logger.take();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let transport = HostProbe::new(
+            crate::http_util::build_hardened_client(None).unwrap(),
+            Duration::from_secs(5),
+        );
+        let err = transport
+            .get(&format!("http://127.0.0.1:{port}/v1/models"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("LLM model discovery: request failed:"),
+            "the user-facing error keeps its shape: {err}"
+        );
+        let records = logger.take();
+        let address = format!("127.0.0.1:{port}");
+        assert!(
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Warn && msg.contains(&address) && msg.contains("os error")
+            }),
+            "one host probe warning must name both the address and the refused connection; \
+             got: {records:?}"
+        );
     }
 }

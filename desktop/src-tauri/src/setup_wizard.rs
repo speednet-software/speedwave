@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::runtime::ensure_exec_healthy;
-use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
+use speedwave_runtime::{binary, build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
-
-// ── Setup state — persisted to ~/.speedwave/setup_state.json for resume support ──
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct SetupState {
@@ -12,15 +10,11 @@ pub struct SetupState {
     pub project_created: Option<String>,
     pub tokens_configured: Vec<String>,
     pub images_built: bool,
-    /// True once step 4 is done — containers actually started, or
-    /// legitimately deferred pending an LLM provider choice.
     pub containers_started: bool,
     pub cli_linked: bool,
 }
 
 impl SetupState {
-    /// Derives the wizard step from the boolean flags: count of completed
-    /// sequential steps (0 = nothing done, 6 = all done).
     #[cfg(test)]
     pub fn current_step(&self) -> u8 {
         if !self.runtime_ready {
@@ -55,7 +49,6 @@ impl SetupState {
         match Self::load_from(&path) {
             Ok(state) => state,
             Err(e) => {
-                // Missing file is the normal first-run case; warn on anything else.
                 if !Self::is_missing_state_file(&e) {
                     log::warn!(
                         "setup state file {} unreadable/corrupt, restarting onboarding from \
@@ -68,13 +61,11 @@ impl SetupState {
         }
     }
 
-    /// `true` only when the load error is a missing file (silent first-run case).
     fn is_missing_state_file(e: &anyhow::Error) -> bool {
         e.downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
     }
 
-    /// Loads setup state from a specific file path.
     fn load_from(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let state: Self = serde_json::from_str(&content)?;
@@ -86,8 +77,6 @@ impl SetupState {
         self.save_to(&path)
     }
 
-    /// Saves setup state to a specific file path: atomic, fsynced write via
-    /// [`speedwave_runtime::fs_perms::write_shared_file_atomic`].
     fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -96,8 +85,6 @@ impl SetupState {
         speedwave_runtime::fs_perms::write_shared_file_atomic(path, &json)
     }
 
-    /// `true` when all required setup steps completed. `cli_linked` is
-    /// excluded — CLI symlink creation is optional.
     pub fn is_complete(&self) -> bool {
         self.runtime_ready
             && self.vm_ready
@@ -107,8 +94,6 @@ impl SetupState {
     }
 }
 
-// ── Step 2: Check and install container runtime ──
-
 #[derive(Serialize, Deserialize)]
 pub enum RuntimeStatus {
     Ready,
@@ -117,11 +102,9 @@ pub enum RuntimeStatus {
 
 pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     let rt = runtime::detect_runtime();
-    // ensure_ready() verifies the full stack (binary + version + containerd running).
     if rt.ensure_ready().is_ok() {
         let mut state = SetupState::load();
         state.runtime_ready = true;
-        // A Ready runtime implies the VM is ready (the wizard skips init_vm).
         state.vm_ready = true;
         state.save()?;
         Ok(RuntimeStatus::Ready)
@@ -130,18 +113,11 @@ pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     }
 }
 
-// ── Step 3: Initialize VM (macOS only — Lima) ──
-
-// VM provisioning primitives live in the runtime SSOT `speedwave_runtime::provision`.
-
-/// Returns a `Command` for `limactl` with bundled-binary resolution and
-/// isolated `LIMA_HOME`, via [`speedwave_runtime::binary::command`].
 #[cfg(target_os = "macos")]
 fn limactl_command() -> std::process::Command {
     speedwave_runtime::binary::command("limactl")
 }
 
-/// Decodes `wsl.exe` output which may be UTF-16LE (with or without BOM) or UTF-8.
 #[cfg(test)]
 use runtime::decode_wsl_output;
 
@@ -169,22 +145,14 @@ pub fn init_vm() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ensures `%USERPROFILE%\.wslconfig` declares VPN-compatible `[wsl2]` keys.
-/// Re-exported from the runtime SSOT — called at startup from `main.rs`.
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::ensure_wslconfig_vpn_compat;
 
-/// Whether `ensure_wsl_distro_metadata` may `wsl --terminate` to apply the
-/// change. Re-exported from the runtime SSOT — used by `main.rs`.
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::TerminateOnChange;
 
-/// Sets `/etc/wsl.conf` automount for the Speedwave distro (ADR-052).
-/// Re-exported from the runtime SSOT — used by `main.rs`.
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::ensure_wsl_distro_metadata;
-
-// ── Step 4: Create project ──
 
 pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     project::add_project(name, dir)?;
@@ -196,10 +164,6 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Setup completeness check ──
-
-/// `true` when required setup steps completed AND the VM/WSL distro exists (`cli_linked` excluded).
-/// Spawns `limactl list`/`wsl.exe --list` per call — safe for route guards, do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
     if !state.is_complete() {
@@ -208,12 +172,9 @@ pub fn is_setup_complete() -> bool {
     runtime::detect_runtime().is_installed()
 }
 
-// ── Build container images ──
-
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
     rt.ensure_ready()?;
-    // Build the active project's enabled set (+ claude/mcp-hub always).
     let active_integrations = {
         let user_config = match config::load_user_config() {
             Ok(c) => c,
@@ -245,11 +206,9 @@ pub fn build_images() -> anyhow::Result<()> {
         Err(e) => return Err(e),
     }
 
-    // Sync claude-resources to data_dir for compose volume mounts.
     let build_root = build::resolve_build_root()?;
     bundle::sync_claude_resources(&build_root)?;
 
-    // Persist the built bundle id + per-image map so next reconcile skips the rebuild (ADR-072).
     let manifest = bundle::load_current_bundle_manifest()?;
     let mut bundle_state = bundle::load_bundle_state();
     bundle_state.applied_bundle_id = Some(manifest.bundle_id);
@@ -266,11 +225,7 @@ pub fn build_images() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Start containers for a project ──
-
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
-    // No provider is a valid state ("choose a provider" screen) — every
-    // caller must skip starting rather than let render_compose bail.
     if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
         log::info!("project '{project}' has no LLM provider — skipping container start");
         return defer_container_start_gated(project, true);
@@ -282,7 +237,6 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     rt.ensure_ready()?;
     log::info!("runtime ready, rendering compose");
 
-    // Re-render compose.yml before every start: dynamic config may have changed.
     let user_config = config::load_user_config()?;
     let project_dir = &user_config.require_project(project)?.dir;
     let project_path = std::path::Path::new(project_dir);
@@ -317,13 +271,11 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         compose::save_compose(project, &yaml)?;
         log::info!("starting containers via idempotent compose_up");
         speedwave_runtime::runtime::compose_validate_with_retry(rt, project)?;
-        // Idempotent up, not force-recreate (ADR-072).
         rt.compose_up(project)?;
         Ok(())
     })?;
     log::info!("containers started, verifying health");
 
-    // Verify functional before marking started: probes the claude container only.
     let claude_container = crate::chat::claude_container_name(project);
     runtime::ensure_exec_healthy(&rt, project, &claude_container)?;
 
@@ -334,16 +286,12 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Marks step 4 done without starting containers, for a project with no LLM
-/// provider yet. Refuses if a provider IS configured (must start for real).
 pub fn defer_container_start(project: &str) -> anyhow::Result<()> {
     let unconfigured =
         crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)?;
     defer_container_start_gated(project, unconfigured)
 }
 
-/// Testable core of [`defer_container_start`] — takes the unconfigured check
-/// as a plain bool so tests don't need real disk-backed config/state.
 fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow::Result<()> {
     if !llm_unconfigured {
         anyhow::bail!("project '{project}' has a configured LLM provider — call start_containers");
@@ -354,10 +302,6 @@ fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow:
     Ok(())
 }
 
-// ── Check Claude auth status inside the container ──
-
-/// Looks up the project's LLM provider name. `None` when the project is
-/// missing or `claude.llm.provider` is unset.
 pub(crate) fn lookup_project_provider<'a>(
     user_config: &'a speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -369,8 +313,6 @@ pub(crate) fn lookup_project_provider<'a>(
         .and_then(|l| l.provider.as_deref())
 }
 
-/// True when sessions need the in-container OAuth check (ADR-073, `AnthropicOauth` only).
-/// Unconfigured projects (no llm config, dangling selection) skip it, routed to provider config
 pub(crate) fn project_needs_anthropic_auth(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -385,21 +327,47 @@ pub(crate) fn project_needs_anthropic_auth(
             return match llm.active_provider().map(|e| e.kind) {
                 Some(LlmProviderKind::AnthropicOauth) => true,
                 Some(_) => false,
-                // Dangling active (points at no entry) → unconfigured, not OAuth.
                 None => false,
             };
         }
-        // v2-shaped but no providers configured → unconfigured.
         if llm.schema_version.is_some() {
             return false;
         }
     }
-    // Legacy v1 shape: an explicit non-local provider needs OAuth; an
-    // unset provider (fresh project) does not.
     match lookup_project_provider(user_config, project) {
         Some(provider) => !speedwave_runtime::config::is_local_provider(Some(provider)),
         None => false,
     }
+}
+
+fn auth_status_exec_argv() -> Vec<String> {
+    vec![
+        "env".to_string(),
+        format!("{}=1", consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV),
+        format!("https_proxy={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
+        format!("HTTPS_PROXY={}", consts::CLAUDE_OFFLINE_HTTPS_PROXY),
+        "no_proxy=".to_string(),
+        "NO_PROXY=".to_string(),
+        consts::CLAUDE_BINARY.to_string(),
+        "auth".to_string(),
+        "status".to_string(),
+    ]
+}
+
+fn probe_claude_sign_in(rt: &runtime::LockedRuntime, project: &str) -> anyhow::Result<bool> {
+    let container_name = crate::chat::claude_container_name(project);
+    log::info!("checking Claude auth in container {container_name}");
+    ensure_exec_healthy(rt, project, &container_name)?;
+    log::info!("container {container_name} healthy, checking auth");
+    let argv = auth_status_exec_argv();
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut cmd = rt.container_exec_piped(&container_name, &argv_refs)?;
+    let output = binary::run_with_timeout_capture(&mut cmd, consts::CONTAINER_EXEC_PROBE_TIMEOUT)?;
+    log::info!(
+        "auth status check for {container_name} exited with {}",
+        output.status
+    );
+    Ok(output.status.success())
 }
 
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
@@ -411,34 +379,27 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
         log::info!("non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
-    let rt = runtime::detect_runtime();
-    let container_name = crate::chat::claude_container_name(project);
-    log::info!("checking Claude auth in container {container_name}");
-    ensure_exec_healthy(&rt, project, &container_name)?;
-    log::info!("container {container_name} healthy, checking auth");
-    let mut cmd =
-        rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
-    let output = cmd.output()?;
-    log::info!(
-        "auth status check for {container_name} exited with {}",
-        output.status
-    );
-    Ok(output.status.success())
+    probe_claude_sign_in(&runtime::detect_runtime(), project)
 }
 
-// ── Lima VM config migration — upgrade memory from older installs ──
+pub(crate) fn claude_sign_in_verdict(project: &str) -> anyhow::Result<Option<bool>> {
+    let rt = runtime::detect_runtime();
+    if !rt.is_available() || !runtime::project_has_compose_file(project) {
+        return Ok(None);
+    }
+    if rt.compose_ps(project)?.is_empty() {
+        return Ok(None);
+    }
+    rt.transaction(project, |rt| probe_claude_sign_in(rt, project))
+        .map(Some)
+}
 
-/// Migrates the Lima VM config when it drifts from the SSOT (memory, cpus, or
-/// the VPN netplan drop-in). Re-exported from [`speedwave_runtime::provision`].
 #[cfg(target_os = "macos")]
 pub use speedwave_runtime::provision::ensure_lima_vm_config;
-
-// ── Factory reset — stops containers, destroys VM, wipes setup state ──
 
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
 
-    // 1. Stop only the wizard's project (VM force-delete destroys all containers anyway), with timeout.
     if let Some(ref project) = state.project_created {
         log::info!("stopping containers for project={project}");
         let project_clone = project.clone();
@@ -452,7 +413,6 @@ pub fn factory_reset() -> anyhow::Result<()> {
             }
             let _ = tx.send(());
         });
-        // Wait up to 30s; if anything hangs, limactl delete --force will clean up
         let timeout = std::time::Duration::from_secs(30);
         match rx.recv_timeout(timeout) {
             Ok(()) => {}
@@ -465,7 +425,6 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 2. Destroy VM (macOS only) — force-stop then force-delete, each with timeout
     #[cfg(target_os = "macos")]
     {
         use speedwave_runtime::binary;
@@ -486,7 +445,6 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 2b. Reset VM/distro before wipe_data_dir (WSL VHDX still lives under the data dir).
     {
         let rt = runtime::detect_runtime();
         if let Err(e) = rt.reset_vm() {
@@ -494,7 +452,6 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 3. Remove CLI binary (Unix: ~/.local/bin/speedwave — outside data dir)
     #[cfg(unix)]
     {
         let home =
@@ -503,10 +460,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
             speedwave_runtime::consts::cli_install_path_for(false, &home, consts::data_dir());
         let _ = std::fs::remove_file(&target);
     }
-    // Windows CLI lives inside data_dir/bin/ — wipe_data_dir handles it.
 
-    // 3b. Kill running CLI processes — Windows cannot delete a running exe's image,
-    // which fails the wipe on bin\speedwave.exe (same class the installer sweep handles).
     #[cfg(target_os = "windows")]
     {
         let home =
@@ -528,14 +482,11 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 4. Wipe entire data directory (~/.speedwave/)
     wipe_data_dir(consts::data_dir())?;
 
     Ok(())
 }
 
-/// PowerShell that force-stops every process whose image path equals `exe` —
-/// exact-path scoped; stem split on `\` (`file_stem` won't, on non-Windows hosts).
 #[cfg_attr(
     not(any(windows, test)),
     expect(
@@ -552,20 +503,12 @@ fn kill_processes_by_image_script(exe: &std::path::Path) -> String {
     )
 }
 
-/// Number of wipe attempts (1 initial pass + retries) before giving up.
 const WIPE_MAX_ATTEMPTS: u32 = 4;
-/// Delay between wipe passes — absorbs transient handle-release lag
-/// (WSL 9P teardown after `wsl --unregister`, AV scanning).
 const WIPE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
-/// Cap on undeletable paths listed in the final error message.
 const WIPE_MAX_LISTED_PATHS: usize = 8;
-/// Cap on nested descendants probed per failing top-level entry.
 const WIPE_MAX_DEEP_PROBE: usize = 3;
-/// Max directory depth the deep probe descends into a failing entry.
 const WIPE_MAX_PROBE_DEPTH: u32 = 6;
 
-/// Runs one best-effort removal pass over `data_dir`'s top-level entries.
-/// Returns the entries that failed to remove (empty = all removed).
 fn wipe_pass(data_dir: &std::path::Path) -> std::io::Result<Vec<(PathBuf, std::io::Error)>> {
     let entries = match std::fs::read_dir(data_dir) {
         Ok(e) => e,
@@ -587,11 +530,8 @@ fn wipe_pass(data_dir: &std::path::Path) -> std::io::Result<Vec<(PathBuf, std::i
     Ok(failed)
 }
 
-/// Probes up to [`WIPE_MAX_DEEP_PROBE`] undeletable descendants under `dir` (at
-/// most `depth` levels down), to name the actual locked object.
 fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    // Never descend through a symlink: read_dir would follow it outside the wiped tree.
     let is_symlink = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink());
     if depth == 0 || is_symlink {
         return found;
@@ -624,9 +564,6 @@ fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
     found
 }
 
-/// Best-effort: re-grants owner-only access down a failing tree so the next wipe
-/// pass can delete entries born with a broken DACL/mode. Heals itself before descending.
-/// Never follows symlinks: unlinking one never needs the target's permissions healed.
 fn heal_permissions_tree(path: &std::path::Path, depth: u32) {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -651,8 +588,6 @@ fn heal_permissions_tree(path: &std::path::Path, depth: u32) {
     }
 }
 
-/// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
-/// Best-effort per entry with bounded retries; the error names undeletable paths.
 fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let mut failed = wipe_pass(data_dir)?;
     let mut attempts = 1;
@@ -679,7 +614,6 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
             break;
         }
         listed.push(format!("{} ({e})", path.display()));
-        // Non-following check: Path::is_dir() would send the probe through a symlink.
         let is_real_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
         if is_real_dir {
             for deep in probe_deep_undeletable(path, WIPE_MAX_PROBE_DEPTH) {
@@ -700,22 +634,15 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
     );
 }
 
-// ── Step 7: Copy CLI binary to user PATH ──
-
-/// Resolves the CLI binary bundled in Tauri resources, with a dev fallback
-/// next to the exe.
 pub fn resolve_cli_source() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
     resolve_cli_source_from(exe_dir)
 }
 
-/// Inner implementation that resolves the CLI binary relative to a given exe directory.
-/// Separated from `resolve_cli_source()` to allow unit testing with mock filesystem layouts.
 fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let binary_name = consts::cli_binary_filename(cfg!(target_os = "windows"));
 
-    // SPEEDWAVE_RESOURCES_DIR — set by Tauri in production builds.
     if let Ok(resources_dir) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         let bundled = std::path::PathBuf::from(&resources_dir)
             .join("cli")
@@ -725,10 +652,8 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
         }
     }
 
-    // Production bundle paths
     #[cfg(target_os = "macos")]
     {
-        // .app/Contents/MacOS/../Resources/cli/speedwave
         let resources = exe_dir
             .parent()?
             .join("Resources")
@@ -747,8 +672,6 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
         }
     }
 
-    // Dev mode: Makefile copies CLI to desktop/src-tauri/cli/ before `cargo tauri dev`.
-    // exe_dir is desktop/src-tauri/target/{debug,release}/ → go up two levels to desktop/src-tauri/cli/
     let dev_cli_dir = exe_dir
         .parent()
         .and_then(|p| p.parent())
@@ -759,7 +682,6 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
         }
     }
 
-    // Dev mode fallback: CLI binary next to the exe
     let dev_path = exe_dir.join(&binary_name);
     if dev_path.exists() {
         return Some(dev_path);
@@ -768,7 +690,6 @@ fn resolve_cli_source_from(exe_dir: &std::path::Path) -> Option<std::path::PathB
     None
 }
 
-/// True when both files exist and are byte-identical (size fast-path first).
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn files_identical(a: &std::path::Path, b: &std::path::Path) -> bool {
     let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
@@ -783,41 +704,34 @@ pub(crate) fn files_identical(a: &std::path::Path, b: &std::path::Path) -> bool 
     }
 }
 
-/// Copies the CLI binary from `source` into `target_dir` and sets executable permissions on Unix.
-pub fn copy_cli_binary(
-    source: &std::path::Path,
-    target_dir: &std::path::Path,
-) -> anyhow::Result<()> {
+pub fn copy_cli_binary(source: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
     if !source.exists() {
         anyhow::bail!("CLI source binary not found at {}", source.display());
     }
 
-    std::fs::create_dir_all(target_dir)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
-    let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
-
-    // On Windows, the target may be locked by a running CLI process.
-    // Treat as non-fatal: keep the old binary until the user closes the CLI.
     #[cfg(target_os = "windows")]
-    if let Err(e) = std::fs::copy(source, &dest) {
+    if let Err(e) = std::fs::copy(source, dest) {
         log::warn!("could not update CLI binary (file in use?): {e}");
         return Ok(());
     }
     #[cfg(not(target_os = "windows"))]
-    std::fs::copy(source, &dest)?;
+    std::fs::copy(source, dest)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dest)?.permissions();
+        let mut perms = std::fs::metadata(dest)?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&dest, perms)?;
+        std::fs::set_permissions(dest, perms)?;
     }
 
     Ok(())
 }
 
-/// The user's default shell, detected from `$SHELL`.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UserShell {
@@ -826,15 +740,12 @@ enum UserShell {
     Unknown,
 }
 
-/// Detects the user's default shell from `$SHELL`. Falls back to
-/// [`UserShell::Zsh`] on macOS when `$SHELL` is unset.
 #[cfg(unix)]
 fn detect_shell() -> UserShell {
     let shell = std::env::var("SHELL").unwrap_or_default();
     parse_shell_env(&shell)
 }
 
-/// Parses a `$SHELL` value into a [`UserShell`].
 #[cfg(unix)]
 fn parse_shell_env(shell: &str) -> UserShell {
     if shell.ends_with("/bash") {
@@ -842,7 +753,6 @@ fn parse_shell_env(shell: &str) -> UserShell {
     } else if shell.ends_with("/zsh") {
         UserShell::Zsh
     } else if shell.is_empty() {
-        // $SHELL may be unset when launched from macOS Dock/Finder (launchd).
         #[cfg(target_os = "macos")]
         return UserShell::Zsh;
         #[cfg(target_os = "windows")]
@@ -852,20 +762,17 @@ fn parse_shell_env(shell: &str) -> UserShell {
     }
 }
 
-/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of `.bash_profile`,
-/// `.bash_login`, `.profile` (creates `.bash_profile`); unknown → `.profile`.
 #[cfg(unix)]
 fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::path::PathBuf> {
     match shell {
         UserShell::Zsh => vec![home.join(".zshrc")],
         UserShell::Bash => {
             let mut targets = Vec::new();
-            // bash login shell reads first found of these three, then stops:
             let login_candidates = [".bash_profile", ".bash_login", ".profile"];
             let login_target = login_candidates
                 .iter()
                 .find(|f| home.join(f).exists())
-                .unwrap_or(&".bash_profile"); // create .bash_profile if none exist
+                .unwrap_or(&".bash_profile");
             targets.push(home.join(login_target));
 
             targets
@@ -874,15 +781,11 @@ fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::pa
     }
 }
 
-/// Ensures `~/.local/bin` is on PATH by appending an `export` line to the
-/// detected shell's config file. Idempotent: skips files already containing it.
 #[cfg(unix)]
 fn ensure_local_bin_on_path(home: &std::path::Path) -> anyhow::Result<()> {
     ensure_local_bin_on_path_for_shell(home, detect_shell())
 }
 
-/// Inner implementation accepting an explicit [`UserShell`] for unit testing without
-/// depending on `$SHELL` env var.
 #[cfg(unix)]
 fn ensure_local_bin_on_path_for_shell(
     home: &std::path::Path,
@@ -904,7 +807,6 @@ fn ensure_local_bin_on_path_for_shell(
             writeln!(f, "\n# Added by Speedwave setup")?;
             writeln!(f, "{}", export_line)?;
         } else {
-            // Create the file — user has no config for their shell yet
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -917,10 +819,7 @@ fn ensure_local_bin_on_path_for_shell(
     Ok(())
 }
 
-/// Copies the CLI binary into PATH, updates shell config, and marks
-/// `cli_linked` in [`SetupState`]. Idempotent.
 pub fn link_cli() -> anyhow::Result<()> {
-    // Guard: skip if the data directory does not exist.
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     if !consts::data_dir().exists() {
@@ -935,16 +834,14 @@ pub fn link_cli() -> anyhow::Result<()> {
         )
     })?;
 
-    link_cli_from(&cli_source, &home)?;
+    link_cli_from(&cli_source, &home, consts::data_dir())?;
 
-    // Write resources-dir marker so the external CLI can find build context.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
             log::warn!("could not write resources-dir marker: {e}");
         }
     }
 
-    // Mark CLI as linked in setup state
     let mut state = SetupState::load();
     state.cli_linked = true;
     state.save()?;
@@ -952,8 +849,6 @@ pub fn link_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves a `windows/<name>` script from the Tauri bundle on Windows: prefer
-/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev fallbacks.
 #[cfg(target_os = "windows")]
 pub(crate) fn resolve_bundled_windows_script(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -987,14 +882,11 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
     resolve_bundled_windows_script("sweep.ps1")
 }
 
-/// Absolute system PowerShell path — re-export of the runtime SSOT.
 #[cfg(target_os = "windows")]
 pub(crate) use speedwave_runtime::binary::system_powershell_path;
 
-/// Kills stale Speedwave/Node/CLI processes holding binaries about to be overwritten.
-/// Runs at every Desktop startup, fails open. Kill predicate SSOT: `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
-fn run_pre_link_sweep() {
+fn run_pre_link_sweep(data_dir: &std::path::Path) {
     let Some(sweep) = resolve_sweep_script() else {
         log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
         return;
@@ -1003,10 +895,8 @@ fn run_pre_link_sweep() {
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
-    let data_dir = consts::data_dir();
     let powershell = system_powershell_path();
 
-    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe (full mode is install-time only).
     let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
@@ -1018,7 +908,7 @@ fn run_pre_link_sweep() {
         .arg(&sweep)
         .args(["-Mode", "runtime"])
         .env("SPW_INSTDIR", &inst_dir)
-        .env("SPW_DATA_DIR", &data_dir)
+        .env("SPW_DATA_DIR", data_dir)
         .output();
     match result {
         Ok(out) if out.status.success() => {
@@ -1037,19 +927,22 @@ fn run_pre_link_sweep() {
     }
 }
 
-/// Copies the CLI binary and configures PATH using explicit paths.
-fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow::Result<()> {
+fn link_cli_from(
+    cli_source: &std::path::Path,
+    home: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        let local_bin = home.join(".local").join("bin");
-        copy_cli_binary(cli_source, &local_bin)?;
+        let dest = consts::cli_install_path_for(false, home, data_dir);
+        copy_cli_binary(cli_source, std::path::Path::new(&dest))?;
         ensure_local_bin_on_path(home)?;
     }
 
     #[cfg(target_os = "windows")]
     {
         let _ = home;
-        let cli_dir = consts::data_dir().join(consts::CLI_BIN_SUBDIR);
+        let cli_dir = data_dir.join(consts::CLI_BIN_SUBDIR);
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
 
@@ -1066,15 +959,23 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             );
         }
 
-        // Already-current CLI: skip the sweep AND the copy — the runtime sweep
-        // would kill a user's live `speedwave` session for nothing (ADR-048).
-        let target = cli_dir.join(consts::cli_binary_filename(true));
+        let installed_name = consts::installed_cli_filename(true, data_dir);
+        let target = cli_dir.join(&installed_name);
         if files_identical(cli_source, &target) {
             log::info!("installed CLI already current — sweep/copy skipped");
         } else {
-            // Kill any stale process holding the exe before overwrite (ADR-048).
-            run_pre_link_sweep();
-            copy_cli_binary(cli_source, &cli_dir)?;
+            run_pre_link_sweep(data_dir);
+            copy_cli_binary(cli_source, &target)?;
+        }
+
+        let legacy = cli_dir.join(consts::cli_binary_filename(true));
+        if legacy != target && legacy.exists() {
+            if let Err(e) = std::fs::remove_file(&legacy) {
+                log::warn!(
+                    "could not remove the pre-rename CLI at {}: {e}",
+                    legacy.display()
+                );
+            }
         }
 
         let script = format!(
@@ -1122,6 +1023,90 @@ mod tests {
     };
     use std::collections::HashMap;
 
+    #[test]
+    fn auth_status_argv_runs_the_claude_binary_offline_with_nonessential_traffic_off() {
+        assert_eq!(
+            auth_status_exec_argv(),
+            vec![
+                "env",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+                "https_proxy=http://127.0.0.1:1",
+                "HTTPS_PROXY=http://127.0.0.1:1",
+                "no_proxy=",
+                "NO_PROXY=",
+                "/usr/local/bin/claude",
+                "auth",
+                "status",
+            ]
+        );
+    }
+
+    #[test]
+    fn auth_status_argv_routes_every_https_proxy_variable_to_a_closed_local_port() {
+        let argv = auth_status_exec_argv();
+        let binary_pos = argv
+            .iter()
+            .position(|a| a == consts::CLAUDE_BINARY)
+            .expect("argv must contain the Claude binary path");
+        let assignments = &argv[..binary_pos];
+
+        let mut seen_https_proxy_keys = Vec::new();
+        for assignment in assignments {
+            let Some((key, value)) = assignment.split_once('=') else {
+                continue;
+            };
+            if key.to_lowercase() == "https_proxy" {
+                assert_eq!(
+                    value,
+                    consts::CLAUDE_OFFLINE_HTTPS_PROXY,
+                    "{key} must route to the closed local port"
+                );
+                seen_https_proxy_keys.push(key.to_string());
+            }
+        }
+        assert!(
+            seen_https_proxy_keys.contains(&"https_proxy".to_string()),
+            "lowercase https_proxy must be present"
+        );
+        assert!(
+            seen_https_proxy_keys.contains(&"HTTPS_PROXY".to_string()),
+            "uppercase HTTPS_PROXY must be present"
+        );
+
+        assert!(
+            assignments.contains(&"no_proxy=".to_string()),
+            "no_proxy must be present and empty"
+        );
+        assert!(
+            assignments.contains(&"NO_PROXY=".to_string()),
+            "NO_PROXY must be present and empty"
+        );
+    }
+
+    #[test]
+    fn auth_status_argv_puts_the_env_assignments_before_the_binary() {
+        let argv = auth_status_exec_argv();
+        assert_eq!(argv.first().map(String::as_str), Some("env"));
+
+        let binary_pos = argv
+            .iter()
+            .position(|a| a == consts::CLAUDE_BINARY)
+            .expect("argv must contain the Claude binary path");
+        for (i, entry) in argv.iter().enumerate() {
+            if entry.contains('=') {
+                assert!(
+                    i < binary_pos,
+                    "env assignment {entry:?} must come before the binary path"
+                );
+            }
+        }
+
+        assert_eq!(
+            argv[argv.len() - 2..],
+            ["auth".to_string(), "status".to_string()]
+        );
+    }
+
     fn project_with_provider(name: &str, provider: Option<&str>) -> ProjectUserEntry {
         ProjectUserEntry {
             name: name.to_string(),
@@ -1137,6 +1122,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         }
     }
 
@@ -1192,6 +1178,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             ..Default::default()
         };
@@ -1208,6 +1195,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             ..Default::default()
         };
@@ -1225,8 +1213,6 @@ mod tests {
 
     #[test]
     fn local_provider_branch_covers_ollama_lmstudio_llamacpp() {
-        // Guard: `check_claude_auth` skips Anthropic OAuth exactly for the three local providers.
-        // Documents which set the auth-skip branch fires on if `is_local_provider` changes.
         use speedwave_runtime::config::is_local_provider;
         assert!(is_local_provider(Some("ollama")));
         assert!(is_local_provider(Some("lmstudio")));
@@ -1235,8 +1221,127 @@ mod tests {
         assert!(!is_local_provider(None));
     }
 
-    /// Builds a project entry carrying a v2 (ADR-073) provider list with one
-    /// active entry of the given kind.
+    #[test]
+    fn check_claude_auth_and_claude_sign_in_verdict_delegate_to_probe_claude_sign_in() {
+        let source = include_str!("setup_wizard.rs");
+
+        let probe_body = extract_fn_body(source, "fn probe_claude_sign_in(");
+        assert!(
+            probe_body.contains("auth_status_exec_argv()"),
+            "probe_claude_sign_in must run the offline auth-status probe"
+        );
+
+        let check_body = extract_fn_body(source, "pub fn check_claude_auth(");
+        assert!(
+            check_body.contains("probe_claude_sign_in("),
+            "check_claude_auth must delegate to probe_claude_sign_in"
+        );
+        assert!(
+            !check_body.contains("auth_status_exec_argv"),
+            "check_claude_auth must not run the probe directly"
+        );
+
+        let verdict_body = extract_fn_body(source, "pub(crate) fn claude_sign_in_verdict(");
+        assert!(
+            verdict_body.contains("probe_claude_sign_in("),
+            "claude_sign_in_verdict must delegate to probe_claude_sign_in"
+        );
+        assert!(
+            !verdict_body.contains("auth_status_exec_argv"),
+            "claude_sign_in_verdict must not run the probe directly"
+        );
+    }
+
+    #[test]
+    fn claude_sign_in_verdict_checks_availability_and_compose_state_before_probing() {
+        let source = include_str!("setup_wizard.rs");
+        let body = extract_fn_body(source, "pub(crate) fn claude_sign_in_verdict(");
+
+        let available_pos = body
+            .find("is_available()")
+            .expect("claude_sign_in_verdict must check runtime availability");
+        let compose_file_pos = body
+            .find("project_has_compose_file(")
+            .expect("claude_sign_in_verdict must check for a rendered compose.yml");
+        let compose_ps_pos = body
+            .find("compose_ps(")
+            .expect("claude_sign_in_verdict must check for running containers");
+        let probe_pos = body
+            .find("probe_claude_sign_in(")
+            .expect("claude_sign_in_verdict must call probe_claude_sign_in");
+
+        assert!(
+            available_pos < probe_pos,
+            "availability must be checked before probing"
+        );
+        assert!(
+            compose_file_pos < probe_pos,
+            "compose.yml presence must be checked before probing"
+        );
+        assert!(
+            compose_ps_pos < probe_pos,
+            "running containers must be checked before probing"
+        );
+
+        for forbidden in ["compose_up", "start_containers", "ensure_images_ready"] {
+            assert!(
+                !body.contains(forbidden),
+                "claude_sign_in_verdict must never start containers (found {forbidden})"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_sign_in_verdict_never_applies_the_provider_gate() {
+        let source = include_str!("setup_wizard.rs");
+        let verdict_body = extract_fn_body(source, "pub(crate) fn claude_sign_in_verdict(");
+        assert!(
+            !verdict_body.contains("project_needs_anthropic_auth"),
+            "claude_sign_in_verdict must not re-apply the provider gate"
+        );
+
+        let check_body = extract_fn_body(source, "pub fn check_claude_auth(");
+        assert!(
+            check_body.contains("project_needs_anthropic_auth"),
+            "check_claude_auth must keep the provider gate"
+        );
+    }
+
+    #[test]
+    fn probe_claude_sign_in_reports_true_when_the_container_is_healthy_and_signed_in() {
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
+        let (rt, _handles) = MockRuntimeBuilder::new().build();
+        assert!(probe_claude_sign_in(&rt, "proj").unwrap());
+    }
+
+    #[test]
+    fn probe_claude_sign_in_propagates_a_non_recoverable_exec_error() {
+        use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
+        let (rt, _handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("boom")
+            .build();
+        let err = probe_claude_sign_in(&rt, "proj").unwrap_err();
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn probe_claude_sign_in_uses_the_bounded_exec_timeout_helper() {
+        let source = include_str!("setup_wizard.rs");
+        let probe_body = extract_fn_body(source, "fn probe_claude_sign_in(");
+        assert!(
+            probe_body.contains("run_with_timeout_capture("),
+            "probe_claude_sign_in must bound the auth-status exec with the shared timeout helper"
+        );
+        assert!(
+            probe_body.contains("CONTAINER_EXEC_PROBE_TIMEOUT"),
+            "probe_claude_sign_in must use the shared exec-probe timeout constant"
+        );
+        assert!(
+            !probe_body.contains(".output()"),
+            "probe_claude_sign_in must not call the unbounded Command::output() directly"
+        );
+    }
+
     fn project_with_v2_kind(
         name: &str,
         kind: speedwave_runtime::config::LlmProviderKind,
@@ -1269,11 +1374,10 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         }
     }
 
-    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth check; every other kind
-    /// (api key, local, openrouter, …) must skip it or offline/key-based users hit a login wall.
     #[test]
     fn needs_anthropic_auth_by_v2_kind() {
         use speedwave_runtime::config::LlmProviderKind as K;
@@ -1295,8 +1399,6 @@ mod tests {
         }
     }
 
-    /// Legacy v1: local skips, explicit anthropic checks; an UNSET provider
-    /// (fresh project) and a missing project are unconfigured → no OAuth (R7).
     #[test]
     fn needs_anthropic_auth_legacy_fallback() {
         for (provider, expected) in [
@@ -1321,8 +1423,6 @@ mod tests {
         ));
     }
 
-    /// R7/f4: a v2 config whose active id points at no entry is unconfigured —
-    /// it must NOT force the Anthropic OAuth wall (user goes to config).
     #[test]
     fn needs_anthropic_auth_dangling_active_does_not_force_oauth() {
         use speedwave_runtime::config::LlmActive;
@@ -1345,8 +1445,6 @@ mod tests {
         assert!(!project_needs_anthropic_auth(&cfg, "proj"));
     }
 
-    /// R7/f1: a fresh project (no claude overrides) must NOT force the Anthropic
-    /// OAuth wall — the user can configure OpenRouter/local first.
     #[test]
     fn needs_anthropic_auth_fresh_project_does_not_force_oauth() {
         let entry = ProjectUserEntry {
@@ -1356,6 +1454,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         };
         let cfg = SpeedwaveUserConfig {
             projects: vec![entry],
@@ -1364,7 +1463,6 @@ mod tests {
         assert!(!project_needs_anthropic_auth(&cfg, "fresh"));
     }
 
-    /// Validates that a path component does not contain traversal or unsafe characters.
     fn validate_path_component(name: &str, label: &str) -> anyhow::Result<()> {
         if name.is_empty() {
             anyhow::bail!("{label} is empty");
@@ -1381,7 +1479,6 @@ mod tests {
         Ok(())
     }
 
-    /// Writes token files to `data_dir/tokens/<project>/<service>/` with chmod 600.
     fn write_tokens(
         data_dir: &std::path::Path,
         project: &str,
@@ -1401,7 +1498,6 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode_700 = std::fs::Permissions::from_mode(0o700);
-            // See also: plugin.rs:write_token_files() — identical pattern (2 of 3, Rule of Three)
             std::fs::set_permissions(&token_dir, mode_700.clone())?;
             if let Some(project_dir) = token_dir.parent() {
                 std::fs::set_permissions(project_dir, mode_700.clone())?;
@@ -1440,7 +1536,6 @@ mod tests {
         let data_dir = tmp.path().join("speedwave-data");
         std::fs::create_dir_all(&data_dir).expect("create data dir");
 
-        // Seed state, config, tokens, plugins
         let state_path = data_dir.join("setup_state.json");
         std::fs::write(&state_path, r#"{"runtime_ready":true}"#).expect("write state");
         std::fs::write(data_dir.join("config.json"), r#"{"projects":[]}"#).expect("write config");
@@ -1453,10 +1548,8 @@ mod tests {
         std::fs::create_dir_all(&plugins_dir).expect("create plugins dir");
         std::fs::write(plugins_dir.join("plugin.json"), "{}").expect("write plugin");
 
-        // Run the wipe
         wipe_data_dir(&data_dir).expect("wipe should succeed");
 
-        // Verify entire directory is gone
         assert!(!data_dir.exists(), "data dir should not exist after wipe");
     }
 
@@ -1464,7 +1557,6 @@ mod tests {
     fn wipe_data_dir_succeeds_when_dir_missing() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
         let nonexistent = tmp.path().join("does-not-exist");
-        // Should succeed silently
         wipe_data_dir(&nonexistent).expect("wipe on missing dir should succeed");
     }
 
@@ -1481,8 +1573,6 @@ mod tests {
         assert!(tmp.path().exists(), "parent should still exist");
     }
 
-    /// Direct unit coverage: `heal_permissions_tree` must re-tighten a broken mode
-    /// on the root AND descend into children once the root is readable again.
     #[cfg(unix)]
     #[test]
     fn heal_permissions_tree_fixes_root_and_descends_into_children() {
@@ -1512,7 +1602,6 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("cleanup after test");
     }
 
-    /// A depth of 0 must heal only the root itself, never descend.
     #[cfg(unix)]
     #[test]
     fn heal_permissions_tree_depth_zero_heals_only_root() {
@@ -1539,7 +1628,6 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("cleanup after test");
     }
 
-    /// A missing path is a silent no-op — never panics.
     #[test]
     fn heal_permissions_tree_missing_path_is_noop() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
@@ -1547,8 +1635,6 @@ mod tests {
         heal_permissions_tree(&missing, WIPE_MAX_PROBE_DEPTH);
     }
 
-    /// A symlink inside the tree must never be healed or followed: chmod'ing
-    /// its target would let a planted symlink widen an attacker-chosen path.
     #[cfg(unix)]
     #[test]
     fn heal_permissions_tree_does_not_follow_symlink_to_outside_target() {
@@ -1575,8 +1661,6 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("cleanup after test");
     }
 
-    /// The probe must never read_dir through a symlink — that would attempt
-    /// deletions outside the wiped tree.
     #[cfg(unix)]
     #[test]
     fn probe_deep_undeletable_returns_empty_for_symlink() {
@@ -1599,8 +1683,6 @@ mod tests {
         );
     }
 
-    /// Final-failure reporting on a symlinked entry must not probe (and thus
-    /// delete) through the link target outside the data dir.
     #[cfg(unix)]
     #[test]
     fn wipe_data_dir_final_report_does_not_probe_through_symlink() {
@@ -1615,8 +1697,6 @@ mod tests {
         let data_dir = tmp.path().join("speedwave-data");
         std::fs::create_dir_all(&data_dir).expect("create data dir");
         std::os::unix::fs::symlink(&target, data_dir.join("link")).expect("create symlink");
-        // Read-only data_dir blocks unlinking the symlink; heal fixes entries, never
-        // the parent, so the wipe reaches the final-failure reporting branch.
         std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o555))
             .expect("make data dir read-only");
 
@@ -1634,8 +1714,6 @@ mod tests {
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
-    /// Unix: a dir born with 0o555 (analogous to an empty-DACL dir on Windows) now
-    /// self-heals between retry passes, so the wipe SUCCEEDS instead of erroring.
     #[cfg(unix)]
     #[test]
     fn wipe_data_dir_heals_locked_dir_between_retry_passes() {
@@ -1654,8 +1732,6 @@ mod tests {
         assert!(!data_dir.exists(), "data dir should be gone after healing");
     }
 
-    /// Opens `path` with no share flags, so any other handle's delete attempt hits a
-    /// sharing violation — deterministic across Windows versions (unlike READONLY).
     #[cfg(windows)]
     fn hold_open_no_share(path: &std::path::Path) -> std::fs::File {
         use std::os::windows::fs::OpenOptionsExt;
@@ -1666,8 +1742,6 @@ mod tests {
             .expect("open with exclusive share mode")
     }
 
-    /// Windows companion: an open handle with no delete sharing still blocks removal
-    /// (unlike READONLY, which modern std ignores), so the error still names the path.
     #[cfg(windows)]
     #[test]
     fn wipe_data_dir_names_failing_path_on_error() {
@@ -1692,8 +1766,6 @@ mod tests {
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
-    /// Windows: an open handle with no delete sharing is not fixed by healing, so the
-    /// wipe still fails overall — but the deletable sibling is removed regardless.
     #[cfg(windows)]
     #[test]
     fn wipe_data_dir_partial_failure_still_removes_deletable_sibling() {
@@ -1720,8 +1792,6 @@ mod tests {
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
-    /// Unix: the locked dir now self-heals between retry passes, so the whole wipe
-    /// succeeds — both the sibling and the formerly-locked dir are gone.
     #[cfg(unix)]
     #[test]
     fn wipe_data_dir_heal_removes_both_locked_and_deletable_dirs() {
@@ -1770,8 +1840,6 @@ mod tests {
         let unlock_dir = locked_dir.clone();
         let unlocker = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(700));
-            // On unix the retry-loop heal may already have unlocked (and removed) this
-            // dir before this thread wakes — that is the new success path, not a race bug.
             #[cfg(unix)]
             if unlock_dir.exists() {
                 use std::os::unix::fs::PermissionsExt;
@@ -1796,8 +1864,6 @@ mod tests {
         assert!(!data_dir.exists(), "data dir should be gone after retry");
     }
 
-    /// Windows-only: an open handle with no delete sharing is not fixed by healing, so
-    /// the deep-probe naming still applies — it can unlink parents but must surface the file.
     #[cfg(windows)]
     #[test]
     fn wipe_data_dir_names_deep_undeletable_path_on_final_failure() {
@@ -1827,8 +1893,6 @@ mod tests {
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
-    /// Unix: a 0o555 parent with a nested file heals via the retry loop's recursive
-    /// walk, so the whole tree is removed instead of the deep probe naming anything.
     #[cfg(unix)]
     #[test]
     fn wipe_data_dir_heals_nested_locked_dir_between_retry_passes() {
@@ -1866,8 +1930,6 @@ mod tests {
             "single quote in path must be doubled for PowerShell, got: {script}"
         );
     }
-
-    // ── SetupState save/load roundtrip ──────────────────────────────────────
 
     #[test]
     fn setup_state_save_and_load_roundtrip() {
@@ -1908,7 +1970,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nonexistent.json");
         let err = SetupState::load_from(&path).expect_err("missing file must err");
-        // Missing file is the normal first-run case: classified as missing → no warn.
         assert!(SetupState::is_missing_state_file(&err));
     }
 
@@ -1918,13 +1979,11 @@ mod tests {
         let path = tmp.path().join("setup_state.json");
         std::fs::write(&path, "{ not valid json ]").expect("write corrupt json");
         let err = SetupState::load_from(&path).expect_err("corrupt json must err");
-        // Corrupt JSON is a serde error, not an io::NotFound → must be warned (not missing).
         assert!(!SetupState::is_missing_state_file(&err));
     }
 
     #[test]
     fn setup_state_load_from_corrupt_json_errors_then_defaults_logic() {
-        // load_from surfaces the parse error; load() turns it into a default.
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("setup_state.json");
         std::fs::write(&path, "not even json").expect("write garbage");
@@ -1949,18 +2008,15 @@ mod tests {
 
     #[test]
     fn current_step_derived_from_boolean_flags() {
-        // Step 0: nothing done
         let state = SetupState::default();
         assert_eq!(state.current_step(), 0);
 
-        // Step 1: runtime_ready only
         let state = SetupState {
             runtime_ready: true,
             ..Default::default()
         };
         assert_eq!(state.current_step(), 1);
 
-        // Step 2: runtime + vm
         let state = SetupState {
             runtime_ready: true,
             vm_ready: true,
@@ -1968,7 +2024,6 @@ mod tests {
         };
         assert_eq!(state.current_step(), 2);
 
-        // Step 3: + images_built
         let state = SetupState {
             runtime_ready: true,
             vm_ready: true,
@@ -1977,7 +2032,6 @@ mod tests {
         };
         assert_eq!(state.current_step(), 3);
 
-        // Step 4: + project_created
         let state = SetupState {
             runtime_ready: true,
             vm_ready: true,
@@ -1987,7 +2041,6 @@ mod tests {
         };
         assert_eq!(state.current_step(), 4);
 
-        // Step 5: + containers_started
         let state = SetupState {
             runtime_ready: true,
             vm_ready: true,
@@ -1998,7 +2051,6 @@ mod tests {
         };
         assert_eq!(state.current_step(), 5);
 
-        // Step 6: + cli_linked (fully complete)
         let state = SetupState {
             runtime_ready: true,
             vm_ready: true,
@@ -2013,7 +2065,6 @@ mod tests {
 
     #[test]
     fn current_step_returns_first_incomplete_even_with_later_flags_set() {
-        // vm_ready=false but images_built=true → step 1 (stops at first gap)
         let state = SetupState {
             runtime_ready: true,
             vm_ready: false,
@@ -2028,7 +2079,6 @@ mod tests {
 
     #[test]
     fn current_step_backward_compat_ignores_old_field_in_json() {
-        // Old serialized JSON that includes "current_step" should be ignored
         let json = r#"{
             "current_step": 99,
             "runtime_ready": true,
@@ -2049,8 +2099,6 @@ mod tests {
         assert!(!state.vm_ready);
     }
 
-    // ── defer_container_start_gated ─────────────────────────────────────────
-
     #[test]
     fn defer_container_start_gated_refuses_when_provider_configured() {
         let result = defer_container_start_gated("proj", false);
@@ -2061,11 +2109,8 @@ mod tests {
             .contains("configured LLM provider"));
     }
 
-    // ── is_setup_complete logic ─────────────────────────────────────────────
-
     #[test]
     fn is_setup_complete_requires_all_fields() {
-        // All true → complete
         let complete = SetupState {
             runtime_ready: true,
             vm_ready: true,
@@ -2080,7 +2125,6 @@ mod tests {
             "all fields set → should be complete"
         );
 
-        // Missing project → incomplete
         let no_project = SetupState {
             project_created: None,
             ..complete.clone()
@@ -2090,7 +2134,6 @@ mod tests {
             "setup must be incomplete when project_created is None"
         );
 
-        // Images not built → incomplete
         let no_images = SetupState {
             images_built: false,
             project_created: Some("acme".to_string()),
@@ -2101,7 +2144,6 @@ mod tests {
             "setup must be incomplete when images_built is false"
         );
 
-        // Runtime not ready → incomplete (regression test for init_vm fix)
         let no_runtime = SetupState {
             runtime_ready: false,
             ..complete.clone()
@@ -2111,7 +2153,6 @@ mod tests {
             "setup must be incomplete when runtime_ready is false"
         );
 
-        // VM not ready → incomplete
         let no_vm = SetupState {
             vm_ready: false,
             ..complete.clone()
@@ -2121,7 +2162,6 @@ mod tests {
             "setup must be incomplete when vm_ready is false"
         );
 
-        // Containers not started → incomplete
         let no_containers = SetupState {
             containers_started: false,
             ..complete.clone()
@@ -2131,7 +2171,6 @@ mod tests {
             "setup must be incomplete when containers_started is false"
         );
 
-        // cli_linked is intentionally excluded — should not affect completeness
         let no_cli = SetupState {
             cli_linked: false,
             ..complete.clone()
@@ -2142,21 +2181,17 @@ mod tests {
         );
     }
 
-    /// Regression: init_vm must persist both `runtime_ready` and `vm_ready`; it once set only
-    /// `vm_ready`, leaving `is_setup_complete()` false and the "Setup complete!" screen hung.
     #[test]
     fn init_vm_sets_runtime_ready_and_vm_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state_path = tmp.path().join("setup_state.json");
 
-        // Simulate check_runtime returning NotInstalled (runtime_ready stays false)
         let before = SetupState {
             runtime_ready: false,
             ..Default::default()
         };
         before.save_to(&state_path).expect("save before state");
 
-        // Simulate what init_vm() does after platform-specific work succeeds
         let mut state = SetupState::load_from(&state_path).expect("load state");
         state.runtime_ready = true;
         state.vm_ready = true;
@@ -2167,18 +2202,14 @@ mod tests {
         assert!(after.vm_ready, "init_vm must set vm_ready = true");
     }
 
-    /// check_runtime must set vm_ready=true when Ready — the wizard then skips init_vm, so
-    /// without it is_complete() stays false after reload.
     #[test]
     fn check_runtime_ready_sets_vm_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state_path = tmp.path().join("setup_state.json");
 
-        // Start from default state
         let before = SetupState::default();
         before.save_to(&state_path).expect("save before state");
 
-        // Simulate what check_runtime() does when ensure_ready() succeeds
         let mut state = SetupState::load_from(&state_path).expect("load state");
         state.runtime_ready = true;
         state.vm_ready = true;
@@ -2197,8 +2228,6 @@ mod tests {
         );
     }
 
-    /// is_complete() must return false when vm_ready is false, even with other fields set —
-    /// regression from check_runtime(Ready) skipping init_vm without setting vm_ready.
     #[test]
     fn is_complete_false_without_vm_ready() {
         let state = SetupState {
@@ -2215,8 +2244,6 @@ mod tests {
             "is_complete must return false when vm_ready is false"
         );
     }
-
-    // ── write_tokens ────────────────────────────────────────────────────────
 
     #[test]
     fn write_tokens_creates_files_with_correct_content() {
@@ -2264,7 +2291,6 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "token file should be chmod 600");
 
-        // Directory permissions (3-level set_permissions pattern)
         assert_eq!(
             std::fs::metadata(data_dir.join("tokens/proj/svc"))
                 .unwrap()
@@ -2293,7 +2319,6 @@ mod tests {
             "tokens should be 0o700"
         );
 
-        // data_dir itself should NOT have been changed
         assert_eq!(
             std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
             original_mode,
@@ -2311,7 +2336,6 @@ mod tests {
         write_tokens(tmp.path(), "acme", "slack", &slack_tokens).expect("slack");
         write_tokens(tmp.path(), "acme", "gitlab", &gitlab_tokens).expect("gitlab");
 
-        // Each service has its own isolated directory
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("tokens/acme/slack/token")).expect("read"),
             "slack-secret"
@@ -2321,11 +2345,8 @@ mod tests {
             "gitlab-secret"
         );
 
-        // Verify no cross-contamination
         assert!(!tmp.path().join("tokens/acme/slack/gitlab-secret").exists());
     }
-
-    // -- validate_path_component tests --
 
     #[test]
     fn validate_path_component_accepts_valid_names() {
@@ -2367,8 +2388,6 @@ mod tests {
         assert!(validate_path_component("key`whoami`", "key").is_err());
     }
 
-    // -- write_tokens path traversal prevention --
-
     #[test]
     fn write_tokens_rejects_traversal_in_service() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2400,8 +2419,6 @@ mod tests {
         let err = write_tokens(tmp.path(), "../escape", "slack", &tokens).unwrap_err();
         assert!(err.to_string().contains("path traversal"));
     }
-
-    // -- atomic writes verification --
 
     #[test]
     fn save_to_is_atomic_no_tmp_left() {
@@ -2435,7 +2452,6 @@ mod tests {
     mod wsl_automount_options_tests {
         use speedwave_runtime::consts;
 
-        // Automount opts carry `metadata` + the uid/gid from the SSOT (ADR-052).
         #[test]
         fn options_derive_metadata_and_container_uid_from_ssot() {
             let opts = consts::wsl_automount_options();
@@ -2455,8 +2471,6 @@ mod tests {
         }
     }
 
-    // ── copy_cli_binary tests ─────────────────────────────────────────────
-
     #[test]
     fn copy_cli_binary_copies_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2467,13 +2481,14 @@ mod tests {
         std::fs::write(&source, b"#!/bin/sh\necho hello").expect("write source");
 
         let target_dir = tmp.path().join("target");
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
+        let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        #[cfg(target_os = "windows")]
-        let dest = target_dir.join("speedwave.exe");
-        #[cfg(not(target_os = "windows"))]
-        let dest = target_dir.join(consts::CLI_BINARY);
         assert!(dest.exists(), "copied binary should exist");
+        assert!(
+            target_dir.is_dir(),
+            "copy must create the parent directory of dest"
+        );
         assert_eq!(
             std::fs::read_to_string(&dest).expect("read"),
             "#!/bin/sh\necho hello"
@@ -2489,10 +2504,9 @@ mod tests {
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"#!/bin/sh\necho hello").expect("write source");
 
-        let target_dir = tmp.path().join("bin");
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
+        let dest = tmp.path().join("bin").join(consts::CLI_BINARY);
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        let dest = target_dir.join(consts::CLI_BINARY);
         let mode = std::fs::metadata(&dest)
             .expect("metadata")
             .permissions()
@@ -2508,9 +2522,9 @@ mod tests {
     fn copy_cli_binary_returns_error_when_source_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let source = tmp.path().join("nonexistent");
-        let target_dir = tmp.path().join("bin");
+        let dest = tmp.path().join("bin").join(consts::CLI_BINARY);
 
-        let err = copy_cli_binary(&source, &target_dir).unwrap_err();
+        let err = copy_cli_binary(&source, &dest).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
             "error should mention source not found: {}",
@@ -2518,15 +2532,12 @@ mod tests {
         );
     }
 
-    // ── resolve_cli_source_from tests ─────────────────────────────────────
-
     #[cfg(target_os = "macos")]
     #[test]
     #[serial(env)]
     fn resolve_cli_source_finds_macos_bundle_path() {
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
-        // Simulate: .app/Contents/MacOS/<exe> with Resources/cli/speedwave
         let tmp = tempfile::tempdir().expect("tempdir");
         let contents = tmp.path().join("Contents");
         let macos_dir = contents.join("MacOS");
@@ -2553,7 +2564,6 @@ mod tests {
     fn resolve_cli_source_finds_resources_path() {
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
-        // Simulate: <exe_dir>/resources/cli/speedwave
         let tmp = tempfile::tempdir().expect("tempdir");
         let exe_dir = tmp.path().join("exe_dir");
         let resources_cli = exe_dir.join("resources").join("cli");
@@ -2592,7 +2602,6 @@ mod tests {
     fn resolve_cli_source_finds_dev_fallback() {
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
-        // Simulate: <exe_dir>/speedwave (dev mode)
         let tmp = tempfile::tempdir().expect("tempdir");
         let exe_dir = tmp.path().join("exe_dir");
         std::fs::create_dir_all(&exe_dir).expect("create exe dir");
@@ -2613,8 +2622,6 @@ mod tests {
     fn resolve_cli_source_finds_dev_cli_dir() {
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
-        // Simulate: desktop/src-tauri/target/debug/ as exe_dir,
-        // desktop/src-tauri/cli/speedwave as CLI binary (placed by Makefile)
         let tmp = tempfile::tempdir().expect("tempdir");
         let src_tauri = tmp.path().join("desktop").join("src-tauri");
         let exe_dir = src_tauri.join("target").join("debug");
@@ -2698,8 +2705,6 @@ mod tests {
     fn resolve_cli_source_prefers_bundle_over_dev() {
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
 
-        // Both Resources/cli/speedwave and <exe_dir>/speedwave exist;
-        // bundle path should be preferred.
         let tmp = tempfile::tempdir().expect("tempdir");
         let contents = tmp.path().join("Contents");
         let macos_dir = contents.join("MacOS");
@@ -2724,7 +2729,6 @@ mod tests {
     fn resolve_cli_source_env_var_takes_priority_over_filesystem() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        // Set up a SPEEDWAVE_RESOURCES_DIR with its own CLI binary
         let env_resources = tmp.path().join("env-resources");
         let env_cli_dir = env_resources.join("cli");
         std::fs::create_dir_all(&env_cli_dir).expect("create env cli dir");
@@ -2736,7 +2740,6 @@ mod tests {
 
         std::fs::write(env_cli_dir.join(binary_name), b"from-env-var").expect("write env cli");
 
-        // Also set up a dev-mode fallback binary next to the exe
         let exe_dir = tmp.path().join("exe_dir");
         std::fs::create_dir_all(&exe_dir).expect("create exe dir");
         std::fs::write(exe_dir.join(binary_name), b"from-dev-fallback")
@@ -2758,8 +2761,6 @@ mod tests {
         std::env::remove_var(consts::BUNDLE_RESOURCES_ENV);
     }
 
-    // ── cli_install_path tests ─────────────────────────────────────────────
-
     #[test]
     fn cli_install_path_returns_platform_specific_path() {
         let unix_home = std::path::Path::new("/home/u");
@@ -2771,7 +2772,6 @@ mod tests {
             ),
             "/home/u/.local/bin/speedwave"
         );
-        // Windows path is a backslash string built from a Windows-shaped data_dir.
         let win_home = std::path::Path::new(r"C:\Users\u");
         assert_eq!(
             speedwave_runtime::consts::cli_install_path_for(
@@ -2782,8 +2782,6 @@ mod tests {
             r"C:\Users\u\.speedwave\bin\speedwave.exe"
         );
     }
-
-    // ── detect_shell tests ──────────────────────────────────────────────
 
     #[cfg(unix)]
     #[test]
@@ -2799,11 +2797,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn detect_shell_empty_defaults_to_zsh_on_macos() {
-        // On macOS, empty $SHELL (launchd context) should default to Zsh.
         assert_eq!(parse_shell_env(""), UserShell::Zsh);
     }
-
-    // ── shell_config_targets tests ───────────────────────────────────────
 
     #[cfg(unix)]
     #[test]
@@ -2832,7 +2827,6 @@ mod tests {
         std::fs::write(home.join(".profile"), "# profile\n").expect("write");
 
         let targets = shell_config_targets(home, UserShell::Bash);
-        // .bash_profile takes priority over .profile
         assert!(targets.contains(&home.join(".bash_profile")));
         assert!(!targets.contains(&home.join(".profile")));
     }
@@ -2842,7 +2836,6 @@ mod tests {
     fn bash_falls_through_to_bash_login() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
-        // Only .bash_login exists (no .bash_profile)
         std::fs::write(home.join(".bash_login"), "# bash_login\n").expect("write");
 
         let targets = shell_config_targets(home, UserShell::Bash);
@@ -2854,7 +2847,6 @@ mod tests {
     fn bash_falls_through_to_profile() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
-        // Only .profile exists (no .bash_profile, no .bash_login)
         std::fs::write(home.join(".profile"), "# profile\n").expect("write");
 
         let targets = shell_config_targets(home, UserShell::Bash);
@@ -2866,21 +2858,16 @@ mod tests {
     fn bash_creates_bash_profile_when_none_exist() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
-        // No login files exist at all
 
         let targets = shell_config_targets(home, UserShell::Bash);
-        // Should default to .bash_profile for creation
         assert!(targets.contains(&home.join(".bash_profile")));
     }
-
-    // ── ensure_local_bin_on_path_for_shell tests ─────────────────────────
 
     #[cfg(unix)]
     #[test]
     fn zsh_creates_zshrc_when_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
-        // No .zshrc exists
 
         ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("should succeed");
 
@@ -2953,7 +2940,6 @@ mod tests {
         let bashrc_content = "# my bashrc\n";
         std::fs::write(home.join(".bashrc"), bashrc_content).expect("write .bashrc");
 
-        // Zsh user — should only touch .zshrc, not .bashrc
         ensure_local_bin_on_path_for_shell(home, UserShell::Zsh).expect("should succeed");
 
         let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read .bashrc");
@@ -2979,7 +2965,6 @@ mod tests {
             ".bash_profile should contain PATH export"
         );
 
-        // macOS opens login shells, so .bashrc should NOT be modified.
         #[cfg(target_os = "macos")]
         {
             let bashrc = std::fs::read_to_string(home.join(".bashrc")).expect("read");
@@ -2990,8 +2975,6 @@ mod tests {
         }
     }
 
-    // ── copy_cli_binary overwrites existing binary ────────────────────────
-
     #[test]
     fn copy_cli_binary_overwrites_existing_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3001,20 +2984,14 @@ mod tests {
         let target_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&target_dir).expect("create target dir");
 
-        #[cfg(target_os = "windows")]
-        let binary_name = "speedwave.exe";
-        #[cfg(not(target_os = "windows"))]
-        let binary_name = consts::CLI_BINARY;
+        let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
+        std::fs::write(&dest, b"old-version").expect("write old binary");
 
-        std::fs::write(target_dir.join(binary_name), b"old-version").expect("write old binary");
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
-
-        let content = std::fs::read_to_string(target_dir.join(binary_name)).expect("read");
+        let content = std::fs::read_to_string(&dest).expect("read");
         assert_eq!(content, "new-version", "should overwrite existing binary");
     }
-
-    // ── files_identical (sweep-skip predicate) ──────────────────────────
 
     #[test]
     fn files_identical_true_for_same_bytes() {
@@ -3044,31 +3021,21 @@ mod tests {
         assert!(!files_identical(&a, &c), "same length, different bytes");
     }
 
-    // ── link_cli guard tests ────────────────────────────────────────────
-
     #[test]
     fn link_cli_guard_skips_when_data_dir_missing() {
-        // When the data directory does not exist (fresh install / factory
-        // reset), link_cli() should return Ok without creating it.
         let tmp = tempfile::tempdir().expect("tempdir");
         let fake_home = tmp.path().join("home");
         std::fs::create_dir_all(&fake_home).expect("create fake home");
-        // No .speedwave/ in fake_home — guard should trigger. Can't call link_cli() directly
-        // (uses dirs::home_dir(), the real home), so verify the guard logic instead:
         let data_dir = fake_home.join(consts::DATA_DIR);
         assert!(
             !data_dir.exists(),
             "precondition: data dir should not exist"
         );
-        // Guard in link_cli(): `if !home.join(consts::DATA_DIR).exists() { return Ok(()) }`.
-        // Verify the same condition holds and data dir stays absent.
         assert!(
             !data_dir.exists(),
             "data dir should not be created by guard check"
         );
     }
-
-    // ── link_cli_from tests ─────────────────────────────────────────────
 
     #[test]
     fn link_cli_from_returns_error_when_source_missing() {
@@ -3077,14 +3044,14 @@ mod tests {
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
 
-        let err = link_cli_from(&source, &home).unwrap_err();
+        let data_dir = home.join(".speedwave");
+        let err = link_cli_from(&source, &home, &data_dir).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
             "error should mention source not found: {}",
             err
         );
 
-        // No files should be written to the destination
         #[cfg(unix)]
         assert!(
             !home.join(".local").join("bin").exists(),
@@ -3097,27 +3064,26 @@ mod tests {
     fn link_cli_from_copies_binary_and_sets_permissions() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        // Create mock CLI source binary
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"cli-binary-content").expect("write source");
 
-        // Create home with config files for all common shells so the test
-        // passes regardless of the ambient $SHELL (detect_shell reads it).
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
         std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
         std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
         std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
-        link_cli_from(&source, &home).expect("link_cli_from should succeed");
+        let data_dir = home.join(".speedwave-test");
+        link_cli_from(&source, &home, &data_dir).expect("link_cli_from should succeed");
 
-        // Verify binary copied
-        let dest = home.join(".local").join("bin").join(consts::CLI_BINARY);
+        let dest = home
+            .join(".local")
+            .join("bin")
+            .join(consts::derive_cli_binary_name_from(&data_dir));
         assert!(dest.exists(), "CLI binary should exist at destination");
         let content = std::fs::read_to_string(&dest).expect("read dest");
         assert_eq!(content, "cli-binary-content");
 
-        // Verify executable permission
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&dest)
             .expect("metadata")
@@ -3125,15 +3091,9 @@ mod tests {
             .mode();
         assert!(mode & 0o111 != 0, "binary should be executable");
 
-        // Producer↔SSOT guard (unix): installed path must equal the login SSOT.
-        // Unix SSOT ignores data_dir; a literal avoids the data_dir()-in-tests drift ban.
         #[cfg(unix)]
         {
-            let expected = speedwave_runtime::consts::cli_install_path_for(
-                false,
-                &home,
-                &home.join(".speedwave-test"),
-            );
+            let expected = speedwave_runtime::consts::cli_install_path_for(false, &home, &data_dir);
             assert_eq!(
                 dest.to_string_lossy(),
                 expected,
@@ -3150,25 +3110,53 @@ mod tests {
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"v2-binary").expect("write source");
 
-        // Create config files for all common shells — makes the test
-        // independent of the ambient $SHELL value.
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
         std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
         std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
         std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
-        // Call twice
-        link_cli_from(&source, &home).expect("first call");
+        let data_dir = home.join(".speedwave");
+        link_cli_from(&source, &home, &data_dir).expect("first call");
 
-        // Update source to simulate app update
         std::fs::write(&source, b"v3-binary").expect("update source");
-        link_cli_from(&source, &home).expect("second call");
+        link_cli_from(&source, &home, &data_dir).expect("second call");
 
-        // Binary should be the latest version
         let dest = home.join(".local").join("bin").join(consts::CLI_BINARY);
         let content = std::fs::read_to_string(&dest).expect("read dest");
         assert_eq!(content, "v3-binary", "should have latest binary content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_cli_from_dev_instance_leaves_production_binary_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
+
+        let local_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&local_bin).expect("create local bin");
+        let production = local_bin.join(consts::CLI_BINARY);
+        std::fs::write(&production, b"production-binary").expect("write production binary");
+
+        let source = tmp.path().join("speedwave");
+        std::fs::write(&source, b"debug-binary").expect("write source");
+        link_cli_from(&source, &home, &home.join(".speedwave-dev")).expect("link dev instance");
+
+        assert_eq!(
+            std::fs::read_to_string(&production).expect("read production"),
+            "production-binary",
+            "a dev instance must not overwrite the production CLI"
+        );
+        let dev = local_bin.join("speedwave-dev");
+        assert_eq!(
+            std::fs::read_to_string(&dev).expect("read dev"),
+            "debug-binary",
+            "the dev instance installs under its own name"
+        );
     }
 
     #[test]
@@ -3176,7 +3164,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state_path = tmp.path().join("setup_state.json");
 
-        // Pre-seed with cli_linked: false and other fields set
         let initial = SetupState {
             cli_linked: false,
             runtime_ready: true,
@@ -3186,13 +3173,11 @@ mod tests {
         let initial_step = initial.current_step();
         initial.save_to(&state_path).expect("save initial state");
 
-        // Load, flip cli_linked, save — mirrors what link_cli() does
         let mut state = SetupState::load_from(&state_path).expect("load for update");
         assert!(!state.cli_linked, "cli_linked should start as false");
         state.cli_linked = true;
         state.save_to(&state_path).expect("save updated state");
 
-        // Verify cli_linked changed and other fields preserved
         let final_state = SetupState::load_from(&state_path).expect("load final");
         assert!(
             final_state.cli_linked,
@@ -3211,12 +3196,8 @@ mod tests {
         assert!(final_state.vm_ready, "vm_ready should be unchanged");
     }
 
-    // ── decode_wsl_output smoke test (SSOT is runtime::wsl) ────────────
-
     #[test]
     fn decode_wsl_output_imported_from_runtime_works() {
-        // Smoke test for re-exported decode_wsl_output (full coverage in speedwave-runtime).
-        // Input built from `wsl_distro_name()`, independent of the process-global data_dir.
         let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
@@ -3234,8 +3215,6 @@ mod tests {
 
     #[test]
     fn start_containers_security_check_blocks_missing_cap_drop() {
-        // Compose YAML missing cap_drop: [ALL] should trigger CAP_DROP_ALL violation.
-        // This verifies the SecurityCheck gate runs before save_compose and compose_up_recreate.
         let yaml = r#"
 version: "3"
 services:
@@ -3261,7 +3240,6 @@ services:
             "Expected CAP_DROP_ALL violation for compose YAML missing cap_drop"
         );
 
-        // Verify the error message format matches what start_containers would produce
         let msgs: Vec<String> = violations
             .iter()
             .map(|v| format!("[{}] {} -- {}", v.container, v.rule, v.message))
@@ -3283,14 +3261,11 @@ services:
 
     #[test]
     fn security_check_before_save_compose_ordering() {
-        // Verify that compose is NOT saved to disk when SecurityCheck detects violations.
-        // This tests the ordering guarantee: SecurityCheck::run() runs BEFORE save_compose().
         let tmp = tempfile::tempdir().unwrap();
         let compose_dir = tmp.path().join("compose").join("test-ordering");
         std::fs::create_dir_all(&compose_dir).unwrap();
         let compose_file = compose_dir.join("compose.yml");
 
-        // Insecure YAML (missing cap_drop)
         let yaml = r#"
 version: "3"
 services:
@@ -3305,7 +3280,6 @@ services:
       - CLAUDE_VERSION=1.0.3
 "#;
 
-        // SecurityCheck should find violations
         let expected_paths = compose::SecurityExpectedPaths::from_raw(
             "/test/project",
             "/test/.speedwave/tokens/test",
@@ -3313,9 +3287,7 @@ services:
         let violations = compose::SecurityCheck::run(yaml, "test-ordering", &[], &expected_paths);
         assert!(!violations.is_empty(), "Should detect violations");
 
-        // Simulate the correct ordering: check first, bail before save
         if !violations.is_empty() {
-            // In start_containers, we bail here — save_compose is never called
             assert!(
                 !compose_file.exists(),
                 "compose.yml must NOT be written when security check fails"
@@ -3325,8 +3297,6 @@ services:
 
     #[test]
     fn start_containers_security_check_passes_valid_compose() {
-        // A compose YAML with all security requirements should produce zero compose-level
-        // violations. `FileSecurityViolation`s are filtered; test covers YAML semantics only.
         let yaml = r#"
 version: "3"
 services:
@@ -3366,8 +3336,6 @@ networks:
         );
     }
 
-    /// Extracts the body of a top-level `pub fn <name>()` from source text by counting braces.
-    /// Limitation: string literals with `{`/`}` throw off the depth counter (acceptable here).
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source
             .split(fn_signature)
@@ -3394,8 +3362,6 @@ networks:
         &rest[..end]
     }
 
-    /// Structural test: `build_images()` must handle `SnapshotterRecoveryFailed` by calling
-    /// `restart_container_engine()` and retrying — fails if that recovery path is removed.
     #[test]
     fn build_images_handles_snapshotter_recovery_with_engine_restart() {
         let source = include_str!("setup_wizard.rs");
@@ -3425,8 +3391,6 @@ networks:
         );
     }
 
-    /// Structural test: `build_images()` must persist `BundleState.applied_bundle_id` and sync
-    /// resources after a build, or `reconcile_bundle_update` phantom-rebuilds next startup.
     #[test]
     fn build_images_writes_bundle_state_after_success() {
         let source = include_str!("setup_wizard.rs");
@@ -3452,8 +3416,6 @@ networks:
         );
     }
 
-    /// Structural: `start_containers()` must call `ensure_exec_healthy` between compose_up and
-    /// state save, else `containers_started = true` could persist while broken.
     #[test]
     fn start_containers_probes_exec_after_compose_up() {
         let source = include_str!("setup_wizard.rs");
@@ -3483,7 +3445,6 @@ networks:
         );
     }
 
-    /// No-provider check must precede rt.ensure_ready() (else render_compose bails).
     #[test]
     fn start_containers_checks_no_provider_before_ensure_ready() {
         let source = include_str!("setup_wizard.rs");
@@ -3500,8 +3461,6 @@ networks:
         );
     }
 
-    /// Structural test: `build_images` must warn (not silently default) when
-    /// `load_user_config` fails, mirroring `main.rs::get_health`.
     #[test]
     fn build_images_warns_on_config_load_failure() {
         let source = include_str!("setup_wizard.rs");
@@ -3511,8 +3470,6 @@ networks:
             "build_images must log::warn before defaulting on config load error, \
              not swallow it silently"
         );
-        // And it must NOT silently swallow the config error. Build the forbidden
-        // literal at runtime so this assertion does not match its own source.
         let forbidden = format!("config::load_user_config().{}", "unwrap_or_default()");
         assert!(
             !source.contains(&forbidden),
@@ -3520,8 +3477,6 @@ networks:
         );
     }
 
-    /// Structural: `ensure_wslconfig_vpn_compat` must be invoked from `main.rs` at startup so
-    /// existing WSL2 installs pick up the VPN-compat keys without a fresh install.
     #[test]
     fn ensure_wslconfig_vpn_compat_called_from_main() {
         let source = include_str!("main.rs");
@@ -3532,8 +3487,6 @@ networks:
         );
     }
 
-    /// Structural: `ensure_lima_vm_config()` must be called in `main.rs` before
-    /// `reconcile_bundle_update()` so VM memory is migrated before images are rebuilt.
     #[test]
     fn ensure_lima_vm_config_called_before_reconcile() {
         let source = include_str!("main.rs");
@@ -3549,8 +3502,6 @@ networks:
         );
     }
 
-    /// Structural test: the post-setup migration block (VM stop/start, possible
-    /// long tooling download) must not run on the Tauri main thread.
     #[test]
     fn post_setup_migrations_run_off_the_main_thread() {
         let source = include_str!("main.rs");
@@ -3580,8 +3531,6 @@ networks:
         );
     }
 
-    // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(); errors must be non-fatal
-    // (log::warn and continue). These tests cover both Ok and Err from reset_vm().
     mod reset_vm_factory_reset_contract {
         use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
@@ -3590,12 +3539,9 @@ networks:
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_reset_vm_error("simulated wsl --unregister failure")
                 .build();
-            // Non-fatal: log::warn and continue — must not propagate as Err.
-            // This mirrors the exact pattern in factory_reset.
             if let Err(e) = rt.reset_vm() {
                 log::warn!("reset_vm failed (continuing to wipe_data_dir): {e}");
             }
-            // Reaching here proves the error did not propagate.
             assert_eq!(
                 handles.reset_vm_count(),
                 1,
@@ -3606,7 +3552,6 @@ networks:
         #[test]
         fn reset_vm_ok_returns_ok() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
-            // Default builder returns Ok(()); no warn log, no error propagated.
             assert!(rt.reset_vm().is_ok());
             assert_eq!(handles.reset_vm_count(), 1);
         }

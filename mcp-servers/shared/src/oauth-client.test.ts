@@ -75,11 +75,9 @@ describe('refreshAccessToken', () => {
     });
     expect(result.expiresIn).toBe(3600);
     expect(result.grantedScopes).toEqual(['s1', 's2']);
-    // Authorization header carries the bearer from file
     const call = fetchImpl.mock.calls[0];
     const init = call[1] as RequestInit;
     expect(init.headers).toMatchObject({ Authorization: 'Bearer bearer-sp' });
-    // No `service` param on the wire
     const body = JSON.parse(init.body as string) as {
       params: { name: string; arguments: Record<string, unknown> };
     };
@@ -223,7 +221,7 @@ describe('refreshAccessToken', () => {
       ok: true,
       status: 200,
       statusText: 'OK',
-      json: async () => ({ jsonrpc: '2.0', id: 'x' }), // no result, no error
+      json: async () => ({ jsonrpc: '2.0', id: 'x' }),
     });
     await expect(
       refreshAccessToken({
@@ -235,7 +233,6 @@ describe('refreshAccessToken', () => {
   });
 
   it('throws on unparseable content text (JSON.parse fail)', async () => {
-    // content[0].text is NOT a JSON object — covers the JSON.parse catch.
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -293,13 +290,11 @@ describe('refreshAccessToken', () => {
   });
 
   it('defaults bearerPath to /secrets/oauth-auth-token-<service> when omitted', async () => {
-    // Covers `bearerPath = options.bearerPath ?? …` default-arg branch.
     const fetchImpl = vi.fn();
     let observedPath: string | undefined;
     try {
       await refreshAccessToken({
         service: 'sharepoint',
-        // bearerPath intentionally omitted
         fetchImpl: fetchImpl as unknown as typeof fetch,
       });
     } catch (err) {
@@ -310,7 +305,6 @@ describe('refreshAccessToken', () => {
   });
 
   it('defaults fetchImpl to globalThis.fetch when omitted', async () => {
-    // Covers `const fetchImpl = options.fetchImpl ?? fetch;` default-arg branch.
     const stubFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -323,7 +317,6 @@ describe('refreshAccessToken', () => {
       const result = await refreshAccessToken({
         service: 'sharepoint',
         bearerPath,
-        // fetchImpl intentionally omitted
       });
       expect(result.expiresIn).toBe(3600);
       expect(stubFetch).toHaveBeenCalled();
@@ -333,7 +326,6 @@ describe('refreshAccessToken', () => {
   });
 
   it('treats missing result.content as empty text (covers the ?? fallback)', async () => {
-    // result.content is undefined → text falls back to ''.
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -341,7 +333,7 @@ describe('refreshAccessToken', () => {
       json: async () => ({
         jsonrpc: '2.0',
         id: 'x',
-        result: { isError: true /* no content */ },
+        result: { isError: true },
       }),
     });
     await expect(
@@ -368,7 +360,6 @@ describe('refreshAccessToken', () => {
   });
 
   it('wraps TCP refused as OAuthRefreshError(worker_unreachable)', async () => {
-    // undici/Node fetch throws TypeError("fetch failed") on a dead port.
     const tcpError = new TypeError('fetch failed');
     const fetchImpl = vi.fn().mockRejectedValue(tcpError);
     await expect(
@@ -393,14 +384,12 @@ describe('refreshAccessToken', () => {
       const msg = e instanceof Error ? e.message : String(e);
       expect(msg).toMatch(/cannot reach oauth worker/);
       expect(msg).toMatch(/Restart the project/);
-      // Worker URL must not leak into user-facing message (info disclosure).
       expect(msg).not.toContain('oauth.worker:4040');
       expect(msg).not.toContain('http://');
     }
   });
 
   it('OAuthRefreshError carries httpStatus on the unauthorized path', async () => {
-    // First call returns 401, second succeeds — the retry path branches on httpStatus.
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce({ status: 401, ok: false })
@@ -450,7 +439,6 @@ describe('readJwtExp', () => {
   });
 
   it('returns null when payload is valid base64 but not JSON', () => {
-    // base64url of "valid" is "dmFsaWQ"
     expect(readJwtExp('header.dmFsaWQ.sig')).toBeNull();
   });
 

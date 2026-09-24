@@ -41,7 +41,6 @@ fn second_process_blocks_until_first_releases() {
         .spawn()
         .expect("spawn holder");
 
-    // Wait until holder writes the sentinel before spawning the waiter.
     let deadline = std::time::Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
     while !sentinel.exists() {
         if std::time::Instant::now() >= deadline {

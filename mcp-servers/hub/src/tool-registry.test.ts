@@ -42,7 +42,6 @@ describe('tool-registry', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
     populateRegistryWithMockTools();
-    // Skip production backoff (1+2+4 s) so tests run fast.
     _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
   });
 
@@ -305,8 +304,8 @@ describe('tool-registry', () => {
       expect(stats.services.redmine).toBe(23);
       expect(stats.services.gitlab).toBe(46);
       expect(stats.services.sharepoint).toBe(5);
-      expect(stats.services.os).toBe(25);
-      expect(stats.total).toBe(103);
+      expect(stats.services.os).toBe(26);
+      expect(stats.total).toBe(104);
     });
   });
 
@@ -463,7 +462,6 @@ describe('tool-registry', () => {
         disabledOs
       );
 
-      // Reminder tools should be excluded
       const osTools = TOOL_REGISTRY['os'];
       const reminderTools = Object.entries(osTools)
         .filter(([, meta]) => meta.osCategory === 'reminders')
@@ -473,7 +471,6 @@ describe('tool-registry', () => {
         expect(wrappers[tool]).toBeUndefined();
       }
 
-      // Calendar tools should remain
       const calendarTools = Object.entries(osTools)
         .filter(([, meta]) => meta.osCategory === 'calendar')
         .map(([name]) => name);
@@ -531,14 +528,12 @@ describe('tool-registry', () => {
       _resetRegistryForTesting();
 
       const { discoverAndMergeService } = await import('./tool-discovery.js');
-      // Startup: fail
       vi.mocked(discoverAndMergeService).mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
       process.env.ENABLED_SERVICES = 'redmine';
       await initializeRegistry();
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
 
-      // Refresh: succeed
       vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
       await refreshServiceTools('redmine');
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
@@ -549,18 +544,15 @@ describe('tool-registry', () => {
       _resetRegistryForTesting();
 
       const { discoverAndMergeService } = await import('./tool-discovery.js');
-      // Startup: succeed
       vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
 
       process.env.ENABLED_SERVICES = 'redmine';
       await initializeRegistry();
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
 
-      // Refresh: fail
       vi.mocked(discoverAndMergeService).mockRejectedValueOnce(new Error('worker crashed'));
       await refreshServiceTools('redmine');
 
-      // Should keep last known tools
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
       expect(TOOL_REGISTRY['redmine']['listItems'].name).toBe('listItems');
     });
@@ -575,7 +567,6 @@ describe('tool-registry', () => {
       await initializeRegistry();
       expect(TOOL_REGISTRY['redmine']['listItems']).toBeDefined();
 
-      // Refresh: different tool set
       const newTool: ToolMetadata = { ...mockTool, name: 'createItem', service: 'redmine' };
       vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ createItem: newTool });
       await refreshServiceTools('redmine');
@@ -588,16 +579,13 @@ describe('tool-registry', () => {
       _resetRegistryForTesting();
 
       const { discoverAndMergeService } = await import('./tool-discovery.js');
-      // Reject with a plain string — hits the `String(error)` branch in the warn log (line 114)
       vi.mocked(discoverAndMergeService).mockRejectedValueOnce('plain error string');
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       process.env.ENABLED_SERVICES = 'redmine';
       await initializeRegistry();
 
-      // Registry entry is empty (discovery failed)
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
-      // The warn log used String(error) because error was not an Error instance
       const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
       expect(warnCalls.some((m) => m.includes('plain error string'))).toBe(true);
       warnSpy.mockRestore();
@@ -607,19 +595,15 @@ describe('tool-registry', () => {
       _resetRegistryForTesting();
 
       const { discoverAndMergeService } = await import('./tool-discovery.js');
-      // Startup: succeed with one tool
       vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: mockTool });
       process.env.ENABLED_SERVICES = 'redmine';
       await initializeRegistry();
 
-      // Refresh: fail with a non-Error value (hits the `error` branch at line 183)
       vi.mocked(discoverAndMergeService).mockRejectedValueOnce({ code: 42, msg: 'plain object' });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       await refreshServiceTools('redmine');
 
-      // Tool set is preserved despite the error
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
-      // Warn was called — the non-Error is logged as-is (the `error` branch)
       expect(warnSpy).toHaveBeenCalled();
       warnSpy.mockRestore();
     });
@@ -636,7 +620,6 @@ describe('tool-registry', () => {
 
       const callCountAfterFirst = vi.mocked(discoverAndMergeService).mock.calls.length;
 
-      // Second call must return immediately without calling discover again
       await initializeRegistry();
 
       expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBe(callCountAfterFirst);
@@ -647,8 +630,6 @@ describe('tool-registry', () => {
     it('returns the same object as TOOL_REGISTRY', async () => {
       const { getRegistry } = await import('./tool-registry.js');
       const reg = getRegistry();
-      // getRegistry() returns the internal mutable _registry object,
-      // which is the same reference that TOOL_REGISTRY aliases.
       expect(reg).toBe(TOOL_REGISTRY);
       expect(reg['slack']).toBeDefined();
     });
@@ -671,7 +652,6 @@ describe('tool-registry', () => {
     it('sets empty registry for disabled services and skips discovery', async () => {
       _resetRegistryForTesting();
       resetServiceCaches();
-      // Only enable 'slack'; 'gitlab' is listed but NOT enabled
       process.env.ENABLED_SERVICES = 'slack';
 
       const { discoverAndMergeService } = await import('./tool-discovery.js');
@@ -681,8 +661,6 @@ describe('tool-registry', () => {
 
       await initializeRegistry();
 
-      // 'slack' is enabled but the mock returns {} → empty registry entry. All other
-      // services are in SERVICE_NAMES but not enabled → empty {} without discovery running.
       expect(TOOL_REGISTRY['slack']).toBeDefined();
     });
   });
@@ -722,34 +700,26 @@ describe('tool-registry', () => {
         deferLoading: false,
       };
 
-      // First call (startup) resolves immediately; second call (first refresh interval)
-      // resolves slowly — timers advance to fire the interval again mid-refresh.
       let resolveFirstRefresh: () => void;
       const firstRefreshPromise = new Promise<Record<string, ToolMetadata>>((resolve) => {
         resolveFirstRefresh = () => resolve({});
       });
 
       mockDiscover
-        .mockResolvedValueOnce({ sendChannel: slackTool }) // startup
-        .mockImplementationOnce(() => firstRefreshPromise) // first interval (slow)
-        .mockResolvedValue({}); // any further calls
+        .mockResolvedValueOnce({ sendChannel: slackTool })
+        .mockImplementationOnce(() => firstRefreshPromise)
+        .mockResolvedValue({});
 
-      // Fake timers before initializeRegistry so the refresh setInterval uses them.
       vi.useFakeTimers();
       await initializeRegistry();
 
-      // First interval callback sets _refreshInProgress = true.
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
-      // Second interval fire hits the early return (_refreshInProgress still true).
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
 
       resolveFirstRefresh!();
-      // Drain microtask queue so _refreshInProgress is reset to false.
       await Promise.resolve();
 
-      // Overlapping refresh was skipped without error.
       expect(TOOL_REGISTRY['slack']).toBeDefined();
-      // Called once for startup + once for the first refresh (second skipped).
       expect(mockDiscover).toHaveBeenCalledTimes(2);
     });
 
@@ -762,7 +732,6 @@ describe('tool-registry', () => {
       const mockDiscover = vi.mocked(discoverAndMergeService);
       mockDiscover.mockClear();
 
-      // Non-empty first call so discoverWithStartupRetry exits immediately.
       const slackTool: ToolMetadata = {
         name: 'sendChannel',
         description: 'Send a channel message',
@@ -776,14 +745,10 @@ describe('tool-registry', () => {
 
       await initializeRegistry();
 
-      // Switch to fake timers AFTER initializeRegistry has completed (interval already set).
-      // This avoids the retry-delay setTimeout calls blocking on fake-timer advancement.
       vi.useFakeTimers();
 
-      // Advance timers by 5 minutes to trigger the background refresh interval.
       await vi.runAllTimersAsync();
 
-      // The refresh ran without throwing — registry still exists
       expect(TOOL_REGISTRY['slack']).toBeDefined();
     });
   });
@@ -834,12 +799,9 @@ describe('tool-registry', () => {
         captureBridgeCallFn as never
       );
 
-      // Call one of the generated wrappers
       await wrappers['sendChannel']?.({ channel: 'general' });
 
-      // prepareParams was called with the provided params
       expect(preparedParams.length).toBeGreaterThan(0);
-      // wrapBridgeCall was called with a function
       expect(bridgeCallArgs.length).toBeGreaterThan(0);
     });
   });
@@ -854,7 +816,7 @@ describe('tool-registry', () => {
       const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
       mutableRegistry['testSvc'] = {
         listItems: {
-          name: 'wrongName', // mismatch!
+          name: 'wrongName',
           description: 'List items',
           keywords: [],
           inputSchema: { type: 'object', properties: {} },
@@ -881,7 +843,7 @@ describe('tool-registry', () => {
           keywords: [],
           inputSchema: { type: 'object', properties: {} },
           example: '',
-          service: 'wrongService', // mismatch!
+          service: 'wrongService',
           deferLoading: false,
         },
       };
@@ -899,7 +861,7 @@ describe('tool-registry', () => {
       mutableRegistry['testSvc'] = {
         listItems: {
           name: 'listItems',
-          description: '', // empty = missing
+          description: '',
           keywords: [],
           inputSchema: { type: 'object', properties: {} },
           example: '',
@@ -921,7 +883,7 @@ describe('tool-registry', () => {
           name: 'listItems',
           description: 'List items',
           keywords: [],
-          inputSchema: null as never, // null = missing
+          inputSchema: null as never,
           example: '',
           service: 'testSvc',
           deferLoading: false,
@@ -998,27 +960,22 @@ describe('tool-registry', () => {
 
       process.env.ENABLED_SERVICES = 'redmine';
       _setDiscoveryRetryDelaysForTesting([0, 0, 0]);
-      // 5 ms base → backoff sequence 5, 10, 20, 40 ms (capped at MAX which is
-      // still 60_000 ms but we never reach it in this test).
       _setEmptyRecheckBaseMsForTesting(5);
       await initializeRegistry();
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
 
       const startupCalls = vi.mocked(discoverAndMergeService).mock.calls.length;
 
-      // First retry after 5 ms. Real timers — wait a bit longer than the delay.
       await new Promise((r) => setTimeout(r, 20));
       expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBeGreaterThanOrEqual(
         startupCalls + 1
       );
 
-      // After ~50 ms total we should have seen at least 2 retries (5, 10 ms).
       await new Promise((r) => setTimeout(r, 50));
       expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBeGreaterThanOrEqual(
         startupCalls + 2
       );
 
-      // Restore real-world base for other tests in this file.
       _setEmptyRecheckBaseMsForTesting(10_000);
     });
 
@@ -1034,15 +991,12 @@ describe('tool-registry', () => {
       await initializeRegistry();
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(0);
 
-      // Next discovery call (from the recheck timer) succeeds.
       const recoveryTool: ToolMetadata = { ...mockTool, name: 'listItems', service: 'redmine' };
       vi.mocked(discoverAndMergeService).mockResolvedValueOnce({ listItems: recoveryTool });
 
-      // Wait past the 5 ms backoff for the recovery to happen.
       await new Promise((r) => setTimeout(r, 30));
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
 
-      // After success: no further calls even with extended wait.
       const callsAfterRecovery = vi.mocked(discoverAndMergeService).mock.calls.length;
       await new Promise((r) => setTimeout(r, 100));
       expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBe(callsAfterRecovery);
@@ -1055,7 +1009,6 @@ describe('tool-registry', () => {
 
       const { discoverAndMergeService } = await import('./tool-discovery.js');
       const tool: ToolMetadata = { ...mockTool, name: 'listItems', service: 'redmine' };
-      // Startup discovery succeeds — registry populated immediately.
       vi.mocked(discoverAndMergeService).mockResolvedValue({ listItems: tool });
 
       process.env.ENABLED_SERVICES = 'redmine';
@@ -1065,8 +1018,6 @@ describe('tool-registry', () => {
       expect(Object.keys(TOOL_REGISTRY['redmine']).length).toBe(1);
 
       const callsAfterInit = vi.mocked(discoverAndMergeService).mock.calls.length;
-      // No empty-recheck timer should be scheduled — wait past any conceivable
-      // first retry (5 ms backoff for this test) and assert no extra calls.
       await new Promise((r) => setTimeout(r, 50));
       expect(vi.mocked(discoverAndMergeService).mock.calls.length).toBe(callsAfterInit);
 

@@ -15,12 +15,15 @@ import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.c
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
 import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
+
+const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
 
 /**
  * Application shell — hosts the icon rail, routed content, global keyboard
@@ -105,47 +108,45 @@ import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudst
           </div>
         }
       }
-      @if (
+      @if (projectState.restarting) {
+        <div
+          class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Restarting containers"
+          data-testid="restart-overlay"
+        >
+          <div
+            class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
+          >
+            <div class="flex flex-col items-center">
+              <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
+              <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
+              <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
+            </div>
+          </div>
+        </div>
+      } @else if (
         projectState.needsRestart &&
         (projectState.status() === 'ready' || projectState.status() === 'auth_required')
       ) {
-        @if (projectState.restarting) {
-          <div
-            class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
-            role="alertdialog"
-            aria-modal="true"
-            aria-label="Restarting containers"
-            data-testid="restart-overlay"
-          >
-            <div
-              class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
-            >
-              <div class="flex flex-col items-center">
-                <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
-                <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
-                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
-              </div>
-            </div>
-          </div>
-        } @else {
-          <app-modal-overlay
-            [open]="true"
-            kicker="⚠ restart required"
-            kickerColor="amber"
-            modalTitle="Container config changed"
-            body="Enabling/disabling services needs a container restart. Running conversations will pause briefly."
-            [inlineError]="projectState.restartError"
-            primaryLabel="restart now"
-            secondaryLabel="later"
-            testId="restart-overlay"
-            primaryTestId="restart-now-btn"
-            secondaryTestId="restart-later-btn"
-            inlineErrorTestId="restart-error"
-            (primary)="restartContainers()"
-            (secondary)="dismissRestart()"
-            (closed)="dismissRestart()"
-          />
-        }
+        <app-modal-overlay
+          [open]="true"
+          kicker="⚠ restart required"
+          kickerColor="amber"
+          modalTitle="Container config changed"
+          body="Applying this change needs a container restart. Running conversations will pause briefly."
+          [inlineError]="projectState.restartError"
+          primaryLabel="restart now"
+          secondaryLabel="later"
+          testId="restart-overlay"
+          primaryTestId="restart-now-btn"
+          secondaryTestId="restart-later-btn"
+          inlineErrorTestId="restart-error"
+          (primary)="restartContainers()"
+          (secondary)="dismissRestart()"
+          (closed)="dismissRestart()"
+        />
       }
       <app-update-notification />
 
@@ -189,6 +190,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
   readonly beta = inject(BetaService);
+  private readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private unsubscribe: (() => void) | null = null;
@@ -212,7 +214,7 @@ export class ShellComponent implements OnInit, OnDestroy {
       shortcut: '⌘3',
     },
     {
-      id: 'meeting-transcription',
+      id: TRANSCRIPTION_ENTRY_ID,
       label: 'Meeting transcription',
       route: '/meeting-transcription',
       iconName: 'microphone',
@@ -237,17 +239,17 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
 
-  /** Nav entries to render: chat always visible; meeting-transcription beta-gated (ADR-058/056). */
-  readonly visibleEntries = computed(() =>
-    this.beta.enabled()
-      ? this.entryCatalog
-      : this.entryCatalog.filter((e) => e.id !== 'meeting-transcription')
-  );
+  readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
+    const recording = this.transcription.recording();
+    const show = this.beta.enabled() || recording;
+    return this.entryCatalog
+      .filter((e) => e.id !== TRANSCRIPTION_ENTRY_ID || show)
+      .map((e) => (e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e));
+  });
 
   /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {
     const url = this.currentUrlSignal();
-    // longest-route-prefix wins so /settings beats /settings-something nonexistent etc.
     const sorted = [...this.entryCatalog].sort((a, b) => b.route.length - a.route.length);
     const match = sorted.find((v) => url.startsWith(v.route));
     return match?.id ?? '';
@@ -294,7 +296,6 @@ export class ShellComponent implements OnInit, OnDestroy {
     const cmd = event.metaKey || event.ctrlKey;
     const key = event.key;
 
-    // ⎋ closes any open overlay first — independent of cmd modifier.
     if (key === 'Escape') {
       let consumed = false;
       if (this.ui.paletteOpen()) {
@@ -336,8 +337,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        // Beta-gated route — the shortcut is inert until beta is enabled.
-        if (this.beta.enabled()) {
+        if (this.beta.enabled() || this.transcription.recording()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
         return;

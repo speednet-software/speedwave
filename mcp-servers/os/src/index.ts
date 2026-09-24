@@ -6,7 +6,6 @@
 import { bootWorker, ts } from '@speedwave/mcp-shared';
 import { createToolDefinitions } from './tools/index.js';
 
-// Host-side worker: defaultPort '0' (OS picks).
 console.log(`${ts()} Platform: ${process.platform}`);
 bootWorker({
   serverName: 'mcp-os',

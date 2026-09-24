@@ -9,6 +9,7 @@ import {
 } from './redmine-config.component';
 import { IntegrationStatusEntry } from '../../models/integration';
 import { TauriService } from '../../services/tauri.service';
+import { createDeferred } from '../../testing/deferred';
 
 function makeRedmineSvc(overrides?: Partial<IntegrationStatusEntry>): IntegrationStatusEntry {
   return {
@@ -318,21 +319,16 @@ describe('RedmineConfigComponent', () => {
       component.apiKey = 'key';
       fixture.detectChanges();
 
-      let resolveFirst!: (value: unknown) => void;
-      tauriSpy.invoke.mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveFirst = resolve;
-        })
-      );
+      const pendingValidate = createDeferred<unknown>();
+      tauriSpy.invoke.mockReturnValueOnce(pendingValidate.promise);
 
       const firstCall = component.onValidate();
       expect(component.validating).toBe(true);
 
-      // Second call should be a no-op
       await component.onValidate();
       expect(tauriSpy.invoke).toHaveBeenCalledTimes(1);
 
-      resolveFirst({ valid: true, user: { id: 1, login: 'admin' }, error: null });
+      pendingValidate.resolve({ valid: true, user: { id: 1, login: 'admin' }, error: null });
       tauriSpy.invoke.mockResolvedValue(makeEnumerations());
       await firstCall;
     });
@@ -343,20 +339,15 @@ describe('RedmineConfigComponent', () => {
       component.apiKey = 'key';
       fixture.detectChanges();
 
-      let resolveValidation!: (value: unknown) => void;
-      tauriSpy.invoke.mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveValidation = resolve;
-        })
-      );
+      const pendingValidate = createDeferred<unknown>();
+      tauriSpy.invoke.mockReturnValueOnce(pendingValidate.promise);
 
       const validatePromise = component.onValidate();
       component.ngOnDestroy();
 
-      resolveValidation({ valid: true, user: { id: 1, login: 'admin' }, error: null });
+      pendingValidate.resolve({ valid: true, user: { id: 1, login: 'admin' }, error: null });
       await validatePromise;
 
-      // Should not transition state after destroy
       expect(component.wizardState).toBe('credentials');
     });
 
@@ -366,38 +357,30 @@ describe('RedmineConfigComponent', () => {
       component.apiKey = 'key';
       fixture.detectChanges();
 
-      let resolveEnumerations!: (value: unknown) => void;
-      const enumPromise = new Promise((resolve) => {
-        resolveEnumerations = resolve;
-      });
+      const pendingEnumerations = createDeferred<unknown>();
 
       tauriSpy.invoke.mockImplementation((cmd: string) => {
         if (cmd === 'validate_redmine_credentials') {
           return Promise.resolve({ valid: true, user: { id: 1, login: 'admin' }, error: null });
         }
         if (cmd === 'fetch_redmine_enumerations') {
-          return enumPromise;
+          return pendingEnumerations.promise;
         }
         return Promise.resolve();
       });
 
-      // Validate succeeds, triggers loadEnumerations (fire-and-forget)
       await component.onValidate();
 
       expect(component.wizardState).toBe('mappings');
       expect(component.loadingEnumerations).toBe(true);
 
-      // Destroy while enumeration fetch is pending
       component.ngOnDestroy();
 
-      // Resolve the pending enumeration fetch
-      resolveEnumerations(makeEnumerations());
-      await enumPromise;
+      pendingEnumerations.resolve(makeEnumerations());
+      await pendingEnumerations.promise;
 
-      // Allow microtasks to flush
       await new Promise((r) => setTimeout(r, 0));
 
-      // Should remain in loading state — destroyed guard prevents state update
       expect(component.loadingEnumerations).toBe(true);
       expect(component.enumerations).toBeNull();
     });
@@ -415,14 +398,8 @@ describe('RedmineConfigComponent', () => {
         projects: [{ id: 42, name: 'Fresh' }],
       });
 
-      let resolveFirstEnum!: (value: unknown) => void;
-      const firstEnumPromise = new Promise((resolve) => {
-        resolveFirstEnum = resolve;
-      });
-      let resolveSecondEnum!: (value: unknown) => void;
-      const secondEnumPromise = new Promise((resolve) => {
-        resolveSecondEnum = resolve;
-      });
+      const firstEnum = createDeferred<unknown>();
+      const secondEnum = createDeferred<unknown>();
 
       let enumCallCount = 0;
       tauriSpy.invoke.mockImplementation((cmd: string) => {
@@ -431,40 +408,33 @@ describe('RedmineConfigComponent', () => {
         }
         if (cmd === 'fetch_redmine_enumerations') {
           enumCallCount++;
-          return enumCallCount === 1 ? firstEnumPromise : secondEnumPromise;
+          return enumCallCount === 1 ? firstEnum.promise : secondEnum.promise;
         }
         return Promise.resolve();
       });
 
-      // First validate -> succeeds -> loadEnumerations #1 starts (deferred)
       await component.onValidate();
       expect(component.wizardState).toBe('mappings');
       expect(component.loadingEnumerations).toBe(true);
 
-      // User clicks Edit (back to credentials), then re-validates
       component.onEdit();
       expect(component.wizardState).toBe('credentials');
       expect(component.validating).toBe(false);
 
-      // Second validate -> succeeds -> loadEnumerations #2 starts (deferred)
       await component.onValidate();
       expect(component.wizardState).toBe('mappings');
 
-      // Now resolve the FIRST (stale) enum fetch
-      resolveFirstEnum(staleEnumerations);
-      await firstEnumPromise;
+      firstEnum.resolve(staleEnumerations);
+      await firstEnum.promise;
       await new Promise((r) => setTimeout(r, 0));
 
-      // Stale result must be ignored — enumerations should still be null
       expect(component.enumerations).toBeNull();
       expect(component.loadingEnumerations).toBe(true);
 
-      // Resolve the SECOND (fresh) enum fetch
-      resolveSecondEnum(freshEnumerations);
-      await secondEnumPromise;
+      secondEnum.resolve(freshEnumerations);
+      await secondEnum.promise;
       await new Promise((r) => setTimeout(r, 0));
 
-      // Fresh result is applied
       expect(component.enumerations).not.toBeNull();
       expect(component.enumerations!.projects[0].name).toBe('Fresh');
       expect(component.loadingEnumerations).toBe(false);
@@ -487,7 +457,7 @@ describe('RedmineConfigComponent', () => {
       expect(select).not.toBeNull();
       const options = select.querySelectorAll('option');
       expect(options[0].textContent.trim()).toBe('All projects');
-      expect(options.length).toBe(3); // All projects + 2 projects
+      expect(options.length).toBe(3);
     });
 
     it('renders 0 projects as only All projects option', () => {

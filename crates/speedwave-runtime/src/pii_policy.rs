@@ -413,7 +413,6 @@ fn merge_and_validate_keywords(raw: Vec<KeywordV3>) -> Result<Vec<KeywordV3>, St
                         kw.r#match
                     ));
                 }
-                // Identical duplicate across two policies: collapse to one.
             }
         }
     }
@@ -848,8 +847,6 @@ pub fn resolve_pii_policy(
     let custom_policies: &[crate::config::PiiPolicyDefinition] =
         user.map(|u| u.custom_policies.as_slice()).unwrap_or(&[]);
 
-    // Effective set: user policies in order, then MDM-forced ids not already
-    // present (dedup on first occurrence) — MDM ids are additive, not overriding.
     let mut effective: Vec<String> = Vec::new();
     for id in user.map(|u| u.policies.as_slice()).unwrap_or(&[]) {
         if !effective.contains(id) {
@@ -870,7 +867,6 @@ pub fn resolve_pii_policy(
         return Ok(safe_default_policy());
     }
 
-    // custom_policies internal integrity: no id collides with a builtin, no duplicates.
     let mut seen_custom_ids = HashSet::new();
     for def in custom_policies {
         if templates.iter().any(|t| t.id == def.id) {
@@ -905,8 +901,6 @@ pub fn resolve_pii_policy(
         }
     }
 
-    // Categories: OR each library rule id's flags across the effective set;
-    // every referenced id must be a real library rule.
     let mut merged_categories: HashMap<String, RuleFlags> = HashMap::new();
     for m in &members {
         for (rule_id, flags) in m.categories {
@@ -923,8 +917,6 @@ pub fn resolve_pii_policy(
         }
     }
 
-    // Additive rules: union by id, first-seen order; a shared id must match
-    // (patterns, validator, caseSensitive) or it's Err; flags OR across duplicates.
     let mut own_rule_order: Vec<String> = Vec::new();
     let mut own_rules: HashMap<String, OwnRuleV3> = HashMap::new();
     for m in &members {
@@ -954,15 +946,12 @@ pub fn resolve_pii_policy(
     }
     own_rule_order.sort();
 
-    // Keywords: union across the effective set, validated per §4 of the design doc.
     let mut raw_keywords: Vec<KeywordV3> = Vec::new();
     for m in &members {
         raw_keywords.extend(m.keywords.iter().cloned());
     }
     let keywords = merge_and_validate_keywords(raw_keywords)?;
 
-    // Rules output: library rules (file order) with at least one flag on, then
-    // additive rules (id order) with at least one flag on.
     let mut rules: Vec<RuleOutput> = Vec::new();
     for lib in library {
         let flags = merged_categories
@@ -1045,7 +1034,6 @@ pub fn check_pii_policy_at_boot() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .and_then(|m| m.pii_policy);
 
-    // Beta-gated: an inactive feature must not block boot on a stale user config.
     if !pii_feature_enabled(user_config.beta_enabled(), managed.as_ref()) {
         return Ok(());
     }
@@ -1153,8 +1141,6 @@ mod tests {
             .collect()
     }
 
-    // ---- rule library ------------------------------------------------------
-
     #[test]
     fn rule_library_parses_and_has_seven_unique_rules() {
         let library = rule_library().unwrap();
@@ -1174,8 +1160,6 @@ mod tests {
 
     #[test]
     fn rule_library_matches_pii_engine_default_policy_rule_set() {
-        // Same rules.yaml, same SSOT: the resolver's empty-effective-set default
-        // must name exactly the rules the engine's own default_policy_json() does.
         let library = rule_library().unwrap();
         let engine_default: serde_json::Value =
             serde_json::from_str(&speedwave_pii_engine::default_policy_json()).unwrap();
@@ -1191,8 +1175,6 @@ mod tests {
 
     #[test]
     fn rules_yaml_is_ssot_for_pii_categories() {
-        // Replaces the old enum cross-read test: PII categories are now an open
-        // rule-id set sourced from rules.yaml, not a fixed Rust/TS enum.
         let ids: Vec<&str> = rule_library()
             .unwrap()
             .iter()
@@ -1206,8 +1188,6 @@ mod tests {
             "SENSITIVE_FIELD must not exist (removed in the v3 migration)"
         );
     }
-
-    // ---- builtin templates -----------------------------------------------
 
     #[test]
     fn builtin_templates_parse_and_have_unique_non_custom_ids() {
@@ -1327,8 +1307,6 @@ keywords: []
         let err = validate_template(&template, &library_ids).unwrap_err();
         assert!(err.contains("BOGUS_RULE"));
     }
-
-    // ---- resolve_pii_policy semantics ------------------------------------
 
     #[test]
     fn resolve_with_no_user_and_no_managed_is_safe_default() {
@@ -1566,8 +1544,6 @@ keywords: []
         assert!(err.contains("NOT_A_RULE"));
     }
 
-    // ---- keywords -----------------------------------------------------------
-
     #[test]
     fn resolve_merges_keywords_from_multiple_policies() {
         let user = PiiPolicyUserConfig {
@@ -1779,8 +1755,6 @@ keywords: []
         assert_eq!(compiled.keywords()[0].alias, "Brandex");
     }
 
-    // ---- serde round-trips -------------------------------------------------
-
     #[test]
     fn resolved_pii_policy_json_round_trips_and_uses_camel_case() {
         let user = PiiPolicyUserConfig {
@@ -1822,8 +1796,6 @@ keywords: []
         let round_tripped: ResolvedPiiPolicy = serde_json::from_value(value).unwrap();
         assert_eq!(round_tripped, resolved);
     }
-
-    // ---- validate_value_pattern -------------------------------------------
 
     #[test]
     fn validate_value_pattern_accepts_a_realistic_pattern() {
@@ -1923,8 +1895,6 @@ keywords: []
             }
         }
     }
-
-    // ---- validate_user_policy_config ---------------------------------------
 
     #[test]
     fn validate_user_policy_config_rejects_too_many_rules() {
@@ -2064,8 +2034,6 @@ keywords: []
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("NOT_A_RULE"));
     }
-
-    // ---- write_policy_config_in / policy_state_digest_in -------------------
 
     #[test]
     fn policy_dir_and_path_layout() {

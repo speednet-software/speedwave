@@ -8,7 +8,6 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      // Floors trail measured values; funcs floor reflects unspyable ESM fs/promises paths in restricted-write.ts.
       thresholds: {
         lines: 99,
         functions: 96,

@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
-# Validates PR title for PRs targeting `main`: dev->main squash needs a release-triggering
-# Conventional Commit type or release-please skips the bump. Env: PR_TITLE, HEAD_REF. Exit: 0/1.
 
 set -euo pipefail
 
 PR_TITLE="${PR_TITLE:-}"
 HEAD_REF="${HEAD_REF:-}"
 
-# Release-please PRs are exempt (release-please manages its own titles).
 if [[ "$HEAD_REF" == release-please--* ]]; then
     echo "Release-please PR — skipping title check"
     exit 0
 fi
 
-# Backmerge PRs are exempt (fallback merge when dev has diverged from main).
 if [[ "$HEAD_REF" == chore/backmerge-* ]]; then
     echo "Backmerge PR — skipping title check"
     exit 0
 fi
 
-# Conventional commit types allowed on `dev -> main` squash merges.
-# Keep this set restricted to types that produce a release-please semver bump.
 if [[ "$PR_TITLE" =~ ^(feat|fix)(\(.+\))?\!?:\ .+ ]]; then
     echo "PR title follows conventional commits: $PR_TITLE"
     exit 0

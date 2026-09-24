@@ -32,6 +32,7 @@ describe('slack auth enforcement', () => {
   describe('middleware wiring', () => {
     let httpServer: http.Server | undefined;
     let port: number;
+    const LOOPBACK = '127.0.0.1';
 
     function request(options: {
       path: string;
@@ -40,14 +41,18 @@ describe('slack auth enforcement', () => {
       body?: string;
     }): Promise<{ status: number; body: string }> {
       return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Request timeout')), 5000);
+        const timeout = setTimeout(() => {
+          reject(new Error('Request timeout'));
+          req.destroy();
+        }, 5000);
         const req = http.request(
           {
-            hostname: '127.0.0.1',
+            hostname: LOOPBACK,
             port,
             path: options.path,
             method: options.method || 'GET',
             headers: options.headers || {},
+            agent: false,
           },
           (res) => {
             let data = '';
@@ -74,6 +79,21 @@ describe('slack auth enforcement', () => {
       }
     });
 
+    async function listen(server: ReturnType<typeof createMCPServer>): Promise<void> {
+      await new Promise<void>((resolve, reject) => {
+        httpServer = server.app.listen(0, LOOPBACK, () => {
+          const addr = httpServer!.address();
+          if (!addr || typeof addr !== 'object' || addr.address !== LOOPBACK) {
+            reject(new Error(`test server bound to ${JSON.stringify(addr)}, not ${LOOPBACK}`));
+            return;
+          }
+          port = addr.port;
+          resolve();
+        });
+        httpServer.on('error', reject);
+      });
+    }
+
     async function startServerWithAuth(token: string): Promise<void> {
       const server = createMCPServer({
         name: 'mcp-slack-test',
@@ -82,15 +102,7 @@ describe('slack auth enforcement', () => {
         auth: { token },
       });
 
-      await new Promise<void>((resolve) => {
-        httpServer = server.app.listen(0, () => {
-          const addr = httpServer!.address();
-          if (addr && typeof addr === 'object') {
-            port = addr.port;
-          }
-          resolve();
-        });
-      });
+      await listen(server);
     }
 
     it('returns 401 for requests without Bearer token', async () => {
@@ -117,15 +129,7 @@ describe('slack auth enforcement', () => {
         },
       });
 
-      await new Promise<void>((resolve) => {
-        httpServer = server.app.listen(0, () => {
-          const addr = httpServer!.address();
-          if (addr && typeof addr === 'object') {
-            port = addr.port;
-          }
-          resolve();
-        });
-      });
+      await listen(server);
 
       const res = await request({ path: '/health' });
       expect(res.status).toBe(500);

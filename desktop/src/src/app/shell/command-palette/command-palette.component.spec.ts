@@ -16,13 +16,10 @@ function q(selector: string): HTMLElement | null {
 }
 
 describe('CommandPaletteComponent', () => {
-  // jsdom does not implement Element.scrollIntoView; stub it for this suite.
   beforeAll(() => {
     const proto = Element.prototype as unknown as { scrollIntoView?: () => void };
     if (typeof proto.scrollIntoView !== 'function') {
-      proto.scrollIntoView = () => {
-        // jsdom shim — intentional no-op.
-      };
+      proto.scrollIntoView = () => {};
     }
   });
 
@@ -72,7 +69,6 @@ describe('CommandPaletteComponent', () => {
   });
 
   afterEach(() => {
-    // Close the CDK Dialog overlay so the next test starts with a clean DOM.
     ui.closePalette();
     fixture.detectChanges();
   });
@@ -103,7 +99,6 @@ describe('CommandPaletteComponent', () => {
       fixture.detectChanges();
       const inner = q('[data-testid="command-palette"]') as HTMLElement;
       inner.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      // Clicks inside the overlay panel must not bubble to the backdrop.
       expect(ui.paletteOpen()).toBe(true);
     });
   });
@@ -139,7 +134,6 @@ describe('CommandPaletteComponent', () => {
     it('renders dynamic projects section excluding the active project', () => {
       const section = q('[data-testid="palette-section-projects"]');
       expect(section).not.toBeNull();
-      // Active project ("speedwave") should be excluded.
       expect(q('[data-testid="palette-item-project-speedwave"]')).toBeNull();
       expect(q('[data-testid="palette-item-project-speedwave-plugins"]')).not.toBeNull();
       expect(q('[data-testid="palette-item-project-experiments"]')).not.toBeNull();
@@ -165,7 +159,6 @@ describe('CommandPaletteComponent', () => {
       input.value = 'SETT';
       input.dispatchEvent(new Event('input'));
       fixture.detectChanges();
-      // Only the settings nav row should remain (label: "go to settings").
       expect(q('[data-testid="palette-item-nav-settings"]')).not.toBeNull();
       expect(q('[data-testid="palette-item-nav-chat"]')).toBeNull();
     });
@@ -179,7 +172,6 @@ describe('CommandPaletteComponent', () => {
     });
 
     it('resets the active index on filter change', () => {
-      // Move the active index forward, then narrow the list.
       component.activeIndex.set(4);
       const input = q('[data-testid="palette-input"]') as HTMLInputElement;
       input.value = 'sett';
@@ -212,7 +204,6 @@ describe('CommandPaletteComponent', () => {
 
     it('enter invokes the active item', async () => {
       const input = q('[data-testid="palette-input"]') as HTMLInputElement;
-      // Active "go to settings" (index 3 in the navigate section).
       component.activeIndex.set(3);
       const navSpy = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));

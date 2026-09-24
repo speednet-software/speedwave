@@ -102,7 +102,6 @@ mod tests {
         assert_eq!(peeked.text, "hello");
         assert_eq!(peeked.queued_at, 1);
 
-        // Peek must NOT drain the slot.
         assert!(svc.peek("s1").is_some());
         assert_eq!(svc.stats().occupied_slots, 1);
     }
@@ -120,7 +119,6 @@ mod tests {
         assert_eq!(now.text, "second");
         assert_eq!(now.queued_at, 2);
 
-        // Still one slot — never grows into a FIFO.
         assert_eq!(svc.stats().occupied_slots, 1);
     }
 
@@ -173,7 +171,6 @@ mod tests {
 
     #[test]
     fn empty_text_is_a_valid_queued_message() {
-        // Slot is opaque storage; the queue round-trips any payload.
         let svc = QueuedMessageService::new();
         svc.queue("s1", msg("", 0));
         let drained = svc.take("s1").unwrap();
@@ -190,7 +187,6 @@ mod tests {
 
     #[test]
     fn concurrent_queue_and_take_is_safe() {
-        // Producers and consumers race; slot count stays at most 1, no panic.
         const PRODUCERS: usize = 4;
         const CONSUMERS: usize = 4;
         const ITERS: usize = 1_000;
@@ -218,7 +214,6 @@ mod tests {
             h.join().expect("worker panicked");
         }
 
-        // Drain whatever survived; one-slot invariant still holds.
         let _final = svc.take("hot-session");
         assert!(svc.peek("hot-session").is_none());
         assert_eq!(svc.stats().occupied_slots, 0);

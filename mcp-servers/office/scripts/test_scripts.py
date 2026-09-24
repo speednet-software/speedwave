@@ -21,7 +21,6 @@ import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
-# Skip the whole module unless every library a script uses is importable.
 for _mod in ("docx", "openpyxl", "pptx", "pypdf", "matplotlib"):
     pytest.importorskip(_mod, reason=f"office Python dependency '{_mod}' not installed")
 
@@ -54,6 +53,25 @@ def _matplotlib_renders() -> bool:
 MATPLOTLIB_OK = _matplotlib_renders()
 needs_matplotlib = pytest.mark.skipif(
     not MATPLOTLIB_OK, reason="matplotlib cannot render on this interpreter (too-new Python for the pinned matplotlib)"
+)
+
+
+def _weasyprint_loads() -> bool:
+    """WeasyPrint dlopens pango/harfbuzz/fontconfig through cffi, raising OSError, not ImportError."""
+    import contextlib
+    import io
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            import weasyprint  # noqa: F401
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+WEASYPRINT_OK = _weasyprint_loads()
+needs_weasyprint = pytest.mark.skipif(
+    not WEASYPRINT_OK, reason="weasyprint cannot load its native libraries (pango/harfbuzz/fontconfig)"
 )
 
 
@@ -203,7 +221,6 @@ def is_pdf(path: Path) -> bool:
     return path.read_bytes()[:5] == b"%PDF-"
 
 
-# ── docx_build.py ────────────────────────────────────────────────────────────
 
 
 def test_docx_create_all_element_types(tmp_path: Path) -> None:
@@ -341,7 +358,6 @@ def test_docx_replace_text_zero_matches_when_present_only_in_a_table_cell_is_a_r
     assert any("replaced" in t for t in cell_texts)
 
 
-# ── xlsx_build.py ────────────────────────────────────────────────────────────
 
 
 def test_xlsx_create_with_chart_and_freeze(tmp_path: Path) -> None:
@@ -431,7 +447,6 @@ def test_xlsx_unknown_sheet_name_is_a_teaching_error_via_add_chart(tmp_path: Pat
     assert "['Q1']" in result["error"]
 
 
-# ── pptx_build.py ────────────────────────────────────────────────────────────
 
 
 def test_pptx_create_bullets_and_chart(tmp_path: Path) -> None:
@@ -477,7 +492,6 @@ def test_pptx_errors(tmp_path: Path) -> None:
     run_script_expect_fail("pptx_build.py", "edit", str(src), str(out), json.dumps([{"op": "delete_slide", "index": 99}]))
 
 
-# ── render_chart.py ──────────────────────────────────────────────────────────
 
 
 @needs_matplotlib
@@ -492,8 +506,7 @@ def test_render_chart_png(tmp_path: Path, ctype: str) -> None:
     run_script("render_chart.py", str(out), json.dumps(spec))
     data = out.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    assert len(data) > 100  # a complete (atomically-written) PNG, not a truncated one
-    # No `.tmp-<uuid>` sibling left behind by atomic_save.
+    assert len(data) > 100
     assert not list(tmp_path.glob(f"{ctype}.png.tmp-*"))
 
 
@@ -510,13 +523,11 @@ def test_render_chart_svg_and_multiseries(tmp_path: Path) -> None:
 
 
 def test_render_chart_errors(tmp_path: Path) -> None:
-    # Validation happens before matplotlib is touched, so these run on any interpreter.
     out = tmp_path / "x.png"
     run_script_expect_fail("render_chart.py", str(out), json.dumps({"type": "donut", "data": {"labels": ["A"], "series": [{"name": "s", "values": [1]}]}}))
     run_script_expect_fail("render_chart.py", str(out), json.dumps({"type": "bar", "data": {"labels": ["A", "B"], "series": [{"name": "s", "values": [1]}]}}))
 
 
-# ── pdf_ops.py ───────────────────────────────────────────────────────────────
 
 
 def test_pdf_metadata_merge_split_rotate(tmp_path: Path) -> None:
@@ -527,8 +538,6 @@ def test_pdf_metadata_merge_split_rotate(tmp_path: Path) -> None:
     meta = run_script("pdf_ops.py", "metadata", str(a))["metadata"]
     assert meta["pages"] == 3
     assert meta["encrypted"] is False
-    # A blank PDF with no title/author/creator set reports null (not "" or a missing key);
-    # pypdf stamps its own /Producer when writing, so that field alone is non-null here.
     for key in ("title", "author", "creator"):
         assert meta[key] is None
 
@@ -557,7 +566,6 @@ def test_pdf_watermark_and_fillform(tmp_path: Path) -> None:
     assert res["pages"] == 2
     assert is_pdf(out)
 
-    # fillform on a PDF with no AcroForm fields is a no-op per page but still succeeds.
     filled = tmp_path / "filled.pdf"
     res = run_script("pdf_ops.py", "fillform", str(doc), str(filled), "1", json.dumps({"name": "Ada"}))
     assert is_pdf(filled)
@@ -599,7 +607,6 @@ def test_pdf_fillform_genuine_write_failure_on_a_matching_page_is_not_silently_a
     )
     assert "applicant_name" in result["error"]
     assert "KeyError" in result["error"]
-    # Must not be misreported as the unrelated "no fields on this page" case.
     assert "no AcroForm fields found" not in result["error"]
     assert not out.exists()
 
@@ -644,9 +651,9 @@ def test_pdf_errors(tmp_path: Path) -> None:
     p = tmp_path / "p.pdf"
     _make_pdf(p, 2)
     out = tmp_path / "x.pdf"
-    run_script_expect_fail("pdf_ops.py", "merge", str(out), str(p))  # needs ≥2
-    run_script_expect_fail("pdf_ops.py", "split", str(p), str(out), "1", "99")  # out of range
-    run_script_expect_fail("pdf_ops.py", "rotate", str(p), str(out), "45", "1")  # bad degrees
+    run_script_expect_fail("pdf_ops.py", "merge", str(out), str(p))
+    run_script_expect_fail("pdf_ops.py", "split", str(p), str(out), "1", "99")
+    run_script_expect_fail("pdf_ops.py", "rotate", str(p), str(out), "45", "1")
     run_script_expect_fail("pdf_ops.py", "bogus")
 
 
@@ -679,7 +686,6 @@ def test_pdf_fillform_non_pdf_input_is_a_teaching_error(tmp_path: Path) -> None:
     assert "valid, non-corrupted PDF" in result["error"]
 
 
-# ── python_docx_extract.py ───────────────────────────────────────────────────
 
 
 def test_python_docx_extract(tmp_path: Path) -> None:
@@ -698,21 +704,18 @@ def test_python_docx_extract(tmp_path: Path) -> None:
 
 
 def test_python_docx_extract_usage_error(tmp_path: Path) -> None:
-    run_script_expect_fail("python_docx_extract.py")  # missing arg
+    run_script_expect_fail("python_docx_extract.py")
 
 
-# ── weasyprint_render.py ─────────────────────────────────────────────────────
 
 
 def test_weasyprint_render_usage_error(tmp_path: Path) -> None:
-    # Usage validation runs before weasyprint is imported, so this works on any interpreter.
-    run_script_expect_fail("weasyprint_render.py")  # no args
+    run_script_expect_fail("weasyprint_render.py")
     run_script_expect_fail("weasyprint_render.py", "only-one-arg")
 
 
-@needs_matplotlib  # weasyprint and matplotlib share the cairo/pango stack; if matplotlib renders, weasyprint can too
+@needs_weasyprint
 def test_weasyprint_render_html_to_pdf(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     src.write_text("<html><head><style>@page{size:A4;margin:18mm}</style></head><body><h1>Hi</h1></body></html>")
     dst = tmp_path / "out.pdf"
@@ -720,19 +723,17 @@ def test_weasyprint_render_html_to_pdf(tmp_path: Path) -> None:
     assert is_pdf(dst)
 
 
-@needs_matplotlib
+@needs_weasyprint
 def test_weasyprint_render_rejects_remote_resource(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     src.write_text('<html><body><img src="https://example.com/x.png"></body></html>')
     dst = tmp_path / "out.pdf"
-    # WeasyPrint surfaces the url_fetcher ValueError → the script exits non-zero.
     run_script_expect_fail("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+    assert not dst.exists(), "a rejected render must not leave an output PDF"
 
 
-@needs_matplotlib
+@needs_weasyprint
 def test_weasyprint_render_ignores_presentational_hint_background(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     src.write_text('<html><body background="http://presentational-hint.invalid/bg.png">hi</body></html>')
     dst = tmp_path / "out.pdf"
@@ -740,9 +741,8 @@ def test_weasyprint_render_ignores_presentational_hint_background(tmp_path: Path
     assert is_pdf(dst)
 
 
-@needs_matplotlib
+@needs_weasyprint
 def test_weasyprint_render_ignores_presentational_hint_css_injection(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     payload = "x);}body{background-image:url(http://presentational-hint.invalid/leak)}"
     src.write_text(f'<html><body background="{payload}">hi</body></html>')

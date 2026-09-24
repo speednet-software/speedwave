@@ -6,7 +6,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import { createMCPServer } from '@speedwave/mcp-shared';
 
-// ── fs mock ────────────────────────────────────────────────────────────────
 const readFileMock = vi.fn();
 vi.mock('node:fs', () => ({
   promises: {
@@ -14,7 +13,6 @@ vi.mock('node:fs', () => ({
   },
 }));
 
-// Imported after the mock is registered.
 import { normalizeSiteUrl, readCredentials } from './auth.js';
 
 /** Build an fs.readFile mock that resolves files from a map and ENOENTs the rest. */
@@ -184,6 +182,7 @@ describe('atlassian auth enforcement (process exit)', () => {
 describe('atlassian middleware wiring', () => {
   let server: http.Server | undefined;
   let port: number;
+  const LOOPBACK = '127.0.0.1';
 
   function request(opts: {
     path: string;
@@ -192,14 +191,18 @@ describe('atlassian middleware wiring', () => {
     body?: string;
   }): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Request timeout')), 5000);
+      const timeout = setTimeout(() => {
+        reject(new Error('Request timeout'));
+        req.destroy();
+      }, 5000);
       const req = http.request(
         {
-          hostname: '127.0.0.1',
+          hostname: LOOPBACK,
           port,
           path: opts.path,
           method: opts.method || 'GET',
           headers: opts.headers || {},
+          agent: false,
         },
         (res) => {
           let data = '';
@@ -227,12 +230,17 @@ describe('atlassian middleware wiring', () => {
   });
 
   async function listen(mcp: ReturnType<typeof createMCPServer>): Promise<void> {
-    await new Promise<void>((resolve) => {
-      server = mcp.app.listen(0, () => {
+    await new Promise<void>((resolve, reject) => {
+      server = mcp.app.listen(0, LOOPBACK, () => {
         const addr = server!.address();
-        if (addr && typeof addr === 'object') port = addr.port;
+        if (!addr || typeof addr !== 'object' || addr.address !== LOOPBACK) {
+          reject(new Error(`test server bound to ${JSON.stringify(addr)}, not ${LOOPBACK}`));
+          return;
+        }
+        port = addr.port;
         resolve();
       });
+      server.on('error', reject);
     });
   }
 

@@ -1,6 +1,3 @@
-// GitHub OAuth App Device Flow. No refresh token — only access_token in the
-// worker-mounted token dir. State machine in `oauth_flow`.
-
 use crate::oauth_flow::{
     self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
     PollStep, ProgressStatus,
@@ -14,8 +11,6 @@ use tokio_util::sync::CancellationToken;
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const PROGRESS_EVENT: &str = "github_oauth_progress";
-
-// ── Serde DTOs — GitHub OAuth App device flow responses ─────────────────────
 
 #[derive(Deserialize)]
 struct GhDeviceCodeResponse {
@@ -77,7 +72,6 @@ fn classify_github_response(status: u16, bytes: &[u8]) -> Result<(), oauth_flow:
 fn map_github_error(code: &str) -> Option<&'static str> {
     match code {
         "authorization_pending" | "slow_down" => None,
-        // Canonical wording shared with the deadline path + SharePoint.
         "expired_token" => Some(oauth_flow::DEVICE_CODE_EXPIRED_MSG),
         "access_denied" => Some("Authorization was denied."),
         "incorrect_device_code" => Some("Internal error: device code rejected by GitHub."),
@@ -107,7 +101,6 @@ impl DeviceCodeProvider for GithubProvider {
             .append_pair("device_code", &self.device_code)
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
             .finish();
-        // GitHub: must send `Accept: application/json` or response is form-encoded.
         client
             .post(TOKEN_URL)
             .header("Accept", "application/json")
@@ -120,7 +113,6 @@ impl DeviceCodeProvider for GithubProvider {
         http_status: reqwest::StatusCode,
         body_bytes: &[u8],
     ) -> PollStep {
-        // GitHub returns 200 for both success and polling errors.
         match classify_github_response(http_status.as_u16(), body_bytes) {
             Ok(()) => {
                 let tokens: GhTokenResponse = match serde_json::from_slice(body_bytes) {
@@ -145,8 +137,6 @@ impl DeviceCodeProvider for GithubProvider {
     }
 }
 
-// ── Tauri commands ───────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn start_github_oauth(
     project: String,
@@ -158,7 +148,6 @@ pub async fn start_github_oauth(
     let cancel_token = CancellationToken::new();
     let my_generation = FLOW_STATE.install(request_id.clone(), cancel_token.clone());
 
-    // GitHub: must send `Accept: application/json` or response is form-encoded.
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", GITHUB_OAUTH_CLIENT_ID)
         .append_pair("scope", GITHUB_OAUTH_SCOPES)
@@ -354,8 +343,6 @@ mod tests {
         assert!(m.to_lowercase().contains("unexpected"));
     }
 
-    // -- GithubProvider::handle_token_response classification --
-
     fn provider() -> GithubProvider {
         provider_in(std::env::temp_dir())
     }
@@ -437,8 +424,6 @@ mod tests {
             speedwave_runtime::plugin::token_dir_in(tmp.path(), "p", "github").join("token");
         assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "gho_secret");
     }
-
-    // -- classify_github_response: poll-loop mechanics --
 
     #[test]
     fn classify_accepts_success_body() {

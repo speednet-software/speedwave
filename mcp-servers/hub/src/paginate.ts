@@ -3,8 +3,6 @@
  * @module paginate
  */
 
-// ── Types ───────────────────────────────────────────────────────────────────────────────────
-
 /**
  * Configuration options for pagination
  */
@@ -41,10 +39,12 @@ export interface PageResult<T> {
  * Common response shapes from MCP workers
  */
 type PaginatedResponse<T> = {
+  ids?: T[];
   /** Redmine issues */
   issues?: T[];
   /** Redmine time entries */
   time_entries?: T[];
+  versions?: T[];
   /** Redmine/GitLab projects */
   projects?: T[];
   /** GitLab merge requests */
@@ -69,8 +69,6 @@ type PaginatedResponse<T> = {
   [key: string]: unknown;
 };
 
-// ── Main Pagination Generator ──────────────────────────────────────────────────────────────
-
 /**
  * Create an async generator that yields a PageResult<T> for each page of a paginated API call.
  * @param fetcher - Function that fetches a page given offset and limit
@@ -93,7 +91,6 @@ export async function* paginate<T>(
     const currentLimit = Math.min(limit, maxItems - totalFetched);
     const result = await fetcher(offset, currentLimit);
 
-    // Extract items from common response shapes
     const items = extractItems<T>(result);
     const totalCount = result.total_count as number | undefined;
 
@@ -104,7 +101,6 @@ export async function* paginate<T>(
     totalFetched += items.length;
     pageNumber++;
 
-    // Determine if more pages exist
     const hasMore =
       totalCount !== undefined ? offset + items.length < totalCount : items.length === currentLimit;
 
@@ -116,7 +112,6 @@ export async function* paginate<T>(
       hasMore,
     };
 
-    // Check stop condition
     if (config.stopWhen?.(items, pageNumber)) {
       break;
     }
@@ -129,41 +124,47 @@ export async function* paginate<T>(
   }
 }
 
+export const ITEM_KEYS = [
+  'ids',
+  'issues',
+  'time_entries',
+  'versions',
+  'projects',
+  'merge_requests',
+  'pipelines',
+  'messages',
+  'channels',
+  'files',
+  'results',
+  'items',
+] as const;
+
 /**
  * Extract the items array from various worker response shapes.
  * @param result - API response object
  * @returns Array of items extracted from response
  */
 function extractItems<T>(result: PaginatedResponse<T>): T[] {
-  // Try common keys in order of likelihood
-  const keys = [
-    'issues',
-    'time_entries',
-    'projects',
-    'merge_requests',
-    'pipelines',
-    'messages',
-    'channels',
-    'files',
-    'results',
-    'items',
-  ];
-
-  for (const key of keys) {
+  for (const key of ITEM_KEYS) {
     if (Array.isArray(result[key])) {
       return result[key] as T[];
     }
   }
 
-  // If result itself is an array, return it
   if (Array.isArray(result)) {
     return result as T[];
   }
 
+  const unrecognised = Object.keys(result).filter((key) => Array.isArray(result[key]));
+  if (unrecognised.length > 0) {
+    throw new Error(
+      `paginate(): page has arrays under unrecognised keys (${unrecognised.join(', ')}); ` +
+        `recognised keys: ${ITEM_KEYS.join(', ')}. Iterate the tool manually with offset/limit.`
+    );
+  }
+
   return [];
 }
-
-// ── Helper Functions ────────────────────────────────────────────────────────────────────────
 
 /**
  * Collect all pages into a single array.

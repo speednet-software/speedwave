@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use speedwave_runtime::bundle_test_support::HOST_BUILD_OUTPUT_DIRS;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -23,7 +25,11 @@ fn collect_image_files(root: &Path, out: &mut Vec<PathBuf>) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if path.is_dir() {
-            if name.starts_with('.') || name == "node_modules" || name == "dist" {
+            if name.starts_with('.')
+                || HOST_BUILD_OUTPUT_DIRS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(&name))
+            {
                 continue;
             }
             collect_image_files(&path, out);
@@ -100,8 +106,31 @@ fn logical_lines_joins_continuations() {
 #[test]
 fn logical_lines_handles_empty_and_trailing_continuation() {
     assert!(logical_lines("").is_empty());
-    // Trailing `\` on the last line must not drop the buffered content.
     let lines = logical_lines("RUN a \\");
     assert_eq!(lines.len(), 1);
     assert!(lines[0].1.contains("RUN a"));
+}
+
+#[test]
+fn collect_image_files_skips_host_build_output_dirs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let svc = tmp.path().join("svc");
+    for dir in HOST_BUILD_OUTPUT_DIRS {
+        std::fs::create_dir_all(svc.join(dir)).expect("create build-output dir");
+        std::fs::write(svc.join(dir).join("Containerfile"), "FROM x").expect("plant Containerfile");
+    }
+    std::fs::create_dir_all(tmp.path().join("upper").join("TARGET"))
+        .expect("create case-variant dir");
+    std::fs::write(
+        tmp.path()
+            .join("upper")
+            .join("TARGET")
+            .join("Containerfile"),
+        "FROM x",
+    )
+    .expect("plant case-variant Containerfile");
+    std::fs::write(svc.join("Containerfile"), "FROM x").expect("write Containerfile");
+    let mut files = Vec::new();
+    collect_image_files(tmp.path(), &mut files);
+    assert_eq!(files, vec![svc.join("Containerfile")]);
 }

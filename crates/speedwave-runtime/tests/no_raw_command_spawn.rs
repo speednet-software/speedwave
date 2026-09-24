@@ -43,25 +43,15 @@ const SPAWN_SSOT: &str = "crates/speedwave-runtime/src/binary.rs";
 /// Files that still spawn raw for legitimate reasons (interactive TTY, system probes, test-support
 /// runtimes) pending the spawn-SSOT migration; new entries need PR justification.
 const ALLOWLISTED_FILES: &[&str] = &[
-    // CLI self re-exec (`speedwave update`) — interactive, inherits the terminal.
     "crates/speedwave-cli/src/main.rs",
-    // macOS `sysctl hw.memsize` RAM probe (avoids an `unsafe` sysinfo call).
     "crates/speedwave-runtime/src/resources.rs",
-    // Unix `ps`/`kill` stale-process detection for host MCP workers.
     "crates/speedwave-runtime/src/host_mcp_process/stale.rs",
-    // Unix `kill -0` liveness probe for host MCP workers.
     "crates/speedwave-runtime/src/host_mcp_process/probe.rs",
-    // Interactive `wsl.exe` TTY session — needs a Windows console window.
     "crates/speedwave-runtime/src/runtime/wsl.rs",
-    // Interactive `ssh -t` into the Lima VM — needs a PTY.
     "crates/speedwave-runtime/src/runtime/lima.rs",
-    // Mock runtime (test-support): fabricates exec Commands for assertions.
     "crates/speedwave-runtime/src/runtime/mock_runtime.rs",
-    // macOS `open` to reveal a settings pane.
     "desktop/src-tauri/src/system_settings_cmd.rs",
-    // Launches the bundled CLI for an integration login flow.
     "desktop/src-tauri/src/integrations_cmd.rs",
-    // Interactive OAuth login: osascript / Windows Terminal / PowerShell.
     "desktop/src-tauri/src/oauth_login_cmd.rs",
 ];
 

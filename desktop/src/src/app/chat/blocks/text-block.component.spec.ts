@@ -18,7 +18,6 @@ describe('TextBlockComponent', () => {
     el = fixture.nativeElement as HTMLElement;
   });
 
-  // happy
   it('renders markdown content as HTML', () => {
     fixture.componentRef.setInput('content', '**bold text**');
     fixture.detectChanges();
@@ -42,7 +41,6 @@ describe('TextBlockComponent', () => {
     expect(el.textContent).toContain('Hello world');
   });
 
-  // ── security (DomSanitizer behavior locked in from dev) ──────────────────
   it('strips script tags via Angular DomSanitizer', () => {
     fixture.componentRef.setInput(
       'content',
@@ -69,12 +67,10 @@ describe('TextBlockComponent', () => {
     fixture.detectChanges();
 
     const href = el.querySelector('a')?.getAttribute('href') ?? '';
-    // Angular's HTML sanitizer rewrites javascript: to unsafe:javascript:, making it inert.
     expect(href).toBe('unsafe:javascript:alert(1)');
   });
 
   it('does NOT rewrite data: or vbscript: URLs — only javascript: is prefixed with unsafe:', () => {
-    // Angular's [innerHTML] URL sanitizer rewrites only javascript:; data: and vbscript: pass through unchanged.
     fixture.componentRef.setInput('content', '[d](data:text/html,x) [v](vbscript:MsgBox(1))');
     fixture.detectChanges();
 
@@ -85,7 +81,6 @@ describe('TextBlockComponent', () => {
 
   it('rendered() returns unsanitized HTML containing script tags', () => {
     fixture.componentRef.setInput('content', '<script>alert(1)</script>');
-    // The computed itself does not sanitize — sanitization happens at [innerHTML] binding time.
     expect(component.rendered()).toContain('<script>');
   });
 
@@ -97,7 +92,6 @@ describe('TextBlockComponent', () => {
     );
   });
 
-  // ── edge ──────────────────────────────────────────────────────────────────
   it('renders empty content without error', () => {
     fixture.componentRef.setInput('content', '');
     fixture.detectChanges();
@@ -123,14 +117,12 @@ describe('TextBlockComponent', () => {
     expect(el.querySelector('strong')?.textContent).toBe('ok');
   });
 
-  // ── error — malformed markdown should not throw ──────────────────────────
   it('renders malformed markdown without throwing', () => {
     fixture.componentRef.setInput('content', '```unbalanced\nno closing fence');
     expect(() => fixture.detectChanges()).not.toThrow();
     expect(el.querySelector('.prose-sw')).not.toBeNull();
   });
 
-  // ── state transitions — streaming caret on/off ───────────────────────────
   it('shows the streaming caret when streaming is true', () => {
     fixture.componentRef.setInput('content', 'partial');
     fixture.componentRef.setInput('streaming', true);
@@ -158,7 +150,6 @@ describe('TextBlockComponent', () => {
     expect(el.querySelector('[data-testid="streaming-caret"]')).toBeNull();
   });
 
-  // ── ARIA ─────────────────────────────────────────────────────────────────
   it('sets role="status" and aria-live="polite" on the host while streaming', () => {
     fixture.componentRef.setInput('content', 'streaming...');
     fixture.componentRef.setInput('streaming', true);

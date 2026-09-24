@@ -1,13 +1,14 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import type { MessageBlock } from '../../models/chat';
+import { ControlChipComponent } from '../blocks/control-chip.component';
 
-/** Renders text + image blocks; image is a placeholder pill (ADR-065). */
+/** Renders text + image + chip blocks; image is a placeholder pill (ADR-065). */
 @Component({
   selector: 'app-user-message',
+  imports: [ControlChipComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex justify-end' },
   template: `
-    <!-- Right-aligned bubble, max 80% column width. -->
     <div data-testid="user-message" class="max-w-[80%]">
       @if (editedAt() !== undefined) {
         <div
@@ -35,6 +36,9 @@ import type { MessageBlock } from '../../models/chat';
                 🖼 <span>{{ imageLabel(block) }}</span>
               </div>
             }
+            @case ('chip') {
+              <app-control-chip [command]="block.command" [argument]="block.argument" />
+            }
           }
         }
       </div>
@@ -47,7 +51,9 @@ export class UserMessageComponent {
   readonly timestamp = input(0);
 
   readonly renderBlocks = computed<readonly RenderableUserBlock[]>(() =>
-    this.blocks().filter((b): b is RenderableUserBlock => b.type === 'text' || b.type === 'image')
+    this.blocks().filter(
+      (b): b is RenderableUserBlock => b.type === 'text' || b.type === 'image' || b.type === 'chip'
+    )
   );
 
   readonly textBlocks = computed<readonly Extract<MessageBlock, { type: 'text' }>[]>(() =>
@@ -65,4 +71,4 @@ export class UserMessageComponent {
   }
 }
 
-type RenderableUserBlock = Extract<MessageBlock, { type: 'text' | 'image' }>;
+type RenderableUserBlock = Extract<MessageBlock, { type: 'text' | 'image' | 'chip' }>;

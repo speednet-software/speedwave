@@ -1,8 +1,8 @@
 //! Windows audio capture (ADR-056): system audio via the `wasapi` crate
 //! (cpal's loopback is unreliable — RustAudio/cpal#476), microphone via cpal.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,11 +13,9 @@ use super::audio::{
     CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
     SAMPLE_RATE_HZ,
 };
-use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
-
-/// How long the wasapi capture loop waits for the buffer-ready event before re-checking the stop
-/// flag — short enough for snappy teardown on silence, long enough to not busy-spin.
-const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+use super::mix::{
+    poll_paired_chunk, MixBuffer, MixSource, SingleStreamWatchdog, CHUNK_SAMPLES, KEEPALIVE_AFTER,
+};
 
 /// Channel depth for chunks in flight from the capture thread to the consumer — a few seconds of
 /// audio, enough to absorb a slow consumer without unbounded growth (a full channel drops chunks).
@@ -29,6 +27,52 @@ const CHANNEL_DEPTH: usize = 32;
 enum LoopbackRole {
     Console,
     Communications,
+}
+
+/// Counts chunks a full consumer channel forced the capture thread to drop, and latches the
+/// one-shot report — a silent hole in a recording is worse than a banner. Shared via `Arc`.
+#[derive(Clone, Default)]
+struct DropCounter(Arc<DropState>);
+
+#[derive(Default)]
+struct DropState {
+    count: AtomicU64,
+    reported: AtomicBool,
+}
+
+impl Drop for DropState {
+    fn drop(&mut self) {
+        let n = *self.count.get_mut();
+        if n > 0 {
+            log::info!(
+                target: "transcription::capture",
+                "capture stream closed with {n} dropped chunk(s) in total"
+            );
+        }
+    }
+}
+
+impl DropCounter {
+    fn record(&self) {
+        self.0.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.0.count.load(Ordering::Relaxed)
+    }
+
+    /// One-shot `AudioDropped` transition once any chunk has been lost.
+    fn take_health(&self) -> Option<CaptureHealth> {
+        let n = self.count();
+        if n == 0 || self.0.reported.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        log::warn!(
+            target: "transcription::capture",
+            "dropped {n} captured chunk(s) — the consumer could not keep up; that span is missing from the recording"
+        );
+        Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+    }
 }
 
 /// Windows capture backend. Stateless; `start()` opens a fresh cpal stream.
@@ -50,8 +94,6 @@ impl Default for WasapiAudioCapture {
 impl AudioCapture for WasapiAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
         let host = cpal::default_host();
-        // System audio is captured via wasapi (not cpal), but cpal's device enumeration is a
-        // reliable proxy for "is there a default render endpoint?" without opening a wasapi client.
         let has_output = host.default_output_device().is_some();
         let has_input = host.default_input_device().is_some();
         CaptureCapabilities {
@@ -64,14 +106,12 @@ impl AudioCapture for WasapiAudioCapture {
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
         let host = cpal::default_host();
         let mut sources = Vec::new();
-        // "Whole meeting" (system loopback + default mic) first — the product default.
         if host.default_output_device().is_some() && host.default_input_device().is_some() {
             sources.push(AudioSourceInfo {
                 source: AudioSource::Mixed { mic: None },
                 label: DEFAULT_MIXED_SOURCE_LABEL.to_string(),
             });
         }
-        // System loopback — the default output device's loopback.
         if let Some(dev) = host.default_output_device() {
             let label = device_name(&dev)
                 .map(|n| format!("System ({n})"))
@@ -81,13 +121,11 @@ impl AudioCapture for WasapiAudioCapture {
                 label,
             });
         } else {
-            // No output device — still offer the abstract SystemWide so the UI can error clearly.
             sources.push(AudioSourceInfo {
                 source: AudioSource::SystemWide,
                 label: "System (everything)".to_string(),
             });
         }
-        // Microphones — every input device cpal sees.
         if let Ok(inputs) = host.input_devices() {
             for dev in inputs {
                 let name = device_name(&dev).unwrap_or_else(|| "Unknown input".to_string());
@@ -105,13 +143,16 @@ impl AudioCapture for WasapiAudioCapture {
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError> {
         let host = cpal::default_host();
         match &source {
-            // System audio → wasapi loopback.
             AudioSource::SystemWide => {
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
+                let dropped = DropCounter::default();
                 let stop = Arc::new(AtomicBool::new(false));
                 let handle = spawn_wasapi_loopback(
                     LoopbackRole::Console,
-                    ResamplerSink::Channel(tx),
+                    ResamplerSink::Channel {
+                        tx,
+                        dropped: dropped.clone(),
+                    },
                     &stop,
                     std::time::Instant::now(),
                 )?;
@@ -120,25 +161,32 @@ impl AudioCapture for WasapiAudioCapture {
                     _handle: handle,
                     zero: ZeroStreakDetector::default(),
                     health: Vec::new(),
+                    dropped,
                 }))
             }
             AudioSource::Microphone { device } => {
                 let dev = resolve_mic(&host, device)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
-                let stream = open_capture_stream(&dev, ResamplerSink::Channel(tx))?;
+                let dropped = DropCounter::default();
+                let (stream, failed) = open_capture_stream(
+                    &dev,
+                    ResamplerSink::Channel {
+                        tx,
+                        dropped: dropped.clone(),
+                    },
+                )?;
                 Ok(Box::new(CpalAudioStream {
                     _streams: vec![stream],
                     rx,
+                    dropped,
+                    failed,
+                    watchdog: SingleStreamWatchdog::new(),
                 }))
             }
             AudioSource::Mixed { mic } => {
-                // System loopback (wasapi thread) + mic (cpal stream) sum into one shared
-                // MixBuffer; next_chunk pops mixed chunks.
                 let mic_dev = resolve_mic(&host, mic)?;
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));
                 let stop = Arc::new(AtomicBool::new(false));
-                // Both loopback threads push into the same MixSource::System slot — a shared
-                // epoch keeps their offsets coherent when only one side re-anchors.
                 let loopback_epoch = std::time::Instant::now();
                 let handle = spawn_wasapi_loopback(
                     LoopbackRole::Console,
@@ -149,8 +197,6 @@ impl AudioCapture for WasapiAudioCapture {
                     &stop,
                     loopback_epoch,
                 )?;
-                // Call audio renders to the Communications endpoint — capture it too (own stop
-                // flag: its init failure must not kill the console).
                 let comms_stop = Arc::new(AtomicBool::new(false));
                 let comms_handle = match spawn_wasapi_loopback(
                     LoopbackRole::Communications,
@@ -167,7 +213,7 @@ impl AudioCapture for WasapiAudioCapture {
                         None
                     }
                 };
-                let mic_stream = open_capture_stream(
+                let (mic_stream, _mic_failed) = open_capture_stream(
                     &mic_dev,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
@@ -186,16 +232,21 @@ impl AudioCapture for WasapiAudioCapture {
     }
 }
 
-/// Builds the cpal input stream for the given sample format, wiring its data
-/// callback to down-mix → resample → deliver chunks to `sink`.
+/// Builds the cpal input stream for the given sample format, wiring its data callback to
+/// down-mix → resample → deliver chunks to `sink`. The flag is raised by any cpal stream error.
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     mut resampler: Resampler,
     sink: ResamplerSink,
-) -> Result<cpal::Stream, CaptureError> {
-    let err_fn = |e| log::warn!(target: "transcription::capture", "wasapi stream error: {e}");
+) -> Result<(cpal::Stream, Arc<AtomicBool>), CaptureError> {
+    let failed = Arc::new(AtomicBool::new(false));
+    let err_flag = Arc::clone(&failed);
+    let err_fn = move |e| {
+        log::warn!(target: "transcription::capture", "wasapi stream error: {e}");
+        err_flag.store(true, Ordering::SeqCst);
+    };
     macro_rules! make {
         ($t:ty, $to_f32:expr) => {{
             let to_f32 = $to_f32;
@@ -220,15 +271,16 @@ fn build_stream(
             )));
         }
     };
-    stream.map_err(|e| CaptureError::Failed(format!("build input stream: {e}")))
+    let stream = stream.map_err(|e| CaptureError::Failed(format!("build input stream: {e}")))?;
+    Ok((stream, failed))
 }
 
-/// Opens a cpal capture stream on a microphone `device`, resampling to 16 kHz
-/// mono into `sink`. Returns the running `Stream` (dropping it stops capture).
+/// Opens a cpal capture stream on a microphone `device`, resampling to 16 kHz mono into `sink`.
+/// Returns the running `Stream` (dropping it stops capture) and its device-error flag.
 fn open_capture_stream(
     device: &cpal::Device,
     sink: ResamplerSink,
-) -> Result<cpal::Stream, CaptureError> {
+) -> Result<(cpal::Stream, Arc<AtomicBool>), CaptureError> {
     let supported = device
         .default_input_config()
         .map_err(|e| CaptureError::Failed(format!("default input config: {e}")))?;
@@ -237,11 +289,11 @@ fn open_capture_stream(
     let src_channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.into();
     let resampler = Resampler::new(src_rate, src_channels);
-    let stream = build_stream(device, &config, sample_format, resampler, sink)?;
+    let (stream, failed) = build_stream(device, &config, sample_format, resampler, sink)?;
     stream
         .play()
         .map_err(|e| CaptureError::Failed(format!("start stream: {e}")))?;
-    Ok(stream)
+    Ok((stream, failed))
 }
 
 /// Resolves a mic device name (`None` = default input) to a cpal input device.
@@ -296,7 +348,6 @@ fn spawn_wasapi_loopback(
     stop: &Arc<AtomicBool>,
     epoch: std::time::Instant,
 ) -> Result<WasapiCaptureHandle, CaptureError> {
-    // COM objects are apartment-bound, so the capture thread creates them.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let stop_thread = Arc::clone(stop);
     let failed = Arc::new(AtomicBool::new(false));
@@ -307,7 +358,6 @@ fn spawn_wasapi_loopback(
             run_wasapi_loopback(role, sink, &stop_thread, &failed_thread, ready_tx, epoch);
         })
         .map_err(|e| CaptureError::Failed(format!("spawn wasapi capture thread: {e}")))?;
-    // Wait for the thread's setup result (bounded — a wedged COM init shouldn't hang start()).
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => Ok(WasapiCaptureHandle {
             stop: Arc::clone(stop),
@@ -343,7 +393,6 @@ fn run_wasapi_loopback(
     use std::collections::VecDeque;
     use wasapi::{DeviceEnumerator, Direction, Role, SampleType, StreamMode};
 
-    // COM must be initialised on the capturing thread (MTA, not bound to a UI message pump).
     if let Err(e) = wasapi::initialize_mta().ok() {
         let _ = ready.send(Err(format!("CoInitializeEx(MTA): {e:?}")));
         return;
@@ -356,8 +405,6 @@ fn run_wasapi_loopback(
             return;
         }
     };
-    // System loopback captures the default *render* endpoint in loopback mode. Communications
-    // only gets its own capture when it's a physically different endpoint (else it doubles audio).
     let wanted_role = match role {
         LoopbackRole::Console => Role::Console,
         LoopbackRole::Communications => Role::Communications,
@@ -370,7 +417,6 @@ fn run_wasapi_loopback(
         }
     };
     if role == LoopbackRole::Communications {
-        // Fail toward `same` — a duplicate capture would double the audio.
         let same = match (
             enumerator.get_default_device_for_role(&Direction::Render, &Role::Console),
             device.get_id(),
@@ -384,7 +430,6 @@ fn run_wasapi_loopback(
             }
         };
         if same {
-            // One endpoint serves both roles — the console capture covers it.
             let _ = ready.send(Ok(()));
             wasapi::deinitialize();
             return;
@@ -402,7 +447,6 @@ fn run_wasapi_loopback(
         }
     };
 
-    // The device mix format is authoritative.
     let format = match client.get_mixformat() {
         Ok(f) => f,
         Err(e) => {
@@ -415,7 +459,6 @@ fn run_wasapi_loopback(
     let block_align = format.get_blockalign() as usize;
     let bytes_per_sample = block_align / src_channels.max(1);
     let is_float = matches!(format.get_subformat(), Ok(SampleType::Float));
-    // Fixed per session — warn once here (not per buffer) if undecodable (e.g. 24-bit int).
     if !matches!(
         (is_float, bytes_per_sample),
         (true, 4) | (false, 2) | (false, 4)
@@ -423,7 +466,6 @@ fn run_wasapi_loopback(
         log::warn!(target: "transcription::capture", "unsupported WASAPI format (float={is_float}, bps={bytes_per_sample}) — recording will be silent");
     }
 
-    // Loopback always captures in shared, event-driven mode; `autoconvert` lets WASAPI resample.
     if let Err(e) = client.initialize_client(
         &format,
         &Direction::Capture,
@@ -454,17 +496,13 @@ fn run_wasapi_loopback(
         return;
     }
 
-    // Setup OK — let start() return.
     let _ = ready.send(Ok(()));
 
-    // Anchored: a loopback endpoint delivers nothing while idle, so stream position alone
-    // would misplace audio starting mid-recording.
     let mut resampler = Resampler::new(src_rate, src_channels).anchored_at(epoch);
     let mut queue: VecDeque<u8> = VecDeque::new();
-    let timeout_ms = WASAPI_POLL_TIMEOUT.as_millis() as u32;
+    let timeout_ms = KEEPALIVE_AFTER.as_millis() as u32;
 
     while !stop.load(Ordering::SeqCst) {
-        // Wait for the buffer-ready event, but time out so `stop` gets re-checked on silence.
         if event.wait_for_event(timeout_ms).is_err() {
             continue;
         }
@@ -491,7 +529,6 @@ fn decode_pcm_to_f32(raw: &[u8], bytes_per_sample: usize, is_float: bool) -> Vec
     if bytes_per_sample == 0 {
         return Vec::new();
     }
-    // An unsupported format (logged once/session by the caller) decodes to silence (wildcard arm).
     let n = raw.len() / bytes_per_sample;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -527,8 +564,13 @@ fn run_wasapi_loopback(
 /// Where a resampler delivers its 16 kHz mono output: a channel to a single-stream consumer, or
 /// a shared `MixBuffer` (mixed capture — two streams push as `source`, the buffer sums them).
 enum ResamplerSink {
-    /// Single-stream: push `AudioChunk`s, dropping on a full channel.
-    Channel(SyncSender<AudioChunk>),
+    /// Single-stream: push `AudioChunk`s, counting the ones a full channel forced us to drop.
+    Channel {
+        /// The consumer channel.
+        tx: SyncSender<AudioChunk>,
+        /// Shared with the owning stream, which turns a loss into a one-shot warning.
+        dropped: DropCounter,
+    },
     /// Mixed: push into the shared buffer tagged with which stream this is.
     Mixed {
         /// The buffer both streams write into.
@@ -539,16 +581,29 @@ enum ResamplerSink {
 }
 
 impl ResamplerSink {
+    /// A single-stream sink whose drop counter nobody watches — test-only.
+    #[cfg(test)]
+    fn channel(tx: SyncSender<AudioChunk>) -> Self {
+        Self::Channel {
+            tx,
+            dropped: DropCounter::default(),
+        }
+    }
+
     /// Delivers one completed chunk: `samples` start at `offset_ns` from start.
     fn deliver(&self, samples: Vec<f32>, offset_ns: u64) {
         match self {
-            ResamplerSink::Channel(tx) => {
-                // try_send: never block the cpal callback — a full channel drops, not glitches.
-                let _ = tx.try_send(AudioChunk {
-                    samples,
-                    mic: None,
-                    offset: Duration::from_nanos(offset_ns),
-                });
+            ResamplerSink::Channel { tx, dropped } => {
+                if tx
+                    .try_send(AudioChunk {
+                        samples,
+                        mic: None,
+                        offset: Duration::from_nanos(offset_ns),
+                    })
+                    .is_err()
+                {
+                    dropped.record();
+                }
             }
             ResamplerSink::Mixed { buf, source } => {
                 if let Ok(mut b) = buf.lock() {
@@ -599,7 +654,8 @@ impl Resampler {
     }
 
     /// Anchors chunk offsets to wall clock so audio starting mid-recording lands at the right
-    /// session position (see `REANCHOR_GAP_NS`).
+    /// session position (see `REANCHOR_GAP_NS`). Production anchors via `anchored_at`.
+    #[cfg(test)]
     fn anchored(self) -> Self {
         self.anchored_at(std::time::Instant::now())
     }
@@ -616,7 +672,6 @@ impl Resampler {
         if interleaved.is_empty() {
             return;
         }
-        // Step in source-sample units per output sample.
         let step = self.src_rate as f64 / SAMPLE_RATE_HZ as f64;
         let want = CHUNK_SAMPLES;
         let channels = self.channels;
@@ -624,7 +679,6 @@ impl Resampler {
         if nmono == 0 {
             return;
         }
-        // Mono down-mix via averaging; a free fn so it doesn't borrow `self` (feed needs &mut).
         fn mono(buf: &[f32], channels: usize, i: usize) -> f32 {
             let base = i * channels;
             let mut acc = 0.0f32;
@@ -634,8 +688,6 @@ impl Resampler {
             acc / channels as f32
         }
 
-        // `pos` is measured from the start of *this* buffer; interpolation at pos < 0 uses
-        // `self.last` (the previous buffer's final sample).
         while self.pos < nmono as f64 {
             let idx = self.pos.floor() as isize;
             let frac = (self.pos - self.pos.floor()) as f32;
@@ -647,7 +699,6 @@ impl Resampler {
             let b = if (idx + 1) < nmono as isize {
                 mono(interleaved, channels, (idx + 1) as usize)
             } else {
-                // Need the first sample of the next buffer; approximate with the current one.
                 mono(
                     interleaved,
                     channels,
@@ -662,7 +713,6 @@ impl Resampler {
             }
             self.pos += step;
         }
-        // Carry state across buffers: shift `pos` back by the length, keep the last sample.
         self.pos -= nmono as f64;
         self.last = mono(interleaved, channels, nmono - 1);
     }
@@ -674,18 +724,13 @@ impl Resampler {
         }
         let samples = std::mem::take(&mut self.out);
         let n = samples.len() as u64;
-        // `emitted` is incremented before each push (≥ n normally); `saturating_sub` guards a
-        // directly-poked `out` (tests) from underflowing.
         let mut offset_ns = self.emitted.saturating_sub(n) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
         if let Some(epoch) = self.anchor {
             let elapsed_ns = epoch.elapsed().as_nanos() as u64;
             let chunk_ns = n * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
             let stream_end_ns = self.base_ns + offset_ns + chunk_ns;
-            // Signed: catches both an idle gap (stream behind wall clock) and sustained
-            // positive device-clock drift (stream creeping ahead of wall clock).
             let drift_ns = elapsed_ns as i64 - stream_end_ns as i64;
             if drift_ns.unsigned_abs() > REANCHOR_GAP_NS {
-                // Realign so this chunk ends "now".
                 self.base_ns = elapsed_ns.saturating_sub(chunk_ns + offset_ns);
             }
             offset_ns += self.base_ns;
@@ -701,15 +746,35 @@ struct CpalAudioStream {
     /// Held to keep the stream(s) alive (one for system or mic capture).
     _streams: Vec<cpal::Stream>,
     rx: Receiver<AudioChunk>,
+    /// Chunks a full channel forced the callback to drop (carries the one-shot report latch).
+    dropped: DropCounter,
+    /// Raised by any cpal stream error, recoverable xruns included — so it only decides *why*
+    /// `rx` disconnected, never whether a still-delivering stream is healthy.
+    failed: Arc<AtomicBool>,
+    /// Liveness deadline running from stream open, so a mic that never delivers gives up too.
+    watchdog: SingleStreamWatchdog,
 }
 
 impl AudioStream for CpalAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // Block for the next chunk; a disconnected channel = stream dropped/callback stopped (EOF).
-        match self.rx.recv() {
-            Ok(chunk) => Ok(Some(chunk)),
-            Err(_) => Ok(None),
+        match self.rx.recv_timeout(KEEPALIVE_AFTER) {
+            Ok(chunk) => {
+                self.watchdog.delivered();
+                Ok(Some(chunk))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.watchdog.check()?;
+                Ok(Some(AudioChunk::keepalive()))
+            }
+            Err(RecvTimeoutError::Disconnected) if self.failed.load(Ordering::SeqCst) => Err(
+                CaptureError::Failed("microphone capture stopped on a device error".to_string()),
+            ),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
+    }
+
+    fn take_health(&mut self) -> Vec<CaptureHealth> {
+        self.dropped.take_health().into_iter().collect()
     }
 }
 
@@ -722,27 +787,31 @@ struct WasapiLoopbackStream {
     /// Flags a capture that has been digital silence since start.
     zero: ZeroStreakDetector,
     health: Vec<CaptureHealth>,
+    /// Chunks a full channel forced the capture thread to drop (carries the report latch).
+    dropped: DropCounter,
 }
 
 impl AudioStream for WasapiLoopbackStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // `recv` blocks until a chunk or the sender drops; a disconnect after an abort is an error.
-        match self.rx.recv() {
+        match self.rx.recv_timeout(KEEPALIVE_AFTER) {
             Ok(chunk) => {
                 if let Some(t) = self.zero.feed(&chunk.samples) {
                     self.health.push(t);
                 }
                 Ok(Some(chunk))
             }
-            Err(_) if self._handle.aborted() => Err(CaptureError::Failed(
-                "wasapi capture stopped on a device-read error".to_string(),
-            )),
-            Err(_) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
+            Err(RecvTimeoutError::Disconnected) if self._handle.aborted() => Err(
+                CaptureError::Failed("wasapi capture stopped on a device-read error".to_string()),
+            ),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
 
     fn take_health(&mut self) -> Vec<CaptureHealth> {
-        std::mem::take(&mut self.health)
+        let mut health = std::mem::take(&mut self.health);
+        health.extend(self.dropped.take_health());
+        health
     }
 }
 
@@ -775,8 +844,6 @@ impl MixedWasapiAudioStream {
 
 impl AudioStream for MixedWasapiAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // A wasapi-thread device-read abort surfaces as an error, not a quietly truncated
-        // "complete" recording. Re-check after a poll stall for the precise abort message.
         if self.aborted() {
             return Err(Self::abort_err());
         }
@@ -793,8 +860,6 @@ impl AudioStream for MixedWasapiAudioStream {
             .lock()
             .map(|mut b| b.take_health())
             .unwrap_or_default();
-        // A dead comms capture loses call audio while the console side keeps the mix flowing —
-        // MixBuffer can't see it, so report it here.
         if !self.comms_abort_reported && self.comms_handle.as_ref().is_some_and(|h| h.aborted()) {
             self.comms_abort_reported = true;
             health.push(CaptureHealth::Raised(CaptureWarning::SystemAudioStalled));
@@ -805,7 +870,6 @@ impl AudioStream for MixedWasapiAudioStream {
 
 impl Drop for MixedWasapiAudioStream {
     fn drop(&mut self) {
-        // Stop wasapi threads first (cpal stream stops when `_mic` drops), then finish the buffer.
         self.handle.take();
         self.comms_handle.take();
         if let Ok(mut b) = self.buf.lock() {
@@ -822,7 +886,6 @@ mod tests {
 
     #[test]
     fn decode_pcm_handles_float_and_int_formats() {
-        // 32-bit float round-trips bit-exact.
         let f = [1.0f32, -0.5];
         let mut bytes = Vec::new();
         for s in f {
@@ -832,7 +895,6 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!((got[0] - 1.0).abs() < 1e-6);
         assert!((got[1] + 0.5).abs() < 1e-6);
-        // 16-bit int: full-scale maps to ~1.0.
         let i = [i16::MAX, 0, i16::MIN];
         let mut ib = Vec::new();
         for s in i {
@@ -843,8 +905,76 @@ mod tests {
         assert!((gi[0] - 1.0).abs() < 1e-3);
         assert!(gi[1].abs() < 1e-6);
         assert!((gi[2] + 1.0).abs() < 1e-3);
-        // Zero bytes-per-sample is a safe no-op.
         assert!(decode_pcm_to_f32(&[0, 1, 2, 3], 0, true).is_empty());
+    }
+
+    use super::super::mix::SINGLE_STREAM_GIVE_UP;
+
+    /// A mic stream with nothing queued, its liveness deadline wound back by `age`.
+    fn idle_mic_stream(age: Duration, failed: bool) -> (SyncSender<AudioChunk>, CpalAudioStream) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
+        let mut watchdog = SingleStreamWatchdog::new();
+        watchdog.rewind(age);
+        let stream = CpalAudioStream {
+            _streams: Vec::new(),
+            rx,
+            dropped: DropCounter::default(),
+            failed: Arc::new(AtomicBool::new(failed)),
+            watchdog,
+        };
+        (tx, stream)
+    }
+
+    #[test]
+    fn a_microphone_stream_gives_up_after_a_sustained_silence() {
+        let (_tx, mut stream) = idle_mic_stream(SINGLE_STREAM_GIVE_UP, false);
+        let err = stream.next_chunk().unwrap_err();
+        assert!(matches!(err, CaptureError::Failed(_)), "got {err:?}");
+        assert!(err.to_string().contains("microphone"), "got: {err}");
+    }
+
+    #[test]
+    fn a_microphone_stream_keepalives_while_it_is_only_briefly_quiet() {
+        let (_tx, mut stream) = idle_mic_stream(Duration::ZERO, false);
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert!(c.samples.is_empty(), "expected a keepalive, not a give-up");
+    }
+
+    #[test]
+    fn a_raised_error_flag_alone_does_not_end_a_still_delivering_stream() {
+        let (_tx, mut stream) = idle_mic_stream(Duration::ZERO, true);
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert!(c.samples.is_empty(), "a glitch must not abort the capture");
+    }
+
+    #[test]
+    fn a_disconnect_after_an_error_fails_instead_of_finalizing_as_complete() {
+        let (tx, mut stream) = idle_mic_stream(Duration::ZERO, true);
+        drop(tx);
+        let err = stream.next_chunk().unwrap_err();
+        assert!(err.to_string().contains("device error"), "got: {err}");
+    }
+
+    #[test]
+    fn a_disconnect_without_an_error_is_a_clean_end_of_stream() {
+        let (tx, mut stream) = idle_mic_stream(Duration::ZERO, false);
+        drop(tx);
+        assert!(stream.next_chunk().unwrap().is_none(), "expected EOF");
+    }
+
+    #[test]
+    fn a_delivered_chunk_restarts_the_microphone_deadline() {
+        let (tx, mut stream) = idle_mic_stream(SINGLE_STREAM_GIVE_UP / 2, false);
+        tx.send(AudioChunk {
+            samples: vec![0.5],
+            mic: None,
+            offset: Duration::ZERO,
+        })
+        .unwrap();
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert_eq!(c.samples, vec![0.5]);
+        let next = stream.next_chunk().unwrap().unwrap();
+        assert!(next.samples.is_empty(), "the deadline must have restarted");
     }
 
     /// Drains a channel sink into a flat sample vector.
@@ -858,17 +988,14 @@ mod tests {
 
     #[test]
     fn resampler_downmixes_stereo_to_mono() {
-        // Same rate (16k→16k), 2 channels: output = per-frame average.
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 2);
-        // 4 interleaved stereo frames (L,R pairs).
         let interleaved = vec![1.0, 3.0, 2.0, 4.0, -1.0, 1.0, 0.5, 0.5];
         r.feed(&interleaved, &sink);
-        r.flush(&sink); // force out whatever we have
+        r.flush(&sink);
         drop(sink);
         let got = drain(rx);
-        // Averages: (1+3)/2=2, (2+4)/2=3, (-1+1)/2=0, (0.5+0.5)/2=0.5
         assert_eq!(got.len(), 4);
         assert!((got[0] - 2.0).abs() < 1e-4);
         assert!((got[1] - 3.0).abs() < 1e-4);
@@ -878,23 +1005,21 @@ mod tests {
 
     #[test]
     fn resampler_halves_sample_count_at_2x_rate() {
-        // 32k → 16k mono: roughly half as many output samples.
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(32_000, 1);
         let input: Vec<f32> = (0..1000).map(|i| (i as f32) * 0.001).collect();
         r.feed(&input, &sink);
         r.flush(&sink);
         drop(sink);
         let total = drain(rx).len();
-        // ~500, allow a small boundary slop.
         assert!((490..=510).contains(&total), "got {total} output samples");
     }
 
     #[test]
     fn resampler_empty_buffer_is_noop() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(2);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(48_000, 2);
         r.feed(&[], &sink);
         r.flush(&sink);
@@ -904,20 +1029,19 @@ mod tests {
 
     #[test]
     fn resampler_full_channel_drops_chunk_not_blocks() {
-        // Depth-1 channel, never drained: the second flush must not block.
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(1);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1);
         r.out = vec![0.0; CHUNK_SAMPLES];
-        r.flush(&sink); // fills the channel
+        r.flush(&sink);
         r.out = vec![0.0; CHUNK_SAMPLES];
-        r.flush(&sink); // would block via send(); try_send drops it — no hang means non-blocking
+        r.flush(&sink);
     }
 
     #[test]
     fn unanchored_resampler_keeps_stream_position_offsets() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1);
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
@@ -925,22 +1049,19 @@ mod tests {
         let first = rx.recv().unwrap();
         let second = rx.recv().unwrap();
         assert_eq!(first.offset, Duration::ZERO);
-        // Second chunk starts exactly one chunk later (stream position).
         assert_eq!(second.offset, Duration::from_millis(200));
     }
 
     #[test]
     fn anchored_resampler_realigns_audio_that_starts_after_an_idle_gap() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1);
-        // Simulate a source that stayed idle for ~10 s before its first buffer.
         r.anchor = std::time::Instant::now().checked_sub(Duration::from_secs(10));
         assert!(r.anchor.is_some(), "test clock underflowed");
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         drop(sink);
         let chunk = rx.recv().unwrap();
-        // The chunk lands near the 10 s mark, not at stream position 0.
         assert!(
             chunk.offset > Duration::from_secs(8) && chunk.offset < Duration::from_secs(12),
             "got {:?}",
@@ -951,15 +1072,12 @@ mod tests {
     #[test]
     fn anchored_resampler_realigns_when_the_stream_drifts_ahead_of_wall_clock() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1).anchored();
-        // Simulate accumulated positive device-clock drift: the stream's declared position has
-        // crept 10 s ahead of true wall-clock elapsed time (base_ns dominates stream_end_ns).
         r.base_ns = Duration::from_secs(10).as_nanos() as u64;
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         drop(sink);
         let chunk = rx.recv().unwrap();
-        // Re-anchored back down near "now" instead of staying pinned ~10 s ahead.
         assert!(
             chunk.offset < Duration::from_secs(2),
             "got {:?}, expected forward drift to be corrected",
@@ -969,8 +1087,6 @@ mod tests {
 
     #[test]
     fn two_resamplers_sharing_one_epoch_reanchor_to_the_same_offset() {
-        // Console + Communications loopback threads, both idle for 10 s: a shared epoch keeps
-        // their MixSource::System offsets aligned instead of drifting apart on re-anchor.
         let epoch = std::time::Instant::now()
             .checked_sub(Duration::from_secs(10))
             .expect("test clock underflowed");
@@ -980,16 +1096,14 @@ mod tests {
         let mut comms = Resampler::new(16_000, 1).anchored_at(epoch);
         console.feed(
             &vec![0.1f32; CHUNK_SAMPLES],
-            &ResamplerSink::Channel(console_tx),
+            &ResamplerSink::channel(console_tx),
         );
         comms.feed(
             &vec![0.1f32; CHUNK_SAMPLES],
-            &ResamplerSink::Channel(comms_tx),
+            &ResamplerSink::channel(comms_tx),
         );
         let console_chunk = console_rx.recv().unwrap();
         let comms_chunk = comms_rx.recv().unwrap();
-        // Both threads anchor to the same epoch, so their first chunks land within a hair of
-        // each other — not drifting to unrelated absolute offsets.
         let diff = console_chunk.offset.abs_diff(comms_chunk.offset);
         assert!(
             diff < Duration::from_millis(50),
@@ -1003,14 +1117,13 @@ mod tests {
     #[test]
     fn anchored_resampler_stays_stream_positioned_while_continuous() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1).anchored();
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         drop(sink);
         let first = rx.recv().unwrap();
         let second = rx.recv().unwrap();
-        // No idle gap → offsets stay chunk-consecutive (no re-anchor between).
         assert_eq!(
             second.offset.saturating_sub(first.offset),
             Duration::from_millis(200)
@@ -1019,7 +1132,6 @@ mod tests {
 
     #[test]
     fn resampler_mixed_sink_pushes_into_the_shared_buffer() {
-        // Two resamplers (system + mic) feeding one MixBuffer, paired. Same rate, mono → 1:1.
         let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
         let sys_sink = ResamplerSink::Mixed {
             buf: std::sync::Arc::clone(&buf),
@@ -1029,13 +1141,11 @@ mod tests {
             buf: std::sync::Arc::clone(&buf),
             source: MixSource::Mic,
         };
-        // Feed one chunk's worth of 1.0 on each side so flush fires.
         let ones = vec![1.0f32; CHUNK_SAMPLES];
         let mut rs = Resampler::new(16_000, 1);
         rs.feed(&ones, &sys_sink);
         let mut rm = Resampler::new(16_000, 1);
         rm.feed(&ones, &mic_sink);
-        // Both streams delivered ~CHUNK_SAMPLES at offset 0 → an aligned pair pops.
         let mut b = buf.lock().unwrap();
         let PairedPcm { system: sys, mic } = b
             .pop_pair(1, CHUNK_SAMPLES)
@@ -1043,5 +1153,39 @@ mod tests {
         assert!(!sys.is_empty());
         assert!(sys.iter().all(|&s| (s - 1.0).abs() < 1e-4));
         assert!(mic.iter().all(|&s| (s - 1.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn a_full_channel_records_the_drop_and_warns_exactly_once() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(1);
+        let dropped = DropCounter::default();
+        let sink = ResamplerSink::Channel {
+            tx,
+            dropped: dropped.clone(),
+        };
+        let mut r = Resampler::new(16_000, 1);
+        r.out = vec![0.0; CHUNK_SAMPLES];
+        r.flush(&sink);
+        assert_eq!(dropped.count(), 0, "the first chunk fits");
+        r.out = vec![0.0; CHUNK_SAMPLES];
+        r.flush(&sink);
+        assert_eq!(
+            dropped.count(),
+            1,
+            "the second chunk is counted, not lost silently"
+        );
+
+        assert_eq!(
+            dropped.take_health(),
+            Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+        );
+        assert_eq!(dropped.take_health(), None);
+        let fresh = DropCounter::default();
+        assert_eq!(fresh.take_health(), None);
+        fresh.record();
+        assert_eq!(
+            fresh.take_health(),
+            Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+        );
     }
 }

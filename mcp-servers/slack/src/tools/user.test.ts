@@ -12,7 +12,6 @@ import {
 } from './user-tools.js';
 import type { SlackClients } from '../client.js';
 
-// Mock the client module
 vi.mock('../client.js', async () => {
   const actual = await vi.importActual('../client.js');
   return {
@@ -26,7 +25,6 @@ vi.mock('../client.js', async () => {
   };
 });
 
-// Mock the user-directory boundary — its machinery has its own test file.
 vi.mock('../user-directory.js', () => ({
   searchUsers: vi.fn(),
 }));

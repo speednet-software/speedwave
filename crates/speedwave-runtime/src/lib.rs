@@ -24,6 +24,8 @@ pub mod log_sanitizer;
 pub mod log_ts;
 pub mod managed_config;
 pub mod mcp_os_process;
+pub mod model_id;
+pub mod native_slash;
 pub mod oauth_persist;
 pub mod oauth_process;
 pub mod oauth_state_migration;
@@ -42,8 +44,6 @@ pub mod signing;
 pub mod slash;
 pub mod stream;
 pub mod telemetry_env;
-/// Host-side meeting transcription (audio capture, Whisper, model catalogue) — gated behind the
-/// `audio-transcription` feature so the CLI (which never enables it) stays lean. See ADR-056.
 #[cfg(feature = "audio-transcription")]
 pub mod transcription;
 pub mod tz;
@@ -52,6 +52,13 @@ pub mod url_validation;
 pub mod usage;
 pub mod usage_cost;
 pub mod validation;
+
+/// Test-only re-export of the host build-output dir names.
+#[cfg(any(test, feature = "test-support"))]
+pub mod bundle_test_support {
+    /// Host build-output dir names that tests walking the repo must skip.
+    pub const HOST_BUILD_OUTPUT_DIRS: &[&str] = crate::bundle::HOST_BUILD_OUTPUT_DIRS;
+}
 
 /// Test-only re-exports of internal transaction helpers.
 #[cfg(any(test, feature = "test-support"))]

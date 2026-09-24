@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::transcription::audio::AudioSourceInfo;
+use crate::transcription::audio::{AudioSourceInfo, CaptureWarning};
 use crate::transcription::transcriber::{Language, Segment};
 
 /// On-disk filename for the persisted session.
@@ -38,7 +38,8 @@ pub enum TranscriptStatus {
 /// Which Whisper model was used for each pass.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelsUsed {
-    /// Whisper catalogue key used for the live pass.
+    /// Whisper catalogue key used for the live pass; `None` = record-only (no live pass ran
+    /// for the current part — the UI keys record-only rendering on it, ADR-056 Am. 13).
     pub live: Option<String>,
     /// Whisper catalogue key used for the higher-quality offline pass.
     pub finalize: Option<String>,
@@ -67,6 +68,10 @@ pub struct TranscriptSession {
     /// after `audio_path` (ADR-056 Amendment 10). Empty on never-resumed sessions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_parts: Vec<PathBuf>,
+    /// Capture warnings raised for this session, in arrival order (ADR-056 Am. 16). Retired when
+    /// a capture ends; one raised by the offline pass afterwards stays on the finished session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_warnings: Vec<CaptureWarning>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
     /// Last event seq emitted for this session — for snapshot+stream resume.
@@ -75,6 +80,12 @@ pub struct TranscriptSession {
     /// never persisted and never part of `effective_segments`.
     #[serde(skip, default)]
     pub live_draft: String,
+    /// `models_used.live` as it was before the in-flight resume — consumed by
+    /// `rollback_resume` so the invariant lives in the store, not at call sites.
+    #[serde(skip, default)]
+    pub(crate) prior_live_model: Option<String>,
+    #[serde(skip, default)]
+    pub(crate) prior_active_warnings: Vec<CaptureWarning>,
 }
 
 impl TranscriptSession {
@@ -101,9 +112,12 @@ impl TranscriptSession {
             final_segments: None,
             audio_path: Some(audio_path),
             audio_parts: Vec::new(),
+            active_warnings: Vec::new(),
             models_used: ModelsUsed::default(),
             last_seq: 0,
             live_draft: String::new(),
+            prior_live_model: None,
+            prior_active_warnings: Vec::new(),
         }
     }
 
@@ -137,7 +151,6 @@ impl TranscriptSession {
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
         s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
-        // Live segments interleave across per-channel decode cycles — render chronologically.
         let mut segments: Vec<&Segment> = self.effective_segments().iter().collect();
         segments.sort_by_key(|seg| seg.start);
         for seg in segments {
@@ -281,7 +294,6 @@ mod tests {
         assert!(s.final_segments.is_none());
         assert_eq!(s.last_seq, 0);
         assert_eq!(s.audio_path, Some(PathBuf::from("/tmp/a.wav")));
-        // created_at parses as RFC 3339-ish (YYYY-MM-DDTHH:MM:SSZ).
         assert!(s.created_at.ends_with('Z') && s.created_at.len() == 20);
     }
 
@@ -300,7 +312,6 @@ mod tests {
             Some(PathBuf::from("/data/transcripts/x/audio.wav"))
         );
         assert!(matches!(s.status, TranscriptStatus::Recording));
-        // `new` delegates to it with a fresh id.
         let s2 = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
         assert_ne!(s2.id, id);
     }
@@ -322,7 +333,7 @@ mod tests {
         s.live_segments = vec![
             seg(0.0, 2.5, "Cześć!"),
             seg(2.5, 5.0, "Witaj."),
-            seg(5.0, 7.0, "   "), // blank → skipped
+            seg(5.0, 7.0, "   "),
         ];
         let md = s.to_markdown();
         assert!(md.starts_with("# Meeting transcript ("));
@@ -345,7 +356,6 @@ mod tests {
         let md = s.to_markdown();
         assert!(md.contains("**(00:00.00) Meeting:** Dzień dobry państwu."));
         assert!(md.contains("**(00:02.00) You:** Cześć."));
-        // An untagged segment renders exactly as before.
         assert!(md.contains("**(00:03.00)** bez kanału"));
     }
 
@@ -353,7 +363,6 @@ mod tests {
     fn to_markdown_renders_live_segments_chronologically() {
         use crate::transcription::transcriber::TranscriptSource;
         let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
-        // Cross-lane commits can land out of order in storage.
         let mut late = seg(5.0, 6.0, "później");
         late.source = Some(TranscriptSource::System);
         let mut early = seg(1.0, 2.0, "wcześniej");
@@ -375,6 +384,39 @@ mod tests {
             src.contains("audio_parts?: string[]"),
             "models/transcript.ts TranscriptSession must carry the optional audio_parts field"
         );
+    }
+
+    #[test]
+    fn active_warnings_field_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("active_warnings?: CaptureWarning[]"),
+            "models/transcript.ts TranscriptSession must carry the optional active_warnings field"
+        );
+    }
+
+    #[test]
+    fn active_warnings_is_omitted_when_empty_and_wire_encoded_when_raised() {
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("a.wav"));
+        assert!(s.active_warnings.is_empty(), "a new session is healthy");
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(
+            json.get("active_warnings").is_none(),
+            "an empty list stays off the wire so older readers see no new field"
+        );
+
+        s.active_warnings = vec![
+            CaptureWarning::MicrophoneStalled,
+            CaptureWarning::AudioDropped,
+        ];
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json.get("active_warnings").unwrap().to_string(),
+            "[\"microphone_stalled\",\"audio_dropped\"]",
+            "arrival order and snake_case wire names are both part of the contract"
+        );
+        let back: TranscriptSession = serde_json::from_value(json).unwrap();
+        assert_eq!(back.active_warnings, s.active_warnings);
     }
 
     #[test]
@@ -403,12 +445,10 @@ mod tests {
     #[test]
     fn segment_source_serde_defaults_to_none_and_round_trips() {
         use crate::transcription::transcriber::TranscriptSource;
-        // Pre-Amendment-9 JSON (no `source` key) loads as None.
         let legacy = r#"{"start":{"secs":0,"nanos":0},"end":{"secs":1,"nanos":0},
             "text":"hej","words":[]}"#;
         let s: Segment = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.source, None);
-        // None is omitted on the wire; Some round-trips.
         let mut tagged = seg(0.0, 1.0, "x");
         assert!(!serde_json::to_string(&tagged).unwrap().contains("source"));
         tagged.source = Some(TranscriptSource::Mic);
@@ -419,8 +459,6 @@ mod tests {
 
     #[test]
     fn old_transcript_json_with_speaker_fields_still_loads() {
-        // Backward compat (ADR-075): a pre-removal transcript.json carried `speaker_names`,
-        // `expected_speakers`, `speaker`, `models_used.diarization_*` — serde drops unknown keys.
         let dir = tempfile::tempdir().unwrap();
         let legacy = r#"{
             "id":"00000000-0000-4000-8000-000000000000",
@@ -444,7 +482,6 @@ mod tests {
         assert_eq!(s.live_segments[0].text, "hej");
         assert_eq!(s.models_used.live.as_deref(), Some("small"));
         assert_eq!(s.last_seq, 7);
-        // Re-saving produces the new shape with no diarization keys.
         s.save(dir.path()).unwrap();
         let body = std::fs::read_to_string(dir.path().join(TRANSCRIPT_JSON)).unwrap();
         assert!(!body.contains("speaker_names"));
@@ -459,7 +496,6 @@ mod tests {
         s.live_segments = vec![seg(0.0, 1.0, "hi")];
         s.last_seq = 42;
         s.save(dir.path()).unwrap();
-        // Only the final file remains — no leftover tmp of any naming scheme.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)
@@ -505,7 +541,6 @@ mod tests {
 
     #[test]
     fn rfc3339_now_format_sanity() {
-        // Year is plausible (post-2020) and the shape matches YYYY-MM-DDTHH:MM:SSZ.
         let s = rfc3339_now();
         assert_eq!(s.len(), 20);
         assert!(s.ends_with('Z'));
@@ -515,11 +550,8 @@ mod tests {
 
     #[test]
     fn ymd_hms_known_epochs() {
-        // 1970-01-01T00:00:00Z
         assert_eq!(secs_to_ymd_hms(0), (1970, 1, 1, 0, 0, 0));
-        // 2024-01-01T00:00:00Z = 1_704_067_200 (precomputed known epoch).
         assert_eq!(secs_to_ymd_hms(1_704_067_200), (2024, 1, 1, 0, 0, 0));
-        // 2024-12-31T23:59:59Z = 1_735_689_599.
         assert_eq!(secs_to_ymd_hms(1_735_689_599), (2024, 12, 31, 23, 59, 59));
     }
 }

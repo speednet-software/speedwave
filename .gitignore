@@ -1,46 +1,37 @@
-# Rust / Cargo
 target/
 **/*.rs.bk
-# Machine-local cargo overrides (linker path, etc.) belong in ~/.cargo/config.toml —
-# cargo merges user-level config; the committed .cargo/config.toml is repo policy.
 .cargo/config.local.toml
 
-# Generated pii-engine-wasm artifact (built by crates/pii-engine-wasm/build-wasm.sh)
 mcp-servers/policies/wasm-pkg/
+mcp-servers/policies/.wasm-build.lock/
 
-# Node.js (root-level lockfiles if any)
 node_modules/
+.angular/
 
-# OS
 .DS_Store
 Thumbs.db
 Desktop.ini
 
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Claude Code
 .claude/*.lock
 .claude/worktrees/
+.playwright-mcp/
 
-# Superpowers skills (local tooling, not part of the project)
 docs/superpowers/
 
-# Environment / secrets
 .env
 .env.*
 !.env.example
 
-# Tauri signing keys
 .tauri-privkey
 .tauri-privkey.pub
 .tauri-pubkey
 
-# Code signing credentials — MUST NEVER be committed
 *.p12
 *.pfx
 *.cer
@@ -52,58 +43,44 @@ docs/superpowers/
 apple-signing/
 azure-signing/
 
-# Speedwave runtime data (should never be committed)
 .speedwave/
 
-# Worktree metadata
 .worktree.json
 
-# Coverage
 coverage/
 *.lcov
 *.profraw
 
-# Swift Package Manager
 .build/
 .swiftpm/
 
-# Build artifacts
 *.dmg
 *.exe
 *.msi
 *.deb
 
-# Bundled Lima binaries (downloaded by `make download-lima`)
 desktop/src-tauri/lima/
 desktop/src-tauri/THIRD-PARTY-LICENSES/
 
-# Bundled Node.js binary (downloaded by `make download-nodejs`)
 desktop/src-tauri/nodejs/
 
-# Reserved nerdctl-full bundle layout — not currently populated in production,
-# kept so resolve_binary() can fall through to it if tests drop a tree here.
 desktop/src-tauri/nerdctl-full/
 
-# Bundled WSL2 resources (downloaded by `make download-wsl-resources`, Windows only)
 desktop/src-tauri/wsl/
 
-# Bundled macOS native CLI helpers (compiled by `make build-native-macos`)
 desktop/src-tauri/calendar-cli
 desktop/src-tauri/mail-cli
 desktop/src-tauri/notes-cli
 desktop/src-tauri/reminders-cli
 desktop/src-tauri/audio-capture-cli
 
-# Bundled container build context + host workers (mcp-os, oauth) — staged before Tauri build
 desktop/src-tauri/build-context/
 desktop/src-tauri/mcp-os/
 desktop/src-tauri/oauth/
 .e2e-artifacts/
 
-# Local Python venvs (test tooling)
 .office-test-venv/
 
-# Python bytecode caches
 __pycache__/
 *.pyc
 .claude/specs/

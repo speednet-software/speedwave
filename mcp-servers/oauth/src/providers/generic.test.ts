@@ -89,11 +89,11 @@ describe('refreshGenericToken', () => {
   });
 
   it.each([
-    'https://[fc00::1]/token', // IPv6 ULA
-    'https://[fd12:3456::1]/token', // IPv6 ULA
-    'https://[fe80::1]/token', // IPv6 link-local
-    'https://[::1]/token', // IPv6 loopback
-    'https://10.0.0.1/token', // RFC 1918
+    'https://[fc00::1]/token',
+    'https://[fd12:3456::1]/token',
+    'https://[fe80::1]/token',
+    'https://[::1]/token',
+    'https://10.0.0.1/token',
   ])('rejects private/reserved token URL %s (SSRF backstop)', async (tokenUrl) => {
     const result = await refreshGenericToken(
       refreshTokenReq({ providerData: { tokenUrl, clientId: 'cid' } })
@@ -188,7 +188,6 @@ describe('refreshGenericToken', () => {
   });
 
   it('rejects a crafted content-type that merely contains "json"', async () => {
-    // /json/i substring matching would pass these — the anchored check must not.
     mockJson({
       body: { access_token: 'a', expires_in: 60 },
       contentType: 'text/jsonx',
@@ -369,7 +368,6 @@ describe('refreshGenericToken', () => {
   });
 
   it('rejects a response body over the size cap', async () => {
-    // 257 KiB > MAX_BODY_BYTES (256 KiB).
     const big = new ArrayBuffer(257 * 1024);
     vi.stubGlobal(
       'fetch',
@@ -429,7 +427,6 @@ describe('refreshGenericToken', () => {
   });
 
   it('streams and rejects an oversized body before fully buffering it', async () => {
-    // A real ReadableStream whose chunks exceed the 256 KiB cap.
     let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({
       pull(controller) {
@@ -453,7 +450,7 @@ describe('refreshGenericToken', () => {
     const result = await refreshGenericToken(refreshTokenReq());
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('malformed');
-    expect(cancelled).toBe(true); // read was aborted, not fully buffered
+    expect(cancelled).toBe(true);
   });
 });
 

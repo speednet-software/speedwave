@@ -372,6 +372,28 @@ describe('PR Review Tools', () => {
 
       expect(result).toMatchObject({ isError: true });
     });
+
+    it('forwards an issue number over the same code path', async () => {
+      const comments = [makeComment({ id: 9, body: 'on the issue' })];
+      mockClient.listPrComments.mockResolvedValue(comments);
+
+      const tools = createPrReviewTools(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'listPrComments')?.handler;
+      const result = await handler!({ owner: 'octocat', repo: 'hello-world', number: 7 });
+
+      expect(mockClient.listPrComments).toHaveBeenCalledWith('octocat', 'hello-world', 7, {});
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ comments, count: 1 }, null, 2) }],
+      });
+    });
+
+    it('documents that the number may be an issue number', () => {
+      const tools = createPrReviewTools(mockClient as unknown as GitHubClient);
+      const tool = tools.find((t) => t.tool.name === 'listPrComments')?.tool;
+
+      expect(tool?.description).toContain('issue');
+      expect(tool?.keywords).toContain('issue');
+    });
   });
 
   describe('createPrComment', () => {
@@ -418,6 +440,39 @@ describe('PR Review Tools', () => {
       const result = await handler!({ owner: 'o', repo: 'r', number: 1, body: 'x' });
 
       expect(result).toMatchObject({ isError: true });
+    });
+
+    it('forwards an issue number over the same code path', async () => {
+      const comment = makeComment({ id: 11, body: 'Reproduced on main' });
+      mockClient.createPrComment.mockResolvedValue(comment);
+
+      const tools = createPrReviewTools(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'createPrComment')?.handler;
+      const result = await handler!({
+        owner: 'octocat',
+        repo: 'hello-world',
+        number: 7,
+        body: 'Reproduced on main',
+      });
+
+      expect(mockClient.createPrComment).toHaveBeenCalledWith(
+        'octocat',
+        'hello-world',
+        7,
+        'Reproduced on main'
+      );
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify(comment, null, 2) }],
+      });
+    });
+
+    it('documents that the number may be an issue number', () => {
+      const tools = createPrReviewTools(mockClient as unknown as GitHubClient);
+      const tool = tools.find((t) => t.tool.name === 'createPrComment')?.tool;
+
+      expect(tool?.description).toContain('issue');
+      expect(tool?.keywords).toContain('issue');
+      expect(tool?.inputExamples?.map((e) => e.description)).toContain('Add a comment to an issue');
     });
   });
 

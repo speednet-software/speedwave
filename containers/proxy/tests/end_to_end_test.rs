@@ -69,7 +69,6 @@ fn full_request_response_cycle_masks_keyword_and_tokenizes_pii_then_restores_bot
         ]
     });
 
-    // 1. Outbound (request -> proxy -> LLM): tokenize PII first, then mask keywords.
     let mut outbound = original_request.clone();
     let detections = scan_json(&policy, &key, &mut outbound).expect("scan succeeds");
     assert!(
@@ -98,11 +97,8 @@ fn full_request_response_cycle_masks_keyword_and_tokenizes_pii_then_restores_bot
         "original PII must be gone from what the LLM sees"
     );
 
-    // 2. Simulate the LLM echoing the masked/tokenized text back verbatim.
     let llm_response = format!("Processing: {masked_and_tokenized}");
 
-    // 3. Inbound (LLM -> proxy -> agent): unmask keywords first, then detokenize —
-    // the exact reverse order of the outbound pass.
     let unmasked = unmask_keywords(&llm_response, keywords);
     let restored = detokenize_text(&key, &unmasked).expect("detokenize succeeds");
 

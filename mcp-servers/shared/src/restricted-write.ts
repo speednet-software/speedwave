@@ -17,7 +17,6 @@ export async function writeRestrictedSecret(
 ): Promise<void> {
   const parent = path.dirname(filePath);
 
-  // Refuse to write into a world-readable parent dir.
   if (process.platform !== 'win32') {
     const stat = await fs.stat(parent);
     const mode = stat.mode & 0o777;
@@ -39,7 +38,6 @@ export async function writeRestrictedSecret(
   try {
     handle = await fs.open(tmpPath, 'wx', 0o600);
     await handle.writeFile(contents);
-    // O_CREAT honors umask; explicit chmod ensures mode 0o600.
     await handle.chmod(0o600);
     await handle.sync();
     await handle.close();

@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# Tests for scripts/verify-release-assets.sh using a gh shim on PATH.
-# All fixtures hardcode version 0.8.1 / tag v0.8.1 / repo test/repo / RID 12345.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/verify-release-assets.sh"
@@ -141,7 +139,6 @@ setup() {
   _install_gh_shim
 }
 
-# ── Case 1: Happy path ───────────────────────────────────────────────────────
 
 @test "happy path: all assets present and latest.json valid" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -150,7 +147,6 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-# ── Case 2: Missing latest.json ──────────────────────────────────────────────
 
 @test "missing latest.json asset fails with expected message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-latest.json"
@@ -160,7 +156,6 @@ setup() {
   [[ "$output" =~ "missing release asset: latest.json" ]]
 }
 
-# ── Case 3: Missing macOS .sig ───────────────────────────────────────────────
 
 @test "missing macOS Apple Silicon sig fails with exact sig name" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-macos-sig.json"
@@ -170,7 +165,6 @@ setup() {
   [[ "$output" =~ "Speedwave_0.8.1_macOS_Apple_Silicon.app.tar.gz.sig" ]]
 }
 
-# ── Case 4: Missing MSI .sig ─────────────────────────────────────────────────
 
 @test "missing MSI sig fails with exact sig name" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-msi-sig.json"
@@ -180,7 +174,6 @@ setup() {
   [[ "$output" =~ "Speedwave_0.8.1_x64_en-US.msi.sig" ]]
 }
 
-# ── Case 5: Empty latest.json version ────────────────────────────────────────
 
 @test "empty latest.json version fails with version mismatch message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -190,7 +183,6 @@ setup() {
   [[ "$output" =~ "version '' != expected '0.8.1'" ]]
 }
 
-# ── Case 6: Invalid JSON in latest.json ──────────────────────────────────────
 
 @test "invalid JSON in latest.json fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -199,7 +191,6 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-# ── Case 7: Empty .sig file ───────────────────────────────────────────────────
 
 @test "empty sig file fails with 'signature file empty' message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -210,32 +201,25 @@ setup() {
   [[ "$output" =~ "signature file empty:" ]]
 }
 
-# ── Case 8: Idempotency ───────────────────────────────────────────────────────
 
 @test "script is idempotent: two successful runs produce consistent gh call counts" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
 
-  # First run
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
   count_after_first=$(cat "$BATS_TEST_TMPDIR/gh_call_count")
 
-  # Reset counter
   echo 0 > "$BATS_TEST_TMPDIR/gh_call_count"
 
-  # Second run
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
   count_after_second=$(cat "$BATS_TEST_TMPDIR/gh_call_count")
 
-  # Both runs must make the same number of gh calls (no cached state divergence)
   [ "$count_after_first" -eq "$count_after_second" ]
-  # Both counts must be > 0 (gh was actually called)
   [ "$count_after_first" -gt 0 ]
 }
 
-# ── Case 9: v prefix in latest.json version ───────────────────────────────────
 
 @test "v-prefixed version in latest.json rejected (bare semver required)" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -245,7 +229,6 @@ setup() {
   [[ "$output" =~ "version 'v0.8.1' != expected '0.8.1'" ]]
 }
 
-# ── Case 10: latest.json missing 'notes' field ────────────────────────────────
 
 @test "latest.json missing 'notes' field fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -255,7 +238,6 @@ setup() {
   [[ "$output" =~ "latest.json missing field: notes" ]]
 }
 
-# ── Case 11: empty platforms dict ─────────────────────────────────────────────
 
 @test "latest.json empty platforms dict fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -265,7 +247,6 @@ setup() {
   [[ "$output" =~ "latest.json platforms is empty" ]]
 }
 
-# ── Case 12: missing required platform key ────────────────────────────────────
 
 @test "latest.json missing required platform key fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -275,7 +256,6 @@ setup() {
   [[ "$output" =~ "latest.json missing required platform key: darwin-x86_64" ]]
 }
 
-# ── Case 13: empty platform signature ─────────────────────────────────────────
 
 @test "latest.json empty platform signature fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -285,17 +265,24 @@ setup() {
   [[ "$output" =~ "latest.json platforms.darwin-aarch64.signature is empty" ]]
 }
 
-# ── Case 14: wrong URL prefix on platform entry ───────────────────────────────
 
 @test "latest.json wrong URL prefix fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-wrong-url-prefix.json"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "does not start with https://github.com/test/repo/releases/" ]]
+  [[ "$output" =~ "does not start with https://api.github.com/repos/test/repo/releases/assets/" ]]
 }
 
-# ── Case 15: empty platform url ───────────────────────────────────────────────
+
+@test "latest.json browser download URL rejected (API asset URL required)" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-browser-download-url.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "platforms.darwin-x86_64.url does not start with" ]]
+}
+
 
 @test "latest.json empty platform url fails" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
@@ -305,7 +292,6 @@ setup() {
   [[ "$output" =~ "latest.json platforms.darwin-aarch64.url is empty" ]]
 }
 
-# ── Case 16: unset VERSION fails ──────────────────────────────────────────────
 
 @test "unset VERSION fails with required-message" {
   unset VERSION
@@ -314,7 +300,6 @@ setup() {
   [[ "$output" =~ "VERSION required" ]]
 }
 
-# ── Case 17: empty VERSION fails ──────────────────────────────────────────────
 
 @test "empty VERSION fails with required-message" {
   export VERSION=""
@@ -323,7 +308,6 @@ setup() {
   [[ "$output" =~ "VERSION required" ]]
 }
 
-# ── Case 18: invalid VERSION format fails ─────────────────────────────────────
 
 @test "invalid VERSION format fails" {
   export VERSION="0.8"
@@ -332,7 +316,6 @@ setup() {
   [[ "$output" =~ "Invalid VERSION format" ]]
 }
 
-# ── Case 19: invalid REPO format fails ───────────────────────────────────────
 
 @test "invalid REPO format fails" {
   export REPO="badrepo"
@@ -341,7 +324,6 @@ setup() {
   [[ "$output" =~ "Invalid REPO format" ]]
 }
 
-# ── Case 20: invalid TAG_NAME format fails ────────────────────────────────────
 
 @test "invalid TAG_NAME format fails" {
   export TAG_NAME="0.8.1"
@@ -350,7 +332,6 @@ setup() {
   [[ "$output" =~ "Invalid TAG_NAME format" ]]
 }
 
-# ── Case 21: unset RID fails ──────────────────────────────────────────────────
 
 @test "unset RID fails with required-message" {
   unset RID
@@ -359,7 +340,6 @@ setup() {
   [[ "$output" =~ "RID required" ]]
 }
 
-# ── Case 22: empty RID fails ──────────────────────────────────────────────────
 
 @test "empty RID fails with required-message" {
   export RID=""
@@ -368,7 +348,6 @@ setup() {
   [[ "$output" =~ "RID required" ]]
 }
 
-# ── Case 23: invalid RID format fails ────────────────────────────────────────
 
 @test "invalid RID format fails" {
   export RID="abc"
@@ -377,7 +356,6 @@ setup() {
   [[ "$output" =~ "Invalid RID format" ]]
 }
 
-# ── Case 24: unset REPO fails ────────────────────────────────────────────────
 
 @test "unset REPO fails with required-message" {
   unset REPO
@@ -386,7 +364,6 @@ setup() {
   [[ "$output" =~ "REPO required" ]]
 }
 
-# ── Case 25: empty REPO fails ────────────────────────────────────────────────
 
 @test "empty REPO fails with required-message" {
   export REPO=""

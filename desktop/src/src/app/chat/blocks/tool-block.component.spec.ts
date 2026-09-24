@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ToolBlockComponent } from './tool-block.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
+import { LoggerService } from '../../services/logger.service';
+import { makeMockLogger } from '../../testing/mock-logger';
 import type { ToolUseBlock } from '../../models/chat';
 
 describe('ToolBlockComponent', () => {
@@ -44,10 +46,13 @@ describe('ToolBlockComponent', () => {
     } as ToolUseBlock;
   }
 
+  let mockLogger: ReturnType<typeof makeMockLogger>;
+
   beforeEach(async () => {
+    mockLogger = makeMockLogger();
     await TestBed.configureTestingModule({
       imports: [ToolBlockComponent],
-      providers: [ToolNormalizerService],
+      providers: [ToolNormalizerService, { provide: LoggerService, useValue: mockLogger }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ToolBlockComponent);
@@ -182,7 +187,6 @@ describe('ToolBlockComponent', () => {
     it('renders bash terminal output when expanded', () => {
       setTool(makeTool({ tool_name: 'Bash', input_json: '{"command":"ls -la"}' }));
       fixture.detectChanges();
-      // done starts collapsed; expand the body first.
       component.toggleCollapsed();
       fixture.detectChanges();
 
@@ -411,7 +415,6 @@ describe('ToolBlockComponent', () => {
     it('wires role=region and aria-labelledby/aria-controls/aria-expanded', () => {
       setTool(makeTool({ status: 'running' }));
       fixture.detectChanges();
-      // Expand first so the [role="region"] body renders.
       component.toggleCollapsed();
       fixture.detectChanges();
 
@@ -503,7 +506,6 @@ describe('ToolBlockComponent', () => {
 
       component.toggleCollapsed();
 
-      // toggleCollapsed must not mutate the bound tool.
       expect(tool).toEqual(snapshot);
     });
 
@@ -538,22 +540,38 @@ describe('ToolBlockComponent', () => {
       expect(first).not.toBe(second);
     });
 
-    it('does not warn on partial input_json while the tool is running', () => {
+    it('normalizes partial input_json as generic while the tool is running', () => {
       const normalizer = TestBed.inject(ToolNormalizerService);
       const spy = vi.spyOn(normalizer, 'normalize');
 
       setTool(makeTool({ status: 'running', input_json: '{"command":"ls -' }));
       expect(component.normalized()).toEqual({ kind: 'generic', raw_json: '{"command":"ls -' });
-      expect(spy).toHaveBeenCalledWith('Read', '{"command":"ls -', false);
+      expect(spy).toHaveBeenCalledWith('Read', '{"command":"ls -');
+      expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
-    it('flags the input as complete once the tool is done', () => {
-      const normalizer = TestBed.inject(ToolNormalizerService);
-      const spy = vi.spyOn(normalizer, 'normalize');
+    it('keeps the normalized reference when the block is rebuilt with equal fields', () => {
+      const tool = makeTool();
+      setTool(tool);
+      const first = component.normalized();
+      setTool({ ...tool });
+      expect(component.normalized()).toBe(first);
+    });
 
-      setTool(makeTool({ status: 'done', input_json: '{"file_path":"/a.ts"}' }));
-      component.normalized();
-      expect(spy).toHaveBeenCalledWith('Read', '{"file_path":"/a.ts"}', true);
+    it('re-setting an unparseable done block with fresh objects never logs', () => {
+      const spy = vi.spyOn(TestBed.inject(ToolNormalizerService), 'normalize');
+      const tool = makeTool({
+        status: 'done',
+        tool_name: 'SendMessage',
+        input_json: '{"to": "ab97"',
+      });
+      for (let i = 0; i < 25; i += 1) {
+        setTool({ ...tool });
+        expect(component.normalized()).toEqual({ kind: 'generic', raw_json: '{"to": "ab97"' });
+      }
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+      expect(mockLogger.error).not.toHaveBeenCalled();
     });
   });
 
@@ -575,7 +593,6 @@ describe('ToolBlockComponent', () => {
       setTool(makeTool({ tool_name: 'Glob', input_json: '{"pattern":"**/*.ts"}' }));
       expect(component.headerSummary()).toBe('**/*.ts');
 
-      // Use a neutral search term to avoid triggering the marker-comment guardrail spec.
       setTool(makeTool({ tool_name: 'Grep', input_json: '{"pattern":"foo"}' }));
       expect(component.headerSummary()).toBe('foo');
     });

@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { CreateProjectModalComponent } from './create-project-modal.component';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { createDeferred, type Deferred } from '../../testing/deferred';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 import { open } from '@tauri-apps/plugin-dialog';
@@ -86,7 +87,6 @@ describe('CreateProjectModalComponent', () => {
       await component.browse();
       fixture.detectChanges();
 
-      // User overrides the auto-filled name.
       component.onNameInput({ target: { value: 'custom' } } as unknown as Event);
       fixture.detectChanges();
       const nameInput = fixture.nativeElement.querySelector(
@@ -94,7 +94,6 @@ describe('CreateProjectModalComponent', () => {
       ) as HTMLInputElement;
       expect(nameInput.value).toBe('custom');
 
-      // A second browse must keep the user's edit instead of clobbering it.
       openMock.mockResolvedValueOnce('/Users/me/projects/second');
       await component.browse();
       fixture.detectChanges();
@@ -167,7 +166,6 @@ describe('CreateProjectModalComponent', () => {
     });
 
     it('preserves multi-line backend error formatting via whitespace-pre-wrap', async () => {
-      // Backend errors use \n; error pane must preserve via whitespace-pre-wrap.
       const multiLineError =
         "Project is in WSL distribution 'Ubuntu'.\n\n" +
         '1. Copy the project into Speedwave\n' +
@@ -182,13 +180,10 @@ describe('CreateProjectModalComponent', () => {
 
       const err = fixture.nativeElement.querySelector('[data-testid="create-project-error"]');
       expect(err).not.toBeNull();
-      // Newlines must survive into the rendered textContent.
       expect(err?.textContent).toContain('\n');
-      // All 3 numbered options must be present (not truncated, not collapsed).
       expect(err?.textContent).toContain('1. Copy the project');
       expect(err?.textContent).toContain('2. Move to /mnt/c/');
       expect(err?.textContent).toContain('3. Use Claude Code');
-      // whitespace-pre-wrap on the error pane makes the browser honour \n.
       const classes = (err as HTMLElement | null)?.className ?? '';
       expect(classes).toContain('whitespace-pre-wrap');
     });
@@ -216,7 +211,6 @@ describe('CreateProjectModalComponent', () => {
       });
       openMock.mockResolvedValue('/Users/me/OneDrive/project');
       await component.browse();
-      // Wait for the async detectCloudstorage microtask
       await Promise.resolve();
       fixture.detectChanges();
       const warning = fixture.nativeElement.querySelector(
@@ -299,26 +293,21 @@ describe('CreateProjectModalComponent', () => {
     });
 
     it('does not emit `closed` while a submit is in flight', async () => {
-      // Stub invoke to never resolve so `busy` stays true while we test cancel.
-      let resolveInvoke!: () => void;
-      vi.spyOn(mockTauri, 'invoke').mockImplementation(
-        () =>
-          new Promise<void>((resolve) => {
-            resolveInvoke = resolve;
-          })
-      );
+      let pendingInvoke!: Deferred;
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(() => {
+        pendingInvoke = createDeferred();
+        return pendingInvoke.promise;
+      });
       const closed = vi.fn();
       component.closed.subscribe(closed);
 
       openMock.mockResolvedValue('/Users/me/projects/demo');
       await component.browse();
-      // Fire-and-forget: do not await — busy must stay true for this assertion.
       void component.submit();
       component.cancel();
 
       expect(closed).not.toHaveBeenCalled();
-      // Clean up: let submit finish so the test does not leak a pending promise.
-      resolveInvoke();
+      pendingInvoke.resolve();
       await Promise.resolve();
     });
   });

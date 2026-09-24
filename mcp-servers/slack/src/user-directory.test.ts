@@ -76,7 +76,6 @@ describe('user-directory', () => {
         deleted: undefined,
         is_bot: undefined,
       });
-      // Deleted users stay in the map — old messages must still enrich.
       expect(dir.get('U3')?.deleted).toBe(true);
       expect(usersList).toHaveBeenCalledWith({ limit: 200, cursor: undefined });
     });
@@ -179,7 +178,6 @@ describe('user-directory', () => {
       const clients = clientsWith(usersList);
 
       await expect(ensureUserDirectory(clients)).rejects.toThrow('boom');
-      // inflight was cleared on failure — the next call starts a fresh build.
       const dir = await ensureUserDirectory(clients);
       expect(dir.size).toBe(1);
     });
@@ -206,7 +204,6 @@ describe('user-directory', () => {
       expect(early).toBeNull();
 
       release(pageResponse([member('U1', 'a')]));
-      // The build it raced against keeps running and populates the cache.
       await vi.waitFor(async () => {
         expect(await peekUserDirectory(clients, 10)).not.toBeNull();
       });
@@ -225,7 +222,6 @@ describe('user-directory', () => {
 
       const stale = await peekUserDirectory(clients);
       expect(stale?.size).toBe(1);
-      // Let the failed background rebuild settle — it must not reject unhandled.
       await vi.runAllTimersAsync();
       expect((await peekUserDirectory(clients))?.size).toBe(1);
     });
@@ -242,8 +238,8 @@ describe('user-directory', () => {
       vi.advanceTimersByTime(USER_DIRECTORY_TTL_MS + 1);
 
       const stale = await peekUserDirectory(clients);
-      expect(stale?.size).toBe(1); // immediate stale answer
-      expect(usersList).toHaveBeenCalledTimes(2); // rebuild kicked in background
+      expect(stale?.size).toBe(1);
+      expect(usersList).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -319,7 +315,7 @@ describe('user-directory', () => {
       const clients = clientsWith(vi.fn().mockResolvedValue(pageResponse(roster)));
 
       const hits = await searchUsers(clients, { query: 'pa' });
-      expect(hits.map((u) => u.id).sort()).toEqual(['U1', 'U4']); // U3 deleted
+      expect(hits.map((u) => u.id).sort()).toEqual(['U1', 'U4']);
 
       const capped = await searchUsers(clients, { query: 'pa', limit: 1 });
       expect(capped).toHaveLength(1);

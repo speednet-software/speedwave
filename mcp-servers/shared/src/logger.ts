@@ -14,7 +14,6 @@ function pad2(n: number): string {
 /** Returns `[<ISO 8601 with local offset>]` for log-line prefixes (local time, container `TZ`). */
 export function ts(): string {
   const d = new Date();
-  // `getTimezoneOffset()` is minutes *behind* UTC, so negate it for the sign.
   const offMin = -d.getTimezoneOffset();
   const sign = offMin < 0 ? '-' : '+';
   const offset =

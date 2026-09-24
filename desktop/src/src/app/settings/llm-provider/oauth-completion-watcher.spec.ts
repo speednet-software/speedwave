@@ -3,6 +3,8 @@ import { TestBed } from '@angular/core/testing';
 import { OauthCompletionWatcher, type OauthWatchContext } from './oauth-completion-watcher';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { createDeferred } from '../../testing/deferred';
+import type { AuthStatusResponse, OauthSignIn } from '../../services/project-state.service';
 
 /**
  * Drains pending non-Zone microtasks.
@@ -15,13 +17,15 @@ async function flushMicrotasks(cycles = 10): Promise<void> {
 }
 
 /**
- * Auth-status payload with the OAuth flag set as requested.
+ * Auth-status payload with the given verdict fields set.
  * @param oauthAuthenticated - Value for the `oauth_authenticated` flag.
+ * @param signIn - Optional `oauth_sign_in` verdict; omitted mirrors an older payload.
  */
-function authStatus(oauthAuthenticated: boolean): Record<string, unknown> {
+function authStatus(oauthAuthenticated: boolean, signIn?: OauthSignIn): Record<string, unknown> {
   return {
     api_key_configured: false,
     oauth_authenticated: oauthAuthenticated,
+    ...(signIn ? { oauth_sign_in: signIn } : {}),
     needs_anthropic_auth: true,
     provider_configured: true,
   };
@@ -32,24 +36,29 @@ describe('OauthCompletionWatcher', () => {
   let mockTauri: MockTauriService;
 
   /**
-   * Builds a context with probing defaults and a login-callback counter.
+   * Builds a context with probing defaults plus login/verdict call counters.
    * @param overrides - Context members to replace.
    */
   function makeContext(overrides: Partial<OauthWatchContext> = {}): {
     ctx: OauthWatchContext;
     logins: () => number;
+    verdicts: () => Array<{ project: string; status: AuthStatusResponse }>;
   } {
-    let count = 0;
+    let loginCount = 0;
+    const verdictCalls: Array<{ project: string; status: AuthStatusResponse }> = [];
     const ctx: OauthWatchContext = {
       activeProject: () => 'proj',
-      isAuthenticated: () => false,
+      lastKnown: () => 'none',
       shouldProbe: () => true,
       onLoginDetected: async () => {
-        count++;
+        loginCount++;
+      },
+      onVerdict: (project, status) => {
+        verdictCalls.push({ project, status });
       },
       ...overrides,
     };
-    return { ctx, logins: () => count };
+    return { ctx, logins: () => loginCount, verdicts: () => verdictCalls };
   }
 
   beforeEach(() => {
@@ -64,7 +73,7 @@ describe('OauthCompletionWatcher', () => {
     watcher.destroy();
   });
 
-  it('checkNow fires onLoginDetected on the credentials false→true edge and stops the poll', async () => {
+  it('checkNow fires onLoginDetected on the none→verified edge and stops the poll', async () => {
     mockTauri.invokeHandler = async () => authStatus(true);
     const { ctx, logins } = makeContext();
     watcher.attach(ctx);
@@ -83,7 +92,7 @@ describe('OauthCompletionWatcher', () => {
       return authStatus(true);
     };
 
-    await watcher.checkNow(); // never attached
+    await watcher.checkNow();
 
     const noProject = makeContext({ activeProject: () => null });
     watcher.attach(noProject.ctx);
@@ -93,27 +102,46 @@ describe('OauthCompletionWatcher', () => {
     expect(noProject.logins()).toBe(0);
   });
 
-  it('does not fire when credentials were already present (no false→true edge)', async () => {
+  it('does not fire either callback when the observed verdict matches lastKnown', async () => {
     mockTauri.invokeHandler = async () => authStatus(true);
-    const { ctx, logins } = makeContext({ isAuthenticated: () => true });
+    const { ctx, logins, verdicts } = makeContext({ lastKnown: () => 'verified' });
     watcher.attach(ctx);
 
     await watcher.checkNow();
 
     expect(logins()).toBe(0);
+    expect(verdicts()).toEqual([]);
+  });
+
+  it('calls onVerdict, not onLoginDetected, when the first observation is verified while known is pending', async () => {
+    mockTauri.invokeHandler = async () => authStatus(true);
+    const { ctx, logins, verdicts } = makeContext({ lastKnown: () => 'pending' });
+    watcher.attach(ctx);
+
+    await watcher.checkNow();
+
+    expect(logins()).toBe(0);
+    expect(verdicts()).toEqual([{ project: 'proj', status: authStatus(true) }]);
+  });
+
+  it('calls onVerdict for a saved_unverified project that becomes verified (no restart)', async () => {
+    mockTauri.invokeHandler = async () => authStatus(true);
+    const { ctx, logins, verdicts } = makeContext({ lastKnown: () => 'saved_unverified' });
+    watcher.attach(ctx);
+
+    await watcher.checkNow();
+
+    expect(logins()).toBe(0);
+    expect(verdicts().length).toBe(1);
   });
 
   it('overlapping probes fire the callback only once (in-flight guard)', async () => {
-    // A slow get_auth_status must not let a second probe pass the same
-    // false→true edge and fire a duplicate login callback.
-    let release: (v: unknown) => void = () => {};
+    const pendingProbe = createDeferred<unknown>();
     let firstProbe = true;
     mockTauri.invokeHandler = async () => {
       if (firstProbe) {
         firstProbe = false;
-        return new Promise((resolve) => {
-          release = resolve;
-        });
+        return pendingProbe.promise;
       }
       return authStatus(true);
     };
@@ -121,8 +149,8 @@ describe('OauthCompletionWatcher', () => {
     watcher.attach(ctx);
 
     const first = watcher.checkNow();
-    const second = watcher.checkNow(); // overlaps while the first probe hangs
-    release(authStatus(true));
+    const second = watcher.checkNow();
+    pendingProbe.resolve(authStatus(true));
     await Promise.all([first, second]);
 
     expect(logins()).toBe(1);
@@ -131,16 +159,31 @@ describe('OauthCompletionWatcher', () => {
   it('drops a probe whose project changed mid-flight (stale drop, no callback)', async () => {
     let project = 'proj-a';
     mockTauri.invokeHandler = async () => {
-      // Simulate the user switching projects while this probe is in flight.
       project = 'proj-b';
       return authStatus(true);
     };
-    const { ctx, logins } = makeContext({ activeProject: () => project });
+    const { ctx, logins, verdicts } = makeContext({ activeProject: () => project });
     watcher.attach(ctx);
 
     await watcher.checkNow();
 
     expect(logins()).toBe(0);
+    expect(verdicts()).toEqual([]);
+  });
+
+  it('drops a probe that lands after the watcher was destroyed (no callback)', async () => {
+    const probe = createDeferred<Record<string, unknown>>();
+    mockTauri.invokeHandler = async () => probe.promise;
+    const { ctx, logins, verdicts } = makeContext();
+    watcher.attach(ctx);
+
+    const checking = watcher.checkNow();
+    watcher.destroy();
+    probe.resolve(authStatus(true));
+    await checking;
+
+    expect(logins()).toBe(0);
+    expect(verdicts()).toEqual([]);
   });
 
   it('swallows a failing get_auth_status and stays usable (container not up yet)', async () => {
@@ -152,9 +195,9 @@ describe('OauthCompletionWatcher', () => {
     const { ctx, logins } = makeContext();
     watcher.attach(ctx);
 
-    await watcher.checkNow(); // rejected — must not throw
+    await watcher.checkNow();
     fail = false;
-    await watcher.checkNow(); // in-flight guard released — next probe works
+    await watcher.checkNow();
 
     expect(logins()).toBe(1);
   });
@@ -191,7 +234,7 @@ describe('OauthCompletionWatcher', () => {
       watcher.startPoll();
 
       vi.advanceTimersByTime(OauthCompletionWatcher.POLL_MS);
-      expect(invokes).toEqual([]); // gated tick skips the IPC
+      expect(invokes).toEqual([]);
 
       probe = true;
       vi.advanceTimersByTime(OauthCompletionWatcher.POLL_MS);
@@ -201,20 +244,38 @@ describe('OauthCompletionWatcher', () => {
     }
   });
 
-  it('the poll stops itself once the context reports authenticated', () => {
+  it('the poll stops itself once lastKnown reports verified', () => {
     vi.useFakeTimers();
     try {
-      let authed = false;
-      const { ctx } = makeContext({ isAuthenticated: () => authed, shouldProbe: () => false });
+      let known: OauthSignIn = 'none';
+      const { ctx } = makeContext({ lastKnown: () => known, shouldProbe: () => false });
       watcher.attach(ctx);
       watcher.startPoll();
 
       vi.advanceTimersByTime(OauthCompletionWatcher.POLL_MS);
       expect(watcher.isPolling()).toBe(true);
 
-      authed = true;
+      known = 'verified';
       vi.advanceTimersByTime(OauthCompletionWatcher.POLL_MS);
       expect(watcher.isPolling()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the poll keeps running while lastKnown is saved_unverified', () => {
+    vi.useFakeTimers();
+    try {
+      const { ctx } = makeContext({
+        lastKnown: () => 'saved_unverified',
+        shouldProbe: () => false,
+      });
+      watcher.attach(ctx);
+      watcher.startPoll();
+
+      vi.advanceTimersByTime(10 * OauthCompletionWatcher.POLL_MS);
+
+      expect(watcher.isPolling()).toBe(true); // well short of tick exhaustion
     } finally {
       vi.useRealTimers();
     }
@@ -235,7 +296,6 @@ describe('OauthCompletionWatcher', () => {
       vi.advanceTimersByTime(
         (OauthCompletionWatcher.MAX_TICKS - 1) * OauthCompletionWatcher.POLL_MS
       );
-      // Well past the previous expiry point — the budget was reset.
       expect(watcher.isPolling()).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -278,7 +338,7 @@ describe('OauthCompletionWatcher', () => {
     watcher.watchWindowFocus();
     await flushMicrotasks();
 
-    watcher.destroy(); // still safe with no listener registered
+    watcher.destroy();
     expect(watcher.isPolling()).toBe(false);
   });
 
@@ -298,7 +358,7 @@ describe('OauthCompletionWatcher', () => {
   it('a focus registration settling after destroy is released immediately', async () => {
     watcher.attach(makeContext().ctx);
     watcher.watchWindowFocus();
-    watcher.destroy(); // before the listen promise settles
+    watcher.destroy();
     await flushMicrotasks();
 
     expect(mockTauri.listenHandlers['window_focused']).toBeUndefined();
@@ -309,6 +369,15 @@ describe('OauthCompletionWatcher', () => {
     watcher.startPoll();
 
     watcher.ngOnDestroy();
+
+    expect(watcher.isPolling()).toBe(false);
+  });
+
+  it('starts no poll once destroyed (a logout finishing after its form is gone)', () => {
+    watcher.attach(makeContext().ctx);
+    watcher.destroy();
+
+    watcher.startPoll();
 
     expect(watcher.isPolling()).toBe(false);
   });

@@ -61,7 +61,6 @@ describe('UsageViewComponent', () => {
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="usage-title"]')?.textContent).toContain('LLM usage');
     expect(el.querySelector('[data-testid="usage-no-project"]')).toBeNull();
-    // The hosted dashboard fetched usage for the active project.
     expect(invoke).toHaveBeenCalledWith('get_llm_usage', { project: 'proj' });
   });
 
@@ -72,8 +71,6 @@ describe('UsageViewComponent', () => {
     expect(invoke).not.toHaveBeenCalledWith('get_llm_usage', expect.anything());
   });
 
-  // Real service on purpose: an in-place switch mutates state from a Tauri event
-  // callback (no user event in this subtree), so only a reactive read propagates.
   it('refetches usage when the active project changes in place', async () => {
     const invoke = vi.fn().mockResolvedValue(emptySummary());
     await TestBed.configureTestingModule({

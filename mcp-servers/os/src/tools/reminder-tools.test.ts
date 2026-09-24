@@ -8,11 +8,11 @@ import {
   handleListReminders,
   handleGetReminder,
   handleCreateReminder,
+  handleUpdateReminder,
   handleCompleteReminder,
   createReminderTools,
 } from './reminder-tools.js';
 
-// Mock the platform runner
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));
@@ -123,7 +123,6 @@ describe('reminder-tools', () => {
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockData);
-      // Verify flat response — no wrapping under "reminder" key (wrapping removed to match outputSchema)
       expect((result.data as any).reminder).toBeUndefined();
       expect((result.data as any).id).toBe('r-1');
       expect(runCommand).toHaveBeenCalledWith('reminders', 'get_reminder', { id: 'r-1' });
@@ -252,6 +251,176 @@ describe('reminder-tools', () => {
     });
   });
 
+  describe('handleUpdateReminder', () => {
+    it('renames a reminder and passes only the given fields through', async () => {
+      const mockData = { status: 'updated' };
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: mockData });
+
+      const result = await handleUpdateReminder({ id: 'r-1', name: 'Kacper chce na UoP' });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockData);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'update_reminder', {
+        id: 'r-1',
+        name: 'Kacper chce na UoP',
+      });
+    });
+
+    it('passes every updatable field through unchanged', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+      await handleUpdateReminder({
+        id: 'r-1',
+        name: 'Review PR #42',
+        list_id: 'list-2',
+        due_date: '2026-01-16T10:00:00',
+        priority: 5,
+        notes: 'Rescheduled',
+        tags: ['work'],
+        completed: false,
+      });
+
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'update_reminder', {
+        id: 'r-1',
+        name: 'Review PR #42',
+        list_id: 'list-2',
+        due_date: '2026-01-16T10:00:00',
+        priority: 5,
+        notes: 'Rescheduled',
+        tags: ['work'],
+        completed: false,
+      });
+    });
+
+    it('passes due_date null through so the CLI clears the due date', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+      const result = await handleUpdateReminder({ id: 'r-1', due_date: null });
+
+      expect(result.success).toBe(true);
+      expect(runCommand).toHaveBeenCalledWith('reminders', 'update_reminder', {
+        id: 'r-1',
+        due_date: null,
+      });
+    });
+
+    it('accepts an all-day due date', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+      const result = await handleUpdateReminder({ id: 'r-1', due_date: '2026-07-01' });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('emits only keys declared in its outputSchema', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+      const tool = createReminderTools().find((t) => t.tool.name === 'updateReminder')!;
+
+      const result = await tool.handler({ id: 'r-1', name: 'x' });
+
+      const emitted = JSON.parse((result.content[0] as { text: string }).text) as Record<
+        string,
+        unknown
+      >;
+      const declared = Object.keys(tool.tool.outputSchema!.properties as Record<string, unknown>);
+      expect(declared).toEqual(expect.arrayContaining(Object.keys(emitted)));
+    });
+
+    it('fails when id is missing', async () => {
+      const result = await handleUpdateReminder({ name: 'x' } as any);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_FIELDS');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('fails when id is empty', async () => {
+      const result = await handleUpdateReminder({ id: '', name: 'x' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+    });
+
+    it('rejects an empty name (a reminder must keep a title)', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', name: '   ' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EMPTY_FIELDS');
+      expect(result.error?.message).toContain('name');
+    });
+
+    it('rejects name as null', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', name: null as any });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('rejects name exceeding max length', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', name: 'a'.repeat(1001) });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('FIELD_TOO_LONG');
+    });
+
+    it('rejects an invalid due_date', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', due_date: 'tomorrow' });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_DATE');
+    });
+
+    it('rejects completed as a string', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', completed: 'false' as any });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('rejects priority out of range', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', priority: 10 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('OUT_OF_RANGE');
+    });
+
+    it('rejects a fractional priority instead of silently ignoring it', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', priority: 5.5 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it('rejects a tag containing marker characters', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', tags: ['ok', 'bad]#'] });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_CHARACTERS');
+      expect(result.error?.message).toContain('tags[1]');
+    });
+
+    it('passes an empty tags array (clears all tags)', async () => {
+      vi.mocked(runCommand).mockResolvedValue({ stdout: '', parsed: { status: 'updated' } });
+
+      await handleUpdateReminder({ id: 'r-1', tags: [] });
+
+      expect(runCommand).toHaveBeenCalledWith(
+        'reminders',
+        'update_reminder',
+        expect.objectContaining({ tags: [] })
+      );
+    });
+
+    it('propagates CLI failures such as an unknown id', async () => {
+      vi.mocked(runCommand).mockRejectedValue(
+        new Error("reminders.update_reminder failed: Reminder with id 'nope' not found")
+      );
+
+      await expect(handleUpdateReminder({ id: 'nope', name: 'x' })).rejects.toThrow('not found');
+    });
+  });
+
   describe('handleCompleteReminder', () => {
     it('completes reminder successfully', async () => {
       const mockData = { status: 'completed' };
@@ -273,17 +442,64 @@ describe('reminder-tools', () => {
   });
 
   describe('createReminderTools', () => {
-    it('returns 5 tool definitions', () => {
+    it('returns 6 tool definitions', () => {
       const tools = createReminderTools();
 
-      expect(tools).toHaveLength(5);
+      expect(tools).toHaveLength(6);
       expect(tools.map((t) => t.tool.name)).toEqual([
         'listReminderLists',
         'listReminders',
         'getReminder',
         'createReminder',
+        'updateReminder',
         'completeReminder',
       ]);
+    });
+
+    it('updateReminderTool requires only id and lets due_date be null', () => {
+      const tools = createReminderTools();
+      const updateTool = tools.find((t) => t.tool.name === 'updateReminder')!;
+      const props = updateTool.tool.inputSchema.properties as Record<string, { type: unknown }>;
+
+      expect(updateTool.tool.inputSchema.required).toEqual(['id']);
+      expect(props.due_date.type).toEqual(['string', 'null']);
+      expect(props.completed.type).toBe('boolean');
+      expect(props.tags.type).toBe('array');
+      expect(updateTool.tool.annotations?.destructiveHint).toBe(false);
+      expect(updateTool.tool.annotations?.readOnlyHint).toBe(false);
+    });
+
+    it('listReminders and getReminder outputSchemas declare all_day next to due_date', () => {
+      const tools = createReminderTools();
+      const listItems = (
+        tools.find((t) => t.tool.name === 'listReminders')!.tool.outputSchema as any
+      ).properties.reminders.items.properties;
+      const getProps = (tools.find((t) => t.tool.name === 'getReminder')!.tool.outputSchema as any)
+        .properties;
+
+      for (const props of [listItems, getProps]) {
+        expect(props.all_day.type).toBe('boolean');
+        expect(props.due_date.description).toContain('YYYY-MM-DD');
+      }
+    });
+
+    it('createReminder and updateReminder examples teach local due dates, never UTC', () => {
+      const localDueDate = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/;
+      const tools = createReminderTools().filter((t) =>
+        ['createReminder', 'updateReminder'].includes(t.tool.name)
+      );
+      const dueDates = tools.flatMap((t) => [
+        ...(t.tool.inputExamples ?? [])
+          .map((e) => e.input.due_date)
+          .filter((d): d is string => typeof d === 'string'),
+        ...[...(t.tool.example ?? '').matchAll(/due_date: "([^"]*)"/g)].map((m) => m[1]),
+      ]);
+
+      expect(dueDates).toContain('2026-01-15T10:00:00');
+      expect(dueDates.length).toBeGreaterThanOrEqual(4);
+      for (const dueDate of dueDates) {
+        expect(dueDate).toMatch(localDueDate);
+      }
     });
 
     it('all tools have handlers', () => {
@@ -366,6 +582,20 @@ describe('reminder-tools', () => {
         const result = await handleCreateReminder({ name: 'Test', priority: '1' as any });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects a fractional priority (the CLI cannot apply it)', async () => {
+        const result = await handleCreateReminder({ name: 'Test', priority: 5.5 });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it('rejects due_date null (only updateReminder can clear a due date)', async () => {
+        const result = await handleCreateReminder({ name: 'Test', due_date: null as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+        expect(runCommand).not.toHaveBeenCalled();
       });
 
       it('rejects invalid due_date', async () => {

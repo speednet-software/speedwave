@@ -30,14 +30,19 @@ function wdRequest(port: number, method: string, path: string, body?: unknown): 
         port,
         method,
         path,
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
       },
       (res) => {
         let data = '';
         res.on('data', (c: Buffer) => (data += c.toString()));
         res.on('end', () => {
           if ((res.statusCode ?? 500) >= 400) {
-            reject(new Error(`WebDriver ${method} ${path} → ${res.statusCode}: ${data.slice(0, 200)}`));
+            reject(
+              new Error(`WebDriver ${method} ${path} → ${res.statusCode}: ${data.slice(0, 200)}`)
+            );
             return;
           }
           try {
@@ -87,8 +92,6 @@ function waitForPort(port: number, timeoutMs: number): Promise<void> {
 describe('Factory Reset', function () {
   before(async function () {
     this.timeout(180_000);
-    // Earlier specs (10-15) switch projects; pin e2e-test so the
-    // active-project assertion below stays an exact, deterministic match.
     if ((await activeProjectSlug()) !== E2E_PROJECT_NAME) {
       await switchToProject(E2E_PROJECT_NAME);
     }
@@ -100,36 +103,31 @@ describe('Factory Reset', function () {
     const nav = await $('[data-testid="nav-settings"]');
     await nav.waitForExist({
       timeout: 15_000,
-      timeoutMsg: 'Settings nav link not found — earlier specs must complete successfully before factory reset tests can run',
+      timeoutMsg:
+        'Settings nav link not found — earlier specs must complete successfully before factory reset tests can run',
     });
     await nav.click();
 
-    // Settings is ready when the page heading is rendered; active project from activeProjectSlug().
     const title = await $('[data-testid="settings-title"]');
     await title.waitForExist({
       timeout: 10_000,
       timeoutMsg: 'Settings page heading not found',
     });
     expect(await title.isDisplayed()).toBe(true);
-    // The before hook pinned e2e-test — assert the exact slug, not just presence.
     expect(await activeProjectSlug()).toBe(E2E_PROJECT_NAME);
   });
 
   it('should wipe state and restart the app', async function () {
     this.timeout(180_000);
 
-    // Verify ~/.speedwave/ exists before reset (setup completed in earlier specs).
-    const stateExists: boolean = await browser.executeAsync(
-      (done: (result: boolean) => void) => {
-        (window as any).__TAURI_INTERNALS__
-          .invoke('is_setup_complete')
-          .then((result: boolean) => done(result))
-          .catch(() => done(false));
-      },
-    );
+    const stateExists: boolean = await browser.executeAsync((done: (result: boolean) => void) => {
+      (window as any).__TAURI_INTERNALS__
+        .invoke('is_setup_complete')
+        .then((result: boolean) => done(result))
+        .catch(() => done(false));
+    });
     expect(stateExists).toBe(true);
 
-    // Click factory reset → confirm; app.restart() kills the process so the click may throw.
     const resetBtn = await $('[data-testid="settings-reset-btn"]');
     await resetBtn.click();
 
@@ -138,29 +136,19 @@ describe('Factory Reset', function () {
 
     try {
       await confirm.click();
-    } catch {
-      // Expected: session dies when Tauri process exits
-    }
+    } catch {}
 
-    // Wait for old process to die and release port 4445 (TCP TIME_WAIT + teardown).
     await new Promise((resolve) => setTimeout(resolve, 3_000));
 
-    // Poll until the restarted app binds port 4445 again.
     await waitForPort(browser.options.port ?? 4445, 150_000);
   });
 
   it('should land on the setup wizard with all state wiped', async function () {
     this.timeout(300_000);
     const port = browser.options.port ?? 4445;
-    // waitForPort may have latched onto the DYING pre-reset listener; give the
-    // cold post-wipe boot its own generous window before declaring death.
     await waitForPort(port, 120_000);
     const deadline = Date.now() + 240_000;
 
-    // The dying pre-restart instance keeps the port bound through its exit
-    // cleanup, so requests are split between BOTH instances and sessions
-    // evaporate mid-use. Every call recreates the session on invalid-session
-    // and retries; once the old process exits, calls stabilize on the new one.
     let sessionId: string | null = null;
     const exec = async (endpoint: 'sync' | 'async', script: string): Promise<unknown> => {
       let lastErr: unknown = null;
@@ -180,7 +168,7 @@ describe('Factory Reset', function () {
         } catch (err) {
           lastErr = err;
           if (String(err).includes('invalid session id') || String(err).includes('not found')) {
-            sessionId = null; // stale instance answered — recreate and retry
+            sessionId = null;
           }
           await new Promise((resolve) => setTimeout(resolve, 2_000));
         }
@@ -189,7 +177,6 @@ describe('Factory Reset', function () {
     };
 
     try {
-      // A reset that restarts but fails to wipe ~/.speedwave skips the wizard.
       let wizardVisible = false;
       while (Date.now() < deadline && !wizardVisible) {
         wizardVisible =
@@ -210,8 +197,6 @@ describe('Factory Reset', function () {
       expect(setupComplete).toBe(false);
     } finally {
       if (sessionId) {
-        // Hand the LIVE session to wdio: its end-of-run endSession() would
-        // otherwise DELETE the dead pre-reset session and crash the runner.
         (browser as unknown as { sessionId: string }).sessionId = sessionId;
       }
     }

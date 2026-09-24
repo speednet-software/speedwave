@@ -1,7 +1,9 @@
 cli/
 
-# Per-machine path written by scripts/dev-fetch-sherpa-cache.sh (make dev / make download-sherpa-onnx).
 .sherpa-onnx-lib-dir
 
-# Runtime bundle lock (holds the running make dev PID).
 .bundle.lock/
+
+/vulkan-1.dll
+
+/.cargo/

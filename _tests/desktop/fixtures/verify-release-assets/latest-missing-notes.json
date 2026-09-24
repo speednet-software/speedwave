@@ -4,7 +4,7 @@
   "platforms": {
     "darwin-aarch64": {
       "signature": "canned-sig",
-      "url": "https://github.com/test/repo/releases/download/v0.8.1/Speedwave_0.8.1_macOS_Apple_Silicon.app.tar.gz"
+      "url": "https://api.github.com/repos/test/repo/releases/assets/101"
     }
   }
 }

@@ -1,6 +1,7 @@
 //! Resolution and staging of bundled assets (build context, Node, binaries).
 
 use crate::{build, consts};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -70,7 +71,6 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // `oauth` worker (ADR-060): host process like `mcp-os`, not in `build::IMAGES`.
     BundledAssetSpec {
         path: "oauth/oauth/dist/index.js",
         kind: BundledAssetKind::File,
@@ -157,6 +157,10 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     },
     BundledAssetSpec {
         path: "cli/speedwave.exe",
+        kind: BundledAssetKind::File,
+    },
+    BundledAssetSpec {
+        path: "vulkan-1.dll",
         kind: BundledAssetKind::File,
     },
 ];
@@ -271,7 +275,6 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
         let manifest: BundleManifest = serde_json::from_str(&data)?;
-        // Pre-ADR-072 manifest (no per-image hashes) — regenerate from the tree.
         if !manifest.image_hashes.is_empty() {
             return Ok(manifest);
         }
@@ -282,17 +285,16 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
-    .map_err(|e| {
-        // An older Desktop's tree lacks new image inputs — name the real remedy.
-        match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+    .map_err(
+        |e| match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
             Some(v) => anyhow::anyhow!(
-                "installed Desktop resources are v{v} but this binary is v{}: {e}. \
+                "installed Desktop resources are v{v} but this binary is v{}: {e:#}. \
                  Update Speedwave Desktop, then run `speedwave update`.",
                 env!("CARGO_PKG_VERSION")
             ),
             None => e,
-        }
-    })
+        },
+    )
 }
 
 /// App version stamped in the on-disk manifest; `None` when absent/unreadable.
@@ -313,7 +315,6 @@ pub fn generate_bundle_manifest(
     claude_version: &str,
     build_root: &Path,
 ) -> anyhow::Result<BundleManifest> {
-    // Each distinct input is hashed once (mcp-servers/shared feeds every worker).
     let mut component_cache: std::collections::HashMap<&str, String> =
         std::collections::HashMap::new();
     let mut image_hashes = std::collections::BTreeMap::new();
@@ -676,6 +677,14 @@ fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf>
     );
 }
 
+/// True when every catalogue hash input resolves under `build_root`.
+pub fn hash_inputs_resolvable(build_root: &Path) -> bool {
+    build::IMAGES
+        .iter()
+        .flat_map(|img| img.hash_inputs.iter())
+        .all(|input| resolve_hash_input(build_root, input).is_ok())
+}
+
 /// Test-only seam: `build.rs`'s catalog tests assert every declared input resolves.
 #[cfg(test)]
 pub(crate) fn resolve_hash_input_for_test(
@@ -701,8 +710,8 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
-/// Host build-output dir names that are never image content — skipped from digests here, pruned by
-/// bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
+/// Host build-output dir names that are never image content — skipped from digests here, skipped at
+/// copy time by bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
 pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
@@ -713,7 +722,6 @@ fn collect_directory_entries(
     if !dir.exists() {
         anyhow::bail!("Missing path for bundle digest: {}", dir.display());
     }
-    // Reject symlinks: the copier dereferences them, changing content without changing the hash.
     if dir.is_symlink() {
         anyhow::bail!(
             "symlink not allowed in image hash inputs: {}",
@@ -721,25 +729,31 @@ fn collect_directory_entries(
         );
     }
     if dir.is_file() {
-        out.push((prefix.to_string(), std::fs::read(dir)?));
+        let content = std::fs::read(dir)
+            .with_context(|| format!("reading {} for the bundle digest", dir.display()))?;
+        out.push((prefix.to_string(), content));
         return Ok(());
     }
 
-    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<_, _>>()?;
+    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
+        .and_then(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<_, _>>()
+        })
+        .with_context(|| format!("listing {} for the bundle digest", dir.display()))?;
     children.sort();
 
     for child in children {
         if child.is_dir()
-            && child
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| HOST_BUILD_OUTPUT_DIRS.contains(&n))
+            && child.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                HOST_BUILD_OUTPUT_DIRS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(n))
+            })
         {
             continue;
         }
-        // Reject symlinks: the copier dereferences them, changing content without changing the hash.
         if child.is_symlink() {
             anyhow::bail!(
                 "symlink not allowed in image hash inputs: {}",
@@ -755,8 +769,112 @@ fn collect_directory_entries(
             collect_directory_entries(&child, &format!("{prefix}/{rel_name}"), out)?;
             continue;
         }
-        let content = std::fs::read(&child)?;
+        let content = std::fs::read(&child)
+            .with_context(|| format!("reading {} for the bundle digest", child.display()))?;
         out.push((format!("{prefix}/{rel_name}"), content));
+    }
+    Ok(())
+}
+
+/// List of the files a release ships, written into each staged build-context tree by
+/// `bundle-build-context.{sh,ps1}` and read by [`prune_unshipped_files`].
+pub(crate) const SHIPPED_FILES_LIST: &str = ".speedwave-shipped-files";
+/// Build-context trees that carry a [`SHIPPED_FILES_LIST`].
+pub(crate) const SHIPPED_TREES: [&str; 2] = ["containers", "mcp-servers"];
+
+/// Removes from each build-context tree under `build_root` the files its [`SHIPPED_FILES_LIST`]
+/// does not name, without following links. A tree without a list is left alone, and a list that
+/// does not describe its tree is refused before anything is removed. Returns the removed paths.
+pub fn prune_unshipped_files(build_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for tree in SHIPPED_TREES {
+        let root = build_root.join(tree);
+        let list_path = root.join(SHIPPED_FILES_LIST);
+        let list = match std::fs::read_to_string(&list_path) {
+            Ok(list) => list,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", list_path.display())),
+        };
+        let shipped = parse_shipped_files(&list, &list_path)?;
+        let mut files = std::collections::HashMap::new();
+        let mut links = std::collections::HashSet::new();
+        collect_tree_entries(&root, &root, &mut files, &mut links)?;
+        files.remove(&SHIPPED_FILES_LIST.to_lowercase());
+        if let Some(missing) = shipped
+            .iter()
+            .find(|entry| !files.contains_key(*entry) && !links.contains(*entry))
+        {
+            anyhow::bail!(
+                "{} names {missing}, which {} does not hold: the list does not describe this tree",
+                list_path.display(),
+                root.display()
+            );
+        }
+        for (entry, path) in files {
+            if !shipped.contains(&entry) {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                removed.push(path);
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn parse_shipped_files(
+    list: &str,
+    list_path: &Path,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let mut shipped = std::collections::HashSet::new();
+    for line in list.lines() {
+        let entry = line.trim_end_matches('\r');
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.contains('\\') || entry.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            anyhow::bail!(
+                "{} names {entry:?}, which is not a relative path inside its tree",
+                list_path.display()
+            );
+        }
+        shipped.insert(entry.to_lowercase());
+    }
+    if shipped.is_empty() {
+        anyhow::bail!("{} names no file", list_path.display());
+    }
+    Ok(shipped)
+}
+
+fn collect_tree_entries(
+    root: &Path,
+    dir: &Path,
+    files: &mut std::collections::HashMap<String, PathBuf>,
+    links: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("listing {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading the type of {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_tree_entries(root, &path, files, links)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .with_context(|| format!("{} is outside {}", path.display(), root.display()))?
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+            .to_lowercase();
+        if file_type.is_symlink() {
+            links.insert(rel);
+        } else {
+            files.insert(rel, path);
+        }
     }
     Ok(())
 }
@@ -771,7 +889,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
-            // fsync each file — staging→target rename must not outlive the data (torn-write).
             let file = std::fs::File::open(&dst_path)
                 .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
             crate::fs_perms::fsync_file_durable(&file)
@@ -818,14 +935,74 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Missing path for bundle digest"), "{err}");
-        // Separator-insensitive: the message mixes native joins with the
-        // POSIX-relative input on Windows.
         let norm = err.replace('\\', "/");
         let direct = tmp.path().join("crates/pii-engine");
         let vendored = tmp.path().join("containers/crates/pii-engine");
         for candidate in [direct, vendored] {
             let expected = candidate.display().to_string().replace('\\', "/");
             assert!(norm.contains(&expected), "{err}");
+        }
+    }
+
+    fn vendor_proxy_inputs(root: &Path) {
+        let vendored = root.join("containers");
+        std::fs::create_dir_all(vendored.join("mcp-servers/policies")).unwrap();
+        std::fs::rename(root.join("crates"), vendored.join("crates")).unwrap();
+        std::fs::rename(
+            root.join("mcp-servers/policies/rules.yaml"),
+            vendored.join("mcp-servers/policies/rules.yaml"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hash_inputs_resolvable_accepts_the_staged_vendored_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        vendor_proxy_inputs(tmp.path());
+
+        let direct_paths_only = build::IMAGES
+            .iter()
+            .flat_map(|img| img.hash_inputs.iter())
+            .all(|input| tmp.path().join(input).exists());
+        assert!(
+            !direct_paths_only,
+            "a direct-path check must call this complete staged tree incomplete"
+        );
+        assert!(hash_inputs_resolvable(tmp.path()));
+    }
+
+    #[test]
+    fn hash_inputs_resolvable_rejects_a_tree_missing_one_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_build_tree(tmp.path());
+        std::fs::remove_file(tmp.path().join("containers/entrypoint.sh")).unwrap();
+        assert!(!hash_inputs_resolvable(tmp.path()));
+    }
+
+    #[test]
+    fn hash_inputs_resolvable_rejects_stub_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("mcp-servers")).unwrap();
+        assert!(!hash_inputs_resolvable(tmp.path()));
+    }
+
+    #[test]
+    fn vendored_layout_keeps_the_proxy_and_claude_hashes() {
+        let repo = tempfile::tempdir().unwrap();
+        write_build_tree(repo.path());
+        let staged = tempfile::tempdir().unwrap();
+        copy_dir_recursive(repo.path(), staged.path()).unwrap();
+        vendor_proxy_inputs(staged.path());
+
+        let from_repo = generate_bundle_manifest("1.2.3", "2.1.0", repo.path()).unwrap();
+        let from_staged = generate_bundle_manifest("1.2.3", "2.1.0", staged.path()).unwrap();
+        for name in [build::IMAGE_PROXY, build::IMAGE_CLAUDE] {
+            assert_eq!(
+                from_repo.image_hashes[name], from_staged.image_hashes[name],
+                "{name}: the digest labels inputs by their declared path, not where they resolve"
+            );
         }
     }
 
@@ -859,6 +1036,140 @@ mod tests {
         assert!(err.contains("symlink not allowed"), "got: {err}");
     }
 
+    fn io_error(err: &anyhow::Error) -> &std::io::Error {
+        err.downcast_ref::<std::io::Error>()
+            .expect("digest error must wrap an io::Error")
+    }
+
+    fn assert_digest_error_names(err: &anyhow::Error, path: &Path) {
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(&path.display().to_string()),
+            "got: {rendered}"
+        );
+        assert!(rendered.contains("(os error "), "got: {rendered}");
+    }
+
+    #[test]
+    fn digest_error_names_the_unreadable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        crate::fs_perms::make_unreadable_for_test(&locked);
+
+        let err = digest_paths(&[("p", tmp.path())]).unwrap_err();
+
+        assert_eq!(io_error(&err).kind(), std::io::ErrorKind::PermissionDenied);
+        assert_digest_error_names(&err, &locked);
+    }
+
+    #[test]
+    fn digest_error_names_the_unreadable_top_level_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        crate::fs_perms::make_unreadable_for_test(&locked);
+
+        let err = digest_paths(&[("p", &locked)]).unwrap_err();
+
+        assert_eq!(io_error(&err).kind(), std::io::ErrorKind::PermissionDenied);
+        assert_digest_error_names(&err, &locked);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_error_names_the_unlistable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sealed = tmp.path().join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        std::fs::write(sealed.join("inner.txt"), "x").unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = digest_paths(&[("p", tmp.path())]);
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = result.unwrap_err();
+        assert_eq!(io_error(&err).kind(), std::io::ErrorKind::PermissionDenied);
+        assert_digest_error_names(&err, &sealed);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn digest_error_names_the_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        let _holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+
+        let err = digest_paths(&[("p", tmp.path())]).unwrap_err();
+
+        assert_eq!(
+            io_error(&err).raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION as i32)
+        );
+        assert_digest_error_names(&err, &locked);
+    }
+
+    fn script_block_body<'a>(script: &'a str, header: &str) -> Vec<&'a str> {
+        script
+            .lines()
+            .skip_while(|l| l.trim_end() != header)
+            .skip(1)
+            .take_while(|l| l.trim_end() != "}")
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect()
+    }
+
+    fn copy_sources(script: &str, call: &str) -> Vec<String> {
+        let mut sources: Vec<String> = script
+            .lines()
+            .filter_map(|l| l.strip_prefix(call))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|src| {
+                let src = src.trim_matches('"');
+                let src = src.strip_prefix("$REPO_ROOT/").unwrap_or(src);
+                match src.strip_prefix('$') {
+                    Some(knob) => {
+                        let knob = knob.to_lowercase().replace('_', "");
+                        knob.strip_suffix("dir").unwrap_or(&knob).to_string()
+                    }
+                    None => src.replace('\\', "/"),
+                }
+            })
+            .collect();
+        sources.sort();
+        sources
+    }
+
+    #[test]
+    fn script_block_body_skips_comments_and_stops_at_closing_brace() {
+        let script = "copy_tree() {\n  # find -prune\n  tar\n}\nfind . -name target -prune\n";
+        assert_eq!(script_block_body(script, "copy_tree() {"), ["  tar"]);
+        assert!(script_block_body(script, "missing() {").is_empty());
+    }
+
+    #[test]
+    fn copy_sources_normalizes_both_script_dialects() {
+        let sh = "copy_tree \"$CONTAINERS_DIR\" \"$DEST/c\"\ncopy_tree \"$REPO_ROOT/crates/pii-engine\" \"$DEST/p\"\n  copy_tree nested\n";
+        let ps1 =
+            "Copy-Tree $containersDir \"$dest\\c\"\nCopy-Tree crates\\pii-engine \"$dest\\p\"\n";
+        assert_eq!(
+            copy_sources(sh, "copy_tree "),
+            ["containers", "crates/pii-engine"]
+        );
+        assert_eq!(
+            copy_sources(ps1, "Copy-Tree "),
+            ["containers", "crates/pii-engine"]
+        );
+    }
+
     #[test]
     fn host_build_output_dirs_align_with_bundle_scripts_and_dockerignore() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -874,37 +1185,62 @@ mod tests {
         let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
             .expect("containers/.dockerignore should exist");
 
-        // .sh prune: `\( -name target -o -name dist -o -name node_modules \) -prune`
-        let sh_line = sh
-            .lines()
-            .find(|l| l.contains("-prune"))
-            .expect("-prune find line should exist in .sh");
-        let sh_tokens: Vec<&str> = sh_line.split_whitespace().collect();
-        let mut sh_names: Vec<&str> = sh_tokens
-            .windows(2)
-            .filter(|w| w[0] == "-name")
-            .map(|w| w[1])
-            .collect();
-        sh_names.sort_unstable();
-
-        // .ps1 prune: `if ($dir.Name -in 'target', 'dist', 'node_modules') {`
-        let ps1_line = ps1
-            .lines()
-            .find(|l| l.contains(" -in "))
-            .expect("-in prune line should exist in .ps1");
-        let mut ps1_names: Vec<&str> = ps1_line.split('\'').skip(1).step_by(2).collect();
-        ps1_names.sort_unstable();
-
         let mut expected: Vec<&str> = HOST_BUILD_OUTPUT_DIRS.to_vec();
         expected.sort_unstable();
 
-        assert_eq!(
-            sh_names, expected,
-            "bundle-build-context.sh prune must match HOST_BUILD_OUTPUT_DIRS"
+        let sh_lines: Vec<&str> = sh.lines().filter(|l| l.contains("-prune")).collect();
+        assert!(!sh_lines.is_empty(), "-prune find line should exist in .sh");
+        for line in sh_lines {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let mut names: Vec<&str> = tokens
+                .windows(2)
+                .filter(|w| w[0] == "-iname")
+                .map(|w| w[1])
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names, expected,
+                "bundle-build-context.sh exclusion must match HOST_BUILD_OUTPUT_DIRS: {line}"
+            );
+        }
+
+        let ps1_lines: Vec<&str> = ps1.lines().filter(|l| l.contains(" -in ")).collect();
+        assert!(
+            !ps1_lines.is_empty(),
+            "case-insensitive -in exclusion line should exist in .ps1"
         );
-        assert_eq!(
-            ps1_names, expected,
-            "bundle-build-context.ps1 prune must match HOST_BUILD_OUTPUT_DIRS"
+        for line in ps1_lines {
+            let mut names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+            names.sort_unstable();
+            assert_eq!(
+                names, expected,
+                "bundle-build-context.ps1 exclusion must match HOST_BUILD_OUTPUT_DIRS: {line}"
+            );
+        }
+        let sh_body = script_block_body(&sh, "copy_tree() {").join("\n");
+        assert!(
+            ["-type l", "-iname", "-prune"]
+                .iter()
+                .all(|t| sh_body.contains(t))
+                && !sh_body
+                    .split_whitespace()
+                    .any(|t| t == "rm" || t == "-exec" || t == "-delete"),
+            "copy_tree() in bundle-build-context.sh must skip build-output dirs and links case-insensitively, never remove them:\n{sh_body}"
+        );
+        let ps1_body = script_block_body(&ps1, "function Copy-Tree {").join("\n");
+        assert!(
+            [" -in ", "ReparsePoint"].iter().all(|t| ps1_body.contains(t))
+                && !["Remove-Item", "-Recurse"]
+                    .iter()
+                    .any(|t| ps1_body.contains(t)),
+            "Copy-Tree in bundle-build-context.ps1 must skip build-output dirs and reparse points, never copy recursively or remove:\n{ps1_body}"
+        );
+        let sh_sources = copy_sources(&sh, "copy_tree ");
+        let ps1_sources = copy_sources(&ps1, "Copy-Tree ");
+        assert!(
+            !sh_sources.is_empty() && sh_sources == ps1_sources,
+            "both bundle scripts must stage the same trees through their excluding copy: \
+             sh {sh_sources:?}, ps1 {ps1_sources:?}"
         );
         for name in HOST_BUILD_OUTPUT_DIRS {
             assert!(
@@ -937,7 +1273,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn collect_directory_entries_skips_node_modules_with_bin_symlink() {
-        // node_modules/.bin/<tool> symlinks must be skipped, not bailed on.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
         std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
@@ -959,7 +1294,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn collect_directory_entries_skips_nested_node_modules() {
-        // The skip applies at every recursion depth, not just the top level.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
         let nested = dir.join("packages/pkg/node_modules/.bin");
@@ -977,8 +1311,6 @@ mod tests {
 
     #[test]
     fn collect_directory_entries_skips_target_and_dist_directories() {
-        // target/ is .dockerignore'd, dist/ is rebuilt in-image (never a context
-        // COPY source) — both are host build outputs racing parallel test lanes.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("proxy");
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1000,8 +1332,23 @@ mod tests {
     }
 
     #[test]
+    fn collect_directory_entries_skips_build_output_directories_in_any_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("svc");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "real").unwrap();
+        for (parent, name) in [("a", "Target"), ("b", "DIST"), ("c", "Node_Modules")] {
+            std::fs::create_dir_all(dir.join(parent).join(name)).unwrap();
+            std::fs::write(dir.join(parent).join(name).join("blob"), "junk").unwrap();
+        }
+        let mut out = Vec::new();
+        collect_directory_entries(&dir, "p", &mut out).unwrap();
+        let rels: Vec<&str> = out.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(rels, ["p/src/main.rs"]);
+    }
+
+    #[test]
     fn collect_directory_entries_keeps_files_named_target_or_dist() {
-        // The skip is directory-gated: plain FILES with these names are content.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("svc");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1016,8 +1363,6 @@ mod tests {
 
     #[test]
     fn target_and_dist_changes_do_not_alter_manifest_hash() {
-        // Parallel `cargo test` (containers/proxy/target) and tsc rebuilds
-        // (mcp-servers/*/dist) must not perturb or race the image hashes.
         let tmp = tempfile::tempdir().unwrap();
         write_build_tree(tmp.path());
         let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
@@ -1037,7 +1382,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn node_modules_changes_do_not_alter_manifest_hash() {
-        // node_modules is not image content; adding it must not change any image hash (ADR-072).
         let tmp = tempfile::tempdir().unwrap();
         write_build_tree(tmp.path());
         let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
@@ -1082,7 +1426,6 @@ mod tests {
         for img in build::IMAGES {
             for input in img.hash_inputs {
                 let path = root.join(input);
-                // Inputs with an extension are files; the rest are directories.
                 if Path::new(input).extension().is_some() {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).unwrap();
@@ -1137,14 +1480,12 @@ mod tests {
         )
         .unwrap();
 
-        // Real directory copy (matches production bundle-build-context.sh behavior)
         let mcp_shared_dest = root.join("mcp-os/os/node_modules/@speedwave/mcp-shared");
         std::fs::create_dir_all(mcp_shared_dest.join("dist")).unwrap();
         std::fs::write(mcp_shared_dest.join("dist/index.js"), "export {};").unwrap();
         std::fs::write(mcp_shared_dest.join("package.json"), "{}").unwrap();
         std::fs::write(mcp_shared_dest.join("package-lock.json"), "{}").unwrap();
 
-        // oauth worker — staged the same way as mcp-os (ADR-060).
         std::fs::create_dir_all(root.join("oauth/oauth/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/node_modules/pkg")).unwrap();
@@ -1203,6 +1544,7 @@ mod tests {
                 std::fs::write(root.join("wsl/ubuntu-rootfs.tar.gz"), "binary").unwrap();
                 std::fs::write(root.join("nodejs/node.exe"), "binary").unwrap();
                 std::fs::write(root.join("cli/speedwave.exe"), "binary").unwrap();
+                std::fs::write(root.join("vulkan-1.dll"), "binary").unwrap();
             }
             other => panic!("unexpected target os in test: {other}"),
         }
@@ -1383,7 +1725,6 @@ mod tests {
     fn legacy_state_file_parses_preserving_existing_fields() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("bundle-state.json");
-        // Pre-ADR-072 shape: no applied_image_hashes field.
         std::fs::write(
             &path,
             r#"{
@@ -1408,7 +1749,6 @@ mod tests {
 
     #[test]
     fn new_state_file_readable_by_legacy_shape() {
-        // Old releases deserialize the new file (serde ignores unknown fields).
         #[derive(Deserialize)]
         struct LegacyBundleState {
             applied_bundle_id: Option<String>,
@@ -1434,10 +1774,21 @@ mod tests {
     }
 
     #[test]
+    fn missing_manifest_file_regenerates_from_the_build_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let manifest = load_current_bundle_manifest_from(temp.path()).unwrap();
+
+        assert!(!manifest.image_hashes.is_empty());
+        assert_eq!(manifest.app_version, env!("CARGO_PKG_VERSION"));
+        assert!(!temp.path().join(BUNDLE_MANIFEST_FILE).exists());
+    }
+
+    #[test]
     fn legacy_manifest_json_is_regenerated() {
         let temp = tempfile::tempdir().unwrap();
         write_build_tree(temp.path());
-        // Pre-ADR-072 manifest: no image_hashes field.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{
@@ -1462,7 +1813,6 @@ mod tests {
     #[test]
     fn stale_resources_regeneration_error_names_desktop_update() {
         let temp = tempfile::tempdir().unwrap();
-        // Legacy manifest + no build tree: digesting the new catalogue fails.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{"app_version": "0.1.0", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
@@ -1735,12 +2085,53 @@ mod tests {
             "WINDOWS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
              the const literal and the SSOT drifted"
         );
-        // The Tauri Windows resource map must carry the same bundle path.
         let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
         assert!(
             tauri_cfg.contains(&expected),
             "tauri.windows.conf.json must bundle {expected}; rename it there too"
         );
+    }
+
+    #[test]
+    fn windows_vulkan_loader_path_is_aligned_across_bundle_config_and_scripts() {
+        let expected = "vulkan-1.dll";
+        let assets = required_bundled_assets("windows").expect("windows assets");
+        assert!(
+            assets.iter().any(|a| a.path == expected),
+            "WINDOWS_BUNDLED_ASSETS must carry {expected}"
+        );
+        let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
+        assert!(
+            tauri_cfg.contains(expected),
+            "tauri.windows.conf.json must bundle {expected}"
+        );
+        for (name, body) in [
+            (
+                "stage-vulkan-runtime.sh",
+                include_str!("../../../scripts/stage-vulkan-runtime.sh"),
+            ),
+            (
+                "verify-bundled-assets.sh",
+                include_str!("../../../scripts/verify-bundled-assets.sh"),
+            ),
+            (
+                "install-vulkan-sdk.ps1",
+                include_str!("../../../scripts/install-vulkan-sdk.ps1"),
+            ),
+            (
+                "create-desktop-stubs.sh",
+                include_str!("../../../scripts/create-desktop-stubs.sh"),
+            ),
+            (
+                "desktop/src-tauri/.gitignore",
+                include_str!("../../../desktop/src-tauri/.gitignore"),
+            ),
+        ] {
+            assert!(
+                body.contains(expected),
+                "scripts/{name} must reference {expected}; the staged filename drifted"
+            );
+        }
     }
 
     #[test]
@@ -1752,11 +2143,200 @@ mod tests {
             "MACOS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
              the const literal and the SSOT drifted"
         );
-        // The Tauri macOS resource map must carry the same bundle path.
         let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.macos.conf.json");
         assert!(
             tauri_cfg.contains(&expected),
             "tauri.macos.conf.json must bundle {expected}; rename it there too"
         );
+    }
+
+    fn plant(root: &Path, files: &[&str]) {
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, file).unwrap();
+        }
+    }
+
+    fn write_list(tree: &Path, entries: &str) {
+        std::fs::create_dir_all(tree).unwrap();
+        std::fs::write(tree.join(SHIPPED_FILES_LIST), entries).unwrap();
+    }
+
+    fn relative_files(root: &Path) -> Vec<String> {
+        let mut files = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    dirs.push(entry.path());
+                } else {
+                    let rel = entry.path().strip_prefix(root).unwrap().to_path_buf();
+                    files.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn prune_unshipped_files_removes_every_file_the_lists_do_not_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(
+            root,
+            &[
+                "containers/Containerfile.claude",
+                "containers/claude-resources/skills/current/SKILL.md",
+                "containers/claude-resources/skills/retired/SKILL.md",
+                "mcp-servers/hub/src/index.ts",
+                "mcp-servers/hub/src/pii-tokenizer.ts",
+            ],
+        );
+        write_list(
+            &root.join("containers"),
+            "Containerfile.claude\nclaude-resources/skills/current/SKILL.md\n",
+        );
+        write_list(&root.join("mcp-servers"), "hub/src/index.ts\n");
+
+        let mut removed: Vec<String> = prune_unshipped_files(root)
+            .unwrap()
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        removed.sort();
+
+        assert_eq!(
+            removed,
+            [
+                "containers/claude-resources/skills/retired/SKILL.md",
+                "mcp-servers/hub/src/pii-tokenizer.ts",
+            ]
+        );
+        assert_eq!(
+            relative_files(root),
+            [
+                "containers/.speedwave-shipped-files",
+                "containers/Containerfile.claude",
+                "containers/claude-resources/skills/current/SKILL.md",
+                "mcp-servers/.speedwave-shipped-files",
+                "mcp-servers/hub/src/index.ts",
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_unshipped_files_matches_names_case_insensitively_and_tolerates_crlf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(root, &["mcp-servers/hub/src/Hub-Types.ts"]);
+        write_list(&root.join("mcp-servers"), "hub/src/hub-types.ts\r\n");
+
+        assert!(prune_unshipped_files(root).unwrap().is_empty());
+        assert_eq!(
+            relative_files(&root.join("mcp-servers")),
+            [".speedwave-shipped-files", "hub/src/Hub-Types.ts"]
+        );
+    }
+
+    #[test]
+    fn prune_unshipped_files_leaves_a_tree_without_a_list_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant(root, &["mcp-servers/hub/src/pii-tokenizer.ts"]);
+
+        assert!(prune_unshipped_files(root).unwrap().is_empty());
+        assert_eq!(
+            relative_files(root),
+            ["mcp-servers/hub/src/pii-tokenizer.ts"]
+        );
+    }
+
+    #[test]
+    fn prune_unshipped_files_refuses_a_list_that_does_not_describe_the_tree() {
+        for (entries, why) in [
+            ("", "an empty list"),
+            (
+                "hub/src/index.ts\nhub/src/missing.ts\n",
+                "a listed file that is missing",
+            ),
+            ("../escape.ts\n", "a parent component"),
+            ("/etc/passwd\n", "an absolute path"),
+            ("hub\\src\\index.ts\n", "a backslash"),
+            ("hub/./src/index.ts\n", "a dot component"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            plant(
+                root,
+                &["mcp-servers/hub/src/index.ts", "mcp-servers/orphan.ts"],
+            );
+            write_list(&root.join("mcp-servers"), entries);
+
+            assert!(
+                prune_unshipped_files(root).is_err(),
+                "a list with {why} must be refused"
+            );
+            assert_eq!(
+                relative_files(&root.join("mcp-servers")),
+                [".speedwave-shipped-files", "hub/src/index.ts", "orphan.ts"],
+                "a refused list with {why} must not remove anything"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_unshipped_files_leaves_links_and_what_they_point_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("build-context");
+        let outside = tmp.path().join("outside");
+        plant(&outside, &["keep.ts"]);
+        plant(&root, &["mcp-servers/hub/src/index.ts"]);
+        std::os::unix::fs::symlink(&outside, root.join("mcp-servers/hub/linked")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("keep.ts"),
+            root.join("mcp-servers/hub/linked-file.ts"),
+        )
+        .unwrap();
+        write_list(&root.join("mcp-servers"), "hub/src/index.ts\n");
+
+        assert!(prune_unshipped_files(&root).unwrap().is_empty());
+        assert!(root.join("mcp-servers/hub/linked").is_symlink());
+        assert!(root.join("mcp-servers/hub/linked-file.ts").is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep.ts")).unwrap(),
+            "keep.ts"
+        );
+    }
+
+    #[test]
+    fn bundle_scripts_write_the_shipped_files_list_into_every_shipped_tree() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        for script in ["bundle-build-context.sh", "bundle-build-context.ps1"] {
+            let body = std::fs::read_to_string(repo_root.join("scripts").join(script)).unwrap();
+            assert!(
+                body.contains(SHIPPED_FILES_LIST),
+                "scripts/{script} must write {SHIPPED_FILES_LIST}, which prune_unshipped_files reads"
+            );
+            let lists_trees = body.lines().any(|line| {
+                line.contains("for") && SHIPPED_TREES.iter().all(|tree| line.contains(tree))
+            });
+            assert!(
+                lists_trees,
+                "scripts/{script} must write the list for every tree in SHIPPED_TREES ({SHIPPED_TREES:?})"
+            );
+        }
     }
 }

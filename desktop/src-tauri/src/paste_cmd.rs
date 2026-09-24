@@ -220,14 +220,12 @@ mod tests {
 
     #[test]
     fn validate_magic_rejects_mismatch() {
-        // Declared PNG, actual JPEG bytes.
         let err = validate_magic("image/png", JPEG_MAGIC).unwrap_err();
         assert!(err.contains("do not match"));
     }
 
     #[test]
     fn validate_magic_rejects_truncated_webp() {
-        // RIFF header without WEBP fourcc.
         assert!(validate_magic("image/webp", b"RIFF\x00\x00\x00\x00????").is_err());
         assert!(validate_magic("image/webp", b"RIFF").is_err());
     }

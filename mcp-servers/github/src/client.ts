@@ -38,7 +38,6 @@ import type {
 import type { ConnectionTestResult } from '@speedwave/mcp-shared';
 import { TOOL_NAMES } from './tool-names.js';
 
-// Re-export the key types so consumers (the tools layer) can import them from the client too.
 export type {
   GitHubConfig,
   GitHubRepo,
@@ -59,8 +58,6 @@ export type {
   GitHubUser,
 } from './types.js';
 export type { ConnectionTestResult } from '@speedwave/mcp-shared';
-
-// ── Octokit composition (rate-limit throttling + transient-error retry) ──────────────────────────────────────────────────────────────────────
 
 const MyOctokit = Octokit.plugin(throttling, retry);
 
@@ -207,8 +204,6 @@ async function withValidationMessage<T>(
   }
 }
 
-// ── Client Class ──────────────────────────────────────────────────────────────────────
-
 /**
  * GitHub API client for repos, pull requests, reviews, branches, commits, content, Actions, issues, labels, releases.
  * Wraps `@octokit/rest` (throttling + retry plugins) with consistent error handling and type-safe mapping; github.com only in v1.
@@ -262,8 +257,6 @@ export class GitHubClient {
       },
     });
   }
-
-  // ── Parameter Validation ──────────────────────────────────────────────────────────────────────
 
   /**
    * Validates that required parameters are provided; throws an `Error` listing every missing parameter name.
@@ -339,8 +332,6 @@ export class GitHubClient {
     )) as Array<Record<string, unknown>>;
     return (filter ? items.filter(filter) : items).slice(0, wanted);
   }
-
-  // ── Response Mappers ──────────────────────────────────────────────────────────────────────
 
   /**
    * Maps a raw GitHub repository response to the normalized {@link GitHubRepo} shape.
@@ -504,7 +495,6 @@ export class GitHubClient {
       id: Number(a.id),
       name: String(a.name || ''),
       size_in_bytes: Number(a.size_in_bytes || 0),
-      // Drop any non-https:// URL (see isHttpsUrl).
       archive_download_url: isHttpsUrl(downloadUrl) ? downloadUrl : '',
       expired: Boolean(a.expired),
     };
@@ -585,16 +575,12 @@ export class GitHubClient {
     };
   }
 
-  // ── Error Handling ──────────────────────────────────────────────────────────────────────
-
   /**
    * Formats Octokit `RequestError`-shaped errors into user-friendly, actionable messages: auth failures,
    * rate limiting, permission denials, not-found, validation errors, server errors, network failures.
    * @param error - The error object thrown by `@octokit/rest`
    */
   static formatError(error: unknown): string {
-    // An already-translated teaching error is returned verbatim: its message is the guidance,
-    // and message-sniffing on caller-influenced text (a branch name, a path) must not reclassify it.
     if (isExpectedError(error)) {
       return (error as Error).message;
     }
@@ -616,7 +602,6 @@ export class GitHubClient {
       case 'validation':
         return `GitHub validation error: ${message || 'invalid request'}`;
       case 'server': {
-        // `server` ⟹ classifyOctokitError saw a 5xx status, so `status` is a number here.
         const s = status as number;
         const messages: Record<number, string> = {
           500: 'GitHub server error. Please try again later.',
@@ -646,7 +631,6 @@ export class GitHubClient {
       console.error(`${ts()} GitHub connection test failed:`, errorMessage);
 
       const category = classifyOctokitError(error);
-      // Fold `validation` / `server` into 'unknown' (not in ConnectionTestResult's set).
       const errorType: ConnectionTestResult['errorType'] =
         category === 'validation' || category === 'server' ? 'unknown' : category;
 
@@ -654,15 +638,11 @@ export class GitHubClient {
     }
   }
 
-  // ── Users ──────────────────────────────────────────────────────────────────────
-
   /** Gets the GitHub user authenticated by the mounted token — the account every `owner`/`assignee`/`creator`/`author` "me" question resolves against. */
   async getCurrentUser(): Promise<GitHubUser> {
     const res = await this.octokit.rest.users.getAuthenticated();
     return this.mapUser(res.data as Record<string, unknown>);
   }
-
-  // ── Repos ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists repositories accessible to the authenticated user, or searches public/visible repos when `options.search` is given.
@@ -732,8 +712,6 @@ export class GitHubClient {
       };
     });
   }
-
-  // ── Pull Requests ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists pull requests in a repository, filterable by `options.state` ("open"/"closed"/"all", default "open"), `head`, and `base`.
@@ -932,8 +910,6 @@ export class GitHubClient {
     }));
   }
 
-  // ── PR Review ──────────────────────────────────────────────────────────────────────
-
   /**
    * Lists the commits included in a pull request.
    * @param owner - Repository owner login
@@ -1013,10 +989,11 @@ export class GitHubClient {
   }
 
   /**
-   * Lists general (issue-style) comments on a pull request.
+   * Lists general (non-review) comments on a pull request or an issue, from GitHub's shared
+   * comments endpoint.
    * @param owner - Repository owner login
    * @param repo - Repository name
-   * @param number - Pull request number
+   * @param number - Pull request or issue number
    * @param options - Pagination options
    * @param options.limit - Maximum number of comments to return (default 100 when omitted; any positive value honored)
    */
@@ -1036,10 +1013,11 @@ export class GitHubClient {
   }
 
   /**
-   * Adds a general (issue-style) comment to a pull request.
+   * Adds a general (non-review) comment to a pull request or an issue, via GitHub's shared
+   * comments endpoint.
    * @param owner - Repository owner login
    * @param repo - Repository name
-   * @param number - Pull request number
+   * @param number - Pull request or issue number
    * @param body - Comment text (Markdown)
    */
   async createPrComment(
@@ -1095,8 +1073,6 @@ export class GitHubClient {
     });
     return this.mapReviewComment(res.data as Record<string, unknown>);
   }
-
-  // ── Branches ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists branches in a repository.
@@ -1216,8 +1192,6 @@ export class GitHubClient {
     };
   }
 
-  // ── Commits ──────────────────────────────────────────────────────────────────────
-
   /**
    * Lists commits, filterable by `options.sha`/`path`/`author` and an ISO 8601 `since`/`until` window.
    * @param owner - Repository owner login
@@ -1317,8 +1291,6 @@ export class GitHubClient {
     return decodeDiffData(res.data);
   }
 
-  // ── Repository Content ──────────────────────────────────────────────────────────────────────
-
   /**
    * Retrieves a repository tree from `options.ref` (default: default branch), optionally recursive.
    * @param owner - Repository owner login
@@ -1396,8 +1368,6 @@ export class GitHubClient {
     let encoding = rawEncoding === 'base64' ? 'base64' : 'utf-8';
     if (rawEncoding === 'base64') {
       const decoded = Buffer.from(rawContent, 'base64');
-      // Only surface UTF-8 text when the decode round-trips losslessly; otherwise keep base64
-      // so binary files (images, archives, ...) are never corrupted by a forced UTF-8 decode.
       if (Buffer.from(decoded.toString('utf-8'), 'utf-8').equals(decoded)) {
         content = decoded.toString('utf-8');
         encoding = 'utf-8';
@@ -1441,7 +1411,6 @@ export class GitHubClient {
         });
         existingData = existing.data;
       } catch (error) {
-        // 404 means the file does not exist yet (a normal create); any other HTTP status blocks the write.
         const status = (error as OctokitErrorLike)?.status;
         if (status !== 404) {
           if (typeof status !== 'number') {
@@ -1481,8 +1450,6 @@ export class GitHubClient {
       html_url: String(contentObj.html_url || ''),
     };
   }
-
-  // ── Actions ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists GitHub Actions workflow runs, filterable by `options.branch` and `options.status` (e.g. "completed", "in_progress").
@@ -1630,8 +1597,6 @@ export class GitHubClient {
     };
   }
 
-  // ── Issues ──────────────────────────────────────────────────────────────────────
-
   /**
    * Lists issues, filterable by state/labels/assignee/creator; GitHub's issues endpoint also returns PRs, which are filtered out (any item with a `pull_request` key).
    * @param owner - Repository owner login
@@ -1761,8 +1726,6 @@ export class GitHubClient {
     return this.updateIssue(owner, repo, number, { state: 'closed' });
   }
 
-  // ── Labels ──────────────────────────────────────────────────────────────────────
-
   /**
    * Lists labels defined in a repository.
    * @param owner - Repository owner login
@@ -1812,8 +1775,6 @@ export class GitHubClient {
     );
     return this.mapLabel(res.data as Record<string, unknown>);
   }
-
-  // ── Tags & Releases ──────────────────────────────────────────────────────────────────────
 
   /**
    * Creates a Git tag at `params.sha`; if `params.message` is given, an annotated tag object is created first and the ref points at it.
@@ -1918,8 +1879,6 @@ export class GitHubClient {
     return this.mapRelease(res.data as Record<string, unknown>);
   }
 }
-
-// ── Initialization ──────────────────────────────────────────────────────────────────────
 
 /** Initializes the GitHub client from /tokens/token; returns null (not throws) when the token is missing or invalid. */
 export async function initializeGitHubClient(): Promise<GitHubClient | null> {

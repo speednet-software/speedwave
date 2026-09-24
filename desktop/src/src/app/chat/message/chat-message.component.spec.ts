@@ -39,6 +39,20 @@ describe('ChatMessageComponent', () => {
     expect(el.querySelector('[data-testid="error-block"]')).not.toBeNull();
   });
 
+  it('renders chip block with the control-chip testid', () => {
+    const blocks: MessageBlock[] = [
+      { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+    ];
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'user');
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    const chip = el.querySelector('[data-testid="control-chip"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent?.trim()).toBe('model -> sonnet-5');
+  });
+
   it('renders thinking block collapsed', () => {
     const blocks: MessageBlock[] = [{ type: 'thinking', content: 'hmm', collapsed: true }];
     fixture.componentRef.setInput('blocks', blocks);
@@ -46,12 +60,9 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
 
     const el = fixture.nativeElement as HTMLElement;
-    // The collapsed thinking block uses native <details> without the `open`
-    // attribute — the content stays in the DOM but is visually hidden.
     const details = el.querySelector('details');
     expect(details).not.toBeNull();
     expect(details?.hasAttribute('open')).toBe(false);
-    // The summary toggle is always rendered with the lowercase "thinking" label.
     expect(el.textContent).toContain('thinking');
   });
 
@@ -91,7 +102,6 @@ describe('ChatMessageComponent', () => {
     const el = fixture.nativeElement as HTMLElement;
     expect(el.textContent).toContain('First');
     expect(el.textContent).toContain('Second');
-    // The thinking block contributes its lowercase "thinking" summary label.
     expect(el.textContent).toContain('thinking');
   });
 
@@ -105,7 +115,6 @@ describe('ChatMessageComponent', () => {
     const userMsg = fixture.nativeElement.querySelector('app-user-message');
     expect(userMsg).not.toBeNull();
     expect(fixture.nativeElement.textContent).toContain('hi');
-    // No assistant-style bubble on user messages — no max-width or border background.
     expect(fixture.nativeElement.querySelector('.bg-sw-bg-dark')).toBeNull();
     expect(fixture.nativeElement.querySelector('.max-w-\\[85\\%\\]')).toBeNull();
   });
@@ -120,13 +129,11 @@ describe('ChatMessageComponent', () => {
 
     const edited = fixture.nativeElement.querySelector('[data-testid="user-message-edited"]');
     expect(edited).not.toBeNull();
-    // The "user · HH:MM" header was removed — no `user-message-time` element.
     const time = fixture.nativeElement.querySelector('[data-testid="user-message-time"]');
     expect(time).toBeNull();
   });
 
   it('host stretches messages full-width (terminal-minimal: no role-based alignment)', () => {
-    // Terminal-minimal layout removes role-based alignment; both roles stretch full-width.
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
     fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
@@ -149,7 +156,6 @@ describe('ChatMessageComponent', () => {
   });
 
   it('user role dispatches to <app-user-message> (terminal-minimal: no bubble)', () => {
-    // User messages render via <app-user-message>, no sized bubble.
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
     fixture.componentRef.setInput('role', 'user');
     fixture.detectChanges();
@@ -158,7 +164,6 @@ describe('ChatMessageComponent', () => {
   });
 
   it('assistant role renders without a bubble (terminal-minimal: plain article)', () => {
-    // Assistant messages are plain articles — no max-width, border, or rounded background.
     fixture.componentRef.setInput('blocks', [{ type: 'text', content: 'ok' }]);
     fixture.componentRef.setInput('role', 'assistant');
     fixture.detectChanges();
@@ -173,7 +178,6 @@ describe('ChatMessageComponent', () => {
   });
 
   it('shows the block-level cursor when streaming and last block is NOT text', () => {
-    // Per-text-block caret renders in <app-text-block>; block-level cursor suppressed when last block is text.
     fixture.componentRef.setInput('blocks', [
       {
         type: 'tool_use',
@@ -201,7 +205,6 @@ describe('ChatMessageComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-testid="cursor"]')).toBeNull();
-    // The per-text-block caret is the one visible during text streaming.
     expect(fixture.nativeElement.querySelector('[data-testid="streaming-caret"]')).not.toBeNull();
   });
 
@@ -299,7 +302,6 @@ describe('ChatMessageComponent', () => {
     let emitted: { toolId: string; questionIdx: number; value: string } | null = null;
     component.questionAnswered.subscribe((e) => (emitted = e));
 
-    // Drive the child ask-user-block via its real option + send buttons.
     const el = fixture.nativeElement as HTMLElement;
     const optionBtn = el.querySelector(
       '[data-testid="ask-option-btn"]'

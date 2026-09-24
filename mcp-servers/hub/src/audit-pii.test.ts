@@ -197,7 +197,6 @@ describe('writePiiAudit', () => {
       session: null,
     });
 
-    // No data values ever appear: only category/action/count/layer/tool/session/ts keys.
     expect(Object.keys(rows[0]).sort()).toEqual(
       ['action', 'category', 'count', 'layer', 'session', 'tool', 'ts'].sort()
     );

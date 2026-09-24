@@ -79,7 +79,6 @@ describe('memoizedPromise', () => {
     const p1 = get();
     await vi.advanceTimersByTimeAsync(101);
     await expect(p1).resolves.toBeNull();
-    // Second call within the pending window returns the same cached race.
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -101,9 +100,7 @@ describe('memoizedPromise', () => {
     rejectFn(new Error('boom'));
     await expect(p).rejects.toThrow('boom');
 
-    // Cache cleared by the rejection handler — next call triggers a fresh fetch.
     const fetch2 = vi.fn().mockResolvedValue('second');
-    // Replace implementation so the next call uses the new one.
     fetch.mockImplementation(fetch2);
     await expect(get()).resolves.toBe('second');
     expect(fetch).toHaveBeenCalledTimes(2);

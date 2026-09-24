@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     if let Err(e) = run() {
-        println!("cargo:warning=build.rs failed: {e}");
+        let mut message = e.to_string();
+        let mut source = std::error::Error::source(e.as_ref());
+        while let Some(cause) = source {
+            message.push_str(&format!(": {cause}"));
+            source = std::error::Error::source(cause);
+        }
+        println!("cargo:warning=build.rs failed: {message}");
         std::process::exit(1);
     }
 }
@@ -21,12 +27,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
     let allow_stubs = std::env::var_os("SPEEDWAVE_ALLOW_BUNDLE_STUBS").is_some();
-    // build-context is hash root only when every declared hash input exists.
-    let build_context_complete = speedwave_runtime::build::IMAGES
-        .iter()
-        .flat_map(|img| img.hash_inputs.iter())
-        .all(|input| build_context.join(input).exists());
-    let hash_root = if build_context_complete {
+    let hash_root = if speedwave_runtime::bundle::hash_inputs_resolvable(&build_context) {
         build_context.clone()
     } else {
         repo_root.clone()

@@ -25,7 +25,6 @@ const NO_LLM_PROJECT = 'e2e-second';
  *  (Unix: ~/.local/bin, ignores data_dir; Windows: <data_dir>\bin\…exe). */
 function cliPath(): string {
   if (process.platform === 'win32') {
-    // Empty string falls back too, matching consts::data_dir_from.
     const envDir = process.env.SPEEDWAVE_DATA_DIR;
     const dataDir = envDir ? envDir : path.join(os.homedir(), '.speedwave');
     return path.join(dataDir, 'bin', 'speedwave.exe');
@@ -49,7 +48,6 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
     await anthropicCard.waitForExist({ timeout: 15_000 });
     await anthropicCard.click();
 
-    // The incident path: both controls are reachable pre-Save on no-provider.
     await $('[data-testid="auth-open-terminal"]').waitForExist({ timeout: 15_000 });
     const command = await $('[data-testid="auth-command"]');
     await command.waitForExist({ timeout: 15_000 });
@@ -70,8 +68,6 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
     child.on('exit', () => (exited = true));
 
     try {
-      // The sign-in banner prints AFTER render_compose + first-ever compose up
-      // + ensure_exec_healthy — everything the incident broke.
       await browser.waitUntil(async () => output.includes('Starting Anthropic sign-in'), {
         timeout: 240_000,
         interval: 2_000,
@@ -83,13 +79,10 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
         timeout: 30_000,
         timeoutMsg: 'containers not running after the CLI login guard started them',
       });
-      // The claude exec must survive the first seconds (the incident died at once).
       await browser.pause(5_000);
       expect(output).not.toContain('exit code 137');
       expect(exited && output.includes('exit code')).toBe(false);
     } finally {
-      // TerminateProcess kills only the direct child on Windows; taskkill /T sweeps
-      // the whole tree so no descendant keeps bin\speedwave.exe locked for spec 07.
       if (process.platform === 'win32' && child.pid !== undefined) {
         spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F']);
       } else {

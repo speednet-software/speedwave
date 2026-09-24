@@ -3,7 +3,6 @@ import type { Request, Response } from 'express';
 import { handleMCPPost, handleMCPDelete, readSessionId } from './transport.js';
 import { JSONRPCHandler } from './jsonrpc.js';
 
-// Use vi.hoisted to define mocks before vi.mock is hoisted
 const { mockSSEStream, mockSendJSONResponse, mockCreateSSEStream } = vi.hoisted(() => {
   const mockSSEStream = {
     initialize: vi.fn(),
@@ -23,7 +22,6 @@ const { mockSSEStream, mockSendJSONResponse, mockCreateSSEStream } = vi.hoisted(
   return { mockSSEStream, mockSendJSONResponse, mockCreateSSEStream };
 });
 
-// Mock dependencies
 vi.mock('./session.js', () => ({
   sessionManager: {
     createSession: vi.fn(() => 'mock-session-id'),
@@ -303,7 +301,6 @@ describe('transport', () => {
 
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
-      // Should NOT return 400 — initialize negotiates the version
       expect(res.status).not.toHaveBeenCalledWith(400);
     });
 
@@ -329,7 +326,7 @@ describe('transport', () => {
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
       expect(res.status).not.toHaveBeenCalledWith(406);
-      expect(mockSendJSONResponse).toHaveBeenCalled();
+      expect(mockCreateSSEStream).toHaveBeenCalledWith(res);
     });
 
     it('returns 406 when Accept has text/event-stream but missing application/json', async () => {
@@ -382,7 +379,7 @@ describe('transport', () => {
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
       expect(res.status).not.toHaveBeenCalledWith(406);
-      expect(mockSendJSONResponse).toHaveBeenCalled();
+      expect(mockCreateSSEStream).toHaveBeenCalledWith(res);
     });
 
     it('passes when Accept has quality values (application/json;q=0.9, text/event-stream)', async () => {
@@ -465,7 +462,6 @@ describe('transport', () => {
     });
 
     it('does not send 500 response when headers are already sent at time of unhandled error', async () => {
-      // Covers the false branch of `if (!res.headersSent)` in handleMCPPost outer catch
       const throwingHandler = {
         processRequest: vi.fn().mockRejectedValue(new Error('crash after headers sent')),
       } as unknown as JSONRPCHandler;
@@ -477,18 +473,15 @@ describe('transport', () => {
         params: { name: 'echo', arguments: {} },
       });
       const res = createMockResponse();
-      // Simulate headers already sent
       (res as any).headersSent = true;
 
       await handleMCPPost(throwingHandler, req as Request, res as unknown as Response);
 
-      // Since headers are already sent, no status/json should be called
       expect(res.status).not.toHaveBeenCalledWith(500);
       expect(res.json).not.toHaveBeenCalled();
     });
 
     it('handles non-Error thrown value from handler (String() branch in outer catch)', async () => {
-      // Covers line 50 false branch: error instanceof Error ? ... : String(error)
       const throwingHandler = {
         processRequest: vi.fn().mockRejectedValue('plain string thrown'),
       } as unknown as JSONRPCHandler;
@@ -498,7 +491,6 @@ describe('transport', () => {
 
       await handleMCPPost(throwingHandler, req as Request, res as unknown as Response);
 
-      // Should still return 500
       expect(res.status).toHaveBeenCalledWith(500);
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -508,7 +500,6 @@ describe('transport', () => {
     });
 
     it('returns SSE stream for batch request when Accept includes text/event-stream', async () => {
-      // Covers lines 144-149: SSE batch path in handleMCPPostInner
       vi.clearAllMocks();
 
       const req = createMockRequest(
@@ -528,7 +519,6 @@ describe('transport', () => {
     });
 
     it('sets Mcp-Session-Id header when batch contains initialize request', async () => {
-      // Covers line 131: batch sessionId header propagation
       const req = createMockRequest([
         {
           jsonrpc: '2.0',
@@ -592,7 +582,6 @@ describe('transport', () => {
 
     it('returns 204 for non-existent session (idempotent)', async () => {
       const { sessionManager } = await import('./session.js');
-      // destroySession for non-existent ID just does nothing
       vi.mocked(sessionManager.destroySession).mockImplementation(() => {});
 
       const req = createMockRequest(

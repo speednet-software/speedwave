@@ -17,8 +17,6 @@ import {
 import { MAPPABLE_FIELDS } from './tools/helpers.js';
 import { TOOL_NAMES } from './tool-names.js';
 
-// ── Axios Retry Config Extension ─────────────────────────────────────────────────────────────────
-
 /** Extended Axios request configuration with retry counter. */
 interface RetryConfig extends InternalAxiosRequestConfig {
   /** Number of retry attempts made for this request. */
@@ -88,12 +86,10 @@ export function isRetryable(error: AxiosError): boolean {
   }
   const status = error.response?.status;
   if (status === undefined) {
-    return true; // Network error / no response.
+    return true;
   }
   return status === 429 || (status >= 500 && status < 600);
 }
-
-// ── Types ────────────────────────────────────────────────────────────────────────────────────────
 
 /** Redmine client configuration. */
 export interface RedmineConfig {
@@ -269,6 +265,7 @@ export interface RedmineIssue {
    * Assigned user (optional).
    */
   assigned_to?: { id: number; name: string };
+  fixed_version?: { id: number; name: string };
   /**
    * Issue title/subject.
    */
@@ -456,15 +453,16 @@ export interface RedmineUser {
   /**
    * Login username.
    */
-  login: string;
+  login?: string;
   /**
    * First name.
    */
-  firstname: string;
+  firstname?: string;
   /**
    * Last name.
    */
-  lastname: string;
+  lastname?: string;
+  name?: string;
   /**
    * Email address (optional).
    */
@@ -472,10 +470,48 @@ export interface RedmineUser {
   /**
    * Account creation timestamp.
    */
-  created_on: string;
+  created_on?: string;
   /**
    * Last update timestamp.
    */
+  updated_on?: string;
+}
+
+export const PUBLIC_USER_FIELDS = [
+  'id',
+  'login',
+  'firstname',
+  'lastname',
+  'name',
+  'mail',
+  'created_on',
+  'updated_on',
+] as const;
+
+function toPublicUser(user: Record<string, unknown>): RedmineUser {
+  return Object.fromEntries(
+    PUBLIC_USER_FIELDS.filter((field) => Object.hasOwn(user, field)).map((field) => [
+      field,
+      user[field],
+    ])
+  ) as unknown as RedmineUser;
+}
+
+/**
+ * Redmine version: an issue's target version, e.g. a milestone or a planning week.
+ * @interface RedmineVersion
+ */
+export interface RedmineVersion {
+  id: number;
+  project: { id: number; name: string };
+  name: string;
+  description?: string;
+  status: 'open' | 'locked' | 'closed';
+  due_date?: string | null;
+  sharing: string;
+  wiki_page_title?: string | null;
+  custom_fields?: Array<{ id: number; name: string; value: unknown }>;
+  created_on: string;
   updated_on: string;
 }
 
@@ -545,8 +581,6 @@ export interface RedmineProject {
    */
   time_entry_activities?: Array<{ id: number; name: string; is_default?: boolean }>;
 }
-
-// ── Payload Types for API requests ───────────────────────────────────────────────────────────────
 
 /**
  * Redmine relation type defining valid relationship kinds between issues.
@@ -630,6 +664,7 @@ interface IssuePayload {
    * Estimated hours.
    */
   estimated_hours?: number;
+  fixed_version_id?: number;
   /**
    * Update notes/comment.
    */
@@ -667,8 +702,6 @@ interface TimeEntryPayload {
   spent_on?: string;
 }
 
-// ── Token Loading ────────────────────────────────────────────────────────────────────────────────
-
 const REDMINE_STATUS_MAP: Record<string, number> = { active: 1, closed: 9, archived: 5 };
 
 /**
@@ -688,8 +721,6 @@ async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
     return null;
   }
 }
-
-// ── Input Validation ─────────────────────────────────────────────────────────────────────────────
 
 /** Tags whose entire content (opening tag + body + closing tag) must be removed */
 const DANGEROUS_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'applet'];
@@ -750,20 +781,15 @@ function sanitizeTextile(textile: string): string {
   let result = textile;
   let previous: string;
 
-  // Phase 1: iteratively strip dangerous tags with their content
   do {
     previous = result;
     for (const tag of DANGEROUS_TAGS) {
-      // Full tag with content: <script ...>...</script\t\n bar> (multiline, junk before >)
       result = result.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}[^>]*>`, 'gi'), '');
-      // Self-closing or orphaned opening tags: <script ...> or <script .../>
       result = result.replace(new RegExp(`<${tag}\\b[^>]*/?>`, 'gi'), '');
-      // Orphaned closing tags: </script> or </script\t\n bar>
       result = result.replace(new RegExp(`<\\/${tag}[^>]*>`, 'gi'), '');
     }
   } while (result !== previous);
 
-  // Phase 2: whitelist remaining tags — strip any tag not in the safe set
   do {
     previous = result;
     result = result.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/gi, (match, tag: string) => {
@@ -771,7 +797,6 @@ function sanitizeTextile(textile: string): string {
     });
   } while (result !== previous);
 
-  // Phase 3: strip event handlers and dangerous URI schemes from safe tags
   do {
     previous = result;
     result = result.replace(
@@ -783,12 +808,21 @@ function sanitizeTextile(textile: string): string {
     result = result.replace(/(<[^>]*?(?:href|src|action)\s*=\s*["']?)\s*data\s*:/gi, '$1');
   } while (result !== previous);
 
-  // Phase 4: globally strip dangerous URI schemes in plain text (Textile links)
   result = result.replace(/javascript\s*:/gi, '');
   result = result.replace(/vbscript\s*:/gi, '');
   result = result.replace(/data\s*:/gi, '');
 
   return result;
+}
+
+function pathSegment(value: string | number): string {
+  const segment = encodeURIComponent(String(value));
+  if (segment === '' || segment === '.' || segment === '..') {
+    throw new Error(
+      `Invalid identifier ${JSON.stringify(segment)}: pass a numeric ID or a project identifier.`
+    );
+  }
+  return segment;
 }
 
 /** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
@@ -860,16 +894,16 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
     ? errors.filter((e): e is string => typeof e === 'string').map((e) => e.toLowerCase())
     : [];
 
-  if (messages.some((m) => ASSIGNEE_HINT_PREFIXES.some((p) => startsWithFieldName(m, p)))) {
-    return `${prefixed}. Call resolveUser or listUsers to find a valid assignee.`;
-  }
-  if (messages.some((m) => MAPPABLE_FIELDS.some((field) => startsWithFieldName(m, field)))) {
-    return `${prefixed}. Call getMappings for valid values in this project.`;
-  }
-  return prefixed;
+  const names = (fields: readonly string[]) =>
+    messages.some((m) => fields.some((field) => startsWithFieldName(m, field)));
+  const hints = [
+    names(ASSIGNEE_HINT_PREFIXES) && 'Call resolveUser or listUsers to find a valid assignee.',
+    (context?.fixed_version_id !== undefined || names(['target version'])) &&
+      `If the error is about the target version, call ${TOOL_NAMES.LIST_VERSIONS} and pick a version whose status is open.`,
+    names(MAPPABLE_FIELDS) && 'Call getMappings for valid values in this project.',
+  ].filter((hint): hint is string => typeof hint === 'string');
+  return hints.length > 0 ? `${prefixed}. ${hints.join(' ')}` : prefixed;
 }
-
-// ── Client Class ─────────────────────────────────────────────────────────────────────────────────
 
 /** Redmine API client for issues, time entries, journals, users, and projects. */
 export class RedmineClient {
@@ -891,8 +925,6 @@ export class RedmineClient {
     this.client = axios.create({
       baseURL: config.url,
       timeout: TIMEOUTS.API_CALL_MS,
-      // No redirects: a malicious Redmine host could 3xx to another origin, and
-      // follow-redirects does not strip the X-Redmine-API-Key header cross-host.
       maxRedirects: 0,
       headers: {
         'X-Redmine-API-Key': config.apiKey,
@@ -900,12 +932,9 @@ export class RedmineClient {
       },
     });
 
-    // Retry only idempotent reads: replaying a POST/PUT/DELETE on a transient
-    // error can duplicate a mutation. 429/5xx/network retry for GET/HEAD only.
     this.client.interceptors.response.use(
       (response) => response,
       async (error: AxiosError) => {
-        // A redirect here means host_url is wrong: reject with the teaching fix, never retry.
         const redirect = redirectConfigError(error, this.config.url);
         if (redirect) {
           return Promise.reject(redirect);
@@ -968,8 +997,6 @@ export class RedmineClient {
     };
   }
 
-  // ── Project Scope Enforcement ──────────────────────────────────────────────────────────────────
-
   private _scopedProjectIdPromise: Promise<number> | null = null;
 
   /**
@@ -992,7 +1019,7 @@ export class RedmineClient {
     }
 
     const fetchPromise = this.client
-      .get(`/projects/${scope}.json`)
+      .get(`/projects/${pathSegment(scope)}.json`)
       .then((response) => response.data.project.id as number)
       .catch((err) => {
         this._scopedProjectIdPromise = null;
@@ -1036,14 +1063,15 @@ export class RedmineClient {
     }
   }
 
-  // ── Issue Operations ───────────────────────────────────────────────────────────────────────────
-
   /**
    * List issues from Redmine with optional filtering (project/assignee/status/parent); `limit` defaults to 25.
    * @param options - Filter and pagination options.
    * @param options.project_id - Filter by project identifier.
    * @param options.assigned_to_id - Filter by assignee ('me', user ID, or username).
    * @param options.status_id - Filter by status ('open', 'closed', '*', or status ID).
+   * @param options.tracker_id - Filter by tracker ID.
+   * @param options.priority_id - Filter by priority ID.
+   * @param options.fixed_version_id - Filter by target version ID.
    * @param options.parent_id - Filter by parent issue ID.
    * @param options.limit - Maximum number of results (default 25).
    * @param options.offset - Pagination offset (default 0).
@@ -1052,7 +1080,10 @@ export class RedmineClient {
     options: {
       project_id?: string;
       assigned_to_id?: string | number;
-      status_id?: string;
+      status_id?: string | number;
+      tracker_id?: number;
+      priority_id?: number;
+      fixed_version_id?: number;
       parent_id?: number;
       limit?: number;
       offset?: number;
@@ -1068,6 +1099,9 @@ export class RedmineClient {
     if (enforcedProjectId) params.project_id = enforcedProjectId;
     if (options.assigned_to_id) params.assigned_to_id = options.assigned_to_id;
     if (options.status_id) params.status_id = options.status_id;
+    if (options.tracker_id) params.tracker_id = options.tracker_id;
+    if (options.priority_id) params.priority_id = options.priority_id;
+    if (options.fixed_version_id) params.fixed_version_id = options.fixed_version_id;
     if (options.parent_id) params.parent_id = options.parent_id;
 
     const response = await this.client.get('/issues.json', { params });
@@ -1086,10 +1120,9 @@ export class RedmineClient {
       params.include = options.include.join(',');
     }
 
-    const response = await this.client.get(`/issues/${issueId}.json`, { params });
+    const response = await this.client.get(`/issues/${pathSegment(issueId)}.json`, { params });
     const issue = response.data.issue;
 
-    // Inline scope validation: compare issue.project.id against cached numeric project ID
     const scope = this.getProjectScope();
     if (scope) {
       const scopedNumericId = await this._resolveProjectNumericId(scope);
@@ -1143,6 +1176,7 @@ export class RedmineClient {
    * @param options.assigned_to_id - Assigned user ID.
    * @param options.parent_issue_id - Parent issue ID (for subtasks).
    * @param options.estimated_hours - Estimated hours for completion.
+   * @param options.fixed_version_id - Target version ID.
    * @throws {Error} When subject is empty or API request fails.
    */
   async createIssue(options: {
@@ -1155,8 +1189,12 @@ export class RedmineClient {
     assigned_to_id?: number;
     parent_issue_id?: number;
     estimated_hours?: number;
+    fixed_version_id?: number;
   }): Promise<RedmineIssue> {
     this._enforceProjectId(options.project_id);
+    if (options.parent_issue_id) {
+      await this._ensureIssueInScope(options.parent_issue_id);
+    }
 
     const trimmedSubject = options.subject.trim();
     if (!trimmedSubject) {
@@ -1177,6 +1215,7 @@ export class RedmineClient {
     if (options.assigned_to_id) issue.assigned_to_id = options.assigned_to_id;
     if (options.parent_issue_id) issue.parent_issue_id = options.parent_issue_id;
     if (options.estimated_hours) issue.estimated_hours = options.estimated_hours;
+    if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
 
     const response = await this.client.post('/issues.json', { issue });
     return response.data.issue;
@@ -1195,6 +1234,7 @@ export class RedmineClient {
    * @param options.assigned_to_id - New assigned user ID.
    * @param options.parent_issue_id - New parent issue ID.
    * @param options.estimated_hours - New estimated hours.
+   * @param options.fixed_version_id - New target version ID.
    * @param options.notes - Update notes/comment.
    */
   async updateIssue(
@@ -1209,14 +1249,16 @@ export class RedmineClient {
       assigned_to_id?: number;
       parent_issue_id?: number;
       estimated_hours?: number;
+      fixed_version_id?: number;
       notes?: string;
     }
   ): Promise<RedmineIssue> {
-    // Validate scope BEFORE the PUT — prevent modifying out-of-scope issues
     await this._ensureIssueInScope(issueId);
-    // Block moving issues out of scoped project
     if (options.project_id) {
       this._enforceProjectId(options.project_id);
+    }
+    if (options.parent_issue_id) {
+      await this._ensureIssueInScope(options.parent_issue_id);
     }
 
     const issue: Partial<IssuePayload> = {};
@@ -1232,11 +1274,17 @@ export class RedmineClient {
     if (options.assigned_to_id !== undefined) issue.assigned_to_id = options.assigned_to_id;
     if (options.parent_issue_id !== undefined) issue.parent_issue_id = options.parent_issue_id;
     if (options.estimated_hours !== undefined) issue.estimated_hours = options.estimated_hours;
+    if (options.fixed_version_id) issue.fixed_version_id = options.fixed_version_id;
     if (options.notes) issue.notes = sanitizeTextile(options.notes);
 
-    await this.client.put(`/issues/${issueId}.json`, { issue });
+    if (Object.keys(issue).length === 0) {
+      throw new Error(
+        `Nothing to update on issue ${issueId}: every field given was empty or unset, so no request was sent to Redmine. Pass at least one field with a value.`
+      );
+    }
 
-    // Return updated issue for verification.
+    await this.client.put(`/issues/${pathSegment(issueId)}.json`, { issue });
+
     return this.showIssue(issueId);
   }
 
@@ -1247,12 +1295,10 @@ export class RedmineClient {
    */
   async commentIssue(issueId: number, comment: string): Promise<void> {
     await this._ensureIssueInScope(issueId);
-    await this.client.put(`/issues/${issueId}.json`, {
+    await this.client.put(`/issues/${pathSegment(issueId)}.json`, {
       issue: { notes: sanitizeTextile(comment) },
     });
   }
-
-  // ── Time Entry Operations ──────────────────────────────────────────────────────────────────────
 
   /**
    * List time entries with optional filtering (issue/project/user_id incl. 'me', YYYY-MM-DD range); `limit` defaults to 25.
@@ -1274,9 +1320,7 @@ export class RedmineClient {
       limit?: number;
     } = {}
   ): Promise<{ time_entries: RedmineTimeEntry[]; total_count: number }> {
-    // Always validate explicit project_id against scope
     const enforcedProjectId = this._enforceProjectId(options.project_id);
-    // If issue_id is present, validate it belongs to scoped project
     if (options.issue_id && this.getProjectScope()) {
       await this._ensureIssueInScope(options.issue_id);
     }
@@ -1286,7 +1330,6 @@ export class RedmineClient {
     };
 
     if (options.issue_id) params.issue_id = options.issue_id;
-    // Only inject project_id when issue_id is absent (issue_id filter is sufficient)
     if (!options.issue_id && enforcedProjectId) params.project_id = enforcedProjectId;
     if (options.user_id) params.user_id = options.user_id;
     if (options.from) params.from = options.from;
@@ -1314,9 +1357,7 @@ export class RedmineClient {
     comments?: string;
     spent_on?: string;
   }): Promise<RedmineTimeEntry> {
-    // Always validate explicit project_id against scope
     const enforcedProjectId = this._enforceProjectId(options.project_id);
-    // If issue_id is present, validate it belongs to scoped project
     if (options.issue_id && this.getProjectScope()) {
       await this._ensureIssueInScope(options.issue_id);
     }
@@ -1324,7 +1365,6 @@ export class RedmineClient {
     const time_entry: TimeEntryPayload = { hours: options.hours };
 
     if (options.issue_id) time_entry.issue_id = options.issue_id;
-    // Only inject project_id when issue_id is absent (Redmine derives project from issue)
     if (!options.issue_id && enforcedProjectId) time_entry.project_id = enforcedProjectId;
     if (options.activity_id) time_entry.activity_id = options.activity_id;
     if (options.comments) time_entry.comments = options.comments;
@@ -1350,10 +1390,9 @@ export class RedmineClient {
       comments?: string;
     }
   ): Promise<void> {
-    // Fetch-then-validate: check time entry belongs to scoped project before mutation
     const scope = this.getProjectScope();
     if (scope) {
-      const response = await this.client.get(`/time_entries/${timeEntryId}.json`);
+      const response = await this.client.get(`/time_entries/${pathSegment(timeEntryId)}.json`);
       const entry = response.data.time_entry as RedmineTimeEntry;
       const scopedNumericId = await this._resolveProjectNumericId(scope);
       if (entry.project.id !== scopedNumericId) {
@@ -1367,17 +1406,14 @@ export class RedmineClient {
     if (options.activity_id) time_entry.activity_id = options.activity_id;
     if (options.comments !== undefined) time_entry.comments = options.comments;
 
-    await this.client.put(`/time_entries/${timeEntryId}.json`, { time_entry });
+    await this.client.put(`/time_entries/${pathSegment(timeEntryId)}.json`, { time_entry });
   }
-
-  // ── Journal Operations ─────────────────────────────────────────────────────────────────────────
 
   /**
    * List all journals (comments and change history) for an issue.
    * @param issueId - The issue ID.
    */
   async listJournals(issueId: number): Promise<RedmineJournal[]> {
-    // Scope enforcement via showIssue() — do not refactor to skip showIssue without adding explicit scope check
     const issue = await this.showIssue(issueId, { include: ['journals'] });
     return issue.journals || [];
   }
@@ -1390,9 +1426,12 @@ export class RedmineClient {
    */
   async updateJournal(issueId: number, journalId: number, notes: string): Promise<void> {
     await this._ensureIssueInScope(issueId);
-    await this.client.put(`/issues/${issueId}/journals/${journalId}.json`, {
-      journal: { notes: sanitizeTextile(notes) },
-    });
+    await this.client.put(
+      `/issues/${pathSegment(issueId)}/journals/${pathSegment(journalId)}.json`,
+      {
+        journal: { notes: sanitizeTextile(notes) },
+      }
+    );
   }
 
   /**
@@ -1402,48 +1441,82 @@ export class RedmineClient {
    */
   async deleteJournal(issueId: number, journalId: number): Promise<void> {
     await this._ensureIssueInScope(issueId);
-    await this.client.delete(`/issues/${issueId}/journals/${journalId}.json`);
+    await this.client.delete(
+      `/issues/${pathSegment(issueId)}/journals/${pathSegment(journalId)}.json`
+    );
   }
 
-  // ── User Operations ────────────────────────────────────────────────────────────────────────────
-
-  /** Get the current authenticated user's profile. */
+  /** Get the current authenticated user's public profile, never the account's API key. */
   async getCurrentUser(): Promise<RedmineUser> {
     const response = await this.client.get('/users/current.json');
-    return response.data.user;
+    return toPublicUser(response.data.user);
   }
 
   /**
-   * List users, optionally filtered by project membership.
+   * List users, optionally filtered by project membership (group memberships are skipped).
    * @param projectId - Optional project ID to filter users by membership.
    */
   async listUsers(projectId?: string): Promise<RedmineUser[]> {
-    // When scoped, forces projectId = scope → always uses memberships endpoint
     const enforcedProjectId = this._enforceProjectId(projectId);
     if (enforcedProjectId) {
-      const response = await this.client.get(`/projects/${enforcedProjectId}/memberships.json`);
-      return response.data.memberships.map((m: { user: RedmineUser }) => m.user);
+      const response = await this.client.get(
+        `/projects/${pathSegment(enforcedProjectId)}/memberships.json`
+      );
+      return (response.data.memberships as Array<{ user?: Record<string, unknown> }>)
+        .flatMap((m) => (m.user ? [m.user] : []))
+        .map(toPublicUser);
     }
     const response = await this.client.get('/users.json');
-    return response.data.users;
+    return (response.data.users as Array<Record<string, unknown>>).map(toPublicUser);
+  }
+
+  /**
+   * List every version a project sees, its own and shared ones in any status; only open ones are assignable.
+   * @param projectId - Project ID or identifier; the configured project may be named either way.
+   * @throws {ProjectScopeError} When projectId names a project other than the configured one.
+   */
+  async listVersions(
+    projectId: string | number
+  ): Promise<{ versions: RedmineVersion[]; total_count: number }> {
+    const target = String(projectId);
+    const scope = this.getProjectScope();
+    if (scope && target !== scope && !(await this._namesScopedProject(scope, target))) {
+      throw new ProjectScopeError(scope, target);
+    }
+    const response = await this.client.get(`/projects/${pathSegment(target)}/versions.json`);
+    const versions = (response.data.versions ?? []) as RedmineVersion[];
+    return { versions, total_count: response.data.total_count ?? versions.length };
+  }
+
+  private async _namesScopedProject(scope: string, target: string): Promise<boolean> {
+    const scopedId = await this._resolveProjectNumericId(scope);
+    if (/^\d+$/.test(target)) {
+      return Number(target) === scopedId;
+    }
+    const response = await this.client.get(`/projects/${pathSegment(target)}.json`);
+    return response.data.project?.id === scopedId;
   }
 
   /**
    * Resolve a user identifier ('me', numeric ID, or username) to a user ID, or null if not found.
    * @param identifier - User identifier ('me', user ID, or username).
    */
-  async resolveUser(identifier: string): Promise<number | null> {
-    if (identifier === 'me') {
+  async resolveUser(identifier: string | number): Promise<number | null> {
+    const value = identifier === undefined || identifier === null ? '' : String(identifier).trim();
+    if (value === '') {
+      return null;
+    }
+    if (value === 'me') {
       const user = await this.getCurrentUser();
       return user.id;
     }
 
-    if (/^\d+$/.test(identifier)) {
-      return parseInt(identifier, 10);
+    if (/^\d+$/.test(value)) {
+      return parseInt(value, 10);
     }
 
     const response = await this.client.get('/users.json', {
-      params: { name: identifier },
+      params: { name: value },
     });
 
     if (response.data.users && response.data.users.length > 0) {
@@ -1452,8 +1525,6 @@ export class RedmineClient {
 
     return null;
   }
-
-  // ── Project Operations ─────────────────────────────────────────────────────────────────────────
 
   /**
    * List projects with optional status filter; when scoped, returns only the configured project.
@@ -1472,7 +1543,6 @@ export class RedmineClient {
     const scope = this.getProjectScope();
 
     if (scope) {
-      // When scoped, return only the configured project (ignore limit/offset — single project)
       const project = await this.showProject(scope);
       if (options.status && options.status !== 'all') {
         const statusValue = REDMINE_STATUS_MAP[options.status];
@@ -1491,7 +1561,6 @@ export class RedmineClient {
     const response = await this.client.get('/projects.json', { params });
     let projects = response.data.projects as RedmineProject[];
 
-    // Filter by status (Redmine API doesn't support status parameter)
     if (options.status && options.status !== 'all') {
       const statusValue = REDMINE_STATUS_MAP[options.status];
       if (statusValue !== undefined) {
@@ -1520,10 +1589,9 @@ export class RedmineClient {
       params.include = options.include.join(',');
     }
 
-    const response = await this.client.get(`/projects/${projectId}.json`, { params });
+    const response = await this.client.get(`/projects/${pathSegment(projectId)}.json`, { params });
     const project = response.data.project;
 
-    // Post-fetch scope validation via identifier or numeric id.
     const scope = this.getProjectScope();
     if (scope && project.identifier !== scope && project.id.toString() !== scope) {
       throw new ProjectScopeError(scope, project.identifier);
@@ -1551,7 +1619,6 @@ export class RedmineClient {
     const scope = this.getProjectScope();
 
     if (scope) {
-      // When scoped, only search within the configured project
       const project = await this.showProject(scope);
       const matches =
         project.name.toLowerCase().includes(queryLower) ||
@@ -1572,7 +1639,6 @@ export class RedmineClient {
 
     const allProjects = response.data.projects as RedmineProject[];
 
-    // Filter by name, identifier or description
     const matched = allProjects.filter(
       (p: RedmineProject) =>
         p.name.toLowerCase().includes(queryLower) ||
@@ -1592,15 +1658,13 @@ export class RedmineClient {
     };
   }
 
-  // ── Relation Operations ────────────────────────────────────────────────────────────────────────
-
   /**
    * List all relations for a specific issue.
    * @param issueId - The issue ID.
    */
   async listRelations(issueId: number): Promise<{ relations: IssueRelation[] }> {
     await this._ensureIssueInScope(issueId);
-    const response = await this.client.get(`/issues/${issueId}/relations.json`);
+    const response = await this.client.get(`/issues/${pathSegment(issueId)}/relations.json`);
     return { relations: response.data.relations || [] };
   }
 
@@ -1618,7 +1682,6 @@ export class RedmineClient {
     relation_type?: RelationType;
     delay?: number;
   }): Promise<{ relation: IssueRelation }> {
-    // Validate both ends belong to scoped project
     await Promise.all([
       this._ensureIssueInScope(options.issue_id),
       this._ensureIssueInScope(options.issue_to_id),
@@ -1635,9 +1698,12 @@ export class RedmineClient {
       relation.delay = options.delay;
     }
 
-    const response = await this.client.post(`/issues/${options.issue_id}/relations.json`, {
-      relation,
-    });
+    const response = await this.client.post(
+      `/issues/${pathSegment(options.issue_id)}/relations.json`,
+      {
+        relation,
+      }
+    );
     return { relation: response.data.relation };
   }
 
@@ -1646,17 +1712,14 @@ export class RedmineClient {
    * @param relationId - The relation ID to delete.
    */
   async deleteRelation(relationId: number): Promise<void> {
-    // Fetch-then-validate: check relation's source issue belongs to scoped project
     const scope = this.getProjectScope();
     if (scope) {
-      const response = await this.client.get(`/relations/${relationId}.json`);
+      const response = await this.client.get(`/relations/${pathSegment(relationId)}.json`);
       const rel = response.data.relation as IssueRelation;
       await this._ensureIssueInScope(rel.issue_id);
     }
-    await this.client.delete(`/relations/${relationId}.json`);
+    await this.client.delete(`/relations/${pathSegment(relationId)}.json`);
   }
-
-  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Format error objects (Axios errors by HTTP status) into user-friendly messages.
@@ -1694,8 +1757,6 @@ export class RedmineClient {
   }
 }
 
-// ── Client Factory ───────────────────────────────────────────────────────────────────────────────
-
 /**
  * Initialize the Redmine client; returns null (never throws) on config errors.
  * @returns Configured RedmineClient instance, or null if API key not found/invalid
@@ -1704,19 +1765,15 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
   try {
     const apiKey = await loadTokenFile('api_key');
 
-    // Validate API key is not empty (0-byte placeholder file)
     if (!apiKey) {
-      // Graceful degradation: log and return null.
       console.warn(`${ts()} ${withSetupGuidance('Redmine API key is empty.')}`);
       return null;
     }
 
     console.log(`${ts()} ✅ Redmine: API key loaded`);
 
-    // Load project config from /tokens/config.json
     const projectConfig = await loadRedmineConfig();
 
-    // Determine host URL: config.json > REDMINE_URL env > null (fail)
     let host: string | null = null;
     if (projectConfig?.host_url) {
       host = projectConfig.host_url;
@@ -1727,7 +1784,6 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
     }
 
     if (!host) {
-      // Graceful degradation: log and return null.
       console.warn(`${ts()} No Redmine URL found (config.json or REDMINE_URL env var)`);
       return null;
     }
@@ -1742,7 +1798,6 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
       projectConfig
     );
 
-    // Fire-and-forget project_name resolution to avoid startup delays.
     if (
       projectConfig != null &&
       projectConfig.project_id != null &&
@@ -1754,7 +1809,6 @@ export async function initializeRedmineClient(): Promise<RedmineClient | null> {
 
     return client;
   } catch (error) {
-    // Graceful degradation: log and return null.
     console.warn(
       `${ts()} Failed to initialize Redmine client: ${error instanceof Error ? error.message : 'Unknown error'}`
     );

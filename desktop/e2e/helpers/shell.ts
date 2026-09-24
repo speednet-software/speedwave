@@ -1,5 +1,12 @@
 /** Helpers for synchronising with the shell's `projectState` lifecycle. */
 
+export const RESTART_WAIT_MS = 360_000;
+
+interface RestartUi {
+  error: string | null;
+  overlay: boolean;
+}
+
 /**
  * Waits until the shell's blocking overlay disappears (projectState ready).
  * @param timeoutMs - How long to wait for the overlay to clear.
@@ -14,25 +21,46 @@ export async function waitForShellReady(timeoutMs = 60_000): Promise<void> {
   });
 }
 
+function readRestartUi(): Promise<RestartUi> {
+  return browser.execute(() => ({
+    error: document.querySelector('[data-testid="restart-error"]')?.textContent?.trim() ?? null,
+    overlay: document.querySelector('[data-testid="restart-overlay"]') !== null,
+  }));
+}
+
 /**
  * Confirms the restart-required overlay (provider/integration change) and
  * waits for the container restart to finish. requestRestart() only sets
  * needsRestart — the user must click restart-now-btn to actually restart.
  * @param timeoutMs - How long to wait for the restart to complete.
  */
-export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> {
+export async function confirmRestartAndWait(timeoutMs = RESTART_WAIT_MS): Promise<void> {
   const btn = await $('[data-testid="restart-now-btn"]');
   await btn.waitForExist({
     timeout: 60_000,
     timeoutMsg: 'restart-now-btn never appeared — provider change did not request a restart',
   });
+  const before = await readRestartUi();
   await btn.click();
-  const overlay = await $('[data-testid="restart-overlay"]');
-  await overlay.waitForExist({
-    timeout: timeoutMs,
-    reverse: true,
-    timeoutMsg: `restart-overlay still visible after ${timeoutMs}ms — restart did not complete`,
-  });
+  let sawClear = before.error === null;
+  const outcome = await browser.waitUntil(
+    async () => {
+      const now = await readRestartUi();
+      if (now.error === null) {
+        sawClear = true;
+        return now.overlay ? false : { failure: null };
+      }
+      if (!sawClear && now.error === before.error) return false;
+      return { failure: now.error };
+    },
+    {
+      timeout: timeoutMs,
+      timeoutMsg: `restart-overlay still visible after ${timeoutMs}ms — restart did not complete`,
+    }
+  );
+  if (outcome.failure !== null) {
+    throw new Error(`restart failed: ${outcome.failure || '(no error text)'}`);
+  }
 }
 
 /**
@@ -41,7 +69,7 @@ export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> 
  * that does not depend on a pending config change.
  * @param timeoutMs - How long to wait for the restart to complete.
  */
-export async function requestBackendRestart(timeoutMs = 180_000): Promise<void> {
+export async function requestBackendRestart(timeoutMs = RESTART_WAIT_MS): Promise<void> {
   await (await $('[data-testid="nav-rail-palette"]')).click();
   await $('[data-testid="command-palette"]').waitForExist({ timeout: 10_000 });
   await (await $('[data-testid="palette-item-action-restart-containers"]')).click();

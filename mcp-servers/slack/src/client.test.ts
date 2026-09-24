@@ -20,7 +20,6 @@ import {
 import { WebClient } from '@slack/web-api';
 import fs from 'fs/promises';
 
-// Mock WebClient constructor function
 const mockWebClientInstance = {
   chat: {
     postMessage: vi.fn(),
@@ -32,13 +31,11 @@ const mockWebClientInstance = {
   users: {
     lookupByEmail: vi.fn(),
   },
-  // Background auth.test defaults to success; override per-test with mockResolvedValueOnce
   auth: {
     test: vi.fn().mockResolvedValue({ ok: true }),
   },
 };
 
-// Class mock records the token so slackCall's rotate-on-change check (client.token !== token) works
 vi.mock('@slack/web-api', () => ({
   WebClient: vi.fn().mockImplementation(function (
     this: typeof mockWebClientInstance & { token?: string },
@@ -49,7 +46,6 @@ vi.mock('@slack/web-api', () => ({
   }),
 }));
 
-// Mock both named and default-object fs exports (oauth-client imports named; refresh reads bearer)
 const { readFileMock, mkdirMock, writeFileMock } = vi.hoisted(() => ({
   readFileMock: vi.fn(),
   mkdirMock: vi.fn().mockResolvedValue(undefined),
@@ -193,6 +189,48 @@ describe('slack client', () => {
       }
     });
 
+    it('formats an undici fetch transport failure', () => {
+      const message = formatSlackError(new TypeError('fetch failed'));
+      expect(message).toContain('Network error');
+    });
+
+    it('finds a network marker buried in the cause chain', () => {
+      const dns = Object.assign(new Error('getaddrinfo ENOTFOUND slack.com'), {
+        code: 'ENOTFOUND',
+      });
+      const fetchFailed = new TypeError('fetch failed', { cause: dns });
+      const requestError = new Error('A request error occurred: something broke', {
+        cause: fetchFailed,
+      });
+      expect(formatSlackError(requestError)).toContain('Network error');
+    });
+
+    it('finds a network marker carried only as a code on an AggregateError member', () => {
+      const member = Object.assign(new Error('connect failure'), { code: 'ECONNREFUSED' });
+      const aggregate = new AggregateError([member], 'all attempts failed');
+      const wrapped = new Error('request wrapper', { cause: aggregate });
+      expect(formatSlackError(wrapped)).toContain('Network error');
+    });
+
+    it('skips a primitive cause and falls back to the message', () => {
+      const wrapped = new Error('wrapper failure', { cause: 'ECONNREFUSED' });
+      expect(formatSlackError(wrapped)).toBe('wrapper failure');
+    });
+
+    it('does not hang on a cyclic cause chain and falls back to the message', () => {
+      const cyclic: Error & { cause?: unknown } = new Error('opaque failure');
+      cyclic.cause = cyclic;
+      expect(formatSlackError(cyclic)).toBe('opaque failure');
+    });
+
+    it('does not classify a marker below the traversal bound as a network error', () => {
+      let deep: Error = Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      for (let i = 0; i < 10; i++) {
+        deep = new Error(`wrapper ${i}`, { cause: deep });
+      }
+      expect(formatSlackError(deep)).toBe('wrapper 9');
+    });
+
     it('formats unknown Slack API errors', () => {
       const error = { data: { error: 'some_unknown_error' } };
       const message = formatSlackError(error);
@@ -291,7 +329,6 @@ describe('slack client', () => {
     });
 
     it('wraps a non-Error fs rejection into an errno-aware message (still returns missing)', async () => {
-      // Non-Error rejection is wrapped so its message (not "Unknown error") surfaces in the warning
       vi.mocked(fs.readFile).mockRejectedValueOnce('plain string failure');
 
       const result = await initializeSlackClients();
@@ -317,7 +354,6 @@ describe('slack client', () => {
 
       const clients = await initializeSlackClients();
       expect(clients._tokensStatus).toBe('present');
-      // Wait for the background promise to settle.
       await vi.waitFor(() => expect(clients.statusTracker!.getStatus()).toBe('failed'));
       expect(clients.statusTracker!.getError()).toContain('account_inactive');
     });
@@ -369,8 +405,8 @@ describe('slack client', () => {
     it('refreshes once on token_expired and retries with the rotated token', async () => {
       stubOauthWorkerSuccess();
       vi.mocked(fs.readFile)
-        .mockResolvedValueOnce('bearer-uuid') // /secrets/oauth-auth-token-slack
-        .mockResolvedValueOnce('xoxe.xoxp-rotated\n'); // /tokens/access_token re-read
+        .mockResolvedValueOnce('bearer-uuid')
+        .mockResolvedValueOnce('xoxe.xoxp-rotated\n');
 
       const clients = presentClients();
       const apiCall = vi
@@ -383,7 +419,6 @@ describe('slack client', () => {
       expect(result).toEqual({ ok: true });
       expect(apiCall).toHaveBeenCalledTimes(2);
       expect(clients.tokenState.accessToken).toBe('xoxe.xoxp-rotated');
-      // WebClient recreated with the rotated token (state transition).
       expect(WebClient).toHaveBeenCalledWith('xoxe.xoxp-rotated');
       expect(clients.user.token).toBe('xoxe.xoxp-rotated');
     });
@@ -402,7 +437,6 @@ describe('slack client', () => {
     });
 
     it('propagates a refresh failure without retrying the call', async () => {
-      // No WORKER_OAUTH_URL → refreshAccessToken throws not_configured.
       delete process.env.WORKER_OAUTH_URL;
       const clients = presentClients();
       const apiCall = vi.fn().mockRejectedValue({ data: { error: 'token_expired' } });
@@ -489,7 +523,6 @@ describe('slack client', () => {
     });
 
     it('resolves a channel that lives on a later list page', async () => {
-      // Pagination: a channel on page 2+ must still resolve even when pages are sparse
       const mockList = vi
         .fn()
         .mockResolvedValueOnce({
@@ -648,6 +681,148 @@ describe('slack client', () => {
         text: 'Group message',
       });
     });
+
+    it('replies in a thread when thread_ts is given', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({
+        ok: true,
+        ts: '1717000000.000200',
+        channel: 'C12345678',
+      });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'C12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+
+      expect(mockPostMessage).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        text: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+    });
+
+    it('replies in a DM thread', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({
+        ok: true,
+        ts: '1717000000.000200',
+        channel: 'D12345678',
+      });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'D12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+
+      expect(mockPostMessage).toHaveBeenCalledWith({
+        channel: 'D12345678',
+        text: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+    });
+
+    it('omits thread_ts from the API call when not given', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({ ok: true, channel: 'C12345678' });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, { channel: 'C12345678', message: 'Top level' });
+
+      expect(Object.keys(mockPostMessage.mock.calls[0][0])).toEqual(['channel', 'text']);
+    });
+
+    it('rejects a thread_ts that is not a genuine Slack timestamp before calling the API', async () => {
+      const mockPostMessage = vi.fn();
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          thread_ts: '1717000000',
+        })
+      ).rejects.toThrow(/does not look like a Slack timestamp/);
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          thread_ts: 1717000000.0001 as unknown as string,
+        })
+      ).rejects.toThrow(/does not look like a Slack timestamp/);
+      expect(mockPostMessage).not.toHaveBeenCalled();
+    });
+
+    it('broadcasts a thread reply to the channel when reply_broadcast is true', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({
+        ok: true,
+        ts: '1717000000.000200',
+        channel: 'C12345678',
+      });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'C12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      });
+
+      expect(mockPostMessage).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        text: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      });
+    });
+
+    it('omits reply_broadcast from the API call when false', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({ ok: true, channel: 'C12345678' });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'C12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: false,
+      });
+
+      expect(Object.keys(mockPostMessage.mock.calls[0][0])).toEqual([
+        'channel',
+        'text',
+        'thread_ts',
+      ]);
+    });
+
+    it('rejects a reply_broadcast that is not a boolean before calling the API', async () => {
+      const mockPostMessage = vi.fn();
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          thread_ts: '1717000000.000100',
+          reply_broadcast: 'false' as unknown as boolean,
+        })
+      ).rejects.toThrow(/reply_broadcast must be a boolean/);
+      expect(mockPostMessage).not.toHaveBeenCalled();
+    });
+
+    it('rejects reply_broadcast without thread_ts before calling the API', async () => {
+      const mockPostMessage = vi.fn();
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          reply_broadcast: true,
+        })
+      ).rejects.toThrow(/reply_broadcast requires thread_ts/);
+      expect(mockPostMessage).not.toHaveBeenCalled();
+    });
   });
 
   describe('readChannel', () => {
@@ -742,7 +917,6 @@ describe('slack client', () => {
       expect(result.messages[1].attachments_text).toBe(
         'SPW-208: spike: wybrac backend\nJira created a Task'
       );
-      // Plain messages carry neither key.
       expect(result.messages[0].attachments_text).toBeUndefined();
     });
 
@@ -908,7 +1082,6 @@ describe('slack client', () => {
       const mockHistory = vi.fn().mockResolvedValue({
         messages: [
           {
-            // Missing user, text, ts fields
             type: 'message',
           },
           {
@@ -1196,7 +1369,6 @@ describe('slack client', () => {
         url_private: 'https://files.slack.com/files-pri/T1-F4/notes.md',
       });
       stubDownload('<html>login</html>', 'text/html');
-      // No WORKER_OAUTH_URL: refresh fails instead of returning the login page as content
       await expect(getFileContent(mockClients, { file: 'F4' })).rejects.toThrow();
     });
 
@@ -1296,7 +1468,7 @@ describe('slack client', () => {
       return fetchMock;
     }
 
-    it('writes a binary file under /workspace/slack-files with id-prefixed name', async () => {
+    it('writes a binary file under .speedwave/slack with id-prefixed name', async () => {
       stubInfo({
         id: 'F1',
         name: 'analiza_techniczna.pdf',
@@ -1304,7 +1476,7 @@ describe('slack client', () => {
         size: 4,
         url_private: 'https://files.slack.com/files-pri/T1-F1/analiza.pdf',
       });
-      const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46]); // %PDF
+      const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46]);
       const fetchMock = stubDownload(bytes);
 
       const result = await downloadFile(mockClients, { file: 'F1' });
@@ -1338,7 +1510,6 @@ describe('slack client', () => {
 
       const result = await downloadFile(mockClients, { file: 'F2' });
 
-      // No separators survive; leading dots stripped; unsafe chars → underscore.
       expect(result.path).toBe('/ws/.speedwave/slack/F2-pa_ss_wd_.txt');
       expect(result.path).not.toContain('..');
     });
@@ -1376,13 +1547,11 @@ describe('slack client', () => {
         url_private: 'https://files.slack.com/files-pri/T1-F5/doc.pdf',
       });
       stubDownload(Buffer.from('<html>login</html>'), 'text/html');
-      // No WORKER_OAUTH_URL: refresh fails instead of persisting the login page
       await expect(downloadFile(mockClients, { file: 'F5' })).rejects.toThrow();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
     it('sanitizes a hostile file ID falling back from files.info', async () => {
-      // files.info without an id → meta.id falls back to the caller's argument.
       stubInfo({
         name: 'x.pdf',
         mimetype: 'application/pdf',
@@ -1393,7 +1562,6 @@ describe('slack client', () => {
 
       const result = await downloadFile(mockClients, { file: '../../etc/passwd' });
 
-      // sanitizeFilename keeps only the basename — traversal segments drop out.
       expect(result.path).toBe('/ws/.speedwave/slack/passwd-x.pdf');
       expect(result.path).not.toContain('..');
     });
@@ -1550,7 +1718,6 @@ describe('slack client', () => {
     });
 
     it('caps pagination at the runaway-cursor backstop', async () => {
-      // A cursor that never empties must not loop forever.
       const mockList = vi.fn().mockResolvedValue({
         channels: [{ id: 'CX', name: 'x', is_member: true }],
         response_metadata: { next_cursor: 'cur-again' },
@@ -1615,7 +1782,6 @@ describe('slack client', () => {
       const mockList = vi.fn().mockResolvedValue({
         channels: [
           {
-            // Missing all fields except is_member
             is_member: true,
           },
           {
@@ -1632,7 +1798,6 @@ describe('slack client', () => {
 
       const result = await getChannels(mockClients);
 
-      // These channels pass the is_member filter, so they will be included
       expect(result.channels[0]).toEqual({
         id: '',
         name: '',
@@ -1717,7 +1882,6 @@ describe('slack client', () => {
       const list = stubList([
         {
           ok: true,
-          // No is_member field anywhere — im objects do not carry it.
           channels: [{ id: 'D1', is_im: true, user: 'U1' }],
           response_metadata: { next_cursor: 'CUR2' },
         },
@@ -1986,7 +2150,6 @@ describe('slack client', () => {
         user: {
           id: 'U12345',
           name: 'john.doe',
-          // Missing real_name and profile
         },
       });
 
@@ -2029,7 +2192,6 @@ describe('slack client', () => {
     });
 
     it('throws error for other API errors', async () => {
-      // token_revoked is terminal: no refresh attempt, error passes through.
       const mockLookup = vi.fn().mockRejectedValue({
         data: { error: 'token_revoked' },
       });

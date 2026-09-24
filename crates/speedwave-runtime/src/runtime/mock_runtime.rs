@@ -7,12 +7,11 @@
 
 use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Recorded `remove_images` call args: `(tags, force)`.
 type RemoveImagesCall = (Vec<String>, bool);
 
 /// Shared introspection handles cloned into the mock before wrapping.
@@ -138,6 +137,7 @@ pub struct MockRuntimeBuilder {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
+    ensure_ready_script: Arc<Mutex<VecDeque<ScriptedEnsureReady>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -150,12 +150,17 @@ pub struct MockRuntimeBuilder {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
+    image_exists_failure_queue: Arc<Mutex<VecDeque<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
     build_panic_substrings: Vec<String>,
     container_exec_program: String,
     exec_piped_script: Option<String>,
+    exec_piped_hang_secs: Option<u64>,
+    exec_piped_hang_used: Arc<Mutex<bool>>,
+    exec_piped_orphan_hang_secs: Option<u64>,
+    exec_piped_orphan_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -167,12 +172,20 @@ pub struct MockRuntimeBuilder {
     buildkit_prune_result: Result<(), String>,
     remove_images_result: Result<(), String>,
     prepare_build_context_root: Option<std::path::PathBuf>,
+    engine_teardown_check: fn() -> bool,
 }
 
 #[derive(Clone)]
 enum ResultCell {
     Ok,
     Err(String),
+}
+
+enum ScriptedEnsureReady {
+    StatusUnreadable(String),
+    VmNotFound(String),
+    Fails(String),
+    DuringTeardown,
 }
 
 #[derive(Clone)]
@@ -182,8 +195,6 @@ enum BuildResult {
     AllErr(String),
 }
 
-/// Per-tag build attempt counter. Keyed by image tag, value is the running
-/// 1-based attempt count.
 type AttemptCounter = Arc<Mutex<HashMap<String, u32>>>;
 
 impl Default for MockRuntimeBuilder {
@@ -199,6 +210,7 @@ impl MockRuntimeBuilder {
             handles: MockHandles::default(),
             is_available: true,
             ensure_ready_result: ResultCell::Ok,
+            ensure_ready_script: Arc::new(Mutex::new(VecDeque::new())),
             fail_on_up: HashSet::new(),
             fail_on_down: HashSet::new(),
             fail_on_recreate: HashSet::new(),
@@ -211,12 +223,17 @@ impl MockRuntimeBuilder {
             image_exists_default: false,
             image_missing_substrings: Vec::new(),
             image_exists_error: None,
+            image_exists_failure_queue: Arc::new(Mutex::new(VecDeque::new())),
             build_image_result: BuildResult::Ok,
             build_attempt_errors: HashMap::new(),
             build_attempts: Arc::new(Mutex::new(HashMap::new())),
             build_panic_substrings: Vec::new(),
             container_exec_program: "true".to_string(),
             exec_piped_script: None,
+            exec_piped_hang_secs: None,
+            exec_piped_hang_used: Arc::new(Mutex::new(false)),
+            exec_piped_orphan_hang_secs: None,
+            exec_piped_orphan_hang_used: Arc::new(Mutex::new(false)),
             exec_piped_error: None,
             exec_piped_failure_queue: Arc::new(Mutex::new(Vec::new())),
             validate_script: Arc::new(Mutex::new(Vec::new())),
@@ -228,6 +245,7 @@ impl MockRuntimeBuilder {
             buildkit_prune_result: Ok(()),
             remove_images_result: Ok(()),
             prepare_build_context_root: None,
+            engine_teardown_check: || false,
         }
     }
 
@@ -239,6 +257,33 @@ impl MockRuntimeBuilder {
     /// Makes `ensure_ready` fail with `msg`.
     pub fn with_ensure_ready_error(mut self, msg: &str) -> Self {
         self.ensure_ready_result = ResultCell::Err(msg.to_string());
+        self
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmStatusUnreadable`; scripted failures
+    /// run first in FIFO order, then the configured result resumes.
+    pub fn push_ensure_ready_status_unreadable(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::StatusUnreadable(msg.to_string()))
+    }
+    /// Makes the runtime ask `started` whether the engine teardown began, as
+    /// [`super::engine_teardown_started`] does in production.
+    pub fn with_engine_teardown_check(mut self, started: fn() -> bool) -> Self {
+        self.engine_teardown_check = started;
+        self
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmNotFound`.
+    pub fn push_ensure_ready_vm_not_found(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::VmNotFound(msg.to_string()))
+    }
+    /// Push a scripted plain `ensure_ready` failure with `msg`.
+    pub fn push_ensure_ready_failure(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::Fails(msg.to_string()))
+    }
+    /// Push a scripted `ensure_ready` failure carrying `EngineTearingDown`.
+    pub fn push_ensure_ready_during_teardown(self) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::DuringTeardown)
+    }
+    fn push_ensure_ready(self, outcome: ScriptedEnsureReady) -> Self {
+        self.ensure_ready_script.lock().unwrap().push_back(outcome);
         self
     }
     /// Sets the value returned by `is_available`.
@@ -282,6 +327,14 @@ impl MockRuntimeBuilder {
     /// Makes `image_exists` fail with `msg`.
     pub fn with_image_exists_error(mut self, msg: &str) -> Self {
         self.image_exists_error = Some(msg.to_string());
+        self
+    }
+    /// Push a scripted `image_exists` failure (FIFO); the normal answer resumes once the queue is empty.
+    pub fn push_image_exists_failure(self, msg: &str) -> Self {
+        self.image_exists_failure_queue
+            .lock()
+            .unwrap()
+            .push_back(msg.to_string());
         self
     }
     /// Default for `image_exists(tag)` when no exact-match override is set and no
@@ -342,6 +395,21 @@ impl MockRuntimeBuilder {
         self.exec_piped_script = Some(script.to_string());
         self
     }
+    /// ONE-SHOT hang: the first `container_exec_piped` call returns a real
+    /// `sh -c "sleep <secs>"` child (alive, zero stdout); later calls fall through.
+    pub fn with_exec_piped_hang(mut self, sleep_secs: u64) -> Self {
+        self.exec_piped_hang_secs = Some(sleep_secs);
+        self
+    }
+    /// ONE-SHOT orphan hang: the first `container_exec_piped` call returns a
+    /// `sh -c "sleep <secs> & exit 0"` child. The shell exits immediately
+    /// (`child.wait()` returns) but the orphaned `sleep` inherits and holds
+    /// the stdout pipe write end open, so a reader blocked on it never sees
+    /// EOF. Later calls fall through.
+    pub fn with_exec_piped_orphan_hang(mut self, sleep_secs: u64) -> Self {
+        self.exec_piped_orphan_hang_secs = Some(sleep_secs);
+        self
+    }
     /// Makes `container_exec_piped` fail with `msg`.
     pub fn with_exec_piped_error(mut self, msg: &str) -> Self {
         self.exec_piped_error = Some(msg.to_string());
@@ -385,6 +453,7 @@ impl MockRuntimeBuilder {
             handles: self.handles,
             is_available: self.is_available,
             ensure_ready_result: self.ensure_ready_result,
+            ensure_ready_script: self.ensure_ready_script,
             fail_on_up: self.fail_on_up,
             fail_on_down: self.fail_on_down,
             fail_on_recreate: self.fail_on_recreate,
@@ -397,12 +466,17 @@ impl MockRuntimeBuilder {
             image_exists_default: self.image_exists_default,
             image_missing_substrings: self.image_missing_substrings,
             image_exists_error: self.image_exists_error,
+            image_exists_failure_queue: self.image_exists_failure_queue,
             build_image_result: self.build_image_result,
             build_attempt_errors: self.build_attempt_errors,
             build_attempts: self.build_attempts,
             build_panic_substrings: self.build_panic_substrings,
             container_exec_program: self.container_exec_program,
             exec_piped_script: self.exec_piped_script,
+            exec_piped_hang_secs: self.exec_piped_hang_secs,
+            exec_piped_hang_used: self.exec_piped_hang_used,
+            exec_piped_orphan_hang_secs: self.exec_piped_orphan_hang_secs,
+            exec_piped_orphan_hang_used: self.exec_piped_orphan_hang_used,
             exec_piped_error: self.exec_piped_error,
             exec_piped_failure_queue: self.exec_piped_failure_queue,
             validate_script: self.validate_script,
@@ -415,7 +489,10 @@ impl MockRuntimeBuilder {
             remove_images_result: self.remove_images_result,
             prepare_build_context_root: self.prepare_build_context_root,
         };
-        (LockedRuntime::new(Box::new(mock)), handles)
+        (
+            LockedRuntime::new(Box::new(mock), self.engine_teardown_check),
+            handles,
+        )
     }
 }
 
@@ -423,6 +500,7 @@ struct MockRuntime {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
+    ensure_ready_script: Arc<Mutex<VecDeque<ScriptedEnsureReady>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -435,12 +513,17 @@ struct MockRuntime {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
+    image_exists_failure_queue: Arc<Mutex<VecDeque<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
     build_panic_substrings: Vec<String>,
     container_exec_program: String,
     exec_piped_script: Option<String>,
+    exec_piped_hang_secs: Option<u64>,
+    exec_piped_hang_used: Arc<Mutex<bool>>,
+    exec_piped_orphan_hang_secs: Option<u64>,
+    exec_piped_orphan_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -505,10 +588,29 @@ impl ContainerRuntime for MockRuntime {
             container: container.to_string(),
             argv: cmd.iter().map(|s| s.to_string()).collect(),
         });
+        if let Some(secs) = self.exec_piped_hang_secs {
+            let mut used = self.exec_piped_hang_used.lock().unwrap();
+            if !*used {
+                *used = true;
+                // SSOT-allow: test fixture spawn
+                let mut c = Command::new("sh");
+                c.args(["-c", &format!("sleep {secs}")]);
+                return Ok(c);
+            }
+        }
+        if let Some(secs) = self.exec_piped_orphan_hang_secs {
+            let mut used = self.exec_piped_orphan_hang_used.lock().unwrap();
+            if !*used {
+                *used = true;
+                // SSOT-allow: test fixture spawn
+                let mut c = Command::new("sh");
+                c.args(["-c", &format!("sleep {secs} & exit 0")]);
+                return Ok(c);
+            }
+        }
         if let Some(err) = &self.exec_piped_error {
             anyhow::bail!("{err}");
         }
-        // FIFO failure queue: returns a Command that writes stderr and exits non-zero.
         let next_failure = {
             let mut q = self.exec_piped_failure_queue.lock().unwrap();
             if q.is_empty() {
@@ -543,6 +645,20 @@ impl ContainerRuntime for MockRuntime {
         self.handles
             .ensure_ready_calls
             .fetch_add(1, Ordering::SeqCst);
+        let scripted = self.ensure_ready_script.lock().unwrap().pop_front();
+        match scripted {
+            Some(ScriptedEnsureReady::StatusUnreadable(msg)) => {
+                return Err(super::VmStatusUnreadable::error(msg));
+            }
+            Some(ScriptedEnsureReady::VmNotFound(msg)) => {
+                return Err(super::VmNotFound::error(msg));
+            }
+            Some(ScriptedEnsureReady::Fails(msg)) => anyhow::bail!("{msg}"),
+            Some(ScriptedEnsureReady::DuringTeardown) => {
+                return Err(anyhow::Error::new(super::EngineTearingDown));
+            }
+            None => {}
+        }
         match &self.ensure_ready_result {
             ResultCell::Ok => Ok(()),
             ResultCell::Err(e) => anyhow::bail!("{e}"),
@@ -556,7 +672,6 @@ impl ContainerRuntime for MockRuntime {
         containerfile: &str,
         build_args: &[(&str, &str)],
     ) -> anyhow::Result<()> {
-        // Panic before recording so panicking calls do not show up in `build_calls`.
         for needle in &self.build_panic_substrings {
             if tag.contains(needle.as_str()) {
                 panic!("mock build_image panic for tag containing {needle:?}");
@@ -577,7 +692,6 @@ impl ContainerRuntime for MockRuntime {
             *entry += 1;
             *entry
         };
-        // Per-attempt override beats the global tag/all-err result.
         let outcome = if let Some(msg) = self.build_attempt_errors.get(&(tag.to_string(), attempt))
         {
             Err(msg.clone())
@@ -593,7 +707,6 @@ impl ContainerRuntime for MockRuntime {
         };
         match outcome {
             Ok(()) => {
-                // Mirror real-runtime semantics: a successful build makes the tag exist.
                 self.image_exists
                     .lock()
                     .unwrap()
@@ -639,10 +752,13 @@ impl ContainerRuntime for MockRuntime {
     }
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        let next_failure = self.image_exists_failure_queue.lock().unwrap().pop_front();
+        if let Some(err) = next_failure {
+            anyhow::bail!("{err}");
+        }
         if let Some(err) = &self.image_exists_error {
             anyhow::bail!("{err}");
         }
-        // Exact-match override wins; then substring "missing" rule; then default.
         if let Some(v) = self.image_exists.lock().unwrap().get(tag).copied() {
             return Ok(v);
         }
@@ -814,7 +930,6 @@ mod tests {
 
     #[test]
     fn validate_script_consumes_in_fifo_order() {
-        // First push -> first pop. Matches push_exec_piped_failure semantics.
         let (rt, _) = MockRuntimeBuilder::new()
             .push_validate_result(Err("propagation lag".to_string()))
             .push_validate_result(Ok(()))
@@ -844,6 +959,45 @@ mod tests {
     }
 
     #[test]
+    fn ensure_ready_script_drains_in_fifo_before_the_configured_result() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_ensure_ready_status_unreadable("status read failed")
+            .push_ensure_ready_failure("stuck in Stopping")
+            .push_ensure_ready_during_teardown()
+            .build();
+        let unreadable = rt.ensure_ready().unwrap_err();
+        assert!(unreadable
+            .downcast_ref::<super::super::VmStatusUnreadable>()
+            .is_some());
+        assert!(unreadable.to_string().contains("status read failed"));
+        let failed = rt.ensure_ready().unwrap_err();
+        assert!(failed.to_string().contains("stuck in Stopping"));
+        assert!(failed
+            .downcast_ref::<super::super::VmStatusUnreadable>()
+            .is_none());
+        let inhibited = rt.ensure_ready().unwrap_err();
+        assert!(inhibited
+            .downcast_ref::<super::super::EngineTearingDown>()
+            .is_some());
+        assert!(rt.ensure_ready().is_ok());
+        assert_eq!(handles.ensure_ready_count(), 4);
+    }
+
+    #[test]
+    fn image_exists_failure_queue_drains_in_fifo_before_the_configured_answer() {
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_image_exists("present:1", true)
+            .push_image_exists_failure("first engine error")
+            .push_image_exists_failure("second engine error")
+            .build();
+        let first = rt.image_exists("present:1").unwrap_err();
+        assert!(first.to_string().contains("first engine error"));
+        let second = rt.image_exists("present:1").unwrap_err();
+        assert!(second.to_string().contains("second engine error"));
+        assert!(rt.image_exists("present:1").unwrap());
+    }
+
+    #[test]
     fn reset_vm_error_recorded_and_counted() {
         let (rt, handles) = MockRuntimeBuilder::new()
             .with_reset_vm_error("wsl --unregister failed")
@@ -855,7 +1009,6 @@ mod tests {
 
     #[test]
     fn successful_build_makes_image_exist_next_call() {
-        // Mirrors real-runtime semantics: image_exists returns true after a successful build.
         let (rt, handles) = MockRuntimeBuilder::new().build();
         assert!(!rt.image_exists("fresh:1").unwrap());
         rt.build_image("fresh:1", ".", "C", &[]).unwrap();
@@ -917,7 +1070,6 @@ mod tests {
             .push_exec_piped_failure("first failure stderr")
             .push_exec_piped_failure("second failure stderr")
             .build();
-        // First call: returns Command that fails with the first message.
         let out1 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
@@ -925,7 +1077,6 @@ mod tests {
             .unwrap();
         assert!(!out1.status.success());
         assert!(String::from_utf8_lossy(&out1.stderr).contains("first failure stderr"));
-        // Second call: pops the second entry.
         let out2 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
@@ -933,12 +1084,31 @@ mod tests {
             .unwrap();
         assert!(!out2.status.success());
         assert!(String::from_utf8_lossy(&out2.stderr).contains("second failure stderr"));
-        // Third call: queue drained, falls back to default success.
         let out3 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
             .output()
             .unwrap();
         assert!(out3.status.success());
+    }
+
+    #[test]
+    fn exec_piped_hang_is_one_shot_and_spawns_live_child() {
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .with_exec_piped_script("second-call")
+            .build();
+        let mut first = rt.container_exec_piped("c", &["x"]).unwrap();
+        let mut child = first.spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(child.try_wait().unwrap().is_none(), "first call must hang");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let out = rt
+            .container_exec_piped("c", &["x"])
+            .unwrap()
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "second-call");
     }
 }

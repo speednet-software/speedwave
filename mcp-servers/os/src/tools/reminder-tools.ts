@@ -9,10 +9,18 @@ import {
   WRITE_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
-import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
+import {
+  withValidation,
+  ToolResult,
+  validateAll,
+  requireFields,
+  asRecord,
+  MAX_LENGTHS,
+} from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-// ── Types ──────────────────────────────────────────────────────────────
+/** Tags become `[#tag]` markers inside the notes field, so these characters would forge markers. */
+const TAG_MARKER_CHARS = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
 
 /** Input parameters for the listReminderLists tool (no params required). */
 type ListReminderListsParams = Record<string, never>;
@@ -49,13 +57,31 @@ interface CreateReminderParams {
   tags?: string[];
 }
 
+/** Input parameters for the updateReminder tool; omitted fields keep their current value. */
+interface UpdateReminderParams {
+  /** Reminder ID to update. */
+  id: string;
+  /** New title/name. */
+  name?: string;
+  /** Move the reminder to this list (ID or exact display name). */
+  list_id?: string;
+  /** New due date in ISO8601 format; `null` removes the due date. */
+  due_date?: string | null;
+  /** New priority level (0=none, 1=high, 5=medium, 9=low). */
+  priority?: number;
+  /** New notes; existing tags are kept unless `tags` is also given. */
+  notes?: string;
+  /** New tags (replaces the current set); existing notes are kept unless `notes` is also given. */
+  tags?: string[];
+  /** Mark as completed (true) or reopen (false). */
+  completed?: boolean;
+}
+
 /** Input parameters for the completeReminder tool. */
 interface CompleteReminderParams {
   /** Reminder ID to complete. */
   id: string;
 }
-
-// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
@@ -131,7 +157,16 @@ const listRemindersTool: Tool = {
           properties: {
             id: { type: 'string' },
             name: { type: 'string' },
-            due_date: { type: 'string', description: 'ISO8601 date' },
+            due_date: {
+              type: 'string',
+              description:
+                'YYYY-MM-DD for an all-day reminder, otherwise local time with UTC offset (e.g. 2026-06-15T09:00:00+02:00)',
+            },
+            all_day: {
+              type: 'boolean',
+              description:
+                'Present together with due_date: true when the reminder has no time of day',
+            },
             completed: { type: 'boolean' },
             priority: { type: 'number', description: '0=none, 1=high, 5=medium, 9=low' },
             notes: { type: 'string', description: 'Reminder notes/body' },
@@ -142,7 +177,10 @@ const listRemindersTool: Tool = {
             },
             list_id: { type: 'string' },
             list_name: { type: 'string' },
-            completed_date: { type: 'string', description: 'ISO8601 date' },
+            completed_date: {
+              type: 'string',
+              description: 'Completion time as local time with UTC offset',
+            },
           },
         },
       },
@@ -188,9 +226,20 @@ const getReminderTool: Tool = {
       id: { type: 'string' },
       name: { type: 'string' },
       notes: { type: 'string', description: 'Reminder notes/body' },
-      due_date: { type: 'string', description: 'ISO8601 date' },
+      due_date: {
+        type: 'string',
+        description:
+          'YYYY-MM-DD for an all-day reminder, otherwise local time with UTC offset (e.g. 2026-06-15T09:00:00+02:00)',
+      },
+      all_day: {
+        type: 'boolean',
+        description: 'Present together with due_date: true when the reminder has no time of day',
+      },
       completed: { type: 'boolean' },
-      completed_date: { type: 'string', description: 'ISO8601 date' },
+      completed_date: {
+        type: 'string',
+        description: 'Completion time as local time with UTC offset',
+      },
       priority: { type: 'number' },
       tags: {
         type: 'array',
@@ -220,7 +269,7 @@ const createReminderTool: Tool = {
   },
   keywords: ['os', 'reminder', 'create', 'new', 'add', 'task', 'todo'],
   example:
-    'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2025-01-15T10:00:00Z", priority: 1 })',
+    'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2026-01-15T10:00:00", priority: 1 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -230,9 +279,13 @@ const createReminderTool: Tool = {
         description:
           'Target reminder list id or its exact display name (uses default list if omitted)',
       },
-      due_date: { type: 'string', description: 'Due date in ISO8601 format' },
+      due_date: {
+        type: 'string',
+        description:
+          'YYYY-MM-DD for an all-day reminder, or YYYY-MM-DDTHH:MM:SS for a timed one (local time; a UTC offset or Z is converted to local time)',
+      },
       priority: {
-        type: 'number',
+        type: 'integer',
         description:
           'Priority, 0-9 (0=none, 1-4=high, 5=medium, 6-9=low; EventKit treats 1-9 as a gradient)',
       },
@@ -258,14 +311,115 @@ const createReminderTool: Tool = {
       input: { name: 'Buy groceries' },
     },
     {
+      description: 'All-day: a bare date sets no time of day',
+      input: { name: 'Pay rent', due_date: '2026-07-01' },
+    },
+    {
       description: 'Full: create with all fields',
       input: {
         name: 'Review PR #42',
         list_id: 'work-list',
-        due_date: '2025-01-15T10:00:00Z',
+        due_date: '2026-01-15T10:00:00',
         priority: 1,
         notes: 'Check test coverage',
         tags: ['work', 'code-review'],
+      },
+    },
+  ],
+};
+
+const updateReminderTool: Tool = {
+  name: 'updateReminder',
+  description:
+    'Update an existing reminder: only the provided fields change, omitted fields keep their value',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
+  keywords: [
+    'os',
+    'reminder',
+    'update',
+    'edit',
+    'modify',
+    'rename',
+    'move',
+    'reschedule',
+    'reopen',
+  ],
+  example: 'await os.updateReminder({ id: "abc-123", name: "Corrected title" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description:
+          'Reminder ID to update (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
+      name: { type: 'string', description: 'New reminder title/name' },
+      list_id: {
+        type: 'string',
+        description: 'Move the reminder to this list (id or exact display name)',
+      },
+      due_date: {
+        type: ['string', 'null'],
+        description:
+          'New due date: YYYY-MM-DD for all-day, or YYYY-MM-DDTHH:MM:SS for a timed reminder (local time; an offset or Z is converted). Pass null to remove the due date (this also removes any recurrence)',
+      },
+      priority: {
+        type: 'integer',
+        description:
+          'New priority, 0-9 (0=none, 1-4=high, 5=medium, 6-9=low; EventKit treats 1-9 as a gradient)',
+      },
+      notes: {
+        type: 'string',
+        description:
+          'New notes text (replaces the notes; existing tags are kept unless tags is also given)',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'New tags, replacing the current set (stored as [#tag] markers in the notes field); existing notes are kept unless notes is also given',
+      },
+      completed: {
+        type: 'boolean',
+        description: 'true marks the reminder completed, false reopens a completed reminder',
+      },
+    },
+    required: ['id'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      status: { type: 'string', description: '"updated"' },
+    },
+  },
+  inputExamples: [
+    {
+      description: 'Minimal: rename only',
+      input: { id: 'abc-123', name: 'Corrected title' },
+    },
+    {
+      description: 'Reopen a completed reminder',
+      input: { id: 'abc-123', completed: false },
+    },
+    {
+      description: 'Remove the due date',
+      input: { id: 'abc-123', due_date: null },
+    },
+    {
+      description: 'Full: reschedule, move and retag at once',
+      input: {
+        id: 'abc-123',
+        name: 'Review PR #42',
+        list_id: 'work-list',
+        due_date: '2026-01-16T10:00:00',
+        priority: 5,
+        notes: 'Rescheduled after the sync',
+        tags: ['work'],
       },
     },
   ],
@@ -306,8 +460,6 @@ const completeReminderTool: Tool = {
     },
   ],
 };
-
-// ── Handlers ──────────────────────────────────────────────────────────
 
 /**
  * Lists all reminder lists/groups available on this device.
@@ -364,25 +516,41 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
       ['list_id', MAX_LENGTHS.id, false],
       ['notes', MAX_LENGTHS.body, true],
     ],
-    numbers: [['priority', 0, 9]],
+    integers: [['priority', 0, 9]],
     dates: ['due_date'],
-    stringArrays: [['tags', 50, MAX_LENGTHS.short]],
+    stringArrays: [['tags', 50, MAX_LENGTHS.short, TAG_MARKER_CHARS]],
   });
   if (!v.valid) return v.error;
-  const tags = p.tags as string[] | undefined;
-  if (tags) {
-    const badIdx = tags.findIndex((t) => /[[\]#]/.test(t));
-    if (badIdx !== -1) {
-      return {
-        success: false,
-        error: {
-          code: 'INVALID_CHARACTERS',
-          message: `tags[${badIdx}] must not contain [, ], or # characters`,
-        },
-      };
-    }
-  }
   const result = await runCommand('reminders', 'create_reminder', p);
+  return { success: true, data: result.parsed };
+}
+
+/**
+ * Updates an existing reminder; only the fields present in params change.
+ * @param params - Tool input parameters.
+ */
+export async function handleUpdateReminder(params: UpdateReminderParams): Promise<ToolResult> {
+  const p = asRecord(params);
+  const v = validateAll(p, {
+    required: ['id'],
+    booleans: ['completed'],
+    strings: [
+      ['id', MAX_LENGTHS.id, false],
+      ['name', MAX_LENGTHS.short, false],
+      ['list_id', MAX_LENGTHS.id, false],
+      ['notes', MAX_LENGTHS.body, true],
+    ],
+    integers: [['priority', 0, 9]],
+    dates: ['due_date'],
+    nullable: ['due_date'],
+    stringArrays: [['tags', 50, MAX_LENGTHS.short, TAG_MARKER_CHARS]],
+  });
+  if (!v.valid) return v.error;
+  if (p.name !== undefined) {
+    const nonEmpty = requireFields(p, ['name']);
+    if (!nonEmpty.valid) return nonEmpty.error;
+  }
+  const result = await runCommand('reminders', 'update_reminder', p);
   return { success: true, data: result.parsed };
 }
 
@@ -401,8 +569,6 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
   return { success: true, data: result.parsed };
 }
 
-// ── Export ────────────────────────────────────────────────────────────
-
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {
   return [
@@ -410,6 +576,7 @@ export function createReminderTools(): ToolDefinition[] {
     { tool: listRemindersTool, handler: withValidation(handleListReminders) },
     { tool: getReminderTool, handler: withValidation(handleGetReminder) },
     { tool: createReminderTool, handler: withValidation(handleCreateReminder) },
+    { tool: updateReminderTool, handler: withValidation(handleUpdateReminder) },
     { tool: completeReminderTool, handler: withValidation(handleCompleteReminder) },
   ];
 }

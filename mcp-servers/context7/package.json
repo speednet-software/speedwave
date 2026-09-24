@@ -25,12 +25,12 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@speedwave/mcp-shared": "file:../shared",
-    "undici": "^8.10.0"
+    "undici": "^8.10.2"
   },
   "devDependencies": {
-    "@types/node": "^25.6.2",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^5.0.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.0.16"
+    "vitest": "^5.0.0"
   }
 }

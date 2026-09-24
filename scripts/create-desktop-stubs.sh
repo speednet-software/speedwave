@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# create-desktop-stubs.sh — stub files for desktop/src-tauri/ so build.rs
-# validation passes with SPEEDWAVE_ALLOW_BUNDLE_STUBS=1; never overwrites real files.
 
 set -euo pipefail
 
@@ -14,7 +12,6 @@ stub_file() {
     [ -f "$1" ] || { mkdir -p "$(dirname "$1")"; touch "$1"; }
 }
 
-# Platform-agnostic stubs (covers all platforms for clippy)
 stub_dir "$DEST/build-context/containers/claude-resources"
 stub_dir "$DEST/build-context/mcp-servers"
 stub_dir "$DEST/mcp-os/os/dist"
@@ -51,3 +48,4 @@ stub_file "$DEST/calendar-cli"
 stub_file "$DEST/mail-cli"
 stub_file "$DEST/notes-cli"
 stub_file "$DEST/audio-capture-cli"
+stub_file "$DEST/vulkan-1.dll"

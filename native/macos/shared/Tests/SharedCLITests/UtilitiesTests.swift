@@ -3,8 +3,65 @@ import XCTest
 @testable import SharedCLI
 
 final class SharedCLITests: XCTestCase {
+    private let warsaw = TimeZone(identifier: "Europe/Warsaw")!
+    private let newYork = TimeZone(identifier: "America/New_York")!
 
-    // MARK: - ISO8601 Parsing
+
+    func testParseISODateInputBareDayIsAZonelessGregorianDay() {
+        guard case .day(let c)? = parseISODateInput("2026-06-15") else {
+            return XCTFail("expected a bare day")
+        }
+        XCTAssertEqual([c.year, c.month, c.day], [2026, 6, 15])
+        XCTAssertNil(c.hour)
+        XCTAssertNil(c.timeZone)
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testParseISODateInputWallClockKeepsTheTypedTime() {
+        guard case .wallClock(let c)? = parseISODateInput("2026-06-15T09:30:15.250") else {
+            return XCTFail("expected a wall-clock time")
+        }
+        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 6, 15, 9, 30, 15])
+        XCTAssertNil(c.timeZone)
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testParseISODateInputWithZOrOffsetIsAnInstant() throws {
+        let utc = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        XCTAssertEqual(parseISODateInput("2026-06-15T07:00:00Z"), .instant(utc))
+        XCTAssertEqual(parseISODateInput("2026-06-15T09:00:00+02:00"), .instant(utc))
+        XCTAssertEqual(parseISODateInput("2026-06-15T03:00:00.000-04:00"), .instant(utc))
+    }
+
+    func testParseISODateInputRejectsGarbageUnpaddedAndImpossibleDates() {
+        let rejected = [
+            "", "tomorrow", "March 1st, 2025", "2026-6-1", "2026-06-15 09:30:00", "٢٠٢٦-٠١-٠١",
+            "2026-02-30", "2026-02-30T09:30:00", "2026-02-30T09:30:00Z",
+            "2026-06-15T25:00:00", "2026-06-15T23:60:00", "2026-06-15T25:00:00Z",
+        ]
+        for input in rejected {
+            XCTAssertNil(parseISODateInput(input), input)
+        }
+    }
+
+    func testISODateInputBareDayStartsAtLocalMidnightInEachZone() throws {
+        let day = try XCTUnwrap(parseISODateInput("2026-06-15"))
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(day.date(in: newYork)), timeZone: newYork), "2026-06-15T00:00:00-04:00")
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(day.date(in: warsaw)), timeZone: warsaw), "2026-06-15T00:00:00+02:00")
+    }
+
+    func testISODateInputWallClockIsLocalTimeInEachZone() throws {
+        let time = try XCTUnwrap(parseISODateInput("2026-06-15T09:30:00"))
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(time.date(in: newYork)), timeZone: newYork), "2026-06-15T09:30:00-04:00")
+        XCTAssertEqual(iso8601String(from: try XCTUnwrap(time.date(in: warsaw)), timeZone: warsaw), "2026-06-15T09:30:00+02:00")
+    }
+
+    func testISODateInputInstantIsTheSameMomentInEveryZone() throws {
+        let instant = try XCTUnwrap(parseISODateInput("2026-06-15T07:00:00Z"))
+        let utc = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        XCTAssertEqual(instant.date(in: newYork), utc)
+        XCTAssertEqual(instant.date(in: warsaw), utc)
+    }
 
     func testParseISO8601WithTimezone() {
         let date = parseISO8601("2025-03-01T10:00:00Z")
@@ -16,9 +73,9 @@ final class SharedCLITests: XCTestCase {
         XCTAssertNotNil(date)
     }
 
-    func testParseISO8601DateOnly() {
-        let date = parseISO8601("2025-03-01")
-        XCTAssertNotNil(date)
+    func testParseISO8601ParsesInstantsOnlyAndRejectsABareDate() {
+        XCTAssertNil(parseISO8601("2025-03-01"), "a bare day has no instant; parseISODateInput resolves it in a zone")
+        XCTAssertNil(parseISO8601("2025-03-01T10:00:00"), "a time without an offset has no instant either")
     }
 
     func testParseISO8601Invalid() {
@@ -36,12 +93,18 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(result, original)
     }
 
+    func testISO8601StringWithZoneNeverCollapsesZeroOffsetToZ() throws {
+        let date = try XCTUnwrap(parseISO8601("2025-06-15T14:30:00Z"))
+        XCTAssertEqual(iso8601String(from: date, timeZone: TimeZone(identifier: "UTC")!), "2025-06-15T14:30:00+00:00")
+        XCTAssertEqual(iso8601String(from: date, timeZone: TimeZone(identifier: "Europe/Warsaw")!), "2025-06-15T16:30:00+02:00")
+        XCTAssertEqual(iso8601String(from: date, timeZone: TimeZone(identifier: "Asia/Kolkata")!), "2025-06-15T20:00:00+05:30")
+    }
+
     func testParseISO8601InvalidFormat() {
         let badDate = "March 1st, 2025"
         XCTAssertNil(parseISO8601(badDate))
     }
 
-    // MARK: - Hex Color
 
     func testHexColorReturnsCorrectRGBString() {
         let red = CGColor(srgbRed: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)
@@ -61,7 +124,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testHexColorClampsWideGamutValues() {
-        // Display P3 components can exceed 1.0; verify clamping to [0, 255]
         let wideGamut = CGColor(
             colorSpace: CGColorSpace(name: CGColorSpace.displayP3)!,
             components: [1.3, -0.1, 0.5, 1.0]
@@ -70,7 +132,45 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(result, "#ff007f")
     }
 
-    // MARK: - CLIError
+
+    private func calendars(_ titles: [String], for entityType: EKEntityType) -> [EKCalendar] {
+        let store = EKEventStore()
+        return titles.map { title in
+            let calendar = EKCalendar(for: entityType, eventStore: store)
+            calendar.title = title
+            return calendar
+        }
+    }
+
+    func testSingleCalendarMatchReturnsTheOnlyMatch() throws {
+        let work = calendars(["Work"], for: .event)
+        XCTAssertTrue(try singleCalendarMatch(work, filter: "Work", entityType: .event) === work[0])
+    }
+
+    func testSingleCalendarMatchRefusesACalendarNameSharedByTwoCalendars() {
+        let twins = calendars(["Work", "Work"], for: .event)
+        XCTAssertThrowsError(try singleCalendarMatch(twins, filter: "Work", entityType: .event)) { error in
+            guard case CLIError.ambiguous(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(message, "Calendar 'Work' matches 2 calendars; pass the calendar id instead")
+        }
+    }
+
+    func testSingleCalendarMatchRefusesAListNameSharedByTwoReminderLists() {
+        let twins = calendars(["Groceries", "Groceries"], for: .reminder)
+        XCTAssertThrowsError(try singleCalendarMatch(twins, filter: "Groceries", entityType: .reminder)) { error in
+            guard case CLIError.ambiguous(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(message, "Reminder list 'Groceries' matches 2 lists; pass the list id instead")
+        }
+    }
+
+    func testResolveSingleCalendarReportsAnUnknownNameAsNotFound() {
+        let filter = "speedwave-test-no-such-calendar"
+        XCTAssertThrowsError(try resolveSingleCalendar(for: .event, filter: filter, store: EKEventStore())) { error in
+            guard case CLIError.notFound(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(message, "Calendar '\(filter)' not found")
+        }
+    }
+
 
     func testCLIErrorMissingField() {
         let error = CLIError.missingField("name")
@@ -84,8 +184,10 @@ final class SharedCLITests: XCTestCase {
 
     func testCLIErrorInvalidDate() {
         let error = CLIError.invalidDate("bad-date")
-        XCTAssertTrue(error.errorDescription!.contains("Invalid ISO8601 date"))
-        XCTAssertTrue(error.errorDescription!.contains("bad-date"))
+        XCTAssertEqual(
+            error.errorDescription,
+            "Invalid ISO8601 date: bad-date. Expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (local time), optionally with Z or ±HH:MM"
+        )
     }
 
     func testCLIErrorMissingFieldHasDescription() {
@@ -98,7 +200,6 @@ final class SharedCLITests: XCTestCase {
         XCTAssertNil(parseISO8601(badDate))
     }
 
-    // MARK: - formatPermissionResult (new signature with status field)
 
     func testFormatGrantedNoError() {
         let json = formatPermissionResult(granted: true, status: .granted, error: nil)
@@ -110,7 +211,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testFormatGrantedEmptyStringError() {
-        // Empty-string error must be omitted (validates the !error.isEmpty guard)
         let json = formatPermissionResult(granted: true, status: .granted, error: "")
         let data = json.data(using: .utf8)!
         let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
@@ -152,7 +252,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testFormatBackwardCompatShape() {
-        // Old Rust parser only reads granted/error — new JSON must still be parseable
         let json = formatPermissionResult(granted: false, status: .denied, error: "access denied")
         let data = json.data(using: .utf8)!
         let parsed = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
@@ -161,14 +260,12 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testFormatSerializationFailureFallback() {
-        // The static fallback string itself must be parseable JSON
         let fallback = #"{"error":"Failed to serialize permission result","granted":false,"status":"silentReject"}"#
         let data = fallback.data(using: .utf8)!
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(parsed)
     }
 
-    // MARK: - mapAuthorizationStatus
 
     func testMapNotDetermined() {
         XCTAssertEqual(mapAuthorizationStatus(.notDetermined), .notDetermined)
@@ -183,11 +280,8 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testMapAuthorizedLegacy() {
-        // .authorized is the macOS 13 legacy value; deprecated on macOS 14+ but still present
-        // in the enum and must map to .granted for backward compatibility.
         if #available(macOS 14.0, *) {
-            // On macOS 14+, .authorized is .fullAccess (same raw value 3); test via rawValue
-            let status = EKAuthorizationStatus(rawValue: 3)! // .authorized / .fullAccess
+            let status = EKAuthorizationStatus(rawValue: 3)! 
             XCTAssertEqual(mapAuthorizationStatus(status), .granted)
         } else {
             XCTAssertEqual(mapAuthorizationStatus(.authorized), .granted)
@@ -205,23 +299,18 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testMapUnknownDefault() {
-        // Synthetic unknown raw value must map to .silentReject via @unknown default
         if let synthetic = EKAuthorizationStatus(rawValue: 99) {
             XCTAssertEqual(mapAuthorizationStatus(synthetic), .silentReject)
         }
-        // If 99 is a valid case on this OS, the test is a no-op (acceptable)
     }
 
-    // MARK: - resolvedBundleIdentifier
 
     func testResolvedBundleIdentifierFallbackWhenNil() {
-        // Test seam: passing nil exercises the fallback to the literal SSOT.
         XCTAssertEqual(resolvedBundleIdentifier(from: nil), speedwaveBundleIdentifier)
         XCTAssertEqual(resolvedBundleIdentifier(from: nil), "pl.speedwave.desktop")
     }
 
     func testResolvedBundleIdentifierUsesProvidedValueWhenPresent() {
-        // When a bundle identifier is present, pass it through verbatim.
         XCTAssertEqual(resolvedBundleIdentifier(from: "pl.speedwave.desktop"), "pl.speedwave.desktop")
         XCTAssertEqual(resolvedBundleIdentifier(from: "com.example.other"), "com.example.other")
     }
@@ -247,10 +336,8 @@ final class SharedCLITests: XCTestCase {
                        "Swift literal must match tauri.conf.json::identifier")
     }
 
-    // MARK: - composeErrorMessage
 
     func testComposeDeniedCalendarMentionsTccutilReset() {
-        // Default bundleId param resolves to subBundleIdentifier(.calendar).
         let msg = composeErrorMessage(status: .denied, entity: .calendar)
         XCTAssertTrue(msg.contains("tccutil reset Calendar pl.speedwave.desktop.calendar"),
                       "Denied Calendar message must contain tccutil reset with sub-identifier, got: \(msg)")
@@ -263,8 +350,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testComposeDeniedMailMentionsAppleEventsService() {
-        // Mail/Notes use the AppleEvents kTCCService, not Mail/Notes — TCC scopes
-        // automation per (sender, target) under that single service name.
         let msg = composeErrorMessage(status: .denied, entity: .mail)
         XCTAssertTrue(msg.contains("tccutil reset AppleEvents pl.speedwave.desktop.mail"),
                       "Denied Mail must use AppleEvents service in tccutil command, got: \(msg)")
@@ -277,7 +362,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testComposeUsesSubIdentifierByDefault() {
-        // Default bundleId argument must produce sub-identifier per entity, not parent.
         for entity in [PermissionEntity.calendar, .reminders, .mail, .notes] {
             let msg = composeErrorMessage(status: .denied, entity: entity)
             let expected = "pl.speedwave.desktop.\(entity.rawValue)"
@@ -287,7 +371,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testComposeAcceptsExplicitBundleIdOverride() {
-        // Backward-compat: explicit bundleId argument overrides the default sub-identifier.
         let msg = composeErrorMessage(status: .denied, entity: .calendar, bundleId: "com.example.test")
         XCTAssertTrue(msg.contains("tccutil reset Calendar com.example.test"),
                       "Explicit bundleId must override default sub-identifier, got: \(msg)")
@@ -304,7 +387,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testComposeTargetNotRunningDoesNotMentionTccutil() {
-        // .targetNotRunning is NOT a TCC issue — recovery is "open the app", not reset.
         for entity in [PermissionEntity.mail, .notes] {
             let msg = composeErrorMessage(status: .targetNotRunning, entity: entity)
             XCTAssertFalse(msg.lowercased().contains("tccutil"),
@@ -321,8 +403,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testGrantedFalseAlwaysCarriesNonEmptyError() {
-        // Parametric invariant: every non-granted status must produce a non-empty error string,
-        // for every entity (calendar/reminders/mail/notes).
         let nonGrantedStatuses: [PermissionStatus] = [.denied, .restricted, .notDetermined, .writeOnly, .silentReject, .targetNotRunning]
         for status in nonGrantedStatuses {
             for entity in [PermissionEntity.calendar, .reminders, .mail, .notes] {
@@ -336,19 +416,15 @@ final class SharedCLITests: XCTestCase {
     func testEntityNameUsesCapitalizedRawValue() {
         let calMsg = composeErrorMessage(status: .denied, entity: .calendar)
         XCTAssertTrue(calMsg.contains("Calendar"), "Calendar denied must contain 'Calendar'")
-        // bundleId contains lowercase by design; test only checks the capitalised entity name.
         let remMsg = composeErrorMessage(status: .denied, entity: .reminders)
         XCTAssertTrue(remMsg.contains("Reminders"), "Reminders denied must contain 'Reminders'")
     }
 
     func testComposeNotDeterminedReturnsNonEmpty() {
-        // .notDetermined is unreachable from performCheckPermission but must still satisfy
-        // the parametric non-empty invariant for direct callers of composeErrorMessage.
         let msg = composeErrorMessage(status: .notDetermined, entity: .calendar)
         XCTAssertFalse(msg.isEmpty, ".notDetermined must return non-empty for parametric invariant")
     }
 
-    // MARK: - subBundleIdentifier / tccServiceName
 
     func testSubBundleIdentifierForEachEntity() {
         XCTAssertEqual(subBundleIdentifier(for: .calendar), "pl.speedwave.desktop.calendar")
@@ -366,7 +442,6 @@ final class SharedCLITests: XCTestCase {
                        "Notes uses kTCCServiceAppleEvents, not 'Notes'")
     }
 
-    // MARK: - mapEventKitStatusToRaw / mapRawToPermissionStatus
 
     func testMapEventKitStatusToRawCoversAllCases() {
         XCTAssertEqual(mapEventKitStatusToRaw(.notDetermined), .notDetermined)
@@ -393,25 +468,20 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(mapRawToPermissionStatus(.unknown), .silentReject)
     }
 
-    // MARK: - mapAEStatusToRaw (AppleEvents OSStatus mapping)
 
     func testMapAEStatusNoErrIsGranted() {
-        // OSStatus 0 = noErr → granted
         XCTAssertEqual(mapAEStatusToRaw(0, targetBundleId: "com.x"), .granted)
     }
 
     func testMapAEStatusErrAEEventNotPermittedIsDenied() {
-        // -1743 = errAEEventNotPermitted → denied
         XCTAssertEqual(mapAEStatusToRaw(-1743, targetBundleId: "com.x"), .denied)
     }
 
     func testMapAEStatusErrAEEventWouldRequireUserConsentIsNotDetermined() {
-        // -1744 = errAEEventWouldRequireUserConsent → notDetermined (with askUserIfNeeded=false)
         XCTAssertEqual(mapAEStatusToRaw(-1744, targetBundleId: "com.x"), .notDetermined)
     }
 
     func testMapAEStatusProcNotFoundIsTargetNotRunning() {
-        // -600 = procNotFound → targetNotRunning(bundleId)
         let raw = mapAEStatusToRaw(-600, targetBundleId: "com.apple.mail")
         guard case let .targetNotRunning(bid) = raw else {
             XCTFail("Expected .targetNotRunning, got \(raw)"); return
@@ -420,11 +490,9 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testMapAEStatusUnknownOSStatusMapsToUnknown() {
-        // Any other OSStatus → .unknown (which mapRawToPermissionStatus → .silentReject)
         XCTAssertEqual(mapAEStatusToRaw(-12345, targetBundleId: "com.x"), .unknown)
     }
 
-    // MARK: - performCheckPermission (MockGate)
 
     final class MockGate: PermissionGate {
         var initialStatus: RawAuthorizationStatus = .notDetermined
@@ -433,8 +501,8 @@ final class SharedCLITests: XCTestCase {
         var requestError: Error? = nil
         var requestInvokedCount = 0
         var statusQueryCount = 0
-        var deferRequest: Bool = false  // if true, never invoke completion → exercises timeout path
-        var dataAccessError: String? = nil  // when set, verifyDataAccess returns this
+        var deferRequest: Bool = false  
+        var dataAccessError: String? = nil  
         func authorizationStatus() -> RawAuthorizationStatus {
             statusQueryCount += 1
             return statusQueryCount == 1 ? initialStatus : postRequestStatus
@@ -527,8 +595,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformGrantedRequestButPostStatusDenied() {
-        // Post-status is the source of truth: a stale TCC.db can leave the request callback
-        // returning granted=true while the actual authorization is .denied.
         let gate = MockGate()
         gate.initialStatus = .notDetermined
         gate.requestGranted = true
@@ -544,7 +610,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTimeout() {
-        // 0.1s timeout; MockGate.requestAccess defers completion to exercise the timeout path.
         let gate = MockGate()
         gate.initialStatus = .notDetermined
         gate.deferRequest = true
@@ -556,8 +621,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTargetNotRunningInvokesRequestForAutoLaunch() {
-        // .targetNotRunning is NOT terminal; orchestrator passes through to requestAccess
-        // for an auto-launch attempt. Launch failure keeps the result targetNotRunning.
         let gate = MockGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
         gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.mail")
@@ -574,7 +637,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformTargetNotRunningRecoversWhenAutoLaunchSucceeds() {
-        // Success path: auto-launch succeeds and the gate gets permission.
         let gate = MockGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
         gate.requestGranted = true
@@ -586,7 +648,6 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformDataAccessFailureOverridesGranted() {
-        // TCC granted + verifyDataAccess error = silentReject with the data-access error in the message.
         let gate = MockGate()
         gate.initialStatus = .granted
         gate.dataAccessError = "AppleScript error: probe failed"
@@ -603,19 +664,16 @@ final class SharedCLITests: XCTestCase {
     }
 
     func testPerformDataAccessSuccessPreservesGranted() {
-        // TCC granted + verifyDataAccess returns nil → result remains granted.
         let gate = MockGate()
         gate.initialStatus = .granted
-        gate.dataAccessError = nil  // success
+        gate.dataAccessError = nil  
         let result = performCheckPermission(gate: gate, entity: .mail)
         let parsed = try! JSONSerialization.jsonObject(with: result.data(using: .utf8)!) as! [String: Any]
         XCTAssertEqual(parsed["granted"] as? Bool, true)
         XCTAssertEqual(parsed["status"] as? String, "granted")
     }
 
-    // exitWithError calls exit(1) and cannot be unit-tested without process spawning.
 
-    // MARK: - resolveCalendars (Reminders)
 
     func testResolveRemindersByIdMatchesFirst() throws {
         let store = EKEventStore()
@@ -645,7 +703,6 @@ final class SharedCLITests: XCTestCase {
         }
     }
 
-    // MARK: - resolveCalendars (Calendar Events)
 
     func testResolveCalendarsByIdMatchesFirst() throws {
         let store = EKEventStore()

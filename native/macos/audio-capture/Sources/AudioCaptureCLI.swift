@@ -3,8 +3,6 @@ import CoreAudio
 import Foundation
 import SharedCLI
 
-// ── Framed PCM protocol (ADR-056, frozen by spike 0B) ───────────────────────────────────────────
-// Stdout: JSON header line, then binary chunks (u32_le stream_index/nframes, u64_le offset_ns, f32_le samples). Logs → stderr only.
 
 /// 16 kHz mono float32 — the only output format. Whisper expects this rate.
 let kSampleRate: Double = 16_000.0
@@ -23,8 +21,6 @@ final class WriterQueue {
 
     /// Writes the JSON header line synchronously (called once, before any chunk).
     func writeHeader(streams: [String]) {
-        // `started_at_ns` (wall-clock) and per-chunk `offset_ns` (mach-time delta) are different
-        // clock domains; the Rust reader ignores `started_at_ns` — informational only.
         let startedAtNs = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
         let header: [String: Any] = [
             "sample_rate": Int(kSampleRate), "channels": 1, "format": "f32le",
@@ -46,7 +42,6 @@ final class WriterQueue {
     ) {
         queue.async { [self] in
             let idx = Int(streamIndex)
-            // Rebuild on a format change — a stale converter mis-resamples on a device/rate switch mid-session.
             if let cached = converters[idx], cached.inputFormat != format {
                 logErr(
                     "stream \(idx) input format changed (\(cached.inputFormat.sampleRate) Hz → \(format.sampleRate) Hz); rebuilding converter"
@@ -63,8 +58,6 @@ final class WriterQueue {
                   let inBuf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: inFrames)
             else { return }
             inBuf.frameLength = inFrames
-            // Copy raw interleaved samples into the input buffer; the format handed to the
-            // converter is always non-interleaved float, so write one channel at a time.
             if format.isInterleaved {
                 if let dst = inBuf.floatChannelData?[0] {
                     interleaved.withUnsafeBufferPointer { src in
@@ -73,7 +66,6 @@ final class WriterQueue {
                     }
                 }
             } else if let dst = inBuf.floatChannelData {
-                // De-interleave into per-channel planes.
                 let ch = Int(format.channelCount)
                 for f in 0..<Int(inFrames) {
                     for c in 0..<ch { dst[c][f] = interleaved[f * ch + c] }
@@ -152,7 +144,6 @@ func logErr(_ message: String) {
     }
 }
 
-// MARK: - Argument parsing
 
 /// Source for `--record --source`. `all` = system-wide tap; `mic-only` = no system tap, just the mic
 /// (uses the public AVCaptureDevice consent API, so the OS prompt fires — unlike CoreAudio process taps).
@@ -219,7 +210,6 @@ func parseRecordOptions(_ args: [String]) -> RecordOptions? {
     return RecordOptions(source: s, mic: mic)
 }
 
-// MARK: - Input device enumeration (--list-mics)
 
 /// Emits a JSON array of input-capable audio devices (`{uid, name, default}`)
 /// on stdout so the UI can offer a microphone picker.
@@ -321,7 +311,6 @@ func deviceStringProperty(_ device: AudioObjectID, _ selector: AudioObjectProper
     return s.isEmpty ? nil : s
 }
 
-// MARK: - CLI entry point
 
 /// audio-capture-cli <command> [args]. Commands: --list-mics (enumerate input devices, JSON stdout);
 /// --record --source <all|mic-only[:uid]> --mic <none|default|<uid>> (stream framed PCM to stdout).
@@ -335,8 +324,6 @@ struct AudioCaptureCLI {
             )
         }
 
-        // Both subcommands need macOS 14.4 (process taps API). Fail fast and
-        // honestly on older systems — Rust caller surfaces a friendly message.
         guard #available(macOS 14.4, *) else {
             exitWithError(
                 "audio-capture-cli requires macOS 14.4 or newer (CoreAudio process taps)")
@@ -366,7 +353,6 @@ struct AudioCaptureCLI {
     }
 }
 
-// MARK: - Record session
 
 /// Owns the active capture session (process tap, aggregate device, IOProc id, optional AVAudioEngine
 /// for the mic). Held in a global so the signal handler can tear it down on SIGTERM/SIGINT.
@@ -417,8 +403,6 @@ final class RecordSession {
             AudioHardwareDestroyProcessTap(tapId)
             tapId = 0
         }
-        // No observer/GCD cleanup: teardown can run from a signal handler
-        // (not async-signal-safe) and every call site exits right after.
         micEngine?.stop()
         micEngine = nil
     }
@@ -436,7 +420,6 @@ let cleanupHandler: @convention(c) (Int32) -> Void = { _ in
         tailOffset = activeSession?.offsetNs() ?? 0
         activeSession?.teardown()
     }
-    // Flush converter tails + queued writes, then the C stdio buffer.
     WriterQueue.shared.flush(offsetNs: tailOffset)
     fflush(stdout)
     _exit(0)
@@ -450,8 +433,6 @@ func runRecord(_ opts: RecordOptions) {
     signal(SIGTERM, cleanupHandler)
     signal(SIGINT, cleanupHandler)
 
-    // mic-only: no system tap, mic on stream 0 (public AVCaptureDevice consent,
-    // so the OS prompt fires). `mic-only:<uid>` selects that device, bare = default.
     if case .micOnly(let uid) = opts.source {
         guard requestMicrophoneAccess() else {
             logErr(
@@ -472,16 +453,12 @@ func runRecord(_ opts: RecordOptions) {
         return
     }
 
-    // System tap path. The system-audio TCC prompt has no public trigger, so request it via the
-    // private API first — without it the tap silently delivers zeroed buffers (ADR-056 decision 3).
     guard preflightSystemAudioConsent() else {
         logErr(
             "system audio recording permission denied — grant it in System Settings → Privacy & Security → System Audio Recording Only")
         exit(2)
     }
 
-    // Resolve mic permission BEFORE the header so it lists only streams we actually capture (a denied
-    // mic must not leave the reader waiting on "mic" frames, ADR-056); header still precedes the IOProc.
     let micGranted: Bool
     if case .none = opts.mic {
         micGranted = false
@@ -503,8 +480,6 @@ func runRecord(_ opts: RecordOptions) {
         exit(1)
     }
 
-    // Park the main thread; IOProc + AVAudioEngine push samples from CoreAudio
-    // threads. RunLoop.main.run() never returns until cleanupHandler exits.
     RunLoop.main.run()
 }
 
@@ -518,9 +493,8 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     switch source {
     case .all:
         description.processes = []
-        description.isExclusive = true  // empty exclude-list = capture everything
+        description.isExclusive = true  
     case .micOnly:
-        // Unreachable — runRecord handles mic-only before getting here.
         throw NSError(
             domain: "AudioCapture", code: -1,
             userInfo: [NSLocalizedDescriptionKey: "mic-only must not reach startSystemTap"])
@@ -537,8 +511,6 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     }
     session.tapId = tapId
 
-    // Wrap the tap in a private aggregate device so we can attach an IOProc
-    // (taps are not directly addressable as IO targets).
     let aggUid = "pl.speedwave.audio-capture.\(UUID().uuidString)"
     let aggDescription: [String: Any] = [
         kAudioAggregateDeviceNameKey: "Speedwave Audio Capture",
@@ -562,8 +534,6 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
     }
     session.aggregateId = aggId
 
-    // The aggregate device's input stream format tells us the *real* sample rate + channel count —
-    // never assume 48 kHz. A tap mixdown arrives as one interleaved float buffer, matched here.
     let inputFormat = inputStreamFormat(of: aggId)
     let inChannels = max(1, inputFormat.mChannelsPerFrame)
     guard let avInFormat = AVAudioFormat(
@@ -575,8 +545,6 @@ func startSystemTap(session: RecordSession, source: AudioSource) throws {
             userInfo: [NSLocalizedDescriptionKey: "could not build input AVAudioFormat (rate \(inputFormat.mSampleRate))"])
     }
 
-    // IOProc runs on a real-time CoreAudio thread: it only copies the buffer's float samples into a
-    // Swift array and hands them to the writer queue. No resampling, no stdout, no locking here.
     var procId: AudioDeviceIOProcID?
     let procStatus = AudioDeviceCreateIOProcIDWithBlock(
         &procId, aggId, nil
@@ -636,8 +604,6 @@ func inputStreamFormat(of device: AudioObjectID) -> AudioStreamBasicDescription 
 /// Requests "System Audio Recording" (TCC `kTCCServiceAudioCapture`) consent via the private
 /// `TCCAccessRequest` API — no public trigger exists (ADR-056 decision 3). `dlopen`/`dlsym`-guarded: a missing symbol returns `false` (never crashes). Blocks; returns `true` if granted.
 func preflightSystemAudioConsent() -> Bool {
-    // `TCCAccessRequest(service, options, completion)` — 3 args; the nullable options dictionary
-    // must be passed or TCC treats the block as the options and crashes.
     typealias TCCRequestFn = @convention(c) (
         CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void
     ) -> Void
@@ -693,8 +659,6 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
 
-    // Route to a named device before reading the format — the engine's input format follows the
-    // bound device. A missing/unknown UID falls back to system default (logged), never fails capture.
     if case .device(let uid) = selector {
         if let deviceId = inputDeviceId(forUID: uid) {
             do {
@@ -712,8 +676,6 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
         let frames = Int(buf.frameLength)
         let channels = Int(buf.format.channelCount)
         guard frames > 0, let chan = buf.floatChannelData else { return }
-        // Interleave the engine's non-interleaved channels into one array, then hand a matching
-        // interleaved format to the writer queue (which deinterleaves + down-mixes + resamples).
         var interleaved = [Float](repeating: 0, count: frames * channels)
         for f in 0..<frames {
             for c in 0..<channels { interleaved[f * channels + c] = chan[c][f] }
@@ -758,7 +720,6 @@ func restartMicEngine(session: RecordSession, selector: MicSelector, streamIndex
     do {
         try startMicEngine(session: session, selector: selector, streamIndex: streamIndex)
     } catch {
-        // The Rust side degrades a dead mic side gracefully and warns the user.
         logErr("mic restart failed: \(error.localizedDescription) — continuing without the microphone")
     }
 }

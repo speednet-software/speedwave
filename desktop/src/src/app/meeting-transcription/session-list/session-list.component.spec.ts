@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { signal, type WritableSignal } from '@angular/core';
+import { computed, signal, type Signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SessionListComponent } from './session-list.component';
 import { TranscriptionService } from '../../services/transcription.service';
@@ -30,10 +30,13 @@ describe('SessionListComponent', () => {
     list: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
     resumeRecording: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     recordingSessionId: WritableSignal<string | null>;
+    recording: Signal<boolean>;
   };
 
   beforeEach(async () => {
+    const recordingSessionId = signal<string | null>(null);
     svc = {
       list: vi.fn(async () => [
         session('a', '2026-05-10T00:00:00Z', true),
@@ -41,7 +44,9 @@ describe('SessionListComponent', () => {
       ]),
       delete: vi.fn(async () => undefined),
       resumeRecording: vi.fn(async () => undefined),
-      recordingSessionId: signal<string | null>(null),
+      liveTranscriptPreferred: vi.fn(() => true),
+      recordingSessionId: recordingSessionId,
+      recording: computed(() => recordingSessionId() !== null),
     };
     await TestBed.configureTestingModule({
       imports: [SessionListComponent],
@@ -72,7 +77,7 @@ describe('SessionListComponent', () => {
     await component.remove('a');
     expect(svc.delete).toHaveBeenCalledWith('a');
     expect(component.selectedId()).toBeNull();
-    expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
+    expect(svc.list).toHaveBeenCalledTimes(2);
   });
 
   it('resumes a done session and selects it without re-subscribing the view', async () => {
@@ -81,11 +86,10 @@ describe('SessionListComponent', () => {
     component.opened.subscribe(spy);
     const s = component.sessions()[0];
     await component.resume(s);
-    expect(svc.resumeRecording).toHaveBeenCalledWith(s.id);
+    expect(svc.resumeRecording).toHaveBeenCalledWith(s.id, true);
     expect(component.selectedId()).toBe(s.id);
-    // The service already activated the snapshot + listener — no opened round trip.
     expect(spy).not.toHaveBeenCalled();
-    expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
+    expect(svc.list).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces a resume failure without selecting the session', async () => {
@@ -103,11 +107,9 @@ describe('SessionListComponent', () => {
     await component.ngOnInit();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="resume-b"]')).not.toBeNull();
-    // A recording in flight hides every resume button.
     svc.recordingSessionId.set('b');
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="resume-b"]')).toBeNull();
-    // A non-done session offers no resume.
     svc.recordingSessionId.set(null);
     component.sessions.set([
       { ...session('c', '2026-05-13T00:00:00Z', true), status: { state: 'failed', reason: 'x' } },

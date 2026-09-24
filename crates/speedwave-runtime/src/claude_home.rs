@@ -12,11 +12,15 @@ pub fn claude_home_dir(data_dir: &Path, project: &str) -> PathBuf {
         .join(project)
 }
 
-/// True when `.claude/.credentials.json` exists — a real "logged in to Claude
-/// Code" signal, independent of which provider is active.
+/// Returns `<data_dir>/claude-home/<project>/.claude/`, the container's `~/.claude`.
+pub fn claude_config_dir(data_dir: &Path, project: &str) -> PathBuf {
+    claude_home_dir(data_dir, project).join(".claude")
+}
+
+/// True when `.claude/.credentials.json` exists — evidence a sign-in happened, never a
+/// verdict: Claude Code keeps the file after clearing rejected or expired tokens.
 pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
-    claude_home_dir(data_dir, project)
-        .join(".claude")
+    claude_config_dir(data_dir, project)
         .join(".credentials.json")
         .exists()
 }
@@ -24,10 +28,9 @@ pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
 /// Removes Claude Code's credential files (`.claude/.credentials.json` and `.claude.json`) from
 /// the project's claude-home dir. Returns the count removed; missing files are not an error.
 pub fn remove_claude_credentials(data_dir: &Path, project: &str) -> io::Result<usize> {
-    let home = claude_home_dir(data_dir, project);
     let targets = [
-        home.join(".claude").join(".credentials.json"),
-        home.join(".claude.json"),
+        claude_config_dir(data_dir, project).join(".credentials.json"),
+        claude_home_dir(data_dir, project).join(".claude.json"),
     ];
     let mut removed = 0usize;
     let mut errors: Vec<String> = Vec::new();
@@ -61,6 +64,12 @@ mod tests {
     fn claude_home_dir_layout() {
         let p = claude_home_dir(Path::new("/data"), "myproj");
         assert_eq!(p, Path::new("/data/claude-home/myproj"));
+    }
+
+    #[test]
+    fn claude_config_dir_is_the_dot_claude_dir_of_the_project_home() {
+        let p = claude_config_dir(Path::new("/data"), "myproj");
+        assert_eq!(p, Path::new("/data/claude-home/myproj/.claude"));
     }
 
     #[test]
@@ -102,7 +111,6 @@ mod tests {
     #[test]
     fn has_oauth_credentials_false_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        // Home exists but no credentials file.
         std::fs::create_dir_all(claude_home_dir(tmp.path(), "p").join(".claude")).unwrap();
         assert!(!has_anthropic_oauth_credentials(tmp.path(), "p"));
     }
@@ -119,18 +127,15 @@ mod tests {
         let home = claude_home_dir(tmp.path(), "proj-a");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
-        // A different project sees no credentials.
         assert!(!has_anthropic_oauth_credentials(tmp.path(), "proj-b"));
     }
 
     #[test]
     fn remove_is_scoped_to_project_dir() {
-        // A plain project component cannot reach outside claude-home/<project>.
         let tmp = tempfile::tempdir().unwrap();
         let home = claude_home_dir(tmp.path(), "proj-a");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
-        // Removing a *different* project removes nothing.
         assert_eq!(remove_claude_credentials(tmp.path(), "proj-b").unwrap(), 0);
         assert!(home.join(".claude").join(".credentials.json").exists());
     }

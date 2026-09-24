@@ -36,9 +36,7 @@ export const MODE_STORAGE_KEY = 'speedwave-theme-mode';
 function safePersist(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
-  } catch {
-    /* private mode / disabled storage — ignore. */
-  }
+  } catch {}
 }
 
 /**
@@ -145,7 +143,6 @@ export class ThemeService implements OnDestroy {
           signal: this.abortController.signal,
         });
       } else if (typeof this.mediaQuery.addListener === 'function') {
-        // Legacy WebView fallback; cleaned up in ngOnDestroy
         this.mediaQuery.addListener(this.mediaListener);
       }
     }
@@ -154,13 +151,10 @@ export class ThemeService implements OnDestroy {
   /** Removes the matchMedia listener when the root service is torn down. */
   ngOnDestroy(): void {
     this.abortController.abort();
-    // Legacy fallback teardown (only when addEventListener unavailable)
     if (this.mediaQuery && typeof this.mediaQuery.addEventListener !== 'function') {
       try {
         this.mediaQuery.removeListener?.(this.mediaListener);
-      } catch {
-        /* removeListener may be a hard error on some legacy hosts — ignore. */
-      }
+      } catch {}
     }
   }
 
@@ -186,14 +180,14 @@ export class ThemeService implements OnDestroy {
   }
 
   /**
-   * Resolves effective mode, applies DOM class, syncs native chrome.
-   * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
+   * Resolves effective mode, applies DOM class, pins the native chrome to an explicit mode or
+   * lets it follow the OS in auto. Does NOT persist; see {@link setMode}.
    * @param mode - Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {
     const effective = resolveEffectiveMode(mode);
     applyModeClass(effective);
-    this.native.syncWindowTheme(effective);
+    this.native.syncWindowTheme(mode === 'auto' ? null : effective);
   }
 }
 

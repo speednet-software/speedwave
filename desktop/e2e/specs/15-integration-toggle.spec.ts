@@ -18,7 +18,7 @@
  */
 
 import { switchToProject, activeProjectSlug, containersRunning } from '../helpers/projects';
-import { confirmRestartAndWait } from '../helpers/shell';
+import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import { openIntegrations, toggleIntegration, rowStatus } from '../helpers/llm';
 
 const NO_LLM_PROJECT = 'e2e-second';
@@ -38,14 +38,10 @@ describe('Integration Toggle', function () {
     it('enables the integration but does not start containers', async function () {
       this.timeout(60_000);
       await toggleIntegration(SERVICE);
-      // Row reflects the enable optimistically.
       await browser.waitUntil(async () => (await rowStatus(SERVICE)) !== 'disabled', {
         timeout: 15_000,
         timeoutMsg: `${SERVICE} row never left disabled after enable`,
       });
-      // requestRestart routes no_provider through ensureContainersRunning, which
-      // runs a brief system_check/checking cycle then defers. No restart overlay
-      // ever renders and containers stay down — assert it holds, not just once.
       for (let i = 0; i < 6; i++) {
         expect(await $('[data-testid="restart-now-btn"]').isExisting()).toBe(false);
         expect(await containersRunning(NO_LLM_PROJECT)).toBe(false);
@@ -73,7 +69,7 @@ describe('Integration Toggle', function () {
     });
 
     it('enables an integration and restarts to running', async function () {
-      this.timeout(240_000);
+      this.timeout(RESTART_WAIT_MS + 60_000);
       await toggleIntegration(SERVICE);
       await confirmRestartAndWait();
       await openIntegrations();
@@ -85,7 +81,7 @@ describe('Integration Toggle', function () {
     });
 
     it('disables the integration and restarts', async function () {
-      this.timeout(240_000);
+      this.timeout(RESTART_WAIT_MS + 60_000);
       await toggleIntegration(SERVICE);
       await confirmRestartAndWait();
       await openIntegrations();

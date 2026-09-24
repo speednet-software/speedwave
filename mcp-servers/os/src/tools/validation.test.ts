@@ -183,8 +183,6 @@ describe('validation', () => {
     });
 
     it('renders a genuinely-undefined field by omitting it from the received map', () => {
-      // b is absent (genuinely undefined); JSON.stringify drops it, but both names still
-      // appear in the next-step guidance derived from the single offending list.
       const result = requireFields({ a: 123 }, ['a', 'b']);
       expect(result.valid).toBe(false);
       if (!result.valid) {
@@ -199,7 +197,6 @@ describe('validation', () => {
       const result = requireFields({}, ['a', 'b']);
       expect(result.valid).toBe(false);
       if (!result.valid) {
-        // The "Invalid ..." prefix and the next step derive from one joined list.
         expect(result.error.error?.message).toContain('Invalid a, b');
         expect(result.error.error?.message).toContain('Provide a non-empty string for a, b');
       }
@@ -742,7 +739,6 @@ describe('validation', () => {
     });
 
     it('runs steps in order: required → booleans → strings → numbers', () => {
-      // required fails first even though numbers would also fail
       const result = validateAll(
         { count: 999 },
         {
@@ -879,9 +875,56 @@ describe('validation', () => {
       expect(result.valid).toBe(true);
     });
 
-    it('returns valid when date field is null', () => {
+    it('fails with INVALID_TYPE when a date field is null and not declared nullable', () => {
       const result = validateDateFields({ start: null }, ['start']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('null is not accepted');
+      }
+    });
+
+    it('returns valid when a nullable date field is null', () => {
+      const result = validateDateFields({ start: null }, ['start'], ['start']);
       expect(result.valid).toBe(true);
+    });
+
+    it('validateAll passes the nullable list through to date validation', () => {
+      expect(validateAll({ due: null }, { dates: ['due'], nullable: ['due'] }).valid).toBe(true);
+      const rejected = validateAll({ due: null }, { dates: ['due'] });
+      expect(rejected.valid).toBe(false);
+      if (!rejected.valid) expect(rejected.error.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('validateAll integers spec rejects a fractional value and keeps the range check', () => {
+      const fractional = validateAll({ priority: 5.5 }, { integers: [['priority', 0, 9]] });
+      expect(fractional.valid).toBe(false);
+      if (!fractional.valid) {
+        expect(fractional.error.error?.code).toBe('INVALID_TYPE');
+        expect(fractional.error.error?.message).toContain('whole number');
+      }
+      const outOfRange = validateAll({ priority: 10 }, { integers: [['priority', 0, 9]] });
+      expect(outOfRange.valid).toBe(false);
+      if (!outOfRange.valid) expect(outOfRange.error.error?.code).toBe('OUT_OF_RANGE');
+      expect(validateAll({ priority: 5 }, { integers: [['priority', 0, 9]] }).valid).toBe(true);
+      expect(validateAll({}, { integers: [['priority', 0, 9]] }).valid).toBe(true);
+    });
+
+    it('stringArrays forbidden characters produce a teaching INVALID_CHARACTERS error', () => {
+      const forbidden = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
+      const result = validateAll(
+        { tags: ['ok', 'bad]#'] },
+        { stringArrays: [['tags', 50, 100, forbidden]] }
+      );
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+        expect(result.error.error?.message).toContain('Invalid tags[1]');
+        expect(result.error.error?.message).toContain('Remove [, ], or # characters from tags[1].');
+      }
+      expect(
+        validateAll({ tags: ['ok'] }, { stringArrays: [['tags', 50, 100, forbidden]] }).valid
+      ).toBe(true);
     });
 
     it('fails with INVALID_DATE when value is not an ISO8601 string', () => {
@@ -892,7 +935,7 @@ describe('validation', () => {
         expect(result.error.error?.message).toContain('Invalid start');
         expect(result.error.error?.message).toContain('"Feb 20, 2026"');
         expect(result.error.error?.message).toContain(
-          'Pass start as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".'
+          'Pass start as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00".'
         );
       }
     });

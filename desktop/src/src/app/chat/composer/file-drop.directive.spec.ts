@@ -57,22 +57,17 @@ describe('FileDropDirective', () => {
   it('ignores drag events that do not carry Files', () => {
     dropTarget.dispatchEvent(makeDragEvent('dragenter'));
     dropTarget.dispatchEvent(makeDragEvent('dragenter'));
-    // No file payload → no drop emission later
     dropTarget.dispatchEvent(makeDragEvent('drop'));
     expect(host.dropped).toEqual([]);
   });
 
   it('keeps isDragging true while the cursor crosses internal children (dragDepth counter)', () => {
     const file = new File(['x'], 'a.png', { type: 'image/png' });
-    // Outer enter
-    dropTarget.dispatchEvent(makeDragEvent('dragenter', [file]));
-    // Two nested enters (simulating browser firing on each child boundary)
     dropTarget.dispatchEvent(makeDragEvent('dragenter', [file]));
     dropTarget.dispatchEvent(makeDragEvent('dragenter', [file]));
-    // One leave should NOT flip isDragging back to false yet
+    dropTarget.dispatchEvent(makeDragEvent('dragenter', [file]));
     dropTarget.dispatchEvent(makeDragEvent('dragleave', [file]));
     dropTarget.dispatchEvent(makeDragEvent('dragleave', [file]));
-    // After matching number of leaves the directive flips back to false on drop
     dropTarget.dispatchEvent(makeDragEvent('dragleave', [file]));
     dropTarget.dispatchEvent(makeDragEvent('drop', [file]));
     expect(host.dropped).toHaveLength(1);

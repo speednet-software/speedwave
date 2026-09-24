@@ -4,14 +4,15 @@ import { signal } from '@angular/core';
 import { By } from '@angular/platform-browser';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { ComposerComponent } from './composer.component';
-import { ProjectStateService } from '../../services/project-state.service';
+import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
+import { TauriService } from '../../services/tauri.service';
+import { LoggerService } from '../../services/logger.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
+import { makeMockLogger } from '../../testing/mock-logger';
 import { SlashService } from '../slash/slash.service';
 
 class ProjectStateStub {
   readonly activeProject = signal<string | null>(null);
-  onProjectReady(_cb: () => void): () => void {
-    return () => undefined;
-  }
 }
 
 class SlashServiceStub {
@@ -19,6 +20,7 @@ class SlashServiceStub {
   readonly discovering = signal(false);
   readonly source = signal<string | null>(null);
   readonly error = signal<string | null>(null);
+  readonly unavailable = signal(false);
   readonly isLoadingEmpty = signal(false);
   refresh = vi.fn(async () => undefined);
   filter(_query: string): readonly unknown[] {
@@ -64,7 +66,6 @@ describe('ComposerComponent', () => {
     return el;
   }
 
-  // ── happy path ──────────────────────────────────────────────────────────
   describe('happy path — submit', () => {
     it('emits submitted(value) and resets form when Enter is pressed without Shift', () => {
       const emitted: string[] = [];
@@ -104,7 +105,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── Shift+Enter inserts newline ─────────────────────────────────────────
   describe('Shift+Enter', () => {
     it('does NOT submit when Shift+Enter is pressed', () => {
       const emitted: string[] = [];
@@ -122,7 +122,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── edge cases ──────────────────────────────────────────────────────────
   describe('edge cases', () => {
     it('does not emit when submitting empty text', () => {
       const emitted: string[] = [];
@@ -192,8 +191,6 @@ describe('ComposerComponent', () => {
     });
 
     it('CAN submit a lone `/` when an image attachment is present (ADR-065)', () => {
-      // The lone-`/` guard only suppresses a *text-only* send; with a ready
-      // attachment the image is the real payload, so submit is allowed.
       component.text.setValue('/');
       component.attachments.set([
         {
@@ -219,7 +216,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── disabled state ──────────────────────────────────────────────────────
   describe('disabled state', () => {
     it('prevents submission via Enter when disabled', () => {
       const emitted: string[] = [];
@@ -265,7 +261,89 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── slash menu trigger ──────────────────────────────────────────────────
+  describe('send blocked while a session starts', () => {
+    it('keeps the text and emits nothing on Enter', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue('wait for the session');
+      fixture.detectChanges();
+
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual([]);
+      expect(component.text.value).toBe('wait for the session');
+    });
+
+    it('refuses a submit when a start began after the last render', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(false);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('typed before the start');
+      fixture.detectChanges();
+
+      blocked.set(true);
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual([]);
+      expect(component.text.value).toBe('typed before the start');
+    });
+
+    it('disables the send button but leaves the field editable', () => {
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue('ready');
+      fixture.detectChanges();
+
+      expect(sendButton().hasAttribute('disabled')).toBe(true);
+      expect(textarea().hasAttribute('disabled')).toBe(false);
+    });
+
+    it('tells the user the session is starting, ahead of the queue hint', () => {
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      blocked.set(false);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('queue next message...');
+    });
+
+    it('sends when the block lifted after the last render', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('the start just ended');
+      fixture.detectChanges();
+
+      blocked.set(false);
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual(['the start just ended']);
+    });
+
+    it('sends the kept text once the block lifts', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('now it goes');
+      fixture.detectChanges();
+
+      blocked.set(false);
+      fixture.detectChanges();
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual(['now it goes']);
+    });
+  });
+
   describe('slash menu trigger', () => {
     function dispatchInputAt(value: string, caretPos: number): void {
       const ta = textarea();
@@ -300,11 +378,30 @@ describe('ComposerComponent', () => {
       expect(component.slashQuery()).toBe('rev');
     });
 
+    it('runs discovery on open when no commands are cached', () => {
+      const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+      const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
+      projectState.activeProject.set('acme');
+      slash.commands.set([]);
+      slash.source.set('Unavailable');
+      dispatchInputAt('/', 1);
+      expect(slash.refresh).toHaveBeenCalledWith('acme');
+    });
+
+    it('does not re-run discovery on open while commands are cached', () => {
+      const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+      const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
+      projectState.activeProject.set('acme');
+      slash.commands.set([{ name: 'speedwave-tdd' }]);
+      slash.source.set('Init');
+      dispatchInputAt('/', 1);
+      expect(slash.refresh).not.toHaveBeenCalled();
+    });
+
     it('opens the slash popover when the slash toolbar button is clicked and inserts `/`', async () => {
       const events: boolean[] = [];
       component.slashOpenChange.subscribe((e) => events.push(e));
       slashButton().click();
-      // queueMicrotask defers the caret update; await it for the popover state to settle.
       await Promise.resolve();
       fixture.detectChanges();
       expect(component.text.value).toBe('/');
@@ -323,7 +420,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── ARIA ────────────────────────────────────────────────────────────────
   describe('ARIA', () => {
     it('textarea has aria-label "Compose message"', () => {
       expect(textarea().getAttribute('aria-label')).toBe('Compose message');
@@ -334,7 +430,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── placeholder input ───────────────────────────────────────────────────
   describe('placeholder', () => {
     it('uses default placeholder when none provided', () => {
       expect(textarea().getAttribute('placeholder')).toBe('message speedwave...');
@@ -353,7 +448,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── ADR-045 — queued message UX ─────────────────────────────────────────
   describe('queued message (ADR-045)', () => {
     function queuedRow(): HTMLElement | null {
       return rootEl.querySelector<HTMLElement>('[data-testid="composer-queued"]');
@@ -411,8 +505,6 @@ describe('ComposerComponent', () => {
       component.queueRequested.subscribe((v) => queued.push(v));
       component.text.setValue('next turn');
       fixture.detectChanges();
-      // While streaming the send button is replaced by a stop button —
-      // submission goes through the textarea Enter handler instead.
       component.submit();
       expect(submitted).toEqual([]);
       expect(queued).toEqual(['next turn']);
@@ -439,14 +531,11 @@ describe('ComposerComponent', () => {
       const queued: string[] = [];
       component.submitted.subscribe((v) => submitted.push(v.payload));
       component.queueRequested.subscribe((v) => queued.push(v));
-      // Cannot setValue when control is disabled — guard with try.
       component.text.enable({ emitEvent: false });
       component.text.setValue('blocked');
       component.text.disable({ emitEvent: false });
       fixture.detectChanges();
-      // canSubmit returns false because disabled() is true.
       expect(component.canSubmit()).toBe(false);
-      // submit() called directly is also a no-op when canSubmit() is false.
       component.submit();
       expect(submitted).toEqual([]);
       expect(queued).toEqual([]);
@@ -504,7 +593,67 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── manual resize ─────────────────────────────────────────────
+  describe('model selector', () => {
+    it('renders app-model-selector instead of the old read-only model span', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector).toBeTruthy();
+    });
+
+    it('forwards streaming() to the model selector', () => {
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.streaming()).toBe(true);
+    });
+
+    it('re-emits the model selector modelSelected event unchanged for the parent to handle', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      const emissions: unknown[] = [];
+      fixture.componentInstance.modelSelected.subscribe((sel) => emissions.push(sel));
+
+      selector.triggerEventHandler('modelSelected', {
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(emissions).toEqual([
+        {
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+        },
+      ]);
+    });
+  });
+
+  describe('overlayWidth', () => {
+    it('reflects the textarea width read at call time, not a cached first read', () => {
+      const el = textarea();
+      Object.defineProperty(el, 'offsetWidth', { value: 300, configurable: true });
+      expect(component.overlayWidth()).toBe('300px');
+
+      Object.defineProperty(el, 'offsetWidth', { value: 500, configurable: true });
+      expect(component.overlayWidth()).toBe('500px');
+    });
+  });
+
+  describe('contextLabel', () => {
+    it('does not render the context span when contextLabel is empty (default)', () => {
+      const span = rootEl.querySelector('[data-testid="composer-context"]');
+      expect(span).toBeNull();
+    });
+
+    it('renders the bound contextLabel text', () => {
+      fixture.componentRef.setInput('contextLabel', '200k');
+      fixture.detectChanges();
+      const span = rootEl.querySelector('[data-testid="composer-context"]');
+      expect(span?.textContent?.trim()).toBe('200k');
+    });
+  });
+
   describe('manual resize', () => {
     function autosize(): CdkTextareaAutosize {
       return fixture.debugElement
@@ -545,7 +694,6 @@ describe('ComposerComponent', () => {
 
     it('lifts the CDK row cap so the drag can exceed 8 rows', () => {
       component.onResizeStart();
-      // Inline max-height (cdkAutosizeMaxRows) must be dropped or the field can't grow past 8 rows.
       expect(textarea().style.maxHeight).toBe('none');
       component.onResizeBy(100000);
       const ceiling = Math.round(window.innerHeight * 0.6);
@@ -586,7 +734,6 @@ describe('ComposerComponent', () => {
 
     it('tracks aria value: base on start, target on drag, null after reset', () => {
       component.onResizeStart();
-      // jsdom has no layout, so the captured base height is 0.
       expect(component.resizeValueNow()).toBe(0);
       component.onResizeBy(300);
       const target = Math.min(Math.round(window.innerHeight * 0.6), Math.max(56, 300));
@@ -598,7 +745,6 @@ describe('ComposerComponent', () => {
     });
 
     it('renders the full aria value set only while resizing', () => {
-      // Auto mode: no partial value set on the separator.
       expect(handle().hasAttribute('aria-valuenow')).toBe(false);
       expect(handle().hasAttribute('aria-valuemin')).toBe(false);
       expect(handle().hasAttribute('aria-valuemax')).toBe(false);
@@ -619,11 +765,9 @@ describe('ComposerComponent', () => {
       expect(() => component.onResizeEnd()).not.toThrow();
     });
 
-    // ── end-to-end wiring through the directive ──────────────────────────────
     it('ArrowUp on the handle grows the textarea and disables autosize', () => {
       handle().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
       expect(autosize().enabled).toBe(false);
-      // base 0 + 24px step, clamped up to the 56px floor.
       expect(textarea().style.height).toBe('56px');
     });
 
@@ -641,5 +785,161 @@ describe('ComposerComponent', () => {
       handle().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
       expect(textarea().style.height).toBe('');
     });
+  });
+
+  describe('staged transcript', () => {
+    function transcriptRow(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-transcript"]');
+    }
+
+    function detachButton(): HTMLButtonElement | null {
+      return rootEl.querySelector<HTMLButtonElement>('[data-testid="composer-transcript-detach"]');
+    }
+
+    it('renders no transcript row by default', () => {
+      expect(transcriptRow()).toBeNull();
+    });
+
+    it('names the destination so the user knows the text leaves the machine', () => {
+      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.detectChanges();
+      expect(transcriptRow()?.textContent).toContain('next message');
+      expect(transcriptRow()?.textContent).toContain('LLM provider');
+    });
+
+    it('emits transcriptDetached when the row is unpinned', () => {
+      const detached: number[] = [];
+      component.transcriptDetached.subscribe(() => detached.push(1));
+      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.detectChanges();
+      expect(detachButton()?.getAttribute('aria-label')).toBe('Detach meeting transcript');
+      detachButton()!.click();
+      expect(detached.length).toBe(1);
+    });
+
+    it('loads a draft into the field and reports it applied', async () => {
+      const applied: number[] = [];
+      component.draftApplied.subscribe(() => applied.push(1));
+      fixture.componentRef.setInput('draftText', 'summarize the meeting');
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(component.text.value).toBe('summarize the meeting');
+      expect(applied.length).toBe(1);
+      expect(textarea().selectionStart).toBe('summarize the meeting'.length);
+    });
+
+    it('leaves user edits alone once the parent clears the draft', async () => {
+      fixture.componentRef.setInput('draftText', 'summarize the meeting');
+      fixture.detectChanges();
+      component.text.setValue('my own prompt');
+      fixture.componentRef.setInput('draftText', '');
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(component.text.value).toBe('my own prompt');
+    });
+
+    it('does not submit an empty field, so a cleared prompt sends nothing', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      fixture.componentRef.setInput('transcriptAttached', true);
+      component.text.setValue('');
+      fixture.detectChanges();
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+      expect(emitted).toEqual([]);
+      expect(transcriptRow()).not.toBeNull();
+    });
+  });
+
+  describe('attachment error', () => {
+    function attachmentErrorEl(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-attachment-error"]');
+    }
+
+    function makeDropEvent(files: File[]): DragEvent {
+      const dataTransfer = { types: ['Files'], files, dropEffect: 'none' };
+      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
+      return ev;
+    }
+
+    it('shows an English error when an image is dropped with no active project', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'a.png', { type: 'image/png' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe(
+        'Select a project before attaching an image.'
+      );
+    });
+  });
+});
+
+describe('ComposerComponent slash discovery with the real project and slash services', () => {
+  const READY: AuthStatusResponse = {
+    status: 'ready',
+    api_key_configured: false,
+    oauth_authenticated: true,
+    needs_anthropic_auth: true,
+    provider_configured: true,
+  };
+
+  let projectState: ProjectStateService;
+  let slash: SlashService;
+  let discoveries: number;
+
+  beforeEach(() => {
+    discoveries = 0;
+    const tauri = new MockTauriService();
+    tauri.invokeHandler = (cmd) => {
+      if (cmd !== 'list_slash_commands') return Promise.resolve(undefined);
+      discoveries++;
+      return Promise.resolve({ commands: [], source: 'Init' });
+    };
+    TestBed.configureTestingModule({
+      imports: [ComposerComponent],
+      providers: [
+        { provide: TauriService, useValue: tauri },
+        { provide: LoggerService, useValue: makeMockLogger() },
+      ],
+    });
+    projectState = TestBed.inject(ProjectStateService);
+    slash = TestBed.inject(SlashService);
+    projectState.activeProject.set('acme');
+  });
+
+  function mountComposer(): ComponentFixture<ComposerComponent> {
+    const created = TestBed.createComponent(ComposerComponent);
+    created.detectChanges();
+    return created;
+  }
+
+  async function signIn(): Promise<void> {
+    projectState.forceUnconfigured();
+    projectState.applyAuthStatus(READY);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
+
+  it('refreshes once per sign-in however many composers were mounted before', async () => {
+    const refresh = vi.spyOn(slash, 'refresh');
+    mountComposer().destroy();
+    mountComposer().destroy();
+    const live = mountComposer();
+
+    await signIn();
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(discoveries).toBe(1);
+    live.destroy();
+  });
+
+  it('refreshes once per sign-in while no composer is mounted', async () => {
+    mountComposer().destroy();
+
+    await signIn();
+    await signIn();
+
+    expect(discoveries).toBe(2);
   });
 });

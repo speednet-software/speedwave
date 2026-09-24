@@ -16,6 +16,7 @@ import { UiStateService } from '../services/ui-state.service';
 import type { ProjectEntry, ProjectList } from '../models/update';
 import { CreateProjectModalComponent } from '../shared/create-project-modal/create-project-modal.component';
 import { IconComponent } from '../shared/icon.component';
+import { SpinIconComponent } from '../shared/spin-icon.component';
 import { TooltipDirective } from '../shared/tooltip.directive';
 import { swatchFor } from './project-swatch';
 
@@ -40,7 +41,7 @@ export function cleanRemoveErrorMessage(msg: string): string {
  */
 @Component({
   selector: 'app-project-switcher',
-  imports: [CreateProjectModalComponent, IconComponent, TooltipDirective],
+  imports: [CreateProjectModalComponent, IconComponent, SpinIconComponent, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
@@ -62,6 +63,8 @@ export function cleanRemoveErrorMessage(msg: string): string {
           <div class="max-h-64 overflow-y-auto p-1">
             @for (entry of visibleProjects(); track entry.project.name) {
               @let pendingDelete = entry.project.name === pendingDeleteName();
+              @let removing = entry.project.name === removingName();
+              @let rowDisabled = entry.isActive || removingName() !== null;
               <div
                 class="group flex items-center gap-1 rounded px-2 py-1.5"
                 [class]="entry.isActive ? rowActiveClasses : rowInactiveClasses"
@@ -97,9 +100,9 @@ export function cleanRemoveErrorMessage(msg: string): string {
                   <button
                     type="button"
                     class="flex min-w-0 flex-1 items-center gap-2 text-left"
-                    [class.cursor-default]="entry.isActive"
+                    [class.cursor-default]="rowDisabled"
                     [attr.data-testid]="'project-switcher-item-' + entry.project.name"
-                    [disabled]="entry.isActive"
+                    [disabled]="rowDisabled"
                     [attr.aria-current]="entry.isActive ? 'true' : null"
                     (click)="switchProject(entry.project.name)"
                   >
@@ -119,7 +122,16 @@ export function cleanRemoveErrorMessage(msg: string): string {
                       <span class="sr-only">current project</span>
                     }
                   </button>
-                  @if (!entry.isActive) {
+                  @if (removing) {
+                    <span
+                      class="mono inline-flex shrink-0 items-center gap-1 px-1 text-[10px] text-[var(--ink-mute)]"
+                      [attr.data-testid]="'project-switcher-removing-' + entry.project.name"
+                      role="status"
+                    >
+                      <app-spin-icon />
+                      removing...
+                    </span>
+                  } @else if (!entry.isActive && removingName() === null) {
                     <button
                       type="button"
                       class="flex shrink-0 items-center px-1 text-[var(--ink-mute)] opacity-0 hover:text-red-300 focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
@@ -201,6 +213,9 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
   /** Backend error to surface inline under a row; `null` when none. */
   readonly removeError = signal<{ msg: string; project: string } | null>(null);
 
+  /** Row whose backend removal is in flight; one removal at a time, `null` when idle. */
+  readonly removingName = signal<string | null>(null);
+
   /** Tailwind class string for the active row (highlighted bg, no hover-bg). */
   readonly rowActiveClasses = 'bg-[var(--bg-2)]';
   /** Tailwind class string for inactive rows — relies on `.hover-bg` utility. */
@@ -219,7 +234,6 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
 
   /** Registers reactive cleanup of transient pending/error state. */
   constructor() {
-    // Reset transient pending/error state when the dropdown closes or the row disappears.
     effect(() => {
       if (!this.ui.projectSwitcherOpen()) {
         this.pendingDeleteName.set(null);
@@ -245,11 +259,8 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.projects.set(result.projects);
       this.activeProject.set(result.active_project);
-    } catch {
-      // Not running inside Tauri or command not registered yet.
-    }
+    } catch {}
 
-    // Refresh list on settled (not just ready — failed add still registers project).
     this.unsubProjectSettled = this.projectState.onProjectSettled(async () => {
       try {
         const result = await this.tauri.invoke<ProjectList>('list_projects');
@@ -309,6 +320,9 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
    * @param name - The project to mark as pending removal.
    */
   requestRemove(name: string): void {
+    if (this.removingName() !== null) {
+      return;
+    }
     this.pendingDeleteName.set(name);
     this.removeError.set(null);
     this.cdr.markForCheck();
@@ -325,7 +339,11 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
    * @param name - The project to remove.
    */
   async confirmRemove(name: string): Promise<void> {
+    if (this.removingName() !== null) {
+      return;
+    }
     this.pendingDeleteName.set(null);
+    this.removingName.set(name);
     try {
       await this.projectState.removeProject(name);
       this.removeError.set(null);
@@ -333,6 +351,8 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
       const msg = err instanceof Error ? err.message : String(err);
       this.removeError.set({ msg: cleanRemoveErrorMessage(msg), project: name });
       this.logger.error(`Failed to remove project: ${msg}`);
+    } finally {
+      this.removingName.set(null);
     }
     this.cdr.markForCheck();
   }

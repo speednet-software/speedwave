@@ -1,3 +1,6 @@
+use crate::control_channel::{
+    self, ControlChannel, ControlHandle, ControlQuery, SessionInfoEvent, SessionInfoState,
+};
 use crate::history;
 use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
@@ -12,95 +15,89 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Events emitted to the Angular frontend over the `"chat_stream"` event.
-/// Tagged enum: serde serializes as `{"chunk_type":"Text","data":{...}}`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "chunk_type", content = "data")]
 pub enum StreamChunk {
-    /// Text content delta from the assistant.
-    Text { content: String },
-    /// Thinking content delta (extended thinking / interleaved thinking).
-    Thinking { content: String },
-    /// Tool use started — includes tool_id and tool_name.
-    ToolStart { tool_id: String, tool_name: String },
-    /// Partial JSON input for a tool (streamed incrementally).
+    Text {
+        content: String,
+    },
+    Thinking {
+        content: String,
+    },
+    ToolStart {
+        tool_id: String,
+        tool_name: String,
+    },
     ToolInputDelta {
         tool_id: String,
         partial_json: String,
     },
-    /// Tool result from a user message (tool execution output).
+    ToolInputComplete {
+        tool_id: String,
+        input_json: String,
+    },
     ToolResult {
         tool_id: String,
         content: String,
         is_error: bool,
     },
-    /// Final result — conversation turn complete.
     Result {
         session_id: String,
-        /// Total session cost in USD — estimated from token counts at API pricing.
         total_cost: Option<f64>,
-        /// Boxed to keep this variant under clippy's large-variant gap;
-        /// serde treats `Option<Box<T>>` exactly like `Option<T>`.
         usage: Option<Box<UsageInfo>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         result_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_window_size: Option<u64>,
-        /// UUID of the just-completed assistant message (ADR-046); `None` for
-        /// error turns and local-LLM paths that omit `message.id`.
         #[serde(skip_serializing_if = "Option::is_none")]
         assistant_uuid: Option<String>,
-        /// Per-turn usage delta since the previous turn (`current - previous`
-        /// for cumulative `usage`; the per-step `usage` otherwise).
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_usage: Option<TurnUsage>,
-        /// Per-turn cost in USD, delta of `total_cost_usd` between turns. `None`
-        /// hides the segment until `reconcileFooterCost` fills it from the proxy SSOT.
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_cost: Option<f64>,
-        /// Model name for the turn when known. Populated from `modelUsage`
-        /// in the `result` message or from the most recent `SystemInit`.
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        /// Usage of the most recent main-chain API call — the only valid
-        /// context-occupancy source (per-turn `usage` sums cache reads per call).
         #[serde(skip_serializing_if = "Option::is_none")]
         context_usage: Option<TurnUsage>,
     },
-    /// Interactive question(s) from Claude (AskUserQuestion tool).
-    /// Up to 4 questions per the Agent SDK contract.
     AskUserQuestion {
         tool_id: String,
         questions: Vec<AskUserQuestionItem>,
-        /// Always `0` on first emit. The frontend reducer advances this as
-        /// answers come in.
         current_index: usize,
     },
-    /// Error from the Claude subprocess.
-    Error { content: String },
-    /// Session init metadata — model + session id from the system init message.
-    /// `session_id` lets the frontend queue/retry during the FIRST turn (ADR-045).
+    Error {
+        content: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_ended: bool,
+    },
     SystemInit {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
-    /// Rate limit event — utilization and reset info.
     RateLimit {
         status: String,
-        utilization: Option<f64>,
+        rate_limit_type: Option<String>,
+        utilization_percent: Option<f64>,
         resets_at: Option<u64>,
+        overage_status: Option<String>,
+        is_using_overage: Option<bool>,
     },
-    /// Commits a UUID onto the most recent user entry (ADR-046) on the first
-    /// text-bearing user message (not a tool_result wrapper).
-    UserMessageCommit { uuid: String },
-    /// One-slot queued message (ADR-045) drained at turn end; frontend clears
-    /// `state.pending_queue` since the message is already in flight via stdin.
-    QueueDrained { session_id: String, text: String },
+    UserMessageCommit {
+        uuid: String,
+    },
+    ControlChip {
+        command: String,
+        argument: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    QueueDrained {
+        session_id: String,
+        text: String,
+    },
 }
 
-/// Redacts secrets in a chunk's free-text fields. Structural fields (tool ids,
-/// model, session ids) and `partial_json` are left untouched.
 pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     use speedwave_runtime::log_sanitizer::sanitize;
     match chunk {
@@ -119,8 +116,12 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             content: sanitize(&content),
             is_error,
         },
-        StreamChunk::Error { content } => StreamChunk::Error {
+        StreamChunk::Error {
+            content,
+            turn_ended,
+        } => StreamChunk::Error {
             content: sanitize(&content),
+            turn_ended,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -154,7 +155,6 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             mut questions,
             current_index,
         } => {
-            // Model-authored free text — redact question/header/option strings.
             for q in &mut questions {
                 q.question = sanitize(&q.question);
                 q.header = sanitize(&q.header);
@@ -173,8 +173,6 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     }
 }
 
-/// Detokenizes a chunk's free-text fields for display (same fields as `sanitize_chunk`).
-/// Runs before `sanitize_chunk` so redaction sees the real display text, not a token placeholder.
 fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
     if policy.is_noop() {
         return chunk;
@@ -196,8 +194,12 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             content: detok(policy, &content),
             is_error,
         },
-        StreamChunk::Error { content } => StreamChunk::Error {
+        StreamChunk::Error {
+            content,
+            turn_ended,
+        } => StreamChunk::Error {
             content: detok(policy, &content),
+            turn_ended,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -249,8 +251,6 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
     }
 }
 
-/// The ONE way to emit a `chat_stream` event: detokenizes for display, then sanitizes
-/// so no site leaks a secret. Enforced by `chat_stream_emits_go_through_helper`.
 fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, policy: &DisplayPolicy) {
     let chunk = detokenize_chunk(chunk, policy);
     if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
@@ -258,21 +258,14 @@ fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, polic
     }
 }
 
-/// Token usage information from the result message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UsageInfo {
-    /// Number of input tokens consumed.
     pub input_tokens: u64,
-    /// Number of output tokens generated.
     pub output_tokens: u64,
-    /// Number of tokens read from cache.
     pub cache_read_tokens: Option<u64>,
-    /// Number of tokens written to cache.
     pub cache_write_tokens: Option<u64>,
 }
 
-/// Per-turn token usage. All cache fields are required (missing values are
-/// normalized to 0), so the frontend can render without `??` guards.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TurnUsage {
     pub input_tokens: u64,
@@ -282,8 +275,6 @@ pub struct TurnUsage {
 }
 
 impl TurnUsage {
-    /// Create a `TurnUsage` from a `UsageInfo`, normalizing missing cache
-    /// fields to 0.
     pub fn from_usage_info(usage: &UsageInfo) -> Self {
         Self {
             input_tokens: usage.input_tokens,
@@ -293,8 +284,6 @@ impl TurnUsage {
         }
     }
 
-    /// Per-turn delta between a cumulative snapshot and a previous snapshot.
-    /// Saturating subtraction clamps reset/resume regressions to zero.
     pub fn delta(current: &Self, previous: &Self) -> Self {
         Self {
             input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
@@ -309,28 +298,17 @@ impl TurnUsage {
     }
 }
 
-/// JSONL `usage` field names (Anthropic schema) — SSOT for the result reader,
-/// `history.rs` transcript parsing, and the resume-snapshot summing.
 pub(crate) const USAGE_INPUT_TOKENS: &str = "input_tokens";
 pub(crate) const USAGE_OUTPUT_TOKENS: &str = "output_tokens";
 pub(crate) const USAGE_CACHE_READ_TOKENS: &str = "cache_read_input_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
-/// Legacy flat cache names some CLI builds emit in `result.usage`.
 pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
 
-/// True when a parsed `assistant` line is a sidechain (subagent) call —
-/// checked via BOTH the live stream-json marker (`parent_tool_use_id`) and
-/// the on-disk transcript marker (`isSidechain`), since either can appear
-/// depending on source (live CLI stream vs resumed JSONL transcript).
-/// SSOT for both `capture_context_usage` (chat.rs) and the resume-snapshot
-/// / assistant-message readers (history.rs) — never re-check one field alone.
 pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
 }
 
-/// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
-/// malformed fields. `None` when `usage` is not a JSON object.
 pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
     let obj = usage.as_object()?;
     let read = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -342,15 +320,10 @@ pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsa
     })
 }
 
-/// Tool name constant for the AskUserQuestion tool.
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
-// Stream-json protocol literals (claude-agent-sdk-python types.py).
-const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
 const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
 
-/// Parsed control_request from Claude stdout.
-/// Also used as the pending request storage — keyed by `tool_use_id` in the HashMap.
 #[derive(Debug, Clone)]
 pub struct ControlRequest {
     pub request_id: String,
@@ -359,23 +332,14 @@ pub struct ControlRequest {
     pub tool_use_id: String,
 }
 
-/// Per-`AskUserQuestion` slot state held while the user answers each question.
-/// Consumed once every slot in `answers` is `Some`.
 #[derive(Debug, Clone)]
 pub struct PartialAnswers {
-    /// Original control_request — reconstructs the wire payload (`request_id`
-    /// + full `input`).
     pub request: ControlRequest,
-    /// Parsed questions list (after truncation to `MAX_ASK_USER_QUESTIONS`).
     pub questions: Vec<AskUserQuestionItem>,
-    /// One slot per question (`None` until answered); length always equals
-    /// `questions.len()` — enforced by `PartialAnswers::new`.
     pub answers: Vec<Option<String>>,
 }
 
 impl PartialAnswers {
-    /// Create a `PartialAnswers` with one `None` slot per question, upholding
-    /// the `answers.len() == questions.len()` invariant.
     pub fn new(request: ControlRequest, questions: Vec<AskUserQuestionItem>) -> Self {
         let answers = vec![None; questions.len()];
         Self {
@@ -388,8 +352,6 @@ impl PartialAnswers {
 
 type PendingRequests = Arc<Mutex<HashMap<String, PartialAnswers>>>;
 
-/// Result of `fill_slot`. `Completed` carries the `PartialAnswers` so the
-/// caller builds the wire response without re-locking the pending map.
 #[derive(Debug)]
 enum FillOutcome {
     Pending,
@@ -413,77 +375,48 @@ fn validate_slot(
     Ok(())
 }
 
-/// Maximum size, in bytes, of a user-supplied chat message string.
 pub const MAX_MESSAGE_LEN: usize = 1_000_000;
 
-/// Maximum size, in bytes, of a single per-slot answer to an `AskUserQuestion`.
-/// Sized so 4 maximal slots stay under `MAX_ASK_USER_WIRE_BYTES` once encoded.
 pub const MAX_ASK_USER_ANSWER_LEN: usize = 12 * 1024;
 
-/// Structured log entry returned by StreamParser for session logging.
 pub struct LogEntry {
     pub prefix: &'static str,
     pub message: String,
 }
 
-/// Adapts a legacy `(Option<StreamChunk>, Option<LogEntry>)` tuple into the
-/// `(Vec<StreamChunk>, Option<LogEntry>)` shape returned by `parse_line`.
 fn option_to_vec(
     (chunk, log): (Option<StreamChunk>, Option<LogEntry>),
 ) -> (Vec<StreamChunk>, Option<LogEntry>) {
     (chunk.map(|c| vec![c]).unwrap_or_default(), log)
 }
 
-/// Stateful parser that tracks active content blocks across stream events.
-/// Maintains index→(tool_id, tool_name) map built from content_block_start events.
 pub struct StreamParser {
-    /// Maps content block index to (tool_use_id, tool_name).
     active_blocks: HashMap<u64, (String, String)>,
-    /// Accumulated input_json per tool_id (built from ToolInputDelta chunks).
-    tool_input: HashMap<String, String>,
-    /// Provisional assistant UUID (ADR-046), committed onto `Result` and
-    /// `take`n there so an error turn can't reuse a stale id.
     pending_assistant_uuid: Option<String>,
-    /// UUIDs already emitted via `UserMessageCommit`, guarding against
-    /// duplicate commits when a user message is re-emitted in the same turn.
     committed_user_uuids: std::collections::HashSet<String>,
-    /// Snapshot of cumulative session usage at the start of the current turn.
-    /// Per-turn usage = current - previous.
     previous_session_usage: TurnUsage,
-    /// Usage of the most recent main-chain API call (sidechains excluded);
-    /// carried onto `Result` as the context-occupancy source.
     last_context_usage: Option<TurnUsage>,
-    /// Cumulative session cost in USD from the previous `Result`. Per-turn
-    /// cost = current total - previous total, when both are authoritative.
     previous_session_cost: Option<f64>,
-    /// Last model seen (from `SystemInit` or `modelUsage` in a result).
-    last_model: Option<String>,
-    /// Unhandled top-level stream-json `type` values, each logged once per
-    /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
+    model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
 }
 
-/// Cap on distinct unknown types tracked for once-per-type logging.
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
 
 impl StreamParser {
-    /// Create a new parser with empty state.
     pub fn new() -> Self {
         Self {
             active_blocks: HashMap::new(),
-            tool_input: HashMap::new(),
             pending_assistant_uuid: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
             last_context_usage: None,
             previous_session_cost: None,
-            last_model: None,
+            model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
         }
     }
 
-    /// Seeds the cumulative usage snapshot so the next `Result` subtracts
-    /// against the supplied baseline (called on resume).
     pub fn restore_session_snapshot(
         &mut self,
         usage: TurnUsage,
@@ -493,19 +426,17 @@ impl StreamParser {
     ) {
         self.previous_session_usage = usage;
         self.previous_session_cost = total_cost;
-        self.last_model = model;
+        if let Some(m) = model.as_deref() {
+            self.model_tracker.observe_init(m);
+        }
         self.last_context_usage = context_usage;
     }
 
-    /// Current cumulative usage snapshot. Tests use this to assert that the
-    /// snapshot advances after each turn.
     #[cfg(test)]
     pub fn previous_session_usage(&self) -> TurnUsage {
         self.previous_session_usage
     }
 
-    /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
-    /// Returns (chunks for frontend in emission order, optional log entry).
     pub fn parse_line(
         &mut self,
         parsed: &serde_json::Value,
@@ -518,13 +449,13 @@ impl StreamParser {
             "result" => option_to_vec(self.parse_result(parsed)),
             "assistant" => {
                 self.capture_assistant_uuid(parsed);
+                self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
-                (Vec::new(), None)
+                (Self::complete_tool_inputs(parsed), None)
             }
             "system" => option_to_vec(self.parse_system_message(parsed)),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
             other => {
-                // Unknown types are dropped; logged once per type.
                 let label = if other.is_empty() { "<none>" } else { other };
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
                     && self.seen_unknown_types.insert(label.to_string())
@@ -545,8 +476,6 @@ impl StreamParser {
         }
     }
 
-    /// Capture `message.id` into `pending_assistant_uuid` for the next `Result`
-    /// chunk; missing/empty ids are silently ignored.
     fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
         if let Some(id) = parsed["message"]["id"].as_str() {
             if !id.is_empty() {
@@ -555,8 +484,15 @@ impl StreamParser {
         }
     }
 
-    /// Track `message.usage` of main-chain assistant events (last one wins).
-    /// Sidechain (subagent) calls and all-zero usage never move the meter.
+    fn capture_assistant_model(&mut self, parsed: &serde_json::Value) {
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        if let Some(model) = parsed["message"]["model"].as_str() {
+            self.model_tracker.observe_assistant(model);
+        }
+    }
+
     fn capture_context_usage(&mut self, parsed: &serde_json::Value) {
         if is_sidechain_event(parsed) {
             return;
@@ -568,16 +504,32 @@ impl StreamParser {
         }
     }
 
-    /// Reset per-message block state (e.g. on `message_stop`). Does NOT reset
-    /// the session-wide usage snapshot — only `new_session()` does.
-    pub fn reset(&mut self) {
-        self.active_blocks.clear();
-        self.tool_input.clear();
-        // pending_assistant_uuid NOT cleared (message_stop can precede the
-        // result; parse_result .take()s it); committed_user_uuids persists too.
+    fn complete_tool_inputs(parsed: &serde_json::Value) -> Vec<StreamChunk> {
+        if is_sidechain_event(parsed) {
+            return Vec::new();
+        }
+        let Some(blocks) = parsed["message"]["content"].as_array() else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter(|b| b["type"].as_str() == Some("tool_use"))
+            .filter(|b| b["name"].as_str() != Some(ASK_USER_TOOL_NAME))
+            .filter_map(|b| {
+                let id = b["id"].as_str().filter(|s| !s.is_empty())?;
+                let input = &b["input"];
+                input.is_object().then(|| StreamChunk::ToolInputComplete {
+                    tool_id: id.to_string(),
+                    input_json: input.to_string(),
+                })
+            })
+            .collect()
     }
 
-    /// Reset all state for a fresh session (no snapshot restore).
+    pub fn reset(&mut self) {
+        self.active_blocks.clear();
+    }
+
     #[cfg(test)]
     pub fn new_session(&mut self) {
         self.reset();
@@ -585,11 +537,10 @@ impl StreamParser {
         self.previous_session_usage = TurnUsage::default();
         self.last_context_usage = None;
         self.previous_session_cost = None;
-        self.last_model = None;
+        self.model_tracker = crate::session_model::SessionModelTracker::default();
         self.seen_unknown_types.clear();
     }
 
-    /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
     pub fn try_parse_control_request(parsed: &serde_json::Value) -> Option<ControlRequest> {
         if parsed["type"].as_str() != Some("control_request") {
             return None;
@@ -607,8 +558,6 @@ impl StreamParser {
         })
     }
 
-    /// Parse one question entry; `None` if unusable (no `question` text).
-    /// Malformed `options` entries are filtered out individually.
     fn parse_ask_user_question(v: &serde_json::Value) -> Option<AskUserQuestionItem> {
         let question = v["question"].as_str().unwrap_or("").to_string();
         let header = v["header"].as_str().unwrap_or("").to_string();
@@ -625,7 +574,6 @@ impl StreamParser {
                     .collect()
             })
             .unwrap_or_default();
-        // Drop entries without question text; logged at count level only.
         if question.trim().is_empty() {
             log::warn!(
                 "dropping AskUserQuestion entry with empty question text \
@@ -643,8 +591,6 @@ impl StreamParser {
         })
     }
 
-    /// Parse the questions list (SDK `{ "questions": [...] }` array or a single
-    /// object); truncates to `MAX_ASK_USER_QUESTIONS`; empty `Vec` if none usable.
     pub fn parse_ask_user_questions(req: &ControlRequest) -> Vec<AskUserQuestionItem> {
         let parsed = &req.input;
 
@@ -673,7 +619,6 @@ impl StreamParser {
             .collect()
     }
 
-    /// Build AskUserQuestion chunk from a control_request's input (test-only).
     #[cfg(test)]
     pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
         let questions = Self::parse_ask_user_questions(req);
@@ -726,7 +671,6 @@ impl StreamParser {
                             message: format!("start: {} ({})", name, id),
                         });
                         self.active_blocks.insert(index, (id.clone(), name.clone()));
-                        // Suppress ToolStart for AskUserQuestion (control_request path).
                         if name == ASK_USER_TOOL_NAME {
                             (None, log_entry)
                         } else {
@@ -745,7 +689,6 @@ impl StreamParser {
                         }),
                         None,
                     ),
-                    // "text" — text deltas will arrive via content_block_delta
                     _ => (None, None),
                 }
             }
@@ -792,12 +735,6 @@ impl StreamParser {
                             Some(t) => t,
                             None => return (None, None),
                         };
-                        // Accumulate input JSON for AskUserQuestion detection on block stop
-                        self.tool_input
-                            .entry(tool_id.clone())
-                            .or_default()
-                            .push_str(partial);
-                        // Suppress ToolInputDelta for AskUserQuestion — frontend doesn't need partial JSON
                         if tool_name == ASK_USER_TOOL_NAME {
                             (None, None)
                         } else {
@@ -810,7 +747,6 @@ impl StreamParser {
                             )
                         }
                     }
-                    // signature_delta — integrity, not rendered
                     _ => (None, None),
                 }
             }
@@ -822,15 +758,13 @@ impl StreamParser {
                             prefix: "TOOL",
                             message: format!("stop: {} ({})", tool_name, tool_id),
                         });
-                        // AskUserQuestion uses control_request; just clean up input.
-                        self.tool_input.remove(&tool_id);
                         return (None, log_entry);
                     }
                 }
                 (None, None)
             }
 
-            "message_stop" => {
+            "message_start" | "message_stop" => {
                 self.reset();
                 (None, None)
             }
@@ -860,7 +794,6 @@ impl StreamParser {
             }
         }
 
-        // Commit a UUID once per session, only for a text-bearing user prompt.
         if has_text && !has_tool_result {
             if let Some(id) = message["id"].as_str() {
                 if !id.is_empty() && !self.committed_user_uuids.contains(id) {
@@ -878,7 +811,6 @@ impl StreamParser {
             }
         }
 
-        // One user line can carry several tool_result blocks; each emits a chunk.
         let mut chunks = Vec::new();
         let mut log_lines = Vec::new();
         for block in blocks {
@@ -895,7 +827,6 @@ impl StreamParser {
             };
             let is_error = block["is_error"].as_bool().unwrap_or(false);
 
-            // content can be a string or an array of content blocks
             let result_content = if let Some(s) = block["content"].as_str() {
                 s.to_string()
             } else if let Some(arr) = block["content"].as_array() {
@@ -931,35 +862,35 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        // Consume the pending uuid up-front so an error turn (which short-circuits
-        // below) doesn't leak it onto the next turn.
         let assistant_uuid = self.pending_assistant_uuid.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
 
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
-            if result_text.trim().is_empty() {
-                // `is_error=true` with empty `result`: placeholder chunk + DEBUG log.
+            let error_text = if result_text.trim().is_empty() {
                 log::warn!(
                     "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
                 );
                 log::debug!("empty-error result payload: {parsed}");
-                return (
-                    Some(StreamChunk::Error {
-                        content: "The LLM returned an error without details. \
-                             Check the provider server logs or try a different model."
-                            .to_string(),
-                    }),
-                    None,
-                );
-            }
+                "The LLM returned an error without details. \
+                     Check the provider server logs or try a different model."
+                    .to_string()
+            } else {
+                log::warn!("turn ended with an API error: {result_text}");
+                result_text.to_string()
+            };
+            let log_message = format!("error: {error_text}");
             return (
                 Some(StreamChunk::Error {
-                    content: result_text.to_string(),
+                    content: error_text,
+                    turn_ended: true,
                 }),
-                None,
+                Some(LogEntry {
+                    prefix: "RESULT",
+                    message: log_message,
+                }),
             );
         }
 
@@ -968,36 +899,28 @@ impl StreamParser {
             log::warn!("result message missing 'session_id'");
         }
 
-        // Cost: prefer total_cost_usd (real CLI), fall back to total_cost (legacy)
         let total_cost = parsed["total_cost_usd"]
             .as_f64()
             .or_else(|| parsed["total_cost"].as_f64());
 
-        // modelUsage: cumulative per-model stats; used for contextWindow + model id.
         let model_usage = parsed["modelUsage"].as_object();
-        // contextWindow from the dominant model (highest outputTokens).
-        let context_window_size = model_usage
-            .and_then(|mu| {
-                mu.values()
-                    .max_by_key(|stats| stats["outputTokens"].as_u64().unwrap_or(0))
-            })
-            .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Model with the most output tokens; falls back to last SystemInit model.
-        let model = model_usage
-            .and_then(|mu| {
-                mu.iter()
-                    .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
-                    .map(|(k, _)| k.clone())
-            })
-            .or_else(|| self.last_model.clone());
-        // Keep `last_model` in sync for turns without modelUsage.
-        if let Some(m) = model.as_deref() {
-            self.last_model = Some(m.to_string());
+        let model = self
+            .model_tracker
+            .resolve()
+            .map(str::to_string)
+            .or_else(|| dominant_model_by_output_tokens(model_usage));
+        if self.model_tracker.resolve().is_none() {
+            if let Some(m) = model.as_deref() {
+                self.model_tracker.observe_assistant(m);
+            }
         }
 
-        // Option-preserving reader (absent cache fields stay `None` for the UI);
-        // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
+        let context_window_size = model
+            .as_deref()
+            .and_then(|m| model_usage.and_then(|mu| mu.get(m)))
+            .and_then(|stats| stats["contextWindow"].as_u64());
+
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
             Some(Box::new(UsageInfo {
@@ -1014,20 +937,17 @@ impl StreamParser {
             None
         };
 
-        // Per-turn usage: see `compute_turn_usage_from_result`.
         let turn_usage = compute_turn_usage_from_result(
             parsed,
             usage.as_deref(),
             &mut self.previous_session_usage,
         );
 
-        // Per-turn cost = `total_cost_usd` delta vs snapshot, or `total_cost` on turn 1.
         let turn_cost = match (total_cost, self.previous_session_cost) {
             (Some(current), Some(prev)) if current >= prev => Some(current - prev),
             (Some(current), None) => Some(current),
             _ => None,
         };
-        // Update the cumulative cost snapshot for the next turn.
         if let Some(t) = total_cost {
             self.previous_session_cost = Some(t);
         }
@@ -1059,40 +979,45 @@ impl StreamParser {
         )
     }
 
-    /// Parse a rate_limit_event from Claude Code.
-    /// Extracts status, utilization percentage, and reset timestamp.
     fn parse_rate_limit_event(
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
-        let utilization = info["utilization"].as_f64();
-        // Read the reset timestamp as both `resetsAt` and `resets_at`.
+        let rate_limit_type = info["rateLimitType"].as_str().map(str::to_string);
+        let utilization_percent = info["utilization"]
+            .as_f64()
+            .and_then(utilization_fraction_to_percent);
         let resets_at = info["resetsAt"]
             .as_u64()
             .or_else(|| info["resets_at"].as_u64());
+        let overage_status = info["overageStatus"].as_str().map(str::to_string);
+        let is_using_overage = info["isUsingOverage"].as_bool();
 
         let log_entry = Some(LogEntry {
             prefix: "RATE_LIMIT",
             message: format!(
-                "status={status} utilization={} resets_at={}",
-                utilization.map_or("none".to_string(), |v| format!("{v:.1}")),
+                "status={status} type={} utilization={} resets_at={} overage={}",
+                rate_limit_type.as_deref().unwrap_or("none"),
+                utilization_percent.map_or("none".to_string(), |v| format!("{v:.0}%")),
                 resets_at.map_or("none".to_string(), |v| v.to_string()),
+                overage_status.as_deref().unwrap_or("none"),
             ),
         });
 
         (
             Some(StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
+                overage_status,
+                is_using_overage,
             }),
             log_entry,
         )
     }
 
-    /// Patterns that indicate a system message should be surfaced to the
-    /// user as an error (rate limits, billing, context limits).
     const ACTIONABLE_PATTERNS: &'static [&'static str] = &[
         "hit your limit",
         "rate limit",
@@ -1103,14 +1028,10 @@ impl StreamParser {
         "Error:",
     ];
 
-    /// Parse system messages, surfacing rate-limit and other actionable ones
-    /// as errors so the frontend can display them.
     fn parse_system_message(
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        // ── Extract model + session id from system init message ──
-        // Check BEFORE the message.is_empty() early return (init may lack `message`).
         if parsed["subtype"].as_str() == Some("init") {
             let session_id = parsed["session_id"]
                 .as_str()
@@ -1118,8 +1039,7 @@ impl StreamParser {
                 .map(String::from);
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
-                    // Cache the model for subsequent result chunks.
-                    self.last_model = Some(model.to_string());
+                    self.model_tracker.observe_init(model);
                     let log_entry = Some(LogEntry {
                         prefix: "SYSTEM",
                         message: format!("init: model={model}"),
@@ -1133,7 +1053,6 @@ impl StreamParser {
                     );
                 }
             }
-            // Model missing/empty — still surface the session id (ADR-045 first-turn queue).
             if session_id.is_some() {
                 return (
                     Some(StreamChunk::SystemInit {
@@ -1148,7 +1067,6 @@ impl StreamParser {
             }
         }
 
-        // System messages carry text in either `message` or `content`
         let message = parsed["message"]
             .as_str()
             .or_else(|| parsed["content"].as_str())
@@ -1171,18 +1089,25 @@ impl StreamParser {
             (
                 Some(StreamChunk::Error {
                     content: message.to_string(),
+                    turn_ended: false,
                 }),
                 log_entry,
             )
         } else {
-            // Log but don't surface non-actionable system messages
             (None, log_entry)
         }
     }
 }
 
-/// Per-turn usage from a `result`, advancing the snapshot in place. Source:
-/// flat `usage` (accumulated) or `modelUsage` (delta); `None` if absent.
+fn utilization_fraction_to_percent(fraction: f64) -> Option<f64> {
+    if (0.0..=1.0).contains(&fraction) {
+        Some(fraction * 100.0)
+    } else {
+        log::debug!("ignored a rate_limit_event utilization outside the 0-1 fraction: {fraction}");
+        None
+    }
+}
+
 fn compute_turn_usage_from_result(
     parsed: &serde_json::Value,
     flat: Option<&UsageInfo>,
@@ -1200,15 +1125,12 @@ fn compute_turn_usage_from_result(
             .saturating_add(delta.cache_write_tokens);
         return Some(delta);
     }
-    // Fallback: only `modelUsage` is present — delta against the snapshot.
     let cumulative = extract_cumulative_usage(parsed)?;
     let delta = TurnUsage::delta(&cumulative, snapshot);
     *snapshot = cumulative;
     Some(delta)
 }
 
-/// Sum `modelUsage` across models into one cumulative snapshot; `None` when
-/// no `modelUsage` object or its values lack usage fields.
 fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     let model_usage = parsed["modelUsage"].as_object()?;
     if model_usage.is_empty() {
@@ -1236,11 +1158,18 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     }
 }
 
-/// 1 MiB cap on serialized user-message JSON — wire is text-only after
-/// ADR-065; images go through `<project>/.speedwave/pastes/` + `@…` refs.
+fn dominant_model_by_output_tokens(
+    model_usage: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    model_usage.and_then(|mu| {
+        mu.iter()
+            .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
+            .map(|(k, _)| k.clone())
+    })
+}
+
 pub const MAX_WIRE_BYTES: usize = 1024 * 1024;
 
-/// Text-only wire content block (ADR-065). `@/workspace/...` refs are inlined as text.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireContentBlock {
@@ -1251,8 +1180,6 @@ pub fn text_only(text: impl Into<String>) -> Vec<WireContentBlock> {
     vec![WireContentBlock::Text { text: text.into() }]
 }
 
-/// True when the blocks carry nothing but whitespace or a lone `/` (the
-/// slash-menu trigger, not a message — sending it spawns a junk session).
 pub fn is_blank_or_slash_only(blocks: &[WireContentBlock]) -> bool {
     let joined: String = blocks
         .iter()
@@ -1261,7 +1188,6 @@ pub fn is_blank_or_slash_only(blocks: &[WireContentBlock]) -> bool {
     joined.trim().is_empty() || speedwave_runtime::slash::is_bare_slash(&joined)
 }
 
-/// Stream-json user envelope: `{"type":"user","message":{"role":"user","content":[...]}}`.
 pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     serde_json::json!({
         "type": "user",
@@ -1272,7 +1198,135 @@ pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     })
 }
 
-/// Auto-approve response for non-AskUserQuestion tools.
+fn soft_impose_target(
+    kind: speedwave_runtime::config::LlmProviderKind,
+    entry_id: &str,
+    entry_model: Option<&str>,
+    observed_model: &str,
+) -> Option<String> {
+    if kind.is_anthropic() {
+        return None;
+    }
+    let model = entry_model?;
+    let expected = speedwave_runtime::model_id::wire_model_id(kind, entry_id, model);
+    let observed = speedwave_runtime::model_id::normalize_observed(observed_model, entry_id);
+    if observed == speedwave_runtime::model_id::normalize_observed(&expected, entry_id) {
+        return None;
+    }
+    Some(expected)
+}
+
+struct SoftImposeConfig {
+    kind: speedwave_runtime::config::LlmProviderKind,
+    entry_id: String,
+    entry_model: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct ModelSettled(Arc<std::sync::atomic::AtomicBool>);
+
+impl ModelSettled {
+    fn settle(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_settled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn settles_model(text: &str) -> bool {
+    matches!(
+        speedwave_runtime::slash::parse_control_command(text),
+        Some(("model", _))
+    )
+}
+
+fn soft_impose_step(
+    line: &serde_json::Value,
+    chunks: &[StreamChunk],
+    cfg: &SoftImposeConfig,
+    settled: &ModelSettled,
+    control: &ControlChannel,
+    stdin: &Mutex<impl Write>,
+) -> Option<(control_channel::PendingControl, String)> {
+    if !chunks
+        .iter()
+        .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
+    {
+        return None;
+    }
+    let observed = line["model"].as_str().filter(|s| !s.is_empty())?;
+    let model = soft_impose_target(
+        cfg.kind,
+        &cfg.entry_id,
+        cfg.entry_model.as_deref(),
+        observed,
+    )?;
+    let pending = send_soft_impose(stdin, control, settled, &model)?;
+    Some((pending, model))
+}
+
+fn send_soft_impose(
+    stdin: &Mutex<impl Write>,
+    control: &ControlChannel,
+    settled: &ModelSettled,
+    model: &str,
+) -> Option<control_channel::PendingControl> {
+    let Ok(mut handle) = stdin.lock() else {
+        log::error!("stdin mutex poisoned; dropping the soft-impose");
+        return None;
+    };
+    if settled.is_settled() {
+        return None;
+    }
+    settled.settle();
+    match control.send_set_model(&mut *handle, model) {
+        Ok(pending) => {
+            log::info!("soft-imposing {model} with a set_model control request");
+            Some(pending)
+        }
+        Err(e) => {
+            log::error!("the soft-impose set_model request was not written: {e}");
+            None
+        }
+    }
+}
+
+pub(crate) struct ModelSwitch {
+    control: ControlChannel,
+    stdin: Arc<Mutex<std::process::ChildStdin>>,
+    settled: ModelSettled,
+}
+
+impl ModelSwitch {
+    pub(crate) fn apply(&self, model: &str) -> Result<(), control_channel::ControlError> {
+        send_model_pick(&self.stdin, &self.control, &self.settled, model)?
+            .wait(control_channel::SET_MODEL_TIMEOUT)
+            .map(|_| ())
+    }
+}
+
+fn send_model_pick(
+    stdin: &Mutex<impl Write>,
+    control: &ControlChannel,
+    settled: &ModelSettled,
+    model: &str,
+) -> Result<control_channel::PendingControl, control_channel::ControlError> {
+    let mut handle = stdin
+        .lock()
+        .map_err(|e| control_channel::ControlError::Write(format!("stdin lock poisoned: {e}")))?;
+    settled.settle();
+    control.send_set_model(&mut *handle, model)
+}
+
+fn report_soft_impose(pending: control_channel::PendingControl, model: &str) {
+    match pending.wait(control_channel::SET_MODEL_TIMEOUT) {
+        Ok(_) => log::info!("Claude Code switched the session to {model}"),
+        Err(e) => log::warn!("the soft-impose to {model} did not apply: {e}"),
+    }
+}
+
 pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
     serde_json::json!({
         "type": "control_response",
@@ -1287,8 +1341,6 @@ pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Valu
     })
 }
 
-/// AskUserQuestion response: full answers map (question text → chosen label)
-/// with `questions` preserved in `updatedInput`; fails closed on duplicate text.
 fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<serde_json::Value> {
     let mut updated_input = partial.request.input.clone();
     let mut answers = serde_json::Map::with_capacity(partial.questions.len());
@@ -1326,8 +1378,6 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
     }))
 }
 
-/// Validate a `--resume-session-at` UUID: non-empty bounded `[A-Za-z0-9_-]`
-/// (API `msg_...` + UUID v4); rejects shell metacharacters/whitespace/traversal.
 pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     if uuid.is_empty() {
         anyhow::bail!("retry uuid must not be empty");
@@ -1335,7 +1385,6 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     if uuid.len() > 128 {
         anyhow::bail!("retry uuid too long (max 128 chars)");
     }
-    // Allow [A-Za-z0-9_-] only.
     for ch in uuid.chars() {
         if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
             anyhow::bail!("retry uuid contains invalid character: {ch:?}");
@@ -1344,8 +1393,16 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build Claude Code's stream-json argv: `env SPW_SESSION_INSTANCE_ID=<id>` for
-/// reap, plus `--resume`/`--resume-session-at` from the resume args (ADR-046).
+fn launch_effort_level(
+    user_config: &config::SpeedwaveUserConfig,
+    project_name: &str,
+) -> Option<String> {
+    user_config
+        .find_project(project_name)
+        .and_then(|p| p.effort_pin.clone())
+        .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
+}
+
 pub fn build_claude_args(
     instance_id: &str,
     resume_session_id: Option<&str>,
@@ -1383,19 +1440,14 @@ pub fn build_claude_args(
     args
 }
 
-/// Build the container name for a project's Claude container.
 pub fn claude_container_name(project: &str) -> String {
     claude_container_name_with_prefix(consts::compose_prefix(), project)
 }
 
-/// Parameterised by `prefix` so unit tests avoid the `consts::compose_prefix()`
-/// `OnceLock`, which resolves the process-global `data_dir()` basename.
 fn claude_container_name_with_prefix(prefix: &str, project: &str) -> String {
     format!("{prefix}_{project}_claude")
 }
 
-/// Container + marker-scoped kill argv for a reap exec. Pure (testable without
-/// a runtime); [`ChatSession::reap_instance`] runs it.
 fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
     (
         claude_container_name(project),
@@ -1403,79 +1455,172 @@ fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
     )
 }
 
-/// Build the stream-json `control_request` payload for an interrupt.
 fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "type": MSG_TYPE_CONTROL_REQUEST,
+        "type": control_channel::MSG_TYPE_CONTROL_REQUEST,
         "request_id": request_id,
         "request": { "subtype": CTRL_SUBTYPE_INTERRUPT },
     })
 }
 
-/// Monotonic interrupt request_id (Claude requires uniqueness; we never
-/// correlate the response, so a counter is enough — no UUID dependency).
 fn next_interrupt_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     format!("req_interrupt_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Write a control_request payload + flush. Extracted so tests can assert
-/// the exact bytes against an in-memory writer.
 fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::Result<()> {
     writeln!(w, "{}", payload)?;
     w.flush()?;
     Ok(())
 }
 
-/// Manages a Claude Code subprocess in the container (via `container_exec`);
-/// a background thread parses stdout and emits Tauri events directly.
+fn consume_control_response(control: &ControlChannel, parsed: &serde_json::Value) -> bool {
+    if parsed["type"].as_str() != Some(control_channel::MSG_TYPE_CONTROL_RESPONSE) {
+        return false;
+    }
+    control.route_response(parsed);
+    true
+}
+
+fn emit_session_info(app_handle: &AppHandle, project: &str, status: SessionInfoState) {
+    let event = SessionInfoEvent {
+        project: project.to_string(),
+        status,
+    };
+    if let Err(e) = app_handle.emit(control_channel::SESSION_INFO_EVENT, event) {
+        log::warn!("failed to emit the chat session info event: {e}");
+    }
+}
+
+fn probe_session_info(
+    query: impl FnOnce() -> Result<serde_json::Value, control_channel::ControlError>,
+    slot: &Mutex<SessionInfoState>,
+    stopping: &std::sync::atomic::AtomicBool,
+) -> Option<SessionInfoState> {
+    let status = control_channel::session_info_state_from(query());
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = status.clone();
+    Some(status)
+}
+
+#[derive(Clone)]
+struct AwaitedResult(Arc<std::sync::atomic::AtomicBool>);
+
+impl AwaitedResult {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    }
+
+    fn observe(&self, chunks: &[StreamChunk]) {
+        if chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }))
+        {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        } else if !chunks.is_empty() {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn message_written(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_awaited(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedSpawn {
+    pub args: Vec<String>,
+    pub container: String,
+    pub with_effort: bool,
+}
+
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
     shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     pending_requests: PendingRequests,
+    control: ControlChannel,
+    session_info: Arc<Mutex<SessionInfoState>>,
     drain_handles: Vec<std::thread::JoinHandle<()>>,
-    /// Set to `Some` only after a successful spawn — guards `stop()` log entry.
     session_log_path: Option<std::path::PathBuf>,
-    /// Env marker of the spawned in-container process; lets `stop()` reap
-    /// exactly this one, not other CLI/UI sessions sharing the container.
     instance_id: Option<String>,
-    /// Set by `stop()` so the reader thread stays silent on a deliberate EOF
-    /// instead of reporting a crash. Reset on each fresh spawn.
+    launched_with_effort: bool,
     stopping: Arc<std::sync::atomic::AtomicBool>,
+    awaited_result: AwaitedResult,
+    model_settled: ModelSettled,
 }
 
 impl ChatSession {
-    /// Create a new session for the given project.
     pub fn new(project_name: &str) -> Self {
         Self {
             child: None,
             project_name: project_name.to_string(),
             shared_stdin: None,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            control: ControlChannel::default(),
+            session_info: Arc::new(Mutex::new(SessionInfoState::Unavailable)),
             drain_handles: Vec::new(),
             session_log_path: None,
             instance_id: None,
+            launched_with_effort: false,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            awaited_result: AwaitedResult::new(),
+            model_settled: ModelSettled::default(),
         }
     }
 
-    /// Read-only owning project name — the retry command reconstructs an empty
-    /// `ChatSession` from it after stopping the old one.
     pub fn project_name(&self) -> &str {
         &self.project_name
     }
 
-    /// Build the argv + container name for a spawn; `resume_session_id` adds
-    /// `--resume`, `resume_at_uuid` adds `--resume-session-at` (ADR-046).
+    pub(crate) fn control_handle(&self) -> anyhow::Result<ControlHandle> {
+        let stdin = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
+    }
+
+    pub(crate) fn model_switch(&self) -> anyhow::Result<ModelSwitch> {
+        let stdin = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        Ok(ModelSwitch {
+            control: self.control.clone(),
+            stdin: stdin.clone(),
+            settled: self.model_settled.clone(),
+        })
+    }
+
+    pub(crate) fn takes_wire_effort(&mut self) -> bool {
+        self.launched_with_effort
+            && matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)))
+    }
+
+    pub(crate) fn session_info_state(&self) -> SessionInfoState {
+        self.session_info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
         instance_id: &str,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
-    ) -> anyhow::Result<(Vec<String>, String)> {
+    ) -> anyhow::Result<PreparedSpawn> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
         }
@@ -1487,19 +1632,26 @@ impl ChatSession {
 
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
-        let args = build_claude_args(
-            instance_id,
-            resume_session_id,
-            resume_at_uuid,
-            &resolved.flags,
-        );
+        let mut flags = resolved.flags.clone();
+        let launch_effort = launch_effort_level(user_config, project_name);
+        if let Some(level) = &launch_effort {
+            flags.push("--effort".to_string());
+            flags.push(level.clone());
+        }
+
+        let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 
-        Ok((args, container))
+        #[cfg(feature = "e2e")]
+        crate::e2e_support::record_spawn_args(&args);
+
+        Ok(PreparedSpawn {
+            args,
+            container,
+            with_effort: launch_effort.is_some(),
+        })
     }
 
-    /// Start Claude Code in stream-json mode, spawning a stdout reader thread
-    /// that emits `chat_stream`. Precondition: container health already verified.
     pub fn start(
         &mut self,
         app_handle: AppHandle,
@@ -1508,8 +1660,6 @@ impl ChatSession {
         self.start_with_retry(app_handle, resume_session_id, None)
     }
 
-    /// Start (or resume+retry) a session. `resume_at_uuid` rewinds to that
-    /// user-message UUID (ADR-046) and MUST pair with `resume_session_id`.
     pub fn start_with_retry(
         &mut self,
         app_handle: AppHandle,
@@ -1517,19 +1667,49 @@ impl ChatSession {
         resume_at_uuid: Option<&str>,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
+        crate::pin_cmd::ensure_effort_pin_migrated_in(
+            speedwave_runtime::consts::data_dir(),
+            &self.project_name,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
         let user_config = config::load_user_config()?;
 
-        // Reap a prior leaked process for this session before spawning a new one.
         self.reap_instance();
 
         let instance_id = speedwave_runtime::session::new_instance_id();
-        let (args, container) = Self::prepare_args(
+        let PreparedSpawn {
+            args,
+            container,
+            with_effort,
+        } = Self::prepare_args(
             &self.project_name,
             &user_config,
             &instance_id,
             resume_session_id,
             resume_at_uuid,
         )?;
+
+        let soft_impose_cfg = {
+            let project_dir =
+                std::path::PathBuf::from(&user_config.require_project(&self.project_name)?.dir);
+            let resolved =
+                config::resolve_claude_config(&project_dir, &user_config, &self.project_name);
+            match resolved.llm.active_provider() {
+                Some(entry) => SoftImposeConfig {
+                    kind: entry.kind,
+                    entry_id: entry.id.clone(),
+                    entry_model: entry.model.clone(),
+                },
+                None => SoftImposeConfig {
+                    kind: config::LlmProviderKind::AnthropicOauth,
+                    entry_id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                    entry_model: None,
+                },
+            }
+        };
+
+        let provider_kind = soft_impose_cfg.kind;
+        let asks_claude_code_for_session_info = provider_kind.is_anthropic();
 
         let mut cmd = rt.container_exec_piped(
             &container,
@@ -1542,9 +1722,8 @@ impl ChatSession {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        // Record the marker only after a confirmed spawn (no id for a missing
-        // process); fresh spawn means this reader must report real EOFs.
         self.instance_id = Some(instance_id);
+        self.launched_with_effort = with_effort;
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -1559,8 +1738,19 @@ impl ChatSession {
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin from child process"))?;
         let shared_stdin = Arc::new(Mutex::new(stdin));
         self.shared_stdin = Some(shared_stdin.clone());
+        self.control = ControlChannel::default();
+        self.session_info = Arc::new(Mutex::new(if asks_claude_code_for_session_info {
+            SessionInfoState::Pending
+        } else {
+            SessionInfoState::Unavailable
+        }));
+        let session_info_probe = asks_claude_code_for_session_info.then(|| {
+            (
+                app_handle.clone(),
+                ControlHandle::new(self.control.clone(), shared_stdin.clone()),
+            )
+        });
 
-        // Best-effort session log init — errors here do NOT kill the session
         let session_log_path = {
             let path = consts::claude_session_log_path(&self.project_name);
             if let Some(parent) = path.parent() {
@@ -1573,8 +1763,6 @@ impl ChatSession {
         };
         self.session_log_path = session_log_path.clone();
 
-        // Spawn stderr reader to log errors (avoids pipe buffer deadlock);
-        // each reader opens its own O_APPEND handle to the session log.
         let stderr_log_path = session_log_path.clone();
         if let Some(stderr) = child.stderr.take() {
             let h = std::thread::spawn(move || {
@@ -1603,17 +1791,18 @@ impl ChatSession {
         }
 
         let pending_requests = self.pending_requests.clone();
+        let control_for_reader = self.control.clone();
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
+        self.awaited_result = AwaitedResult::new();
+        let awaited_for_reader = self.awaited_result.clone();
+        self.model_settled = ModelSettled::default();
+        let settled_for_reader = self.model_settled.clone();
 
-        // Loaded once per turn/session (never per-chunk); `None` when the project has
-        // no PII policy/key, making every detokenize call downstream a no-op.
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
-        // On resume: seed cumulative session state from the transcript so the
-        // first turn reports a real delta. Non-fatal — log and use a zero baseline.
         let resume_seed = resume_session_id.and_then(|id| {
             match history::compute_resume_snapshot(&self.project_name, id) {
                 Ok(s) => Some(s),
@@ -1624,7 +1813,6 @@ impl ChatSession {
             }
         });
 
-        // Background thread: parse Claude's stream-json and emit Tauri events
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
             if let Some(seed) = resume_seed {
@@ -1644,7 +1832,6 @@ impl ChatSession {
                 .as_deref()
                 .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
-            let mut got_result = false;
             let mut http_collator = speedwave_runtime::http_debug_collator::Collator::new();
             for line in reader.lines() {
                 let line = match line {
@@ -1655,7 +1842,6 @@ impl ChatSession {
                     }
                 };
 
-                // Parse JSON once; non-JSON lines are collated by `http_collator`.
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
                     Err(_) => {
@@ -1672,7 +1858,10 @@ impl ChatSession {
 
                 let msg_type = parsed["type"].as_str().unwrap_or("");
 
-                // 1. Check for control_request
+                if consume_control_response(&control_for_reader, &parsed) {
+                    continue;
+                }
+
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
@@ -1703,6 +1892,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
+                                        turn_ended: false,
                                     },
                                     &display_policy,
                                 );
@@ -1719,7 +1909,6 @@ impl ChatSession {
                             &display_policy,
                         );
                     } else {
-                        // Auto-approve non-AskUserQuestion tools
                         let response = build_auto_approve_response(&ctrl);
                         match stdin_for_reader.lock() {
                             Ok(mut stdin) => {
@@ -1733,6 +1922,7 @@ impl ChatSession {
                                             content: format!(
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
+                                            turn_ended: false,
                                         },
                                         &display_policy,
                                     );
@@ -1748,6 +1938,7 @@ impl ChatSession {
                                             content: format!(
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
+                                            turn_ended: false,
                                         },
                                         &display_policy,
                                     );
@@ -1760,6 +1951,7 @@ impl ChatSession {
                                     &app_handle,
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
+                                        turn_ended: false,
                                     },
                                     &display_policy,
                                 );
@@ -1770,7 +1962,6 @@ impl ChatSession {
                     continue;
                 }
 
-                // Undecodable control_request: surface the likely stall, no wire response.
                 if msg_type == "control_request" {
                     log::warn!(
                         "unrecognized control_request shape; not auto-responding (turn may stall)"
@@ -1783,7 +1974,6 @@ impl ChatSession {
                     continue;
                 }
 
-                // 2. Normal stream events
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
                     speedwave_runtime::log_file::write_log_line(
@@ -1791,7 +1981,6 @@ impl ChatSession {
                         entry.prefix,
                         &entry.message,
                     );
-                    // On stream-protocol markers, flush pending debug response fragments.
                     if matches!(entry.prefix, "RESULT" | "SYSTEM" | "SESSION" | "RATE_LIMIT") {
                         for merged in http_collator.flush_all_pending_responses() {
                             speedwave_runtime::log_file::write_log_line(
@@ -1802,61 +1991,102 @@ impl ChatSession {
                         }
                     }
                 }
-                // Track terminal events to emit a fallback error on unexpected EOF.
-                let is_terminal = chunks
-                    .iter()
-                    .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
-                // Capture session_id from a Result chunk before the emit loop consumes `chunks`.
+                if let Some((pending, model)) = soft_impose_step(
+                    &parsed,
+                    &chunks,
+                    &soft_impose_cfg,
+                    &settled_for_reader,
+                    &control_for_reader,
+                    &stdin_for_reader,
+                ) {
+                    std::thread::spawn(move || report_soft_impose(pending, &model));
+                }
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
-                if is_terminal || msg_type == "system" {
-                    got_result = true;
-                    // Clear per-turn state (interrupts emit Result with no message_stop).
-                    parser.reset();
-                }
+                awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
                     emit_sanitized_chunk(&app_handle, chunk, &display_policy);
                 }
-                // ADR-045 drain: after Result chunks emit, write any queued message to stdin.
                 if let Some(session_id) = result_session_id {
-                    drain_queued_message(
+                    if drain_queued_message(
                         &app_handle,
                         &session_id,
                         &stdin_for_reader,
+                        &settled_for_reader,
                         &display_policy,
-                    );
+                    ) {
+                        awaited_for_reader.message_written();
+                    }
                 }
             }
 
             if let Some(entry) = http_collator.flush() {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
+            control_for_reader.fail_all();
 
-            // EOF without a result: surface a crash — but not when `stop()` tore
-            // this session down deliberately (that EOF is ours, not a crash).
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
-            if !got_result && !stopping {
+            if awaited_for_reader.is_awaited() && !stopping {
                 log::warn!("stdout reader stream ended without result");
                 let chunk = StreamChunk::Error {
                     content:
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
+                    turn_ended: false,
                 };
                 emit_sanitized_chunk(&app_handle, chunk, &display_policy);
             }
         });
         self.drain_handles.push(h);
 
+        if let Some((probe_app_handle, handle)) = session_info_probe {
+            let project = self.project_name.clone();
+            let slot = self.session_info.clone();
+            let stopping = self.stopping.clone();
+            emit_session_info(&probe_app_handle, &project, SessionInfoState::Pending);
+            let h = std::thread::spawn(move || {
+                let status =
+                    probe_session_info(|| handle.query(ControlQuery::Initialize), &slot, &stopping);
+                if let Some(status) = status {
+                    let info = match &status {
+                        SessionInfoState::Ready { info } => Some(info),
+                        SessionInfoState::Pending | SessionInfoState::Unavailable => None,
+                    };
+                    crate::model_picker::normalize_pin_for_session(
+                        consts::data_dir(),
+                        &project,
+                        provider_kind,
+                        info,
+                    );
+                    emit_session_info(&probe_app_handle, &project, status);
+                }
+            });
+            self.drain_handles.push(h);
+        }
+
         self.child = Some(child);
         Ok(())
     }
 
-    /// Send a user message to Claude (write JSON to stdin) in stream-json input
-    /// format. Errors if the subprocess has exited (broken pipe).
-    pub fn send_message(&mut self, blocks: &[WireContentBlock]) -> anyhow::Result<()> {
-        // Drop a bare `/` or blank before stdin — never reaches Claude.
+    pub fn send_message(
+        &mut self,
+        app_handle: &tauri::AppHandle,
+        blocks: &[WireContentBlock],
+    ) -> anyhow::Result<()> {
+        let display_policy =
+            crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
+        self.send_message_with_emit(blocks, |chunk| {
+            emit_sanitized_chunk(app_handle, chunk, &display_policy)
+        })
+    }
+
+    fn send_message_with_emit(
+        &mut self,
+        blocks: &[WireContentBlock],
+        mut emit: impl FnMut(StreamChunk),
+    ) -> anyhow::Result<()> {
         if is_blank_or_slash_only(blocks) {
             anyhow::bail!("empty message");
         }
@@ -1866,7 +2096,6 @@ impl ChatSession {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no active session"))?;
 
-        // Check if process is still alive
         if let Some(status) = child.try_wait()? {
             self.child = None;
             if speedwave_runtime::resources::is_oom_exit(&status) {
@@ -1888,6 +2117,7 @@ impl ChatSession {
                 MAX_WIRE_BYTES
             );
         }
+
         log::info!(
             "sending user message: serialized={} bytes, blocks={}",
             serialized.len(),
@@ -1896,13 +2126,45 @@ impl ChatSession {
         let mut stdin = shared
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+        if matches!(blocks, [WireContentBlock::Text { text }] if settles_model(text)) {
+            self.model_settled.settle();
+        }
         writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
+        drop(stdin);
+        self.awaited_result.message_written();
+
+        if let [WireContentBlock::Text { text }] = blocks {
+            if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text)
+            {
+                emit(StreamChunk::ControlChip {
+                    command: command.to_string(),
+                    argument: argument.to_string(),
+                    uuid: None,
+                });
+            }
+        }
         Ok(())
     }
 
-    /// Record one slot's answer; once every slot is filled, write a single
-    /// `control_response` to stdin. Post-fill errors clear the slot for retry.
+    #[cfg(test)]
+    pub(crate) fn set_test_process(&mut self, child: Child, launched_with_effort: bool) {
+        self.child = Some(child);
+        self.launched_with_effort = launched_with_effort;
+    }
+
+    #[cfg(test)]
+    fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
+        self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
+        self.child = Some(spawn_test_child(TestChild::Blocked));
+    }
+
+    #[cfg(test)]
+    fn set_test_stdin_broken_pipe(&mut self) {
+        self.shared_stdin = Some(Arc::new(Mutex::new(test_broken_pipe_stdin())));
+        self.child = Some(spawn_test_child(TestChild::Blocked));
+    }
+
     pub fn submit_question_answer(
         &mut self,
         tool_use_id: &str,
@@ -1972,8 +2234,6 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Apply one answer to the pending entry. Validation errors restore the
-    /// entry so a later retry with a valid index/value still works.
     fn fill_slot(
         &self,
         tool_use_id: &str,
@@ -2000,8 +2260,6 @@ impl ChatSession {
         Ok(FillOutcome::Completed(entry))
     }
 
-    /// Best-effort re-insert of a `PartialAnswers` after a failure (logs on
-    /// poison); `cleared_idx` reverts that slot to `None` for re-submission.
     fn restore_partial(
         &self,
         tool_use_id: &str,
@@ -2024,10 +2282,7 @@ impl ChatSession {
         }
     }
 
-    /// Cancel the current turn without killing the session: writes a
-    /// `subtype: "interrupt"` control_request; Claude aborts but stays ready.
     pub fn interrupt(&mut self) -> anyhow::Result<()> {
-        // Detect an already-exited child for a clean "session exited"/OOM error.
         if let Some(child) = self.child.as_mut() {
             if let Some(status) = child.try_wait()? {
                 self.child = None;
@@ -2054,8 +2309,6 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Kill the orphaned in-container process for `self.instance_id` (host kill
-    /// doesn't propagate). Best-effort; no-op (no runtime detected) without an id.
     fn reap_instance(&mut self) {
         let Some(id) = self.instance_id.take() else {
             return;
@@ -2073,18 +2326,18 @@ impl ChatSession {
         }
     }
 
-    /// Stop the Claude subprocess entirely (session end, not turn cancel).
     pub fn stop(&mut self) -> anyhow::Result<()> {
-        // Mark deliberate teardown before EOF so the reader stays silent.
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Drop stdin first to signal EOF to the child
         self.shared_stdin = None;
-        // Reap the orphaned in-container process; self-disarms (no-op) without an id.
+        self.control.fail_all();
+        *self
+            .session_info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = SessionInfoState::Unavailable;
         self.reap_instance();
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
-            // Wait up to 5 s for exit, then abandon it (OS reaps).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match child.try_wait() {
@@ -2103,7 +2356,6 @@ impl ChatSession {
                 }
             }
         }
-        // Join finished reader threads; detach the rest after a grace window so `is_finished` can flip.
         const READER_GRACE_MS: u64 = 200;
         const READER_POLL_MS: u64 = 10;
         let reader_grace_deadline =
@@ -2114,7 +2366,6 @@ impl ChatSession {
             }
             let name = format!("{:?}", handle.thread().id());
             if !handle.is_finished() {
-                // Pipe wedged — detach so `stop()` returns in bounded time.
                 log::warn!(
                     "reader thread {name} still running after {READER_GRACE_MS}ms grace \
                      on stop, detaching"
@@ -2125,7 +2376,6 @@ impl ChatSession {
                 log::warn!("reader thread panicked during stop: {e:?}");
             }
         }
-        // Log session end ONLY if session actually started
         if let Some(ref log_path) = self.session_log_path {
             let mut f = speedwave_runtime::log_file::open_log_file(log_path);
             speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "stopped");
@@ -2144,50 +2394,140 @@ impl Drop for ChatSession {
     }
 }
 
-/// Thread-safe wrapper for ChatSession, to be used from Tauri commands.
 pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 
-/// Drain any queued message for `session_id` (ADR-045) and write it to `stdin`
-/// as the next turn (on a `Result` chunk). Best-effort: failures are logged.
 fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    settled: &ModelSettled,
     policy: &DisplayPolicy,
-) {
+) -> bool {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
         Some(m) => m,
-        None => return,
+        None => return false,
     };
-    // Queue is text-only (ADR-065).
-    let payload = build_user_message(&text_only(&drained.text));
+    write_and_emit_drained_message(session_id, &drained.text, stdin, settled, |chunk| {
+        emit_sanitized_chunk(app_handle, chunk, policy)
+    })
+}
+
+fn write_and_emit_drained_message(
+    session_id: &str,
+    text: &str,
+    stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    settled: &ModelSettled,
+    mut emit: impl FnMut(StreamChunk),
+) -> bool {
+    let payload = build_user_message(&text_only(text));
     match stdin.lock() {
         Ok(mut handle) => {
+            if settles_model(text) {
+                settled.settle();
+            }
             if let Err(e) = writeln!(handle, "{}", payload) {
                 log::warn!("failed to write queued message to stdin: {e}");
-                return;
+                return false;
             }
             if let Err(e) = handle.flush() {
                 log::warn!("failed to flush queued message to stdin: {e}");
-                return;
+                return false;
             }
         }
         Err(e) => {
             log::warn!("stdin lock poisoned while draining queued message: {e}");
-            return;
+            return false;
         }
     }
-    let drained_text = drained.text.clone();
-    emit_sanitized_chunk(
-        app_handle,
-        StreamChunk::QueueDrained {
-            session_id: session_id.to_string(),
-            text: drained.text,
-        },
-        policy,
-    );
-    log::debug!("queue drained: {} bytes for session", drained_text.len());
+    if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text) {
+        emit(StreamChunk::ControlChip {
+            command: command.to_string(),
+            argument: argument.to_string(),
+            uuid: None,
+        });
+    }
+    emit(StreamChunk::QueueDrained {
+        session_id: session_id.to_string(),
+        text: text.to_string(),
+    });
+    log::debug!("queue drained: {} bytes for session", text.len());
+    true
+}
+
+#[cfg(test)]
+fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
+    let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
+    #[cfg(unix)]
+    let stdin: std::process::ChildStdin = {
+        let fd: std::os::fd::OwnedFd = writer.into();
+        fd.into()
+    };
+    #[cfg(windows)]
+    let stdin: std::process::ChildStdin = {
+        let handle: std::os::windows::io::OwnedHandle = writer.into();
+        handle.into()
+    };
+    std::thread::spawn(move || {
+        let mut drained = buf;
+        let _ = std::io::Read::read_to_end(&mut reader, &mut drained);
+    });
+    stdin
+}
+
+#[cfg(test)]
+fn test_broken_pipe_stdin() -> std::process::ChildStdin {
+    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
+    drop(reader);
+    #[cfg(unix)]
+    let stdin: std::process::ChildStdin = {
+        let fd: std::os::fd::OwnedFd = writer.into();
+        fd.into()
+    };
+    #[cfg(windows)]
+    let stdin: std::process::ChildStdin = {
+        let handle: std::os::windows::io::OwnedHandle = writer.into();
+        handle.into()
+    };
+    stdin
+}
+
+#[cfg(test)]
+pub(crate) enum TestChild {
+    Blocked,
+    Exited,
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_test_child(kind: TestChild) -> Child {
+    #[cfg(unix)]
+    let mut command = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(match kind {
+            TestChild::Blocked => "read line",
+            TestChild::Exited => "exit 0",
+        });
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(match kind {
+            TestChild::Blocked => "pause",
+            TestChild::Exited => "exit 0",
+        });
+        c
+    };
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn test child");
+    if matches!(kind, TestChild::Exited) {
+        child.wait().expect("wait for the exiting test child");
+    }
+    child
 }
 
 #[cfg(test)]
@@ -2199,16 +2539,10 @@ fn drain_queued_message(
 mod tests {
     use super::*;
 
-    // -- sanitize_chunk: secrets must not reach the UI on any chunk channel --
-
-    /// Enforcement: the ONLY `emit("chat_stream", ...)` in production source is
-    /// inside emit_sanitized_chunk. A new raw emit elsewhere would leak.
     #[test]
     fn chat_stream_emits_go_through_helper() {
         let src = include_str!("chat.rs");
-        // Strip the test module so test-only emits don't count.
         let prod = src.split("\nmod tests {").next().unwrap_or(src);
-        // Count actual emit calls, ignoring doc/comment lines.
         let raw_emits = prod
             .lines()
             .filter(|l| {
@@ -2220,6 +2554,79 @@ mod tests {
             raw_emits, 1,
             "exactly one chat_stream emit allowed (inside emit_sanitized_chunk); \
              found {raw_emits} — a new raw emit bypasses sanitization"
+        );
+    }
+
+    #[test]
+    fn stdout_reader_never_resets_the_parser() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let resets = prod
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && t.contains("parser.reset()")
+            })
+            .count();
+        assert_eq!(
+            resets, 0,
+            "the stdout reader must not call parser.reset(); found {resets}"
+        );
+    }
+
+    fn ts_chunk_type_tags(union_body: &str) -> Vec<String> {
+        union_body
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.starts_with("/*") && !l.starts_with('*') && !l.starts_with("//"))
+            .flat_map(|l| {
+                l.split("chunk_type: '")
+                    .skip(1)
+                    .filter_map(|s| s.split('\'').next())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ts_chunk_type_tags_skips_comment_examples() {
+        let body = "  | {\n      /** e.g. { chunk_type: 'Foo' } */\n      chunk_type: 'Bar';\n    }\n  | { chunk_type: 'Baz'; data: { x: string } };";
+        assert_eq!(ts_chunk_type_tags(body), vec!["Bar", "Baz"]);
+    }
+
+    #[test]
+    fn stream_chunk_variant_set_matches_ts_union() {
+        let rust_src = include_str!("chat.rs");
+        let start = rust_src
+            .find("pub enum StreamChunk {")
+            .expect("chat.rs must declare `pub enum StreamChunk`");
+        let mut rust: Vec<String> = rust_src[start..]
+            .lines()
+            .skip(1)
+            .take_while(|l| *l != "}")
+            .filter(|l| l.starts_with("    ") && !l.starts_with("     "))
+            .map(|l| l.trim())
+            .filter(|l| !l.starts_with("//") && !l.starts_with('#'))
+            .filter_map(|l| l.split(|c: char| !c.is_alphanumeric()).next())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        rust.sort();
+
+        let ts_src = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "export type StreamChunk =";
+        let idx = ts_src
+            .find(marker)
+            .expect("chat.ts must declare `export type StreamChunk`");
+        let rest = &ts_src[idx + marker.len()..];
+        let union = &rest[..rest.find("\nexport ").unwrap_or(rest.len())];
+        let mut ts = ts_chunk_type_tags(union);
+        ts.sort();
+
+        assert_eq!(
+            rust, ts,
+            "TS StreamChunk union must mirror Rust StreamChunk variants"
         );
     }
 
@@ -2260,6 +2667,7 @@ mod tests {
             },
             StreamChunk::Error {
                 content: secret.into(),
+                turn_ended: false,
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -2280,7 +2688,6 @@ mod tests {
 
     #[test]
     fn sanitize_chunk_redacts_result_text() {
-        // result_text reaches the UI only via chat_stream — sanitize covers it.
         let chunk = StreamChunk::Result {
             session_id: "s".into(),
             total_cost: None,
@@ -2299,7 +2706,6 @@ mod tests {
 
     #[test]
     fn sanitize_chunk_leaves_tool_input_delta_untouched() {
-        // partial_json is incremental JSON — sanitizing could corrupt structure.
         let raw = r#"{"path":"/x","token":"abc"#;
         let chunk = StreamChunk::ToolInputDelta {
             tool_id: "t1".into(),
@@ -2313,7 +2719,20 @@ mod tests {
         }
     }
 
-    // -- detokenize_chunk: PII display detokenization at the emit chokepoint --
+    #[test]
+    fn sanitize_chunk_leaves_tool_input_complete_untouched() {
+        let raw = r#"{"path":"/x","token":"sk-ant-abcdefabcdefabcdefabcdef"}"#;
+        let chunk = StreamChunk::ToolInputComplete {
+            tool_id: "t1".into(),
+            input_json: raw.into(),
+        };
+        match sanitize_chunk(chunk) {
+            StreamChunk::ToolInputComplete { input_json, .. } => {
+                assert_eq!(input_json, raw, "input_json must be byte-identical");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
 
     fn detok_test_key(tmp: &std::path::Path, project: &str) -> speedwave_pii_engine::EngineKey {
         speedwave_runtime::pii_key::ensure_project_key_in(tmp, project)
@@ -2394,10 +2813,17 @@ mod tests {
         match detokenize_chunk(
             StreamChunk::Error {
                 content: tokenized.clone(),
+                turn_ended: true,
             },
             &policy,
         ) {
-            StreamChunk::Error { content } => assert_eq!(content, "secret@example.com"),
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
+                assert_eq!(content, "secret@example.com");
+                assert!(turn_ended, "detokenizing must keep the turn-end marker");
+            }
             other => panic!("variant changed: {other:?}"),
         }
     }
@@ -2506,6 +2932,23 @@ mod tests {
     }
 
     #[test]
+    fn detokenize_chunk_leaves_tool_input_complete_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let raw = r#"{"path":"/x","token":"abc"}"#;
+        let chunk = StreamChunk::ToolInputComplete {
+            tool_id: "t1".into(),
+            input_json: raw.into(),
+        };
+        match detokenize_chunk(chunk, &key_policy(key)) {
+            StreamChunk::ToolInputComplete { input_json, .. } => {
+                assert_eq!(input_json, raw);
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
     fn detokenize_chunk_unmasks_keyword_aliases_in_tool_results() {
         let policy = DisplayPolicy::new(
             None,
@@ -2526,8 +2969,6 @@ mod tests {
         }
     }
 
-    // -- interrupt protocol tests (behavioural via free helpers) --
-
     #[test]
     fn interrupt_without_active_session_errors() {
         let mut s = ChatSession::new("test-project");
@@ -2542,11 +2983,9 @@ mod tests {
 
     #[test]
     fn send_message_rejects_bare_slash_before_session_check() {
-        // The bare-slash guard runs before the active-session check: with no
-        // child the error is "empty message", proving it never reaches stdin.
         let mut s = ChatSession::new("test-project");
         let err = s
-            .send_message(&text_only("/"))
+            .send_message_with_emit(&text_only("/"), |_| {})
             .expect_err("bare slash must be rejected");
         assert!(
             err.to_string().contains("empty message"),
@@ -2556,10 +2995,9 @@ mod tests {
 
     #[test]
     fn send_message_allows_real_text_through_to_session_check() {
-        // Real text passes the guard and hits the no-active-session error.
         let mut s = ChatSession::new("test-project");
         let err = s
-            .send_message(&text_only("hej"))
+            .send_message_with_emit(&text_only("hej"), |_| {})
             .expect_err("no active session expected");
         assert!(
             err.to_string().contains("no active session"),
@@ -2568,13 +3006,353 @@ mod tests {
     }
 
     #[test]
+    fn send_message_matching_control_shape_emits_control_chip_after_stdin_write() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        let result =
+            session.send_message_with_emit(&text_only("/model claude-sonnet-5"), |chunk| {
+                emitted.push(chunk);
+            });
+        assert!(result.is_ok());
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0] {
+            StreamChunk::ControlChip {
+                command,
+                argument,
+                uuid,
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+                assert_eq!(
+                    uuid, &None,
+                    "no uuid available at send time - see Task 13 wire-fact note"
+                );
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_message_stdin_write_failure_propagates_error_and_emits_no_control_chip() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_broken_pipe();
+        let result =
+            session.send_message_with_emit(&text_only("/model claude-sonnet-5"), |chunk| {
+                emitted.push(chunk);
+            });
+        assert!(result.is_err(), "expected stdin write failure to propagate");
+        assert!(
+            emitted.is_empty(),
+            "expected no ControlChip on write failure, got {emitted:?}"
+        );
+    }
+
+    #[test]
+    fn send_message_plain_text_emits_no_control_chip() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("what is 2+2?"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn send_message_bare_model_without_argument_emits_no_control_chip() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn send_message_multi_block_never_matches_control_shape_even_when_joined_text_would() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        let blocks = vec![
+            WireContentBlock::Text {
+                text: "/model ".to_string(),
+            },
+            WireContentBlock::Text {
+                text: "x".to_string(),
+            },
+        ];
+        session
+            .send_message_with_emit(&blocks, |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(
+            emitted.is_empty(),
+            "multi-block message must never emit a ControlChip, got {emitted:?}"
+        );
+    }
+
+    #[test]
+    fn send_message_single_block_control_command_still_matches() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model x"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0] {
+            StreamChunk::ControlChip {
+                command, argument, ..
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "x");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drained_control_shaped_text_emits_control_chip_then_queue_drained_and_writes_stdin_once() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        write_and_emit_drained_message(
+            "sess-1",
+            "/model claude-sonnet-5",
+            &stdin,
+            &settled,
+            |chunk| emitted.push(chunk),
+        );
+
+        assert!(
+            settled.is_settled(),
+            "a queued model pick must stop the session-start soft-impose"
+        );
+        assert_eq!(
+            emitted.len(),
+            2,
+            "expected ControlChip + QueueDrained, got {emitted:?}"
+        );
+        match &emitted[0] {
+            StreamChunk::ControlChip {
+                command, argument, ..
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+            }
+            other => panic!("expected ControlChip first, got {other:?}"),
+        }
+        match &emitted[1] {
+            StreamChunk::QueueDrained { session_id, text } => {
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(text, "/model claude-sonnet-5");
+            }
+            other => panic!("expected QueueDrained second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drained_plain_text_emits_only_queue_drained() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        write_and_emit_drained_message("sess-1", "what is 2+2?", &stdin, &settled, |chunk| {
+            emitted.push(chunk)
+        });
+
+        assert_eq!(emitted.len(), 1);
+        assert!(matches!(emitted[0], StreamChunk::QueueDrained { .. }));
+        assert!(!settled.is_settled());
+    }
+
+    #[test]
+    fn a_drained_effort_pick_leaves_the_soft_impose_armed() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        write_and_emit_drained_message("sess-1", "/effort high", &stdin, &settled, |_| {});
+        assert!(!settled.is_settled());
+    }
+
+    fn finished_turn() -> StreamChunk {
+        StreamChunk::Result {
+            session_id: "sess-1".to_string(),
+            total_cost: None,
+            usage: None,
+            result_text: None,
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+            context_usage: None,
+        }
+    }
+
+    #[test]
+    fn a_result_is_awaited_until_one_arrives_and_again_after_the_next_message() {
+        let awaited = AwaitedResult::new();
+        assert!(
+            awaited.is_awaited(),
+            "a process that dies before its first output line must be reported"
+        );
+        awaited.observe(&[finished_turn()]);
+        assert!(!awaited.is_awaited());
+        awaited.message_written();
+        assert!(
+            awaited.is_awaited(),
+            "the previous turn's result must not cover a message sent after it"
+        );
+    }
+
+    #[test]
+    fn turn_output_keeps_the_result_awaited_and_an_error_or_empty_batch_does_not() {
+        let awaited = AwaitedResult::new();
+        awaited.observe(&[StreamChunk::Error {
+            content: "boom".to_string(),
+            turn_ended: false,
+        }]);
+        assert!(!awaited.is_awaited());
+        awaited.observe(&[]);
+        assert!(!awaited.is_awaited());
+        awaited.observe(&[StreamChunk::Text {
+            content: "hi".to_string(),
+        }]);
+        assert!(awaited.is_awaited());
+        awaited.observe(&[
+            StreamChunk::Text {
+                content: "bye".to_string(),
+            },
+            finished_turn(),
+        ]);
+        assert!(!awaited.is_awaited());
+    }
+
+    #[test]
+    fn a_message_sent_after_a_finished_turn_awaits_its_own_result() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session.awaited_result.observe(&[finished_turn()]);
+        session
+            .send_message_with_emit(&text_only("next question"), |_| {})
+            .unwrap();
+        assert!(session.awaited_result.is_awaited());
+    }
+
+    #[test]
+    fn a_message_that_fails_to_reach_the_process_awaits_nothing() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_broken_pipe();
+        session.awaited_result.observe(&[finished_turn()]);
+        session
+            .send_message_with_emit(&text_only("next question"), |_| {})
+            .unwrap_err();
+        assert!(!session.awaited_result.is_awaited());
+    }
+
+    #[test]
+    fn a_model_pick_sent_to_the_session_stops_the_soft_impose() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model openrouter/openai/gpt-4o-mini"), |_| {})
+            .unwrap();
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_plain_message_or_an_effort_pick_leaves_the_soft_impose_armed() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/effort high"), |_| {})
+            .unwrap();
+        session
+            .send_message_with_emit(&text_only("what model are you?"), |_| {})
+            .unwrap();
+        assert!(!session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_drained_message_reports_whether_it_reached_the_process() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        assert!(write_and_emit_drained_message(
+            "sess-1",
+            "queued",
+            &stdin,
+            &settled,
+            |_| {}
+        ));
+        let broken = Arc::new(Mutex::new(test_broken_pipe_stdin()));
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        assert!(!write_and_emit_drained_message(
+            "sess-1",
+            "queued",
+            &broken,
+            &settled,
+            |chunk| emitted.push(chunk)
+        ));
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn the_stdout_reader_reports_an_unexpected_end_from_the_shared_result_state() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")];
+        for wiring in [
+            "awaited_for_reader.observe(&chunks)",
+            "awaited_for_reader.message_written()",
+            "awaited_for_reader.is_awaited() && !stopping",
+        ] {
+            assert!(body.contains(wiring), "the reader must use `{wiring}`");
+        }
+    }
+
+    #[test]
+    fn the_stdout_reader_runs_the_soft_impose_step_on_every_parsed_line() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body: String = body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")]
+            .split_whitespace()
+            .collect();
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("the reader must use `{needle}`"))
+        };
+        let answers_routed =
+            at("ifconsume_control_response(&control_for_reader,&parsed){continue;}");
+        let parsed = at("let(chunks,log_entry)=parser.parse_line(&parsed);");
+        let step = at(concat!(
+            "ifletSome((pending,model))=soft_impose_step(&parsed,&chunks,&soft_impose_cfg,",
+            "&settled_for_reader,&control_for_reader,&stdin_for_reader,)",
+            "{std::thread::spawn(move||report_soft_impose(pending,&model));}"
+        ));
+        assert!(
+            answers_routed < parsed,
+            "control answers never reach the parser"
+        );
+        assert!(parsed < step, "the step reads the parsed chunks");
+    }
+
+    #[test]
     fn build_interrupt_payload_matches_sdk_protocol() {
-        // Wire format per SDKControlInterruptRequest in claude-agent-sdk-python.
         let v = build_interrupt_payload("req_interrupt_42");
         assert_eq!(v["type"], "control_request");
         assert_eq!(v["request_id"], "req_interrupt_42");
         assert_eq!(v["request"]["subtype"], "interrupt");
-        // Defensive: no extra top-level keys leak in.
         let obj = v.as_object().expect("object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
@@ -2596,7 +3374,6 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         write_interrupt(&mut buf, &payload).expect("write");
         let s = String::from_utf8(buf).expect("utf8");
-        // Exactly one trailing newline (NDJSON framing) and one parse-able value.
         assert!(s.ends_with('\n'), "must end with newline, got: {s:?}");
         let line = s.trim_end_matches('\n');
         assert!(!line.contains('\n'), "must be single line, got: {s:?}");
@@ -2606,8 +3383,6 @@ mod tests {
 
     #[test]
     fn write_interrupt_propagates_io_errors() {
-        // Writer that always fails on first write — verifies the error path
-        // (the production code logs and returns this error to the caller).
         struct FailWriter;
         impl Write for FailWriter {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -2622,7 +3397,124 @@ mod tests {
         assert!(err.to_string().contains("boom"), "got: {err}");
     }
 
-    // -- reap_instance targeting --
+    #[test]
+    fn control_response_is_consumed_before_the_stream_parser() {
+        let control = ControlChannel::default();
+        let line = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": "req_interrupt_1" }
+        });
+        assert!(consume_control_response(&control, &line));
+
+        for other in [
+            serde_json::json!({ "type": "control_request", "request_id": "r" }),
+            serde_json::json!({ "type": "result" }),
+            serde_json::json!({ "foo": "bar" }),
+        ] {
+            assert!(!consume_control_response(&control, &other), "{other}");
+        }
+    }
+
+    #[test]
+    fn stdout_reader_routes_control_responses_before_parsing_the_line() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let route_pos = prod
+            .find("if consume_control_response(&control_for_reader, &parsed)")
+            .expect("the stdout reader must route control responses");
+        let parse_pos = prod
+            .find("parser.parse_line(&parsed)")
+            .expect("the stdout reader must parse lines");
+        assert!(
+            route_pos < parse_pos,
+            "a control_response reaching parse_line is logged as an unknown stream-json type"
+        );
+    }
+
+    #[test]
+    fn stdout_reader_ends_pending_control_requests_when_the_stream_closes() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        assert!(
+            prod.contains("control_for_reader.fail_all();"),
+            "a dead process must fail waiting control requests instead of letting them time out"
+        );
+    }
+
+    #[test]
+    fn probe_session_info_stores_the_parsed_initialize_result() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+        )
+        .expect("a live session reports its status");
+        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 6));
+        assert_eq!(*slot.lock().unwrap(), status);
+    }
+
+    #[test]
+    fn probe_session_info_degrades_to_unavailable_when_the_request_fails() {
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let status = probe_session_info(
+            || {
+                Err(control_channel::ControlError::Timeout {
+                    subtype: "initialize",
+                    timeout: std::time::Duration::from_secs(15),
+                })
+            },
+            &slot,
+            &stopping,
+        );
+        assert_eq!(status, Some(SessionInfoState::Unavailable));
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn probe_session_info_of_a_stopped_session_reports_nothing() {
+        let slot = Mutex::new(SessionInfoState::Unavailable);
+        let stopping = std::sync::atomic::AtomicBool::new(true);
+        let status = probe_session_info(
+            || Err(control_channel::ControlError::SessionEnded),
+            &slot,
+            &stopping,
+        );
+        assert_eq!(status, None);
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn fresh_session_has_no_session_info_and_no_control_handle() {
+        let s = ChatSession::new("test-project");
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+        let err = s.control_handle().err().expect("no stdin yet");
+        assert!(err.to_string().contains("no active session"), "{err}");
+    }
+
+    #[test]
+    fn stop_ends_a_control_request_that_is_still_waiting() {
+        let mut s = ChatSession::new("test-project");
+        s.set_test_stdin_sink(Vec::new());
+        let handle = s.control_handle().expect("handle");
+        let control = s.control.clone();
+        let waiter = std::thread::spawn(move || handle.query(ControlQuery::Usage));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control.pending_ids().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "request never sent");
+            std::thread::yield_now();
+        }
+        s.stop().expect("stop");
+        assert_eq!(
+            waiter.join().expect("join"),
+            Err(control_channel::ControlError::SessionEnded)
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
 
     #[test]
     fn reap_exec_plan_targets_project_container_with_marker() {
@@ -2631,8 +3523,6 @@ mod tests {
             container.ends_with("_acme_claude"),
             "must target the project's claude container, got: {container}"
         );
-        // The kill command carries the exact instance marker so only this
-        // session's in-container process is reaped.
         let joined = argv.join(" ");
         assert!(joined.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
         assert!(joined.contains("kill"));
@@ -2640,15 +3530,11 @@ mod tests {
 
     #[test]
     fn reap_instance_is_noop_without_an_id() {
-        // No spawn happened → no marker → reap takes nothing and never touches a
-        // runtime (would otherwise panic in a unit-test environment).
         let mut s = ChatSession::new("test-project");
         assert!(s.instance_id.is_none());
         s.reap_instance();
         assert!(s.instance_id.is_none());
     }
-
-    // -- EOF-error gating (cross-session error-emission race) --
 
     #[test]
     fn stop_sets_stopping_flag() {
@@ -2661,8 +3547,6 @@ mod tests {
             "stop() must mark deliberate teardown so the reader stays silent"
         );
     }
-
-    // -- ChatSession::stop() tests --
 
     #[test]
     fn stop_is_idempotent_when_no_session_running() {
@@ -2677,8 +3561,6 @@ mod tests {
 
     #[test]
     fn stop_grace_period_joins_reader_that_finishes_late() {
-        // Regression: a reader finishing after ~50 ms (below the 200 ms grace)
-        // must be joined by `stop()`, not classified as "still running".
         let mut s = ChatSession::new("test-project");
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2687,8 +3569,6 @@ mod tests {
         assert!(s.stop().is_ok());
         let elapsed = start.elapsed();
         assert!(s.drain_handles.is_empty(), "handle must be drained");
-        // Upper bound: grace window is 200ms; joining a 50ms thread must
-        // finish well inside it. The generous ceiling absorbs CI jitter.
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "stop() took {elapsed:?} — grace window should have joined the reader well under 500ms"
@@ -2697,8 +3577,6 @@ mod tests {
 
     #[test]
     fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
-        // A wedged reader's grace window must stay bounded; simulate one by
-        // sleeping longer than the window.
         let mut s = ChatSession::new("test-project");
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2707,8 +3585,6 @@ mod tests {
         assert!(s.stop().is_ok());
         let elapsed = start.elapsed();
         assert!(s.drain_handles.is_empty(), "handle must be drained");
-        // Upper bound: 200 ms grace window; 1000 ms allows CI jitter while
-        // catching a regression to an unbounded join.
         assert!(
             elapsed < std::time::Duration::from_millis(1000),
             "stop() took {elapsed:?} — a stuck reader must be detached within the grace window, not joined"
@@ -2749,14 +3625,11 @@ mod tests {
         assert!(s2.stop().is_ok());
     }
 
-    /// Convenience: parse a JSON string and return the first StreamChunk
-    /// (for single-chunk test assertions).
     fn parse_line_str(parser: &mut StreamParser, line: &str) -> Option<StreamChunk> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         parser.parse_line(&parsed).0.into_iter().next()
     }
 
-    /// Convenience: parse a JSON string and return all emitted chunks.
     fn parse_line_all_str(parser: &mut StreamParser, line: &str) -> Vec<StreamChunk> {
         let parsed: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -2765,8 +3638,6 @@ mod tests {
         parser.parse_line(&parsed).0
     }
 
-    /// Convenience: parse a JSON string and call `parser.parse_line`.
-    /// Returns the full tuple (first chunk, log_entry) for log entry assertions.
     fn parse_line_full(
         parser: &mut StreamParser,
         line: &str,
@@ -2779,13 +3650,10 @@ mod tests {
         (chunks.into_iter().next(), log)
     }
 
-    /// Convenience: parse a JSON string and call `StreamParser::try_parse_control_request`.
     fn try_parse_control_request_str(line: &str) -> Option<ControlRequest> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         StreamParser::try_parse_control_request(&parsed)
     }
-
-    // ── Unknown stream-json types ────────────────────────────────────
 
     #[test]
     fn parse_line_logs_unknown_type_once_per_session() {
@@ -2796,7 +3664,6 @@ mod tests {
         let log = log.expect("first occurrence must produce a log entry");
         assert_eq!(log.prefix, "STREAM");
         assert!(log.message.contains("compaction_event"));
-        // Second occurrence: silent (dedup), still no chunk.
         let (chunks2, log2) = parse_line_full(&mut parser, line);
         assert!(chunks2.is_none());
         assert!(log2.is_none(), "repeat occurrences must not spam the log");
@@ -2827,21 +3694,16 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert!(parser.parse_line(&parsed).1.is_some());
         }
-        // Past the cap: dropped without logging (and without growing the set).
         let parsed: serde_json::Value = serde_json::from_str(r#"{"type":"overflow"}"#).unwrap();
         assert!(parser.parse_line(&parsed).1.is_none());
     }
 
     #[test]
     fn control_request_with_unknown_shape_returns_none() {
-        // A future subtype without tool_name/tool_use_id must not parse into a
-        // ControlRequest (the reader loop logs it instead of auto-approving).
         let line =
             r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback"}}"#;
         assert!(try_parse_control_request_str(line).is_none());
     }
-
-    // ── StreamChunk serialization ────────────────────────────────────
 
     #[test]
     fn stream_chunk_text_serializes_tagged() {
@@ -2921,8 +3783,6 @@ mod tests {
         }
     }
 
-    // ── blank / bare-slash guard ─────────────────────────────────────
-
     #[test]
     fn is_blank_or_slash_only_rejects_lone_slash() {
         assert!(is_blank_or_slash_only(&text_only("/")));
@@ -2943,7 +3803,6 @@ mod tests {
 
     #[test]
     fn is_blank_or_slash_only_accepts_real_slash_command() {
-        // A real slash command (slash + name) must still be sendable.
         assert!(!is_blank_or_slash_only(&text_only("/code-review")));
         assert!(!is_blank_or_slash_only(&text_only("/clear")));
     }
@@ -2954,16 +3813,12 @@ mod tests {
         assert!(!is_blank_or_slash_only(&text_only("what is 2/3?")));
     }
 
-    // ── send_message JSON format ─────────────────────────────────────
-
     #[test]
     fn build_user_message_produces_correct_json_structure() {
         let msg = build_user_message(&text_only("test msg"));
 
         assert_eq!(msg["type"], "user");
         assert_eq!(msg["message"]["role"], "user");
-        // No `parent_tool_use_id` on user-input envelope — that field is
-        // an output-side correlation tag for tool_use, never appears here.
         assert!(msg.get("parent_tool_use_id").is_none());
 
         let content = &msg["message"]["content"];
@@ -2984,8 +3839,6 @@ mod tests {
 
     #[test]
     fn build_user_message_with_paste_reference_in_text() {
-        // ADR-065: pastes go to `<project>/.speedwave/pastes/` with an inlined
-        // `@…` ref; the wire is text-only.
         let blocks = text_only("Co tu widać?\n\n@/workspace/.speedwave/pastes/paste-123.png");
         let msg = build_user_message(&blocks);
         let items = msg["message"]["content"].as_array().unwrap();
@@ -2997,8 +3850,6 @@ mod tests {
 
     #[test]
     fn build_user_message_snapshot_wire_format() {
-        // Contract snapshot pinning the text-only wire shape (ADR-065); trips
-        // on inline image blocks, `media_type`→`mimeType`, or `parent_tool_use_id`.
         let blocks = text_only(
             "review these\n\n@/workspace/.speedwave/pastes/paste-1.png\n@/workspace/.speedwave/pastes/paste-2.jpg",
         );
@@ -3016,8 +3867,6 @@ mod tests {
             }
         });
         assert_eq!(msg, expected);
-        // Defence-in-depth: ensure no `image` block ever appears in this
-        // snapshot — that path is gone for good.
         assert!(!serde_json::to_string(&msg).unwrap().contains("\"image\""));
     }
 
@@ -3040,11 +3889,677 @@ mod tests {
 
     #[test]
     fn max_wire_bytes_is_1_mib() {
-        // ADR-065: the cap is sized for text + paste-path refs only.
         assert_eq!(MAX_WIRE_BYTES, 1024 * 1024);
     }
 
-    // ── StreamParser: text delta ─────────────────────────────────────
+    #[test]
+    fn soft_impose_target_is_the_configured_wire_id_on_a_mismatch() {
+        let target = soft_impose_target(
+            speedwave_runtime::config::LlmProviderKind::Local,
+            "local",
+            Some("llama-3.1-70b"),
+            "wrong-observed-model",
+        );
+        assert_eq!(target.as_deref(), Some("local/llama-3.1-70b"));
+    }
+
+    #[test]
+    fn soft_impose_target_is_none_on_a_match() {
+        let target = soft_impose_target(
+            speedwave_runtime::config::LlmProviderKind::Local,
+            "local",
+            Some("llama-3.1-70b"),
+            "local/llama-3.1-70b",
+        );
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn soft_impose_target_is_none_for_an_anthropic_kind() {
+        let target = soft_impose_target(
+            speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
+            "anthropic",
+            Some("claude-sonnet-5"),
+            "some-other-observed",
+        );
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn soft_impose_target_is_none_without_an_entry_model() {
+        let target = soft_impose_target(
+            speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            "openrouter",
+            None,
+            "anthropic/claude-sonnet-5",
+        );
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn soft_impose_target_matches_an_already_prefixed_catalog_id() {
+        let target = soft_impose_target(
+            speedwave_runtime::config::LlmProviderKind::Local,
+            "llama",
+            Some("llama/whatever"),
+            "llama/whatever",
+        );
+        assert_eq!(
+            target, None,
+            "an already-prefixed catalog id must still be recognized as matching"
+        );
+    }
+
+    #[test]
+    fn soft_impose_target_fires_for_openrouter_and_local_kinds_on_a_mismatch() {
+        for kind in [
+            speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            speedwave_runtime::config::LlmProviderKind::Local,
+        ] {
+            let mismatch = soft_impose_target(kind, "entry", Some("model-a"), "model-b");
+            assert!(mismatch.is_some(), "{kind:?} must fire on mismatch");
+
+            let matching = soft_impose_target(kind, "entry", Some("model-a"), "entry/model-a");
+            assert_eq!(matching, None, "{kind:?} must suppress on match");
+        }
+    }
+
+    fn local_llama() -> SoftImposeConfig {
+        SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::Local,
+            entry_id: "local".to_string(),
+            entry_model: Some("llama-3.1-70b".to_string()),
+        }
+    }
+
+    fn init_with_model(model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1",
+            "model": model,
+        })
+    }
+
+    fn init_chunk(model: &str) -> Vec<StreamChunk> {
+        vec![StreamChunk::SystemInit {
+            model: model.to_string(),
+            session_id: Some("sess-1".to_string()),
+        }]
+    }
+
+    fn written_lines(stdin: &Mutex<Vec<u8>>) -> Vec<serde_json::Value> {
+        String::from_utf8(stdin.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_mismatched_init_sends_one_set_model_with_the_configured_wire_id() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        let init = init_with_model("wrong-observed-model");
+        let chunks = init_chunk("wrong-observed-model");
+
+        let first = soft_impose_step(&init, &chunks, &local_llama(), &settled, &control, &stdin);
+        let second = soft_impose_step(&init, &chunks, &local_llama(), &settled, &control, &stdin);
+
+        assert_eq!(
+            first.map(|(_, model)| model).as_deref(),
+            Some("local/llama-3.1-70b")
+        );
+        assert!(second.is_none(), "a session is soft-imposed once");
+        let written = written_lines(&stdin);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0]["type"], "control_request");
+        assert_eq!(
+            written[0]["request"],
+            serde_json::json!({ "subtype": "set_model", "model": "local/llama-3.1-70b" })
+        );
+        assert!(settled.is_settled());
+    }
+
+    #[test]
+    fn a_matching_init_a_line_that_is_not_an_init_or_a_picked_model_sends_nothing() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        let cfg = local_llama();
+
+        let matching = soft_impose_step(
+            &init_with_model("local/llama-3.1-70b"),
+            &init_chunk("local/llama-3.1-70b"),
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+        let not_an_init = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &[],
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+        settled.settle();
+        let picked = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &init_chunk("wrong-observed-model"),
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(matching.is_none());
+        assert!(not_an_init.is_none());
+        assert!(
+            picked.is_none(),
+            "a model the user picked is never switched back"
+        );
+        assert!(written_lines(&stdin).is_empty());
+        assert!(control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_anthropic_session_is_never_soft_imposed() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let settled = ModelSettled::default();
+        let cfg = SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
+            entry_id: "anthropic".to_string(),
+            entry_model: Some("claude-sonnet-5".to_string()),
+        };
+
+        let sent = soft_impose_step(
+            &init_with_model("totally-different"),
+            &init_chunk("totally-different"),
+            &cfg,
+            &settled,
+            &ControlChannel::default(),
+            &stdin,
+        );
+
+        assert!(sent.is_none());
+        assert!(written_lines(&stdin).is_empty());
+        assert!(!settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_written_while_the_soft_impose_waits_for_stdin_cancels_it() {
+        let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+        let held = stdin.lock().unwrap();
+        let sender = {
+            let (stdin, settled, control) = (stdin.clone(), settled.clone(), control.clone());
+            std::thread::spawn(move || {
+                send_soft_impose(&stdin, &control, &settled, "local/llama-3.1-70b").is_some()
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        settled.settle();
+        drop(held);
+
+        assert!(!sender.join().unwrap());
+        assert!(written_lines(&stdin).is_empty());
+        assert!(control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_soft_impose_that_fails_to_reach_the_process_is_not_retried() {
+        struct BrokenPipe;
+        impl Write for BrokenPipe {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+
+        let sent = send_soft_impose(
+            &Mutex::new(BrokenPipe),
+            &control,
+            &settled,
+            "local/llama-3.1-70b",
+        );
+
+        assert!(sent.is_none());
+        assert!(
+            settled.is_settled(),
+            "a dead process is not written to again at the next init"
+        );
+        assert!(control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_first_matching_init_then_a_mismatch_sends_one_set_model() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+
+        let first = soft_impose_step(
+            &init_with_model("local/llama-3.1-70b"),
+            &init_chunk("local/llama-3.1-70b"),
+            &local_llama(),
+            &settled,
+            &control,
+            &stdin,
+        );
+        let later = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &init_chunk("wrong-observed-model"),
+            &local_llama(),
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(first.is_none());
+        assert_eq!(
+            later.map(|(_, model)| model).as_deref(),
+            Some("local/llama-3.1-70b")
+        );
+        assert_eq!(written_lines(&stdin).len(), 1);
+    }
+
+    #[test]
+    fn the_soft_impose_report_ends_on_the_answer_and_on_the_session_end() {
+        let control = ControlChannel::default();
+        let answered = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        let id = control.pending_ids().pop().expect("a waiter");
+        control.route_response(&serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        }));
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.fail_all();
+        let started = std::time::Instant::now();
+
+        report_soft_impose(answered, "local/llama-3.1-70b");
+        report_soft_impose(orphaned, "local/llama-3.1-70b");
+
+        assert!(
+            started.elapsed() < control_channel::SET_MODEL_TIMEOUT / 2,
+            "neither report waited for the timeout"
+        );
+    }
+
+    #[test]
+    fn a_model_pick_is_sent_every_time_and_settles_the_session() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+
+        let first = send_model_pick(&stdin, &control, &settled, "claude-haiku-4-5");
+        let second = send_model_pick(&stdin, &control, &settled, "default");
+
+        assert!(first.is_ok() && second.is_ok());
+        assert!(settled.is_settled(), "no soft-impose follows a pick");
+        let models: Vec<serde_json::Value> = written_lines(&stdin)
+            .iter()
+            .map(|l| l["request"]["model"].clone())
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                serde_json::json!("claude-haiku-4-5"),
+                serde_json::json!("default")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_soft_impose_after_a_model_pick_sends_nothing() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        send_model_pick(&stdin, &control, &settled, ROUTED_PICK).expect("written");
+
+        let after = soft_impose_step(
+            &init_with_model(ENV_MODEL),
+            &init_chunk(ENV_MODEL),
+            &openrouter_mini(),
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(after.is_none());
+        assert_eq!(written_lines(&stdin).len(), 1);
+    }
+
+    #[test]
+    fn a_model_pick_on_a_live_session_settles_it_and_resolves_on_the_answer() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        let control = session.control.clone();
+        let switch = session.model_switch().expect("a live session");
+        let answerer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(id) = control.pending_ids().pop() {
+                    return control.route_response(&serde_json::json!({
+                        "type": "control_response",
+                        "response": { "subtype": "success", "request_id": id },
+                    }));
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the pick never registered a waiter"
+                );
+                std::thread::yield_now();
+            }
+        });
+
+        let applied = switch.apply("claude-haiku-4-5");
+
+        assert_eq!(applied, Ok(()));
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_that_cannot_reach_the_process_reports_the_write_failure() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_broken_pipe();
+        let switch = session.model_switch().expect("a session with a pipe");
+
+        let err = switch
+            .apply("claude-haiku-4-5")
+            .expect_err("the pipe is closed");
+
+        assert!(
+            matches!(err, control_channel::ControlError::Write(_)),
+            "{err}"
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_session_without_a_process_has_no_model_switch() {
+        assert!(ChatSession::new("proj").model_switch().is_err());
+    }
+
+    #[test]
+    fn a_typed_model_pick_settles_under_the_stdin_lock_before_it_is_written() {
+        let source = include_str!("chat.rs");
+        let body_of = |signature: &str, end: &str| -> String {
+            let start = source.find(signature).expect("function exists");
+            let body = &source[start..];
+            body[..body.find(end).expect("end marker")]
+                .split_whitespace()
+                .collect()
+        };
+        let send = body_of("fn send_message_with_emit(", "fn set_test_stdin_sink(");
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("the send path must use `{needle}`"))
+        };
+        let locked = at(&send, "letmutstdin=shared.lock()");
+        let settled = at(&send, "self.model_settled.settle();");
+        let written = at(&send, "writeln!(stdin,\"{}\",serialized)?;");
+        assert!(locked < settled && settled < written);
+
+        let drain = body_of("fn write_and_emit_drained_message(", "#[cfg(test)]");
+        let locked = at(&drain, "matchstdin.lock(){Ok(muthandle)=>{");
+        let settled = at(&drain, "settled.settle();");
+        let written = at(&drain, "writeln!(handle,\"{}\",payload)");
+        assert!(locked < settled && settled < written);
+    }
+
+    const ROUTED_PICK: &str = "openrouter/openai/gpt-4o-mini";
+    const ENV_MODEL: &str = "openrouter/anthropic/claude-sonnet-5";
+
+    fn openrouter_mini() -> SoftImposeConfig {
+        SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            entry_id: "openrouter".to_string(),
+            entry_model: Some("openai/gpt-4o-mini".to_string()),
+        }
+    }
+
+    #[test]
+    fn the_answer_to_a_soft_impose_reaches_its_waiter_and_not_the_chat() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let (pending, model) = soft_impose_step(
+            &init_with_model(ENV_MODEL),
+            &init_chunk(ENV_MODEL),
+            &openrouter_mini(),
+            &ModelSettled::default(),
+            &control,
+            &stdin,
+        )
+        .expect("a mismatch is soft-imposed");
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": written_lines(&stdin)[0]["request_id"],
+            },
+        });
+
+        assert!(consume_control_response(&control, &answer));
+        assert_eq!(
+            pending.wait(std::time::Duration::from_secs(5)),
+            Ok(serde_json::Value::Null)
+        );
+        assert_eq!(model, ROUTED_PICK);
+    }
+
+    const SOFT_IMPOSE_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson");
+    const MID_TURN_COMMAND_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson");
+    const MODEL_PICKS_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.267-model-picks.sanitized.ndjson");
+
+    fn capture_lines(capture: &str) -> Vec<serde_json::Value> {
+        capture
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn init_models(lines: &[serde_json::Value]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["model"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_soft_impose_captures_are_of_the_pinned_claude_code() {
+        for capture in [
+            SOFT_IMPOSE_CAPTURE,
+            MID_TURN_COMMAND_CAPTURE,
+            MODEL_PICKS_CAPTURE,
+        ] {
+            let versions: Vec<String> = capture_lines(capture)
+                .iter()
+                .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+                .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+                .collect();
+            assert!(!versions.is_empty());
+            assert!(
+                versions
+                    .iter()
+                    .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+                "re-capture the soft-impose streams from Claude Code {} (got {versions:?})",
+                speedwave_runtime::defaults::CLAUDE_VERSION
+            );
+        }
+    }
+
+    #[test]
+    fn set_model_switches_to_an_anthropic_id_and_back_to_the_account_default() {
+        let lines = capture_lines(MODEL_PICKS_CAPTURE);
+        let answers: Vec<&str> = lines
+            .iter()
+            .filter(|l| l["type"] == "control_response")
+            .map(|l| l["response"]["subtype"].as_str().unwrap())
+            .collect();
+        let confirmations: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l["message"]["content"].as_str())
+            .collect();
+
+        assert_eq!(answers, vec!["success", "success"]);
+        assert_eq!(
+            confirmations,
+            vec![
+                "<local-command-stdout>Set model to `claude-haiku-4-5`</local-command-stdout>",
+                "<local-command-stdout>Set model to `claude-opus-5[1m]`</local-command-stdout>",
+            ]
+        );
+        assert_eq!(
+            init_models(&lines)[..3],
+            ["claude-opus-5[1m]", "claude-haiku-4-5", "claude-opus-5[1m]"]
+        );
+    }
+
+    #[test]
+    fn a_typed_model_command_answers_as_an_input_of_its_own() {
+        let lines = capture_lines(MODEL_PICKS_CAPTURE);
+        let tail: Vec<String> = lines
+            .iter()
+            .filter(|l| l["type"] != "stream_event" && l["subtype"] != "status")
+            .rev()
+            .take(3)
+            .map(|l| match l["type"].as_str().unwrap() {
+                "assistant" => format!("assistant {}", l["message"]["model"].as_str().unwrap()),
+                "result" => format!("result {}", l["num_turns"]),
+                other => format!("{other} {}", l["subtype"].as_str().unwrap_or("")),
+            })
+            .collect();
+        let mut parser = StreamParser::new();
+        let turn_ends = lines
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count();
+
+        assert_eq!(
+            tail,
+            vec!["result 0", "assistant <synthetic>", "system init"]
+        );
+        assert_eq!(
+            turn_ends, 4,
+            "the typed command's answer is a turn end in the chat, the two switches are not"
+        );
+    }
+
+    #[test]
+    fn a_model_command_queued_behind_a_tool_using_turn_never_runs() {
+        let lines = capture_lines(MID_TURN_COMMAND_CAPTURE);
+
+        assert!(
+            lines
+                .iter()
+                .all(|l| !(l["type"] == "result" && l["num_turns"] == 0)),
+            "the queued /model must have produced no command answer"
+        );
+        assert_eq!(init_models(&lines), vec![ENV_MODEL, ENV_MODEL]);
+    }
+
+    #[test]
+    fn a_set_model_soft_impose_switches_the_running_turn_and_adds_nothing_to_the_chat() {
+        let cfg = openrouter_mini();
+        let mut parser = StreamParser::new();
+        let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        let mut sent = Vec::new();
+        let mut routed_answers = 0;
+        let mut confirmations = 0;
+
+        for mut parsed in capture_lines(SOFT_IMPOSE_CAPTURE) {
+            if parsed["type"] == "control_response" {
+                parsed["response"]["request_id"] = written_lines(&stdin)[0]["request_id"].clone();
+            }
+            if consume_control_response(&control, &parsed) {
+                routed_answers += 1;
+                continue;
+            }
+            let (chunks, _log) = parser.parse_line(&parsed);
+            if parsed["message"]["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("<local-command-stdout>"))
+            {
+                confirmations += 1;
+                assert!(chunks.is_empty(), "{chunks:?}");
+            }
+            if let Some(step) = soft_impose_step(&parsed, &chunks, &cfg, &settled, &control, &stdin)
+            {
+                sent.push(step);
+            }
+            emitted.extend(chunks);
+        }
+
+        assert_eq!(sent.len(), 1, "one set_model, at the first init");
+        assert_eq!(confirmations, 1, "the confirmation line makes no chunk");
+        let (pending, model) = sent.remove(0);
+        assert_eq!(model, ROUTED_PICK);
+        assert_eq!(routed_answers, 1);
+        assert_eq!(
+            pending.wait(std::time::Duration::from_secs(1)),
+            Ok(serde_json::Value::Null),
+            "the captured answer resolves the request"
+        );
+        let turn_ends: Vec<(Option<String>, Option<String>)> = emitted
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Result {
+                    result_text, model, ..
+                } => Some((result_text.clone(), model.clone())),
+                StreamChunk::Error { content, .. } => Some((Some(content.clone()), None)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            turn_ends,
+            vec![
+                (
+                    Some("stub reply".to_string()),
+                    Some(ROUTED_PICK.to_string())
+                ),
+                (
+                    Some("stub reply".to_string()),
+                    Some(ROUTED_PICK.to_string())
+                ),
+            ],
+            "only the user's two turns end, and the first already ends on the pick"
+        );
+        let emitted_inits: Vec<&str> = emitted
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::SystemInit { model, .. } => Some(model.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(emitted_inits, vec![ENV_MODEL, ROUTED_PICK]);
+        assert!(
+            !emitted
+                .iter()
+                .any(|c| matches!(c, StreamChunk::UserMessageCommit { .. })),
+            "the set_model confirmation line adds no user message"
+        );
+    }
 
     #[test]
     fn parse_text_delta_produces_text_chunk() {
@@ -3056,8 +4571,6 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
     }
-
-    // ── StreamParser: thinking delta ─────────────────────────────────
 
     #[test]
     fn parse_thinking_delta_emits_thinking_chunk() {
@@ -3081,13 +4594,10 @@ mod tests {
         }
     }
 
-    // ── StreamParser: tool_use with input_json_delta ──────────────────
-
     #[test]
     fn parse_tool_use_with_input_json_delta_correlates_by_index() {
         let mut parser = StreamParser::new();
 
-        // content_block_start: tool_use at index 1
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
         let chunk = parse_line_str(&mut parser, start).unwrap();
         match &chunk {
@@ -3098,7 +4608,6 @@ mod tests {
             other => panic!("expected ToolStart, got {other:?}"),
         }
 
-        // content_block_delta: input_json_delta at index 1
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/src/main.rs\"}"}}}"#;
         let chunk = parse_line_str(&mut parser, delta).unwrap();
         match chunk {
@@ -3120,74 +4629,242 @@ mod tests {
         assert!(parse_line_str(&mut parser, delta).is_none());
     }
 
-    // ── StreamParser: content_block_stop cleans up ────────────────────
-
     #[test]
     fn parse_content_block_stop_cleans_up_active_blocks() {
         let mut parser = StreamParser::new();
 
-        // Start a tool at index 2
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_X","name":"Bash","input":{}}}}"#;
         parse_line_str(&mut parser, start);
 
-        // Stop at index 2 — should clean up
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2}}"#;
         parse_line_str(&mut parser, stop);
 
-        // Now a delta at index 2 should return None (cleaned up)
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}}"#;
         assert!(parse_line_str(&mut parser, delta).is_none());
     }
-
-    // ── StreamParser: message_stop resets state ───────────────────────
 
     #[test]
     fn parse_message_stop_resets_parser_state() {
         let mut parser = StreamParser::new();
 
-        // Start a tool
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_Y","name":"Edit","input":{}}}}"#;
         parse_line_str(&mut parser, start);
 
-        // message_stop should reset
         let stop = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
         parse_line_str(&mut parser, stop);
 
         assert!(parser.active_blocks.is_empty());
     }
 
-    /// Regression: an interrupted turn emits `result` without `message_stop`,
-    /// so the stdout-reader calls `parser.reset()` after every terminal chunk.
-    #[test]
-    fn reset_after_result_prevents_stale_tool_contamination() {
-        let mut parser = StreamParser::new();
+    const MESSAGE_START_LINE: &str = r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_next","role":"assistant","content":[]}}}"#;
 
-        // Turn 1: a tool starts at index 0 and receives a partial input delta.
+    #[test]
+    fn parse_message_start_resets_parser_state() {
+        let mut parser = StreamParser::new();
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_Y","name":"Edit","input":{}}}}"#;
+        parse_line_str(&mut parser, start);
+        parse_line_str(&mut parser, MESSAGE_START_LINE);
+        assert!(parser.active_blocks.is_empty());
+    }
+
+    #[test]
+    fn message_start_clears_stale_blocks_from_an_interrupted_turn() {
+        let mut parser = StreamParser::new();
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_OLD","name":"Read","input":{}}}}"#;
         parse_line_str(&mut parser, start);
-        assert!(parser.active_blocks.contains_key(&0));
-
-        // Simulate the reader's `reset()` after `result` (parse_line does not).
         let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
         parse_line_str(&mut parser, result);
-        parser.reset();
-
+        parse_line_str(&mut parser, MESSAGE_START_LINE);
         assert!(parser.active_blocks.is_empty());
-        assert!(parser.tool_input.is_empty());
 
-        // Turn 2 reuses index 0; without the reset above, the input delta
-        // would route to the OLD tool_id.
         let start2 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_NEW","name":"Edit","input":{}}}}"#;
         parse_line_str(&mut parser, start2);
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x\"}"}}}"#;
-        let chunk = parse_line_str(&mut parser, delta).expect("expected ToolInputDelta");
-        match chunk {
+        match parse_line_str(&mut parser, delta).expect("expected ToolInputDelta") {
             StreamChunk::ToolInputDelta { tool_id, .. } => assert_eq!(tool_id, "toolu_NEW"),
             other => panic!("expected ToolInputDelta for toolu_NEW, got {other:?}"),
         }
     }
 
-    // ── StreamParser: user tool_result ────────────────────────────────
+    const TOOL_START_LINE: &str = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_MID","name":"Write","input":{}}}}"#;
+    const TOOL_DELTA_LINE: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/x\"}"}}}"#;
+    const TOOL_STOP_LINE: &str =
+        r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+
+    #[test]
+    fn mid_turn_system_line_keeps_streaming_tool_block() {
+        let mut parser = StreamParser::new();
+        parse_line_str(&mut parser, TOOL_START_LINE);
+        let system =
+            r#"{"type":"system","subtype":"task_progress","task_id":"t1","description":"bg"}"#;
+        assert!(parse_line_all_str(&mut parser, system).is_empty());
+
+        match parse_line_str(&mut parser, TOOL_DELTA_LINE) {
+            Some(StreamChunk::ToolInputDelta {
+                tool_id,
+                partial_json,
+            }) => {
+                assert_eq!(tool_id, "toolu_MID");
+                assert_eq!(partial_json, r#"{"file_path":"/x"}"#);
+            }
+            other => panic!("delta after a mid-turn system line must still route: {other:?}"),
+        }
+
+        let (_, log) = parse_line_full(&mut parser, TOOL_STOP_LINE);
+        let log = log.expect("content_block_stop must log TOOL: stop");
+        assert_eq!(log.prefix, "TOOL");
+        assert_eq!(log.message, "stop: Write (toolu_MID)");
+    }
+
+    #[test]
+    fn every_documented_mid_turn_system_subtype_keeps_block_state() {
+        let subtypes = [
+            "init",
+            "status",
+            "api_retry",
+            "task_started",
+            "task_progress",
+            "task_notification",
+            "hook_started",
+            "hook_progress",
+            "hook_response",
+            "files_persisted",
+            "session_state_changed",
+        ];
+        for subtype in subtypes {
+            let mut parser = StreamParser::new();
+            parse_line_str(&mut parser, TOOL_START_LINE);
+            let line = format!(r#"{{"type":"system","subtype":"{subtype}"}}"#);
+            parse_line_str(&mut parser, &line);
+            assert!(
+                parser.active_blocks.contains_key(&0),
+                "system/{subtype} must not drop block state"
+            );
+        }
+    }
+
+    #[test]
+    fn non_actionable_system_text_keeps_block_state() {
+        let mut parser = StreamParser::new();
+        parse_line_str(&mut parser, TOOL_START_LINE);
+        let line = r#"{"type":"system","subtype":"status","message":"Compacting conversation"}"#;
+        let (chunk, log) = parse_line_full(&mut parser, line);
+        assert!(chunk.is_none());
+        assert_eq!(log.expect("system text is logged").prefix, "SYSTEM");
+        assert!(parser.active_blocks.contains_key(&0));
+    }
+
+    fn assistant_tool_use_line(parent: &str, content: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"id":"msg_1","role":"assistant","content":[{content}],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn assistant_line_emits_complete_input_per_tool_use_block_in_order() {
+        let mut parser = StreamParser::new();
+        let line = assistant_tool_use_line(
+            "null",
+            r#"{"type":"text","text":"Sending"},{"type":"tool_use","id":"toolu_A","name":"SendMessage","input":{"to":"ab97","message":"Any progress?"}},{"type":"tool_use","id":"toolu_B","name":"Bash","input":{}}"#,
+        );
+        let chunks = parse_line_all_str(&mut parser, &line);
+        match chunks.as_slice() {
+            [StreamChunk::ToolInputComplete {
+                tool_id: a,
+                input_json: ja,
+            }, StreamChunk::ToolInputComplete {
+                tool_id: b,
+                input_json: jb,
+            }] => {
+                assert_eq!(a, "toolu_A");
+                let parsed: serde_json::Value = serde_json::from_str(ja).unwrap();
+                assert_eq!(
+                    parsed,
+                    serde_json::json!({"to":"ab97","message":"Any progress?"})
+                );
+                assert_eq!(b, "toolu_B");
+                assert_eq!(jb, "{}");
+            }
+            other => panic!("expected two ToolInputComplete chunks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_line_complete_input_round_trips_unicode_and_nesting() {
+        let mut parser = StreamParser::new();
+        let input = serde_json::json!({
+            "prompt": "zażółć gęślą jaźń — \"quoted\"\n",
+            "nested": {"list": [1, 2, {"k": null}]}
+        });
+        let line = assistant_tool_use_line(
+            "null",
+            &format!(r#"{{"type":"tool_use","id":"toolu_U","name":"Agent","input":{input}}}"#),
+        );
+        match parse_line_str(&mut parser, &line).expect("ToolInputComplete") {
+            StreamChunk::ToolInputComplete { input_json, .. } => {
+                let parsed: serde_json::Value = serde_json::from_str(&input_json).unwrap();
+                assert_eq!(parsed, input);
+            }
+            other => panic!("expected ToolInputComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_line_skips_sidechain_ask_user_and_malformed_tool_use_blocks() {
+        let mut parser = StreamParser::new();
+        let sidechain = assistant_tool_use_line(
+            "\"toolu_parent\"",
+            r#"{"type":"tool_use","id":"toolu_sub","name":"Read","input":{"file_path":"/x"}}"#,
+        );
+        assert!(
+            parse_line_all_str(&mut parser, &sidechain).is_empty(),
+            "subagent tools have no frontend block"
+        );
+
+        let ask = assistant_tool_use_line(
+            "null",
+            r#"{"type":"tool_use","id":"toolu_ask","name":"AskUserQuestion","input":{"questions":[]}}"#,
+        );
+        assert!(
+            parse_line_all_str(&mut parser, &ask).is_empty(),
+            "AskUserQuestion is served through control_request"
+        );
+
+        let malformed = assistant_tool_use_line(
+            "null",
+            r#"{"type":"tool_use","name":"Read","input":{"a":1}},{"type":"tool_use","id":"","name":"Read","input":{"a":1}},{"type":"tool_use","id":"toolu_noinput","name":"Read"},{"type":"tool_use","id":"toolu_str","name":"Read","input":"not an object"}"#,
+        );
+        assert!(parse_line_all_str(&mut parser, &malformed).is_empty());
+    }
+
+    #[test]
+    fn assistant_line_without_content_array_emits_nothing_but_still_captures_uuid() {
+        let mut parser = StreamParser::new();
+        let line =
+            r#"{"type":"assistant","message":{"id":"msg_9","role":"assistant","content":"plain"}}"#;
+        assert!(parse_line_all_str(&mut parser, line).is_empty());
+        assert_eq!(parser.pending_assistant_uuid.as_deref(), Some("msg_9"));
+    }
+
+    #[test]
+    fn assistant_line_complete_input_follows_block_stop_in_reader_order() {
+        let mut parser = StreamParser::new();
+        parse_line_str(&mut parser, TOOL_START_LINE);
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"hook_started","hook_name":"x"}"#,
+        );
+        parse_line_str(&mut parser, TOOL_STOP_LINE);
+        let line = assistant_tool_use_line(
+            "null",
+            r#"{"type":"tool_use","id":"toolu_MID","name":"Write","input":{"file_path":"/x","content":"full"}}"#,
+        );
+        let chunks = parse_line_all_str(&mut parser, &line);
+        assert!(matches!(
+            chunks.as_slice(),
+            [StreamChunk::ToolInputComplete { tool_id, .. }] if tool_id == "toolu_MID"
+        ));
+    }
 
     #[test]
     fn parse_user_tool_result_emits_tool_result() {
@@ -3210,8 +4887,6 @@ mod tests {
 
     #[test]
     fn parse_user_multiple_tool_results_emit_one_chunk_each() {
-        // Parallel batches pack several tool_result blocks into one user line;
-        // an early return would leave later tools stuck as "running".
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"tool_result","tool_use_id":"t1","content":"ok"},
@@ -3258,7 +4933,6 @@ mod tests {
 
     #[test]
     fn parse_user_malformed_tool_result_skips_block_not_siblings() {
-        // A block without tool_use_id is dropped; the valid sibling still emits.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"tool_result","content":"orphan"},
@@ -3305,8 +4979,6 @@ mod tests {
         }
     }
 
-    // ── StreamParser: result ──────────────────────────────────────────
-
     #[test]
     fn parse_result_extracts_cost_and_usage() {
         let mut parser = StreamParser::new();
@@ -3340,8 +5012,6 @@ mod tests {
         }
     }
 
-    // The parser reads `total_cost_usd` (current) / `total_cost` (legacy);
-    // this guards against re-adding the dead `cost_usd` alias.
     #[test]
     fn parse_result_with_legacy_cost_usd_only_produces_no_cost() {
         let mut parser = StreamParser::new();
@@ -3379,7 +5049,6 @@ mod tests {
     #[test]
     fn parse_result_with_flat_usage_and_model_usage() {
         let mut parser = StreamParser::new();
-        // Real CLI sends both flat usage (per-step) and modelUsage (cumulative)
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.078,"result":"","usage":{"input_tokens":3,"cache_read_input_tokens":11204,"cache_creation_input_tokens":11358,"output_tokens":65},"modelUsage":{"claude-opus-4-6[1m]":{"inputTokens":3,"cacheReadInputTokens":11204,"cacheCreationInputTokens":11358,"outputTokens":65,"contextWindow":1000000,"costUSD":0.078}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -3389,15 +5058,12 @@ mod tests {
                 total_cost,
                 ..
             } => {
-                // Should use flat usage (per-step), not modelUsage (cumulative)
                 let u = usage.unwrap();
                 assert_eq!(u.input_tokens, 3);
                 assert_eq!(u.output_tokens, 65);
                 assert_eq!(u.cache_read_tokens, Some(11204));
                 assert_eq!(u.cache_write_tokens, Some(11358));
-                // contextWindow from modelUsage
                 assert_eq!(context_window_size, Some(1_000_000));
-                // cost from total_cost_usd
                 assert_eq!(total_cost, Some(0.078));
             }
             other => panic!("expected Result, got {other:?}"),
@@ -3405,9 +5071,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_result_picks_dominant_model_when_modelusage_has_multiple_keys() {
-        // Regression: a turn mixing a main model with background Haiku calls
-        // must report the model with the highest outputTokens.
+    fn parse_result_falls_back_to_dominant_model_when_no_conversation_model_known() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50,"contextWindow":200000},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500,"contextWindow":1000000}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -3420,13 +5084,313 @@ mod tests {
                 assert_eq!(
                     model.as_deref(),
                     Some("claude-opus-4-7"),
-                    "must pick the model with the highest outputTokens, not the alphabetically first key"
+                    "with no conversation model known, must fall back to the highest-outputTokens key"
                 );
                 assert_eq!(
                     context_window_size,
                     Some(1_000_000),
-                    "context_window_size must come from the same dominant model — picking Haiku's 200k here would misreport the cap for 1M sessions"
+                    "context_window_size must come from the same fallback model"
                 );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_chronological_model_wins_over_usage_dominant_old_model() {
+        let mut parser = StreamParser::new();
+        let init_a = r#"{"type":"system","subtype":"init","model":"model-a"}"#;
+        parse_line_str(&mut parser, init_a);
+        let init_b = r#"{"type":"system","subtype":"init","model":"model-b"}"#;
+        parse_line_str(&mut parser, init_b);
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"model-a":{"inputTokens":1000,"outputTokens":5000,"contextWindow":200000},"model-b":{"inputTokens":10,"outputTokens":5,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("model-b"));
+                assert_eq!(context_window_size, Some(1_000_000));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_does_not_revert_tracker_on_later_plain_usage_turn() {
+        let mut parser = StreamParser::new();
+        let assistant_a =
+            r#"{"type":"assistant","message":{"id":"msg_a","model":"model-a","usage":{}}}"#;
+        parse_line_all_str(&mut parser, assistant_a);
+        let assistant_b =
+            r#"{"type":"assistant","message":{"id":"msg_b","model":"model-b","usage":{}}}"#;
+        parse_line_all_str(&mut parser, assistant_b);
+
+        let result_line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"model-a":{"inputTokens":1000,"outputTokens":5000,"contextWindow":200000},"model-b":{"inputTokens":10,"outputTokens":5,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, result_line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("model-b"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        assert_eq!(
+            parser.model_tracker.resolve(),
+            Some("model-b"),
+            "the result event must not re-seed the tracker back to the \
+             cumulative-dominant model-a"
+        );
+
+        let interrupt_line = r#"{"type":"result","session_id":"abc","is_error":false,"result":""}"#;
+        let interrupt_chunk = parse_line_str(&mut parser, interrupt_line).unwrap();
+        match interrupt_chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("model-b"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_plain_usage_only_turn_still_resolves_model_for_context_window() {
+        let mut parser = StreamParser::new();
+        assert!(parser.model_tracker.resolve().is_none());
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.05,"result":"","modelUsage":{"model-only":{"inputTokens":10,"outputTokens":10,"contextWindow":123456}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("model-only"));
+                assert_eq!(context_window_size, Some(123_456));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+        assert_eq!(parser.model_tracker.resolve(), Some("model-only"));
+    }
+
+    #[test]
+    fn parse_line_assistant_model_feeds_result_without_modelusage() {
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"model-observed","usage":{}}}"#;
+        parse_line_all_str(&mut parser, assistant);
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("model-observed"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_sidechain_assistant_model_does_not_override_main_chain() {
+        let mut parser = StreamParser::new();
+        let init_a = r#"{"type":"system","subtype":"init","model":"model-a"}"#;
+        parse_line_str(&mut parser, init_a);
+        let sidechain = r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_sub","model":"claude-haiku-4-5-20251001","usage":{}}}"#;
+        parse_line_all_str(&mut parser, sidechain);
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"","modelUsage":{"model-a":{"inputTokens":10,"outputTokens":10,"contextWindow":200000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("model-a"));
+                assert_eq!(context_window_size, Some(200_000));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthetic_confirmation_after_a_chip_send_emits_no_chunk() {
+        let mut parser = StreamParser::new();
+        let synthetic_line = r#"{"type":"assistant","message":{"id":"u_synth_1","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to Sonnet 5 for this session only"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, synthetic_line);
+        assert!(
+            chunks.is_empty(),
+            "the synthetic confirmation must produce no chunk, got {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn parse_result_uses_conversation_model_window_not_the_dominant_subagent_model() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000},"claude-fable-5":{"inputTokens":100,"outputTokens":100,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-fable-5"),
+                    "the conversation model must win even though the Haiku subagent produced more output"
+                );
+                assert_eq!(
+                    context_window_size,
+                    Some(1_000_000),
+                    "context_window_size must be the conversation model's window, not the dominant subagent's 200k"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_main_chain_assistant_model_supersedes_systeminit() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_1","model":"claude-sonnet-4-6","role":"assistant"}}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-opus-4-7":{"inputTokens":10,"outputTokens":5000,"contextWindow":500000},"claude-sonnet-4-6":{"inputTokens":100,"outputTokens":100,"contextWindow":750000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+                assert_eq!(
+                    context_window_size,
+                    Some(750_000),
+                    "must use sonnet's window, not opus's higher-outputTokens entry"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_ignores_sidechain_assistant_model() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"msg_1","model":"claude-haiku-4-5","role":"assistant"}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_2","model":"claude-haiku-4-5","role":"assistant"}}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000},"claude-fable-5":{"inputTokens":100,"outputTokens":100,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-fable-5"),
+                    "a sidechain assistant event must never move the conversation model"
+                );
+                assert_eq!(context_window_size, Some(1_000_000));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_context_window_none_when_conversation_model_absent_from_modelusage() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("claude-fable-5"));
+                assert!(
+                    context_window_size.is_none(),
+                    "must be None so the frontend falls back to the Anthropic SSOT instead of a subagent's window"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_conversation_model_persists_across_turns_without_modelusage() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+        let first = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000},"claude-fable-5":{"inputTokens":100,"outputTokens":100,"contextWindow":1000000}}}"#;
+        parse_line_str(&mut parser, first);
+
+        let second = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.11,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, second).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-fable-5"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_assistant_model_ignores_empty_or_missing_model() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"","role":"assistant"}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_2","role":"assistant"}}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"","total_cost_usd":0.01}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-fable-5"));
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -3436,37 +5400,51 @@ mod tests {
     fn parse_result_error_produces_error_chunk() {
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
-        let chunk = parse_line_str(&mut parser, line).unwrap();
-        match chunk {
-            StreamChunk::Error { content } => assert_eq!(content, "Something went wrong"),
+        let (chunk, log_entry) = parse_line_full(&mut parser, line);
+        match chunk.unwrap() {
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
+                assert_eq!(content, "Something went wrong");
+                assert!(
+                    turn_ended,
+                    "an is_error result ends the turn of a live process"
+                );
+            }
             other => panic!("expected Error, got {other:?}"),
         }
+        let entry = log_entry.expect("error result must produce a log entry");
+        assert_eq!(entry.prefix, "RESULT");
+        assert_eq!(entry.message, "error: Something went wrong");
     }
-
     #[test]
     fn parse_result_error_with_empty_result_returns_placeholder_error() {
-        // Regression guard: `is_error=true` with empty `result` now surfaces a
-        // placeholder Error chunk instead of being swallowed.
         let mut parser = StreamParser::new();
         for line in [
             r#"{"type":"result","is_error":true,"result":""}"#,
-            // Missing `result` key entirely — same semantics as empty.
             r#"{"type":"result","is_error":true}"#,
         ] {
-            let chunk = parse_line_str(&mut parser, line).unwrap_or_else(|| {
+            let (chunk, log_entry) = parse_line_full(&mut parser, line);
+            let chunk = chunk.unwrap_or_else(|| {
                 panic!(
                     "empty/missing error result must now produce a chunk, not be dropped: {line}"
                 )
             });
-            match chunk {
-                StreamChunk::Error { content } => {
+            let content = match chunk {
+                StreamChunk::Error { content, .. } => {
                     assert!(
                         !content.trim().is_empty(),
                         "placeholder content must be non-empty so the UI has something to render"
                     );
+                    content
                 }
                 other => panic!("expected Error chunk, got {other:?}"),
-            }
+            };
+            let entry = log_entry
+                .unwrap_or_else(|| panic!("empty/missing error result must also log: {line}"));
+            assert_eq!(entry.prefix, "RESULT");
+            assert_eq!(entry.message, format!("error: {content}"));
         }
     }
 
@@ -3486,12 +5464,8 @@ mod tests {
         }
     }
 
-    // ── StreamParser: ignored types ──────────────────────────────────
-
     #[test]
     fn parse_assistant_type_emits_no_chunk() {
-        // Assistant messages emit no chunks (content streams via deltas; the
-        // Result carries the UUID); a missing `message.id` is ignored.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
@@ -3503,8 +5477,6 @@ mod tests {
 
     #[test]
     fn parse_assistant_with_id_captures_pending_uuid() {
-        // Regression: the parser must stash `message.id` when seeing an
-        // `assistant` event so the next `Result` commits it.
         let mut parser = StreamParser::new();
         let line =
             r#"{"type":"assistant","message":{"id":"msg_abc123","role":"assistant","content":[]}}"#;
@@ -3515,8 +5487,6 @@ mod tests {
 
     #[test]
     fn result_commits_pending_assistant_uuid_and_clears_it() {
-        // The pending assistant UUID commits onto the Result (ADR-046) and is
-        // cleared for the next turn.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_turn1","role":"assistant","content":[]}}"#;
@@ -3531,7 +5501,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Fresh turn: Result with no preceding assistant must have None.
         parser.reset();
         let result2 = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.01,"is_error":false,"result":""}"#;
         let chunk = parse_line_str(&mut parser, result2).unwrap();
@@ -3548,8 +5517,6 @@ mod tests {
 
     #[test]
     fn assistant_uuid_does_not_leak_into_error_result() {
-        // An error turn also takes the pending UUID so a later success without
-        // its own `assistant` event isn't mislabeled.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#;
@@ -3557,15 +5524,11 @@ mod tests {
         parse_line_str(&mut parser, assistant);
         let chunk = parse_line_str(&mut parser, error_result).unwrap();
         assert!(matches!(chunk, StreamChunk::Error { .. }));
-        // parse_result `.take()`s the uuid up-front, so an error turn consumes
-        // it — no leak onto the next turn, without relying on reset().
         assert!(parser.pending_assistant_uuid.is_none());
     }
 
     #[test]
     fn assistant_uuid_survives_message_stop_before_result() {
-        // Local-LLM order: assistant → message_stop → result. message_stop's
-        // reset() must NOT drop the uuid the result needs (footer reconcile).
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_local","role":"assistant","content":[]}}"#;
@@ -3596,8 +5559,6 @@ mod tests {
 
     #[test]
     fn user_message_tool_result_does_not_emit_commit() {
-        // Tool-result wrappers carry a user role but must NOT commit a
-        // retry-point UUID — they're not real user prompts.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_tr","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
         let chunks = parse_line_all_str(&mut parser, line);
@@ -3607,8 +5568,6 @@ mod tests {
 
     #[test]
     fn user_message_mixed_text_and_tool_result_emits_tool_result_only() {
-        // Mixed content: a text block alongside a tool_result wrapper MUST NOT
-        // trigger a UserMessageCommit.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_mix","role":"user","content":[{"type":"text","text":"here is the result"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
         let chunks = parse_line_all_str(&mut parser, line);
@@ -3621,8 +5580,6 @@ mod tests {
 
     #[test]
     fn user_message_commit_is_emitted_exactly_once() {
-        // Duplicate user messages (observed on retry/resume) must not
-        // emit the commit twice — only the first occurrence wins.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_once","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
@@ -3643,8 +5600,6 @@ mod tests {
 
     #[test]
     fn user_message_commit_survives_reset() {
-        // Across a turn boundary (reset), a committed user UUID must stay in
-        // the dedup set so a re-echoed prompt isn't re-committed.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_persist","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
@@ -3669,8 +5624,12 @@ mod tests {
         let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => {
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
                 assert!(content.contains("hit your limit"));
+                assert!(!turn_ended, "a system message may arrive mid-turn");
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -3682,7 +5641,7 @@ mod tests {
         let line = r#"{"type":"system","message":"Error: connection refused"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => {
+            StreamChunk::Error { content, .. } => {
                 assert!(content.contains("Error: connection refused"));
             }
             other => panic!("expected Error, got {other:?}"),
@@ -3705,8 +5664,6 @@ mod tests {
         let line = r#"{"type":"system","message":""}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
     }
-
-    // ── StreamParser: system init message ────────────────────────────
 
     #[test]
     fn parse_system_init_extracts_model() {
@@ -3738,8 +5695,6 @@ mod tests {
 
     #[test]
     fn parse_system_init_without_model_still_surfaces_session_id() {
-        // ADR-045: the first-turn queue needs the session id even when the
-        // init line lacks a model.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -3788,14 +5743,13 @@ mod tests {
         let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => assert!(content.contains("hit your limit")),
+            StreamChunk::Error { content, .. } => assert!(content.contains("hit your limit")),
             other => panic!("expected Error, got {other:?}"),
         }
     }
 
     #[test]
     fn stream_chunk_system_init_round_trips() {
-        // No session id → field omitted (wire shape unchanged for old events).
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: None,
@@ -3814,7 +5768,6 @@ mod tests {
             other => panic!("expected SystemInit after round-trip, got {other:?}"),
         }
 
-        // With session id → serialized for the frontend (ADR-045 first-turn queue).
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: Some("abc".to_string()),
@@ -3824,6 +5777,62 @@ mod tests {
             json,
             r#"{"chunk_type":"SystemInit","data":{"model":"test","session_id":"abc"}}"#
         );
+    }
+
+    #[test]
+    fn stream_chunk_control_chip_round_trips() {
+        let chunk = StreamChunk::ControlChip {
+            command: "model".to_string(),
+            argument: "claude-sonnet-5".to_string(),
+            uuid: Some("u-model-1".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"ControlChip","data":{"command":"model","argument":"claude-sonnet-5","uuid":"u-model-1"}}"#
+        );
+        let decoded: StreamChunk = serde_json::from_str(&json).unwrap();
+        match decoded {
+            StreamChunk::ControlChip {
+                command,
+                argument,
+                uuid,
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+                assert_eq!(uuid.as_deref(), Some("u-model-1"));
+            }
+            other => panic!("expected ControlChip after round-trip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_control_chip_omits_uuid_when_none() {
+        let chunk = StreamChunk::ControlChip {
+            command: "effort".to_string(),
+            argument: "high".to_string(),
+            uuid: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(
+            !json.contains("uuid"),
+            "None uuid must be omitted, got: {json}"
+        );
+    }
+
+    #[test]
+    fn stream_chunk_control_chip_unicode_argument_round_trips() {
+        let chunk = StreamChunk::ControlChip {
+            command: "model".to_string(),
+            argument: "modèle-🌊".to_string(),
+            uuid: Some("u-2".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let decoded: StreamChunk = serde_json::from_str(&json).unwrap();
+        match decoded {
+            StreamChunk::ControlChip { argument, .. } => assert_eq!(argument, "modèle-🌊"),
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3838,35 +5847,81 @@ mod tests {
         assert_eq!(entry.message, "init: model=claude-opus-4-6");
     }
 
-    #[test]
-    fn parse_rate_limit_event_extracts_fields() {
-        // Real 2.1.173 wire shape: reset timestamp is camelCase `resetsAt`
-        // (drives the footer countdown).
+    fn parse_rate_limit(line: &str) -> (StreamChunk, LogEntry) {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, log_entry) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+        (
+            chunks.into_iter().next().expect("a RateLimit chunk"),
+            log_entry.expect("a RATE_LIMIT log entry"),
+        )
+    }
+
+    #[test]
+    fn parse_rate_limit_event_stores_a_warning_fraction_as_percent() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1738425600,"rateLimitType":"five_hour","utilization":0.6,"overageStatus":"rejected","isUsingOverage":false},"uuid":"u","session_id":"s"}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                overage_status,
+                is_using_overage,
+            } => {
                 assert_eq!(status, "allowed_warning");
-                assert!((utilization.unwrap() - 73.5).abs() < f64::EPSILON);
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert!((utilization_percent.unwrap() - 60.0).abs() < 1e-9);
                 assert_eq!(resets_at, Some(1738425600));
+                assert_eq!(overage_status.as_deref(), Some("rejected"));
+                assert_eq!(is_using_overage, Some(false));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
-        let entry = log_entry.unwrap();
         assert_eq!(entry.prefix, "RATE_LIMIT");
-        assert!(entry.message.contains("73.5"));
+        assert!(
+            entry.message.contains("utilization=60%"),
+            "{}",
+            entry.message
+        );
+        assert!(
+            entry.message.contains("type=five_hour"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_ignores_a_utilization_that_is_not_a_fraction() {
+        for raw in ["73.5", "1.01", "-0.1"] {
+            let line = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed_warning","utilization":{raw}}}}}"#
+            );
+            match parse_rate_limit(&line).0 {
+                StreamChunk::RateLimit {
+                    utilization_percent,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(utilization_percent, None, "{raw}");
+                    assert_eq!(status, "allowed_warning");
+                }
+                other => panic!("expected RateLimit, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn utilization_fraction_bounds_map_to_zero_and_one_hundred_percent() {
+        assert_eq!(utilization_fraction_to_percent(0.0), Some(0.0));
+        assert_eq!(utilization_fraction_to_percent(1.0), Some(100.0));
+        assert_eq!(utilization_fraction_to_percent(f64::NAN), None);
     }
 
     #[test]
     fn parse_rate_limit_event_accepts_legacy_snake_case_resets_at() {
-        // Older builds emitted snake_case `resets_at`; the parser keeps a fallback.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resets_at":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -3880,41 +5935,76 @@ mod tests {
     }
 
     #[test]
-    fn parse_rate_limit_event_without_utilization() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+    fn parse_rate_limit_event_without_utilization_keeps_status_type_and_reset_time() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1738425600,"rateLimitType":"seven_day","overageStatus":"rejected","isUsingOverage":false}}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                ..
+            } => {
                 assert_eq!(status, "allowed");
-                assert!(utilization.is_none());
-                assert!(resets_at.is_none());
+                assert_eq!(rate_limit_type.as_deref(), Some("seven_day"));
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        assert!(
+            entry.message.contains("utilization=none"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_with_only_a_status_leaves_every_other_field_absent() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
+                status,
+                rate_limit_type,
+                utilization_percent,
+                resets_at,
+                overage_status,
+                is_using_overage,
+            } => {
+                assert_eq!(status, "allowed");
+                assert_eq!(rate_limit_type, None);
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, None);
+                assert_eq!(overage_status, None);
+                assert_eq!(is_using_overage, None);
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_rate_limit_event_rejected() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resetsAt":1738430000}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
-        match chunk {
-            Some(StreamChunk::RateLimit {
+    fn parse_rate_limit_event_rejected_at_the_limit() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1738430000,"rateLimitType":"five_hour","utilization":1.0,"overageStatus":"allowed","isUsingOverage":true}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
+                is_using_overage,
+                overage_status,
                 ..
-            }) => {
+            } => {
                 assert_eq!(status, "rejected");
-                assert!((utilization.unwrap() - 100.0).abs() < f64::EPSILON);
+                assert!((utilization_percent.unwrap() - 100.0).abs() < 1e-9);
+                assert_eq!(overage_status.as_deref(), Some("allowed"));
+                assert_eq!(is_using_overage, Some(true));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
@@ -3923,24 +6013,89 @@ mod tests {
     #[test]
     fn stream_chunk_rate_limit_round_trips() {
         let chunk = StreamChunk::RateLimit {
-            status: "allowed".to_string(),
-            utilization: Some(42.5),
+            status: "allowed_warning".to_string(),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization_percent: Some(42.0),
             resets_at: Some(1738425600),
+            overage_status: None,
+            is_using_overage: Some(false),
         };
-        let json = serde_json::to_string(&chunk).unwrap();
-        let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["chunk_type"], "RateLimit");
+        let mut keys: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "is_using_overage",
+                "overage_status",
+                "rate_limit_type",
+                "resets_at",
+                "status",
+                "utilization_percent"
+            ]
+        );
+        let deserialized: StreamChunk = serde_json::from_value(json).unwrap();
         match deserialized {
             StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
                 resets_at,
+                ..
             } => {
-                assert_eq!(status, "allowed");
-                assert!((utilization.unwrap() - 42.5).abs() < f64::EPSILON);
+                assert_eq!(status, "allowed_warning");
+                assert!((utilization_percent.unwrap() - 42.0).abs() < f64::EPSILON);
                 assert_eq!(resets_at, Some(1738425600));
             }
             other => panic!("expected RateLimit after round-trip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limit_chunk_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "export interface RateLimitInfo {";
+        let idx = ts
+            .find(marker)
+            .expect("chat.ts must declare `export interface RateLimitInfo`");
+        let body = ts[idx + marker.len()..]
+            .split("\n}")
+            .next()
+            .expect("RateLimitInfo must close");
+        let mut ts_fields: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts_fields.sort_unstable();
+        let chunk = StreamChunk::RateLimit {
+            status: "allowed".to_string(),
+            rate_limit_type: None,
+            utilization_percent: None,
+            resets_at: None,
+            overage_status: None,
+            is_using_overage: None,
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        let mut rust_fields: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust_fields.sort_unstable();
+        assert_eq!(rust_fields, ts_fields);
+        let compact: String = ts.split_whitespace().collect();
+        assert!(
+            compact.contains("chunk_type:'RateLimit';data:RateLimitInfo"),
+            "the RateLimit chunk must carry RateLimitInfo"
+        );
     }
 
     #[test]
@@ -3964,8 +6119,6 @@ mod tests {
         assert!(parse_line_str(&mut parser, line).is_none());
     }
 
-    // ── ChatSession::new() ───────────────────────────────────────────
-
     #[test]
     fn chat_session_new_stores_project_name() {
         let session = ChatSession::new("acme-corp");
@@ -3980,12 +6133,8 @@ mod tests {
         assert!(session.pending_requests.lock().unwrap().is_empty());
     }
 
-    // ── Container name construction ──────────────────────────────────
-
     #[test]
     fn claude_container_name_uses_compose_prefix() {
-        // Use the `_with_prefix` variant with the fixed `COMPOSE_PREFIX` literal
-        // so the test does not depend on the process-global `data_dir()` basename.
         let name = claude_container_name_with_prefix(consts::COMPOSE_PREFIX, "myproject");
         assert_eq!(name, format!("{}_myproject_claude", consts::COMPOSE_PREFIX));
     }
@@ -3995,8 +6144,6 @@ mod tests {
         let name = claude_container_name_with_prefix(consts::COMPOSE_PREFIX, "acme-corp");
         assert_eq!(name, "speedwave_acme-corp_claude");
     }
-
-    // ── build_claude_args ────────────────────────────────────────────
 
     #[test]
     fn build_claude_args_without_resume() {
@@ -4019,7 +6166,6 @@ mod tests {
 
     #[test]
     fn build_claude_args_with_resume_and_uuid() {
-        // ADR-046: retry uses `--resume <session>` + `--resume-session-at <uuid>`.
         let session = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_anchor";
         let args = build_claude_args("inst", Some(session), Some(uuid), &[]);
@@ -4045,16 +6191,11 @@ mod tests {
 
     #[test]
     fn build_claude_args_prepends_instance_env_marker() {
-        // The instance marker is injected via `env VAR=id` BEFORE the claude
-        // binary so it lands in the container process's environ.
         let args = build_claude_args("my-instance-42", None, None, &[]);
         assert_eq!(args[0], "env");
         assert_eq!(args[1], "SPW_SESSION_INSTANCE_ID=my-instance-42");
-        // claude binary follows the env prefix.
         assert_eq!(args[2], consts::CLAUDE_BINARY);
     }
-
-    // ── Multi-event fixture test ─────────────────────────────────────
 
     #[test]
     fn full_turn_fixture_produces_expected_chunk_sequence() {
@@ -4065,8 +6206,6 @@ mod tests {
             .filter_map(|line| parse_line_str(&mut parser, line))
             .collect();
 
-        // Expected: Text×2, Thinking×2, ToolStart, ToolInputDelta×2,
-        // ToolResult, Text, Result (10 chunks; per-chunk asserts below).
         assert_eq!(chunks.len(), 10, "expected 10 chunks, got {}", chunks.len());
 
         match &chunks[0] {
@@ -4145,18 +6284,14 @@ mod tests {
         }
     }
 
-    // ── AskUserQuestion tests ───────────────────────────────────────
-
     #[test]
     fn parse_ask_user_question_suppressed_in_stream_events() {
         let mut parser = StreamParser::new();
 
-        // 1. content_block_start: tool_use with AskUserQuestion — suppressed (no ToolStart emitted)
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask1","name":"AskUserQuestion"}}}"#;
         let chunk = parse_line_str(&mut parser, start);
         assert!(chunk.is_none(), "AskUserQuestion should suppress ToolStart");
 
-        // 2. input_json_delta — also suppressed for AskUserQuestion
         let delta1 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"question\":\"Pick a fruit\","}}}"#;
         assert!(
             parse_line_str(&mut parser, delta1).is_none(),
@@ -4169,8 +6304,6 @@ mod tests {
             "AskUserQuestion input_json_delta should be suppressed"
         );
 
-        // 3. content_block_stop → AskUserQuestion is now handled via control_request,
-        //    stream events should NOT emit it (returns None)
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         assert!(
             parse_line_str(&mut parser, stop).is_none(),
@@ -4179,7 +6312,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_ask_user_question_cleans_up_tool_input() {
+    fn parse_ask_user_question_cleans_up_active_blocks() {
         let mut parser = StreamParser::new();
 
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask2","name":"AskUserQuestion"}}}"#;
@@ -4191,8 +6324,6 @@ mod tests {
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         parse_line_str(&mut parser, stop);
 
-        // tool_input should be cleaned up after emission
-        assert!(parser.tool_input.is_empty());
         assert!(parser.active_blocks.is_empty());
     }
 
@@ -4262,19 +6393,15 @@ mod tests {
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask3","name":"AskUserQuestion"}}}"#;
         parse_line_str(&mut parser, start);
 
-        // Wrapped format: {"questions":[{...}]}
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"Co wolisz?\",\"header\":\"Owoc\",\"multiSelect\":false,\"options\":[{\"label\":\"Gruszki\",\"description\":\"Zielone\"},{\"label\":\"Banany\",\"description\":\"Żółte\"}]}]}"}}}"#;
         parse_line_str(&mut parser, delta);
 
-        // content_block_stop should NOT emit AskUserQuestion (handled via control_request)
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         assert!(
             parse_line_str(&mut parser, stop).is_none(),
             "AskUserQuestion should not be emitted from stream events"
         );
     }
-
-    // ── Control protocol tests ────────────────────────────────────
 
     #[test]
     fn try_parse_control_request_returns_none_for_stream_event() {
@@ -4392,8 +6519,6 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_duplicate_question_text_fails_closed() {
-        // Two slots share question text; the host refuses the lossy payload
-        // and surfaces an error.
         let partial = make_partial(
             "req_dup",
             &[("Same?", "H1"), ("Same?", "H2")],
@@ -4423,8 +6548,6 @@ mod tests {
 
     #[test]
     fn submit_question_answer_no_session_errors_cleanly() {
-        // Without an active child, submit_question_answer must fail with
-        // "no active session" before mutating state.
         let mut s = ChatSession::new("test-project");
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
@@ -4437,7 +6560,6 @@ mod tests {
             err.to_string().contains("no active session"),
             "unexpected error: {err}"
         );
-        // The pending entry must NOT be mutated by a no-session error.
         let map = s.pending_requests.lock().unwrap();
         let entry = map.get("tool-x").expect("entry preserved");
         assert!(entry.answers[0].is_none(), "answers must not be modified");
@@ -4555,8 +6677,6 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_oversize_payload_serializes_to_more_than_64_kib() {
-        // Build a 4-question payload whose serialized wire response exceeds
-        // 64 KiB to exercise the wire-cap guard.
         let big = "x".repeat(20_000);
         let partial = make_partial(
             "req_oversize",
@@ -4679,7 +6799,6 @@ mod tests {
         assert_eq!(questions.len(), MAX_ASK_USER_QUESTIONS);
         assert_eq!(questions[0].question, "A");
         assert_eq!(questions[3].question, "D");
-        // E was truncated; we don't assert log capture here (covered by integration).
     }
 
     #[test]
@@ -4740,7 +6859,6 @@ mod tests {
         assert_eq!(questions[0].options.len(), 2);
         assert_eq!(questions[0].options[0].label, "Good");
         assert_eq!(questions[0].options[1].label, "Also good");
-        // Default value falls back to label when missing.
         assert_eq!(questions[0].options[1].value, "Also good");
     }
 
@@ -4770,10 +6888,6 @@ mod tests {
         assert_eq!(args[pos + 1], "stdio");
     }
 
-    // ── Control request fixture test ────────────────────────────────
-
-    // ── prepare_args tests ──────────────────────────────────────────
-
     #[test]
     fn prepare_args_fails_when_project_not_in_config() {
         let user_config = config::SpeedwaveUserConfig {
@@ -4802,6 +6916,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4828,6 +6943,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4854,6 +6970,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4862,9 +6979,131 @@ mod tests {
         };
         let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
         assert!(result.is_ok());
-        let (args, container) = result.unwrap();
+        let PreparedSpawn {
+            args, container, ..
+        } = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
+        assert!(!args.contains(&"--effort".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn prepare_args_includes_effort_flag_when_a_pin_exists() {
+        let mut user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "myproject".to_string(),
+                dir: "/home/user/myproject".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: Some("xhigh".to_string()),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
+        let effort_count = args.iter().filter(|a| *a == "--effort").count();
+        assert_eq!(effort_count, 1, "exactly one --effort flag, got: {args:?}");
+        let pos = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[pos + 1], "xhigh");
+
+        user_config.projects[0].effort_pin = Some("max".to_string());
+        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
+        let effort_count = args.iter().filter(|a| *a == "--effort").count();
+        assert_eq!(effort_count, 1);
+        let pos = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[pos + 1], "max");
+    }
+
+    #[test]
+    fn prepare_args_reports_whether_it_passes_an_effort() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let mut user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "myproject".to_string(),
+                dir: "/home/user/myproject".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let spawn =
+            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
+                .unwrap();
+        assert!(!spawn.with_effort);
+
+        user_config.projects[0].effort_pin = Some("low".to_string());
+        let spawn =
+            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
+                .unwrap();
+        assert!(spawn.with_effort);
+        let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(spawn.args[pos + 1], "low");
+
+        user_config.projects[0].effort_pin = Some("turbo".to_string());
+        let spawn =
+            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
+                .unwrap();
+        assert!(!spawn.with_effort, "an unknown pin is never launched");
+        assert!(!spawn.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn only_a_live_process_launched_with_effort_takes_the_wire() {
+        assert!(!ChatSession::new("myproject").takes_wire_effort());
+
+        let mut pinned = ChatSession::new("myproject");
+        pinned.set_test_process(spawn_test_child(TestChild::Blocked), true);
+        assert!(pinned.takes_wire_effort());
+
+        let mut unpinned = ChatSession::new("myproject");
+        unpinned.set_test_process(spawn_test_child(TestChild::Blocked), false);
+        assert!(!unpinned.takes_wire_effort());
+
+        let mut exited = ChatSession::new("myproject");
+        exited.set_test_process(spawn_test_child(TestChild::Exited), true);
+        assert!(!exited.takes_wire_effort());
+    }
+
+    #[test]
+    fn error_chunk_carries_turn_ended_only_when_set() {
+        let mid_turn = serde_json::to_value(StreamChunk::Error {
+            content: "rate limit".to_string(),
+            turn_ended: false,
+        })
+        .unwrap();
+        assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
+
+        let ended = serde_json::to_value(StreamChunk::Error {
+            content: "overloaded".to_string(),
+            turn_ended: true,
+        })
+        .unwrap();
+        assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));
+
+        let decoded: StreamChunk =
+            serde_json::from_str(r#"{"chunk_type":"Error","data":{"content":"x"}}"#).unwrap();
+        assert!(matches!(
+            decoded,
+            StreamChunk::Error {
+                turn_ended: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4877,6 +7116,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4887,8 +7127,7 @@ mod tests {
         let result =
             ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
         assert!(result.is_ok());
-        let (args, _container) = result.unwrap();
-        // The instance marker is stamped ahead of the claude binary.
+        let args = result.unwrap().args;
         assert!(args.contains(&format!(
             "{}=my-inst",
             speedwave_runtime::session::SESSION_INSTANCE_ENV
@@ -4908,6 +7147,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4919,12 +7159,48 @@ mod tests {
         let result =
             ChatSession::prepare_args("proj", &user_config, "inst", Some(session_id), Some(uuid));
         assert!(result.is_ok());
-        let (args, _) = result.unwrap();
+        let args = result.unwrap().args;
         assert!(args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&uuid.to_string()));
     }
 
-    // ── validate_retry_uuid ──────────────────────────────────────────
+    fn single_project_user_config() -> config::SpeedwaveUserConfig {
+        config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        }
+    }
+
+    #[test]
+    fn prepare_args_never_appends_a_model_flag_without_a_pin_file() {
+        let user_config = single_project_user_config();
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
+        assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn prepare_args_never_appends_a_model_flag_even_with_a_model_pin_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
+        let user_config = single_project_user_config();
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
+            .unwrap()
+            .args;
+        assert!(!args.contains(&"--model".to_string()));
+    }
 
     #[test]
     fn validate_retry_uuid_accepts_api_msg_ids() {
@@ -4966,8 +7242,6 @@ mod tests {
         let too_long = "a".repeat(129);
         assert!(validate_retry_uuid(&too_long).is_err());
     }
-
-    // ── Silent failure prevention tests ──────────────────────────────
 
     #[test]
     fn tool_use_with_empty_id_returns_none() {
@@ -5063,14 +7337,12 @@ mod tests {
         let mut chunks: Vec<StreamChunk> = Vec::new();
 
         for line in fixture.lines() {
-            // control_requests are handled separately from stream events
             if let Some(ctrl) = try_parse_control_request_str(line) {
                 if ctrl.tool_name == ASK_USER_TOOL_NAME {
                     if let Some(chunk) = StreamParser::emit_ask_user_from_control_request(&ctrl) {
                         chunks.push(chunk);
                     }
                 }
-                // auto-approve for non-AskUserQuestion is a stdin write, not a chunk
                 continue;
             }
             if let Some(chunk) = parse_line_str(&mut parser, line) {
@@ -5078,7 +7350,6 @@ mod tests {
             }
         }
 
-        // Expected: Text, AskUserQuestion (from control_request), Text, Result
         assert_eq!(chunks.len(), 4, "expected 4 chunks, got {}", chunks.len());
 
         match &chunks[0] {
@@ -5109,8 +7380,6 @@ mod tests {
             other => panic!("chunk 3: expected Result, got {other:?}"),
         }
     }
-
-    // ── Slash command result_text tests ──────────────────────────────
 
     #[test]
     fn slash_command_result_includes_result_text() {
@@ -5198,9 +7467,6 @@ mod tests {
         );
     }
 
-    // ── context_usage (last main-chain API call) tests ──────────────
-
-    /// Assistant stream-json line with the given per-call usage numbers.
     fn assistant_line(input: u64, cr: u64, cw: u64, out: u64, parent: Option<&str>) -> String {
         let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
         format!(
@@ -5212,8 +7478,6 @@ mod tests {
 
     #[test]
     fn result_carries_last_assistant_call_usage_not_the_turn_sum() {
-        // Three API calls in one turn: summed cache_read (110k+120k+130k)
-        // would overflow any window; context_usage must be the LAST call only.
         let mut parser = StreamParser::new();
         for cr in [110_000, 120_000, 130_000] {
             parse_line_str(&mut parser, &assistant_line(5, cr, 100, 50, None));
@@ -5235,7 +7499,6 @@ mod tests {
     fn sidechain_assistant_usage_never_moves_the_context_meter() {
         let mut parser = StreamParser::new();
         parse_line_str(&mut parser, &assistant_line(5, 60_000, 100, 50, None));
-        // Subagent call with a huge foreign context must be ignored.
         parse_line_str(
             &mut parser,
             &assistant_line(9, 180_000, 900, 90, Some("toolu_task_1")),
@@ -5248,8 +7511,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
     }
-
-    // ── is_sidechain_event: shared heuristic (chat.rs live stream + history.rs transcript) ──
 
     #[test]
     fn is_sidechain_event_true_via_parent_tool_use_id() {
@@ -5283,7 +7544,6 @@ mod tests {
 
     #[test]
     fn is_sidechain_event_false_for_non_boolean_is_sidechain() {
-        // Malformed/unexpected type on isSidechain must not be treated as truthy.
         let v = serde_json::json!({"isSidechain": "true"});
         assert!(!is_sidechain_event(&v));
     }
@@ -5305,12 +7565,10 @@ mod tests {
     #[test]
     fn context_usage_absent_before_any_assistant_call_then_persists_across_turns() {
         let mut parser = StreamParser::new();
-        // Turn 1: no API call (e.g. local slash command) — nothing to report.
         match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
             StreamChunk::Result { context_usage, .. } => assert!(context_usage.is_none()),
             other => panic!("expected Result, got {other:?}"),
         }
-        // Turn 2: a real call; turn 3 has no call and must keep turn 2's value.
         parse_line_str(&mut parser, &assistant_line(5, 70_000, 100, 50, None));
         parse_line_str(&mut parser, RESULT_LINE).unwrap();
         match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
@@ -5398,8 +7656,6 @@ mod tests {
         }
     }
 
-    // ── LogEntry tests ──────────────────────────────────────────────
-
     #[test]
     fn tool_use_start_produces_log_entry() {
         let mut parser = StreamParser::new();
@@ -5418,10 +7674,8 @@ mod tests {
     #[test]
     fn tool_use_stop_produces_log_entry() {
         let mut parser = StreamParser::new();
-        // Start first
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
         parse_line_full(&mut parser, start);
-        // Stop
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         let (chunk, log_entry) = parse_line_full(&mut parser, stop);
         assert!(chunk.is_none(), "content_block_stop should not emit chunk");
@@ -5493,8 +7747,6 @@ mod tests {
         );
     }
 
-    // ── Session guard tests ─────────────────────────────────────────
-
     #[test]
     fn chat_session_new_has_no_session_log_path() {
         let session = ChatSession::new("test-project");
@@ -5515,8 +7767,6 @@ mod tests {
             "stop() on fresh session should not create log file"
         );
     }
-
-    // ── TurnUsage + per-turn meta tests ─────────────────────────────
 
     #[test]
     fn turn_usage_from_usage_info_defaults_missing_cache_fields_to_zero() {
@@ -5569,8 +7819,6 @@ mod tests {
 
     #[test]
     fn turn_usage_delta_saturates_on_reset() {
-        // After a resume or reset, `current` may momentarily be less than
-        // `previous`. The helper should report zero, not underflow.
         let prev = TurnUsage {
             input_tokens: 500,
             output_tokens: 500,
@@ -5589,8 +7837,6 @@ mod tests {
         assert_eq!(delta.cache_read_tokens, 0);
         assert_eq!(delta.cache_write_tokens, 0);
     }
-
-    // ── turn_usage_from_jsonl (JSONL usage SSOT) ────────────────────
 
     #[test]
     fn turn_usage_from_jsonl_maps_all_fields() {
@@ -5619,7 +7865,6 @@ mod tests {
 
     #[test]
     fn turn_usage_from_jsonl_zero_fills_malformed_values() {
-        // Non-u64 values (string, negative, float, null) read as 0, not an error.
         let u = serde_json::json!({
             "input_tokens": "many",
             "output_tokens": -3,
@@ -5645,8 +7890,6 @@ mod tests {
     #[test]
     fn parse_result_emits_turn_usage_from_flat_per_step_usage() {
         let mut parser = StreamParser::new();
-        // First turn: flat usage with all four fields. With no modelUsage,
-        // the parser treats this as per-step and emits it directly.
         let line = r#"{"type":"result","session_id":"s1","is_error":false,"result":"","total_cost_usd":0.003,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -5669,7 +7912,6 @@ mod tests {
     #[test]
     fn parse_result_three_turn_cumulative_modelusage_produces_correct_deltas() {
         let mut parser = StreamParser::new();
-        // Turn 1: cumulative = {in:5, out:3, cR:0, cW:10}. Delta = that.
         let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.01,"modelUsage":{"claude-opus-4-7":{"inputTokens":5,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":10}}}"#;
         let c1 = parse_line_str(&mut parser, t1).unwrap();
         match c1 {
@@ -5688,7 +7930,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Turn 2: cumulative = {in:12, out:8, cR:100, cW:10}. Delta = {7,5,100,0}.
         let t2 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.025,"modelUsage":{"claude-opus-4-7":{"inputTokens":12,"outputTokens":8,"cacheReadInputTokens":100,"cacheCreationInputTokens":10}}}"#;
         let c2 = parse_line_str(&mut parser, t2).unwrap();
         match c2 {
@@ -5707,7 +7948,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Turn 3: cumulative = {in:20, out:13, cR:200, cW:10}. Delta = {8,5,100,0}.
         let t3 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.040,"modelUsage":{"claude-opus-4-7":{"inputTokens":20,"outputTokens":13,"cacheReadInputTokens":200,"cacheCreationInputTokens":10}}}"#;
         let c3 = parse_line_str(&mut parser, t3).unwrap();
         match c3 {
@@ -5729,8 +7969,6 @@ mod tests {
 
     #[test]
     fn parse_result_resume_session_restores_snapshot_correctly() {
-        // Simulate mid-session resume: restore the snapshot, then verify the
-        // next Result's delta is against the baseline, not zero.
         let mut parser = StreamParser::new();
         parser.restore_session_snapshot(
             TurnUsage {
@@ -5744,8 +7982,6 @@ mod tests {
             None,
         );
 
-        // First Result after resume: cumulative = {in:110, out:55, cR:200, cW:30}.
-        // Expected delta: {10, 5, 0, 0}. turn_cost = 0.30 - 0.25 = 0.05.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.30,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":110,"outputTokens":55,"cacheReadInputTokens":200,"cacheCreationInputTokens":30}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -5766,7 +8002,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Snapshot advanced to the current cumulative total after the turn.
         let snap = parser.previous_session_usage();
         assert_eq!(snap.input_tokens, 110);
         assert_eq!(snap.output_tokens, 55);
@@ -5775,11 +8010,9 @@ mod tests {
     #[test]
     fn parse_result_uses_systeminit_model_when_modelusage_absent() {
         let mut parser = StreamParser::new();
-        // SystemInit captures the model
         let init = r#"{"type":"system","subtype":"init","model":"claude-haiku-4-5"}"#;
         parse_line_str(&mut parser, init);
 
-        // Result without modelUsage should fall back to the captured model
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -5812,8 +8045,6 @@ mod tests {
 
     #[test]
     fn parse_result_treats_missing_cache_fields_as_zero() {
-        // Neither cache_read_input_tokens nor cache_creation_input_tokens —
-        // both must flatten to 0 in the emitted TurnUsage.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":3,"output_tokens":4}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -5832,7 +8063,6 @@ mod tests {
     #[test]
     fn parse_result_first_turn_cost_uses_total_cost_when_no_prior_snapshot() {
         let mut parser = StreamParser::new();
-        // First Result: no previous cost snapshot — turn_cost == total_cost.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.123,"usage":{"input_tokens":1,"output_tokens":1}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -5872,7 +8102,6 @@ mod tests {
         );
         parser.new_session();
         assert_eq!(parser.previous_session_usage(), TurnUsage::default());
-        // Next Result with no prior history should emit the turn at face value.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":2,"output_tokens":3}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -5890,8 +8119,6 @@ mod tests {
 
     #[test]
     fn parse_result_with_negative_cost_delta_drops_turn_cost() {
-        // Defensive: a cumulative cost below the previous snapshot drops
-        // `turn_cost` instead of reporting a negative value.
         let mut parser = StreamParser::new();
         let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.50}"#;
         parse_line_str(&mut parser, t1);
@@ -5910,8 +8137,6 @@ mod tests {
 
     #[test]
     fn extract_cumulative_usage_sums_multiple_models() {
-        // Rare but defined case: modelUsage has entries for two models
-        // (e.g., mid-session model switch). The cumulative is the sum.
         let parsed: serde_json::Value = serde_json::from_str(
             r#"{
                 "modelUsage": {
@@ -5938,8 +8163,6 @@ mod tests {
 
     #[test]
     fn turn_usage_serializes_with_required_cache_fields() {
-        // No optional fields: cache_read/write are always present in the
-        // wire format so the TS frontend can render without `??` guards.
         let t = TurnUsage {
             input_tokens: 1,
             output_tokens: 2,
@@ -5955,8 +8178,6 @@ mod tests {
 
     #[test]
     fn first_turn_after_resume_seed_emits_delta_not_cumulative() {
-        // Resume path: seed like `compute_resume_snapshot`, then assert the
-        // first result is the per-turn delta, not the cumulative.
         let mut parser = StreamParser::new();
         parser.restore_session_snapshot(
             TurnUsage {
@@ -5970,8 +8191,6 @@ mod tests {
             None,
         );
 
-        // First post-resume Result: cumulative jumps by {5 in, 3 out}.
-        // Without the seed the parser would report all 95/43 as the turn.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.27,"modelUsage":{"claude-opus-4-7":{"inputTokens":95,"outputTokens":43,"cacheReadInputTokens":150,"cacheCreationInputTokens":20}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {

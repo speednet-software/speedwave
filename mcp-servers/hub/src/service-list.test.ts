@@ -86,14 +86,12 @@ describe('service-list', () => {
     });
 
     it('is pure camelization: a reserved word or empty result passes through unchanged', () => {
-      // Validation (reserved word / collision) is the executor's job, not this function's.
       expect(sandboxGlobalName('class')).toBe('class');
       expect(sandboxGlobalName('await')).toBe('await');
       expect(sandboxGlobalName('-')).toBe('');
     });
 
     it('produces a valid AsyncFunction parameter name for every dashed result', () => {
-      // Probe with the same constructor production uses; `Function` accepts a wider grammar.
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
       for (const name of ['my-plugin', 'a-b-c', 'svc-', 'crm-2go', 'my--plugin']) {
         expect(() => new AsyncFunction(sandboxGlobalName(name), 'return 1')).not.toThrow();
@@ -128,7 +126,6 @@ describe('service-list', () => {
       for (const service of ['collect-pages', 'undefined', 'let']) {
         expect(skipped.get(service)).toContain('built-in or unsafe JS global');
       }
-      // `nan` is a distinct identifier from `NaN`; only the exact global name is unsafe.
       expect(Object.fromEntries(usable)).toEqual({ nan: 'nan' });
     });
 

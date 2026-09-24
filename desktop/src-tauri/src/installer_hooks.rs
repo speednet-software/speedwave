@@ -1,6 +1,3 @@
-//! Regression tests for `windows/installer-hooks.nsh` and its inputs
-//! (`installer-hooks-template.nsh`, `sweep.ps1`, `firewall.ps1`). See ADR-048.
-
 #[cfg(test)]
 mod tests {
     const HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
@@ -9,9 +6,15 @@ mod tests {
     const FIREWALL_PS1: &str = include_str!("../windows/firewall.ps1");
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
-    const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
-
-    // ── Hook shape ──────────────────────────────────────────────────────
+    const RESET_PS1: &str = include_str!("../windows/reset.ps1");
+    const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+    const TAURI_WINDOWS_CONF: &str = include_str!("../tauri.windows.conf.json");
+    const RETIRED_DIRECTORY_RESOURCE_ROOTS: [&str; 1] = ["host_exec"];
+    const INSTALLER_PS1_SOURCES: [(&str, &str); 3] = [
+        ("sweep.ps1", SWEEP_PS1),
+        ("firewall.ps1", FIREWALL_PS1),
+        ("reset.ps1", RESET_PS1),
+    ];
 
     #[test]
     fn has_all_required_hook_macros() {
@@ -36,16 +39,12 @@ mod tests {
             "PREINSTALL must !insertmacro SPEEDWAVE_MATERIALIZE_SWEEP"
         );
         assert!(
-            pre.contains(r#"$\"$PLUGINSDIR\sweep.ps1$\""#),
-            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1 (via the shim)"
+            pre.contains(&hidden_powershell_run(r#""$PLUGINSDIR\sweep.ps1""#)),
+            "PREINSTALL must run the materialized $PLUGINSDIR\\sweep.ps1 without a console window"
         );
         assert!(
             pre.contains("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe"),
             "PREINSTALL must use the absolute powershell path to defeat PATH hijack"
-        );
-        assert!(
-            pre.contains(r#""$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs""#),
-            "PREINSTALL must run PowerShell via the wscript hidden-window shim"
         );
         for env_name in ["SPW_INSTDIR", "SPW_DATA_DIR"] {
             assert!(
@@ -64,6 +63,116 @@ mod tests {
     }
 
     #[test]
+    fn reset_ps1_clears_every_current_and_retired_directory_resource() {
+        let mut expected = windows_directory_resource_roots();
+        assert!(
+            expected.contains("build-context"),
+            "tauri.windows.conf.json must bundle build-context/ as a directory resource: {expected:?}"
+        );
+        expected.extend(RETIRED_DIRECTORY_RESOURCE_ROOTS.map(str::to_owned));
+        assert_eq!(
+            reset_trees(),
+            expected,
+            "reset.ps1 must clear every directory resource the installer lays down and every retired one: \
+             an /UPDATE or silent install never runs the previous uninstaller, so files a release drops stay behind"
+        );
+    }
+
+    #[test]
+    fn reset_trees_cover_every_bundled_directory_asset() {
+        let trees = reset_trees();
+        let assets = speedwave_runtime::bundle::required_bundled_assets("windows")
+            .expect("the Windows bundled assets must resolve");
+        for asset in assets.iter().filter(|a| {
+            matches!(
+                a.kind,
+                speedwave_runtime::bundle::BundledAssetKind::Directory
+            )
+        }) {
+            let root = asset.path.split('/').next().unwrap_or_default();
+            assert!(
+                trees.contains(root),
+                "reset.ps1 must clear {root}, the tree holding the bundled directory {}",
+                asset.path
+            );
+        }
+    }
+
+    #[test]
+    fn reset_ps1_deletes_through_dotnet_without_following_links() {
+        assert!(
+            RESET_PS1.contains("[System.IO.Directory]::Delete($path, $true)"),
+            "reset.ps1 must delete with Directory.Delete, which does not recurse through reparse points"
+        );
+        let lower = RESET_PS1.to_lowercase();
+        for follower in ["remove-item", "rmdir", "rd /s", "get-childitem"] {
+            assert!(
+                !lower.contains(follower),
+                "reset.ps1 must not delete or walk trees with {follower}, which can follow junctions"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_ps1_resets_only_the_default_install_dir_while_the_desktop_is_stopped() {
+        for input in [
+            "$env:SPW_INSTDIR",
+            "$env:SPW_DATA_DIR",
+            "$env:SPW_DEFAULT_INSTDIR",
+        ] {
+            assert!(RESET_PS1.contains(input), "reset.ps1 must read {input}");
+        }
+        assert!(
+            RESET_PS1.contains("OrdinalIgnoreCase"),
+            "reset.ps1 must compare NTFS paths case-insensitively"
+        );
+        let stem = desktop_exe_stem();
+        assert!(
+            RESET_PS1.contains(&format!("[string]$DesktopProcess = '{stem}'"))
+                && RESET_PS1.contains("Get-Process -Name $DesktopProcess"),
+            "reset.ps1 must skip while any {stem} runs: Tauri's own name-based check could still abort the install"
+        );
+    }
+
+    #[test]
+    fn preinstall_runs_the_reset_only_after_a_successful_sweep() {
+        let pre = section(HOOKS, "NSIS_HOOK_PREINSTALL");
+        let sweep = pre
+            .find(r#""$PLUGINSDIR\sweep.ps1""#)
+            .expect("PREINSTALL must run the sweep");
+        let failed = sweep
+            + pre[sweep..]
+                .find("${If} $0 != 0")
+                .expect("PREINSTALL must check the sweep exit code");
+        let succeeded = failed
+            + pre[failed..]
+                .find("${Else}")
+                .expect("PREINSTALL must branch on a successful sweep");
+        let default_dir = pre
+            .find(r#"SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", t "$LOCALAPPDATA\${PRODUCTNAME}")"#)
+            .expect("PREINSTALL must pass Tauri's default per-user install dir to reset.ps1");
+        let reset = pre
+            .find(&hidden_powershell_run(r#""$PLUGINSDIR\reset.ps1""#))
+            .expect("PREINSTALL must run the materialized $PLUGINSDIR\\reset.ps1 without a console window");
+        assert!(
+            pre.contains("!insertmacro SPEEDWAVE_MATERIALIZE_RESET"),
+            "PREINSTALL must materialize reset.ps1"
+        );
+        assert!(
+            succeeded < default_dir && default_dir < reset,
+            "reset.ps1 must run only in the successful-sweep branch, after its inputs are set"
+        );
+        assert!(
+            pre.contains(r#"SetEnvironmentVariable(t "SPW_DEFAULT_INSTDIR", i 0)"#),
+            "PREINSTALL must clear SPW_DEFAULT_INSTDIR after the reset"
+        );
+        assert!(
+            !pre.to_lowercase().contains("rmdir"),
+            "PREINSTALL must leave deletion to reset.ps1: NSIS RMDir /r recurses through junctions"
+        );
+    }
+
+    #[test]
     fn postinstall_installs_firewall_rule() {
         let post = section(HOOKS, "NSIS_HOOK_POSTINSTALL");
         assert!(
@@ -71,8 +180,10 @@ mod tests {
             "POSTINSTALL must materialize firewall.ps1"
         );
         assert!(
-            post.contains(r#"$\"$PLUGINSDIR\firewall.ps1$\" -Mode install"#),
-            "POSTINSTALL must invoke firewall.ps1 -Mode install (via the shim)"
+            post.contains(&hidden_powershell_run(
+                r#""$PLUGINSDIR\firewall.ps1" -Mode install"#
+            )),
+            "POSTINSTALL must invoke firewall.ps1 -Mode install without a console window"
         );
     }
 
@@ -80,7 +191,9 @@ mod tests {
     fn postuninstall_removes_firewall_rule_before_wsl_unregister() {
         let post = section(HOOKS, "NSIS_HOOK_POSTUNINSTALL");
         let firewall_idx = post
-            .find("firewall.ps1$\\\" -Mode uninstall")
+            .find(&hidden_powershell_run(
+                r#""$PLUGINSDIR\firewall.ps1" -Mode uninstall"#,
+            ))
             .expect("POSTUNINSTALL must remove firewall rule");
         let wsl_idx = post
             .find("wsl.exe\" --unregister")
@@ -91,11 +204,16 @@ mod tests {
         );
     }
 
-    // ── Drift detection: generator output stays in sync with .ps1 sources ──
-
     #[test]
     fn installer_hooks_nsh_matches_template_plus_generated_macros() {
-        let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1, RUN_HIDDEN_VBS);
+        let expected = render_expected_hooks(
+            TEMPLATE,
+            &[
+                ("sweep", SWEEP_PS1),
+                ("firewall", FIREWALL_PS1),
+                ("reset", RESET_PS1),
+            ],
+        );
         assert_eq!(
             HOOKS, expected,
             "installer-hooks.nsh is out of sync with its inputs — run `make generate-installer-nsh` and commit"
@@ -103,35 +221,57 @@ mod tests {
     }
 
     #[test]
-    fn run_hidden_vbs_has_no_bom() {
-        // wscript.exe fails to parse a .vbs with a UTF-8 BOM.
+    fn ps1_sources_have_utf8_bom() {
+        for (name, ps1) in INSTALLER_PS1_SOURCES {
+            assert!(
+                ps1.starts_with('\u{feff}'),
+                "{name} must be UTF-8 with BOM (PowerShell 5.1 misreads a BOM-less .ps1)"
+            );
+            assert!(
+                !ps1.starts_with("\u{feff}\u{feff}"),
+                "{name} has a doubled BOM; the generator strips only one"
+            );
+        }
+    }
+
+    #[test]
+    fn installer_hooks_nsh_embeds_no_bom() {
         assert!(
-            !RUN_HIDDEN_VBS.starts_with('\u{feff}'),
-            "run-hidden.vbs must be ANSI/BOM-free (wscript chokes on a BOM)"
+            !HOOKS.contains('\u{feff}'),
+            "installer-hooks.nsh must not embed a BOM (generate-installer-nsh.sh strips it)"
         );
     }
 
     #[test]
-    fn install_hooks_run_powershell_via_hidden_shim() {
-        // All three PowerShell-invoking hooks go through the wscript shim.
-        let shim_calls = HOOKS
-            .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
+    fn install_hooks_run_powershell_without_a_console_window() {
+        let runs = HOOKS
+            .matches(&hidden_powershell_run(r#""$PLUGINSDIR\"#))
             .count();
         assert_eq!(
-            shim_calls, 3,
-            "expected 3 hooks invoking PowerShell via the wscript shim, found {shim_calls}"
+            runs, 4,
+            "expected 4 PowerShell runs through SPEEDWAVE_RUN_HIDDEN (sweep, reset, 2x firewall), found {runs}"
         );
-        assert_eq!(
-            HOOKS
-                .matches("!insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN")
-                .count(),
-            3,
-            "each shim hook must materialize run-hidden.vbs first"
-        );
-        // No hook may launch powershell.exe directly via nsExec.
+        let launcher = section(HOOKS, "SPEEDWAVE_RUN_HIDDEN");
+        for call in [
+            "kernel32::CreateProcessW(p 0, w r3, p 0, p 0, i 0, i 0x08000000,",
+            "kernel32::WaitForSingleObject(p r3, i -1)",
+            "kernel32::GetExitCodeProcess(p r3, *i .r0)",
+        ] {
+            assert!(
+                launcher.contains(call),
+                "SPEEDWAVE_RUN_HIDDEN must {call}: CREATE_NO_WINDOW starts PowerShell without a console window and the exit code lands in $0"
+            );
+        }
+        let lower = HOOKS.to_lowercase();
         assert!(
-            !HOOKS.contains("nsExec::ExecToLog `\"$SYSDIR\\WindowsPowerShell"),
-            "no hook may call powershell.exe directly via nsExec — must use the wscript shim"
+            !lower.contains("wscript") && !lower.contains(".vbs"),
+            "no hook may run PowerShell through WSH: it strips the quotes around a path with a space, and VBScript is deprecated"
+        );
+        assert!(
+            !HOOKS
+                .lines()
+                .any(|line| line.contains("nsExec::") && line.to_lowercase().contains("powershell")),
+            "no hook may run PowerShell through nsExec, whose console window flashes"
         );
     }
 
@@ -143,8 +283,6 @@ mod tests {
         );
     }
 
-    // ── PowerShell scripts: contract surface ─────────────────────────────
-
     #[test]
     fn sweep_ps1_reads_required_env_vars() {
         for env in ["$env:SPW_INSTDIR", "$env:SPW_DATA_DIR"] {
@@ -154,23 +292,39 @@ mod tests {
 
     #[test]
     fn sweep_ps1_kills_all_three_target_categories() {
-        // Speedwave.exe (Tauri) + nodejs/* (host workers) + bin/speedwave.exe (CLI).
+        let stem = desktop_exe_stem();
         assert!(
-            SWEEP_PS1.contains(r"\Speedwave.exe"),
-            "sweep.ps1 must target Speedwave.exe"
+            SWEEP_PS1.contains(&format!("Combine($instDir, '{stem}.exe')")),
+            "sweep.ps1 must target $INSTDIR\\{stem}.exe, the binary Tauri installs"
+        );
+        let nodejs = speedwave_runtime::consts::NODEJS_SUBDIR;
+        assert!(
+            SWEEP_PS1.contains(&format!("Combine($instDir, '{nodejs}')")),
+            "sweep.ps1 must target $instDir\\{nodejs}\\ workers"
+        );
+        let cli_dir = format!(
+            "Combine($dataDir, '{}', $cliName)",
+            speedwave_runtime::consts::CLI_BIN_SUBDIR
         );
         assert!(
-            SWEEP_PS1.contains(r"\nodejs\"),
-            "sweep.ps1 must target $instDir\\nodejs\\ workers"
+            SWEEP_PS1.contains(&cli_dir),
+            "sweep.ps1 must target the CLI through {cli_dir}"
         );
-        let cli_target = format!(
-            r"\{}\{}",
-            speedwave_runtime::consts::CLI_BIN_SUBDIR,
-            speedwave_runtime::consts::cli_binary_filename(true)
+        let prod = speedwave_runtime::consts::installed_cli_filename(
+            true,
+            std::path::Path::new("/home/u/.speedwave"),
         );
         assert!(
-            SWEEP_PS1.contains(&cli_target),
-            "sweep.ps1 must target $dataDir{cli_target} (CLI)"
+            SWEEP_PS1.contains(&format!("'{prod}'")),
+            "sweep.ps1 must fall back to '{prod}' for the production data dir"
+        );
+        assert!(
+            SWEEP_PS1.contains(r"-replace '^speedwave-', ''"),
+            "sweep.ps1 must strip the 'speedwave-' prefix like derive_cli_binary_name_from"
+        );
+        assert!(
+            SWEEP_PS1.contains("Split-Path $dataDir -Leaf"),
+            "sweep.ps1 must take the instance from the data-dir basename"
         );
     }
 
@@ -221,7 +375,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_creates_wdf_allow_rules() {
-        // Host application ALLOW rules (New-NetFirewallRule -Program), separate from the Hyper-V rule.
         assert!(
             FIREWALL_PS1.contains("New-NetFirewallRule")
                 && FIREWALL_PS1.contains("Action      = 'Allow'")
@@ -232,7 +385,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_accepts_programs_param_split_on_semicolon() {
-        // Paths arrive as one ';'-joined [string] (PowerShell -File cannot bind a [string[]]).
         assert!(
             FIREWALL_PS1.contains("[string]$Programs")
                 && FIREWALL_PS1.contains("$Programs -split ';'"),
@@ -254,7 +406,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_installer_modes_fail_open() {
-        // Installer-invoked modes (install/uninstall) fail open via several exit-0 paths.
         let exits = FIREWALL_PS1.matches("exit 0").count();
         assert!(
             exits >= 4,
@@ -272,7 +423,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_ensure_checks_existence_before_signalling_elevation() {
-        // 'ensure' does the non-admin existence check and exits 3 only when the rule is missing.
         let ensure_idx = FIREWALL_PS1
             .find("$Mode -eq 'ensure'")
             .expect("ensure branch must exist");
@@ -291,7 +441,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_elevated_mode_does_not_self_relaunch() {
-        // install-elevated runs the privileged body directly; self-elevation is Rust-driven.
         assert!(
             !FIREWALL_PS1.contains("-Verb RunAs") && !FIREWALL_PS1.contains("RunAs"),
             "firewall.ps1 must not self-elevate; elevation is driven from Rust"
@@ -300,8 +449,6 @@ mod tests {
 
     #[test]
     fn installers_invoke_only_install_and_uninstall_modes() {
-        // Runtime-only modes (ensure, install-elevated) are Desktop-only; assert on the
-        // invocation pattern, not presence (the strings appear in the materialized ValidateSet).
         for needle in [
             "firewall.ps1\" -Mode ensure",
             "firewall.ps1\" -Mode install-elevated",
@@ -321,16 +468,13 @@ mod tests {
 
     #[test]
     fn materialized_ps1_scripts_contain_no_backtick() {
-        // Backtick is the NSIS FileWrite delimiter with no escape; it truncates the string.
-        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+        for (name, ps1) in INSTALLER_PS1_SOURCES {
             assert!(
                 !ps1.contains('`'),
                 "{name} contains a backtick — breaks NSIS FileWrite (use splatting)"
             );
         }
     }
-
-    // ── WiX fragments: MSI parity ────────────────────────────────────────
 
     #[test]
     fn sweep_wxs_runs_after_install_files_and_calls_powershell() {
@@ -358,10 +502,38 @@ mod tests {
     }
 
     #[test]
+    fn msi_custom_actions_run_the_scripts_where_the_msi_installs_them() {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_WINDOWS_CONF).expect("tauri.windows.conf.json must parse");
+        let targets: std::collections::BTreeSet<&str> = conf["bundle"]["resources"]
+            .as_object()
+            .expect("tauri.windows.conf.json must map bundle.resources")
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        for (name, wxs) in [("sweep.wxs", SWEEP_WXS), ("firewall.wxs", FIREWALL_WXS)] {
+            let scripts: Vec<&str> = wxs
+                .match_indices("[INSTALLDIR]")
+                .filter_map(|(at, marker)| {
+                    wxs[at + marker.len()..]
+                        .split("&quot;")
+                        .next()
+                        .filter(|path| path.ends_with(".ps1"))
+                })
+                .collect();
+            assert!(!scripts.is_empty(), "{name} must run a bundled script");
+            for script in scripts {
+                assert!(
+                    targets.contains(script.replace('\\', "/").as_str()),
+                    "{name} runs [INSTALLDIR]{script}, but the MSI installs each bundled resource \
+                     at its tauri.windows.conf.json target under INSTALLDIR"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sweep_wxs_passes_installdir_via_file_arg_not_command_literal() {
-        // H-03: [INSTALLDIR] inside a -Command PS literal lets a crafted install
-        // path inject commands run as SYSTEM. It must be a -File script argument.
-        // Inspect the CustomAction command line only (skip the XML comment prose).
         let cmd = SWEEP_WXS
             .lines()
             .find(|l| l.contains("powershell.exe") && l.contains("Value="))
@@ -382,14 +554,10 @@ mod tests {
 
     #[test]
     fn sweep_wxs_installdir_arg_survives_trailing_backslash() {
-        // WiX resolves [INSTALLDIR] with a trailing "\". A lone "\" before the
-        // closing quote escapes it (Win32 argv), swallowing the next arg. The
-        // property must be doubled so the quoted arg still closes.
         let line = SWEEP_WXS
             .lines()
             .find(|l| l.contains("powershell.exe") && l.contains("Value="))
             .expect("sweep.wxs must have a powershell CustomAction Value line");
-        // Extract the command-line string inside Value="...".
         let inner = line
             .split_once("Value=\"")
             .and_then(|(_, rest)| rest.rsplit_once('"'))
@@ -400,7 +568,6 @@ mod tests {
             .replace("[%USERPROFILE]", "C:\\Users\\bob")
             .replace("[SystemFolder]", "C:\\Windows\\System32\\")
             .replace("&quot;", "\"");
-        // Count args split by the real Win32 backslash/quote rule; -DataDir must survive.
         let argv = win32_argv(&expanded);
         assert!(
             argv.iter().any(|a| a == "-DataDir"),
@@ -417,7 +584,6 @@ mod tests {
         );
     }
 
-    /// Minimal CommandLineToArgvW backslash/quote splitter for the test above.
     #[cfg(test)]
     fn win32_argv(cmd: &str) -> Vec<String> {
         let mut args = Vec::new();
@@ -492,8 +658,6 @@ mod tests {
         );
     }
 
-    // ── Negative invariants from the pre-refactor era ────────────────────
-
     #[test]
     fn no_global_image_name_kill() {
         let lower = HOOKS.to_lowercase();
@@ -508,16 +672,17 @@ mod tests {
     }
 
     #[test]
-    fn sweep_ps1_uses_string_concat_not_join_path() {
+    fn sweep_ps1_builds_paths_with_path_combine_not_join_path() {
         assert!(
-            !SWEEP_PS1.contains("Join-Path $instDir"),
-            "sweep.ps1 must use string concat, not Join-Path (ADR-048)"
+            !SWEEP_PS1.contains("Join-Path"),
+            "sweep.ps1 must not build paths with the provider-bound Join-Path (ADR-048)"
+        );
+        assert!(
+            !SWEEP_PS1.contains(r"+ '\"),
+            "sweep.ps1 must build paths with [System.IO.Path]::Combine, not '\\' concatenation (ADR-048)"
         );
     }
 
-    // ── helpers ─────────────────────────────────────────────────────────
-
-    /// Returns the body of a `!macro NAME ... !macroend` block.
     fn section<'a>(src: &'a str, name: &str) -> &'a str {
         let start = src
             .find(&format!("!macro {name}"))
@@ -529,31 +694,66 @@ mod tests {
         &after[..end]
     }
 
-    /// Re-derives the expected `installer-hooks.nsh` from the template + the two `.ps1` sources,
-    /// mirroring `scripts/generate-installer-nsh.sh`; drift from the committed file fails the test.
-    fn render_expected_hooks(
-        template: &str,
-        sweep_ps1: &str,
-        firewall_ps1: &str,
-        run_hidden_vbs: &str,
-    ) -> String {
-        let mut embed = String::new();
-        embed.push_str(
-            "; ============================================================================\n",
-        );
-        embed.push_str("; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND.\n");
-        embed.push_str(
-            "; Sources: windows/sweep.ps1, windows/firewall.ps1, windows/run-hidden.vbs\n",
-        );
-        embed.push_str("; Regenerate: make generate-installer-nsh\n");
-        embed.push_str(
-            "; ============================================================================\n\n",
-        );
-        embed.push_str(&emit_materialize_macro("sweep", "ps1", sweep_ps1));
-        embed.push('\n');
-        embed.push_str(&emit_materialize_macro("firewall", "ps1", firewall_ps1));
-        embed.push('\n');
-        embed.push_str(&emit_materialize_macro("run-hidden", "vbs", run_hidden_vbs));
+    fn windows_directory_resource_roots() -> std::collections::BTreeSet<String> {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_WINDOWS_CONF).expect("tauri.windows.conf.json must parse");
+        conf["bundle"]["resources"]
+            .as_object()
+            .expect("tauri.windows.conf.json must map bundle.resources")
+            .iter()
+            .filter_map(|(source, target)| Some((source, target.as_str()?)))
+            .filter(|(source, target)| {
+                source.ends_with('/') || source.contains('*') || target.ends_with('/')
+            })
+            .map(|(_, target)| {
+                let root = target.split(['/', '\\']).next().unwrap_or_default();
+                assert!(
+                    !matches!(root, "" | "." | ".."),
+                    "a directory resource must install under a named child of $INSTDIR, got {target}"
+                );
+                root.to_owned()
+            })
+            .collect()
+    }
+
+    fn reset_trees() -> std::collections::BTreeSet<String> {
+        let list = RESET_PS1
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("$trees = @("))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("reset.ps1 must list its trees on one `$trees = @(...)` line");
+        list.split(',')
+            .map(|item| {
+                let tree = item.trim().trim_matches('\'');
+                assert!(
+                    !matches!(tree, "" | "." | "..") && !tree.contains(['\\', '/', '$', '*']),
+                    "reset.ps1 must name single children of $INSTDIR, got {item}"
+                );
+                tree.to_owned()
+            })
+            .collect()
+    }
+
+    fn desktop_exe_stem() -> String {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_CONF).expect("tauri.conf.json must parse");
+        conf["mainBinaryName"]
+            .as_str()
+            .map_or_else(|| env!("CARGO_PKG_NAME").to_owned(), str::to_owned)
+    }
+
+    fn hidden_powershell_run(script_and_args: &str) -> String {
+        format!(
+            r#"!insertmacro SPEEDWAVE_RUN_HIDDEN `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script_and_args}"#
+        )
+    }
+
+    fn render_expected_hooks(template: &str, scripts: &[(&str, &str)]) -> String {
+        let embed = scripts
+            .iter()
+            .map(|(name, src)| emit_materialize_macro(name, src))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let mut out = String::new();
         for line in template.lines() {
@@ -567,10 +767,9 @@ mod tests {
         out
     }
 
-    fn emit_materialize_macro(name: &str, ext: &str, src: &str) -> String {
-        // NSIS !define/label tokens cannot contain '-'; normalize to UPPER with '-' -> '_'.
+    fn emit_materialize_macro(name: &str, src: &str) -> String {
         let upper = name.to_uppercase().replace('-', "_");
-        let file = format!("{name}.{ext}");
+        let file = format!("{name}.ps1");
         let id = format!("SW_{upper}_ID");
         let mut s = String::new();
         s.push_str(&format!("!macro SPEEDWAVE_MATERIALIZE_{upper}\n"));
@@ -592,7 +791,6 @@ mod tests {
             for c in line.chars() {
                 match c {
                     '$' => esc.push_str("$$"),
-                    // Backtick has no NSIS escape; the generator rejects sources containing one.
                     '"' => esc.push_str("$\\\""),
                     other => esc.push(other),
                 }

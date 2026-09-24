@@ -1,22 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
+import { LlmProviderComponent } from './llm-provider/llm-provider.component';
+import { SecuritySectionComponent } from './security-section/security-section.component';
 import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS, THEME_MODES } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
   mockTauri.invokeHandler = async (cmd: string) => {
     switch (cmd) {
-      case 'list_projects':
-        return {
-          projects: [{ name: 'test-project', dir: '/tmp/test' }],
-          active_project: 'test-project',
-        };
       case 'get_llm_config':
         return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
       case 'get_update_settings':
@@ -35,7 +34,6 @@ describe('SettingsComponent', () => {
   let component: SettingsComponent;
   let fixture: ComponentFixture<SettingsComponent>;
   let mockTauri: MockTauriService;
-  // Stub the root BetaService; default "on".
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -64,13 +62,13 @@ describe('SettingsComponent', () => {
   });
 
   it('activeProject starts as null', () => {
-    expect(component.activeProject).toBeNull();
+    expect(component.activeProject()).toBeNull();
   });
 
-  it('sets activeProject after loadProjectInfo resolves', async () => {
-    component.ngOnInit();
-    await fixture.whenStable();
-    expect(component.activeProject).toBe('test-project');
+  it('activeProject reflects the project state service signal', () => {
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject.set('test-project');
+    expect(component.activeProject()).toBe('test-project');
   });
 
   it('renders the system-health link in the header (mockup-aligned)', async () => {
@@ -81,7 +79,6 @@ describe('SettingsComponent', () => {
     const link = fixture.nativeElement.querySelector('[data-testid="settings-system-health-link"]');
     expect(link).not.toBeNull();
     expect(link.getAttribute('href')).toBe('/logs');
-    // Mockup uses an arrow glyph — keep the contract so future visual tweaks don't drop it.
     expect(link.textContent).toContain('system health');
   });
 
@@ -136,7 +133,6 @@ describe('SettingsComponent', () => {
     fixture.detectChanges();
     const section = fixture.nativeElement.querySelector('#section-transcription') as Element;
     expect(section).not.toBeNull();
-    // jsdom doesn't implement scrollIntoView — stub it so we can assert the call.
     const spy = vi.fn();
     (section as unknown as { scrollIntoView: () => void }).scrollIntoView = spy;
     (component as unknown as { scrollToFragment(id: string): void }).scrollToFragment(
@@ -149,7 +145,6 @@ describe('SettingsComponent', () => {
     fixture.detectChanges();
     const scroll = (component as unknown as { scrollToFragment(id: string | null): void })
       .scrollToFragment;
-    // Should not throw and should be a no-op for null.
     expect(() => scroll.call(component, null)).not.toThrow();
   });
 
@@ -161,13 +156,10 @@ describe('SettingsComponent', () => {
         scrollToFragment(id: string | null): void;
         scrollTimer: ReturnType<typeof setTimeout> | null;
       };
-      // A fragment with no matching section → a retry timer is armed.
       inner.scrollToFragment('section-does-not-exist');
       expect(inner.scrollTimer).not.toBeNull();
-      // Destroy must cancel the pending retry so it can't fire post-destroy.
       component.ngOnDestroy();
       expect(inner.scrollTimer).toBeNull();
-      // Advancing time triggers nothing (no throw on the detached host).
       expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
     } finally {
       vi.useRealTimers();
@@ -185,7 +177,6 @@ describe('SettingsComponent', () => {
       inner.scrollToFragment('missing-one');
       const first = inner.scrollTimer;
       expect(first).not.toBeNull();
-      // Re-entry (e.g. a new fragment) cancels the previous timer.
       inner.scrollToFragment('missing-two');
       expect(inner.scrollTimer).not.toBe(first);
     } finally {
@@ -193,59 +184,382 @@ describe('SettingsComponent', () => {
     }
   });
 
-  it('reloads project info on project_switch_succeeded event', async () => {
+  it('switching to a project that settles in auth_required updates the child project input', () => {
     const projectState = TestBed.inject(ProjectStateService);
-    await projectState.init();
-    component.ngOnInit();
-    await fixture.whenStable();
-    expect(component.activeProject).toBe('test-project');
+    projectState.activeProject.set('test-project');
+    fixture.detectChanges();
 
-    mockTauri.invokeHandler = async (cmd: string) => {
-      switch (cmd) {
-        case 'list_projects':
-          return {
-            projects: [
-              { name: 'test-project', dir: '/tmp/test' },
-              { name: 'other-project', dir: '/tmp/other' },
-            ],
-            active_project: 'other-project',
-          };
-        case 'get_auth_status':
-          return {
-            api_key_configured: false,
-            oauth_authenticated: true,
-            needs_anthropic_auth: true,
-            provider_configured: true,
-          };
-        default:
-          return undefined;
-      }
-    };
+    projectState.activeProject.set('other-project');
+    projectState.status.set('auth_required');
+    fixture.detectChanges();
 
-    mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other-project' });
-    // Yield a macrotask so the nested loadProjectInfo() promise settles before whenStable.
-    await new Promise<void>((r) => setTimeout(r, 0));
-    await fixture.whenStable();
-    expect(component.activeProject).toBe('other-project');
+    const llmProvider = fixture.debugElement.query(By.directive(LlmProviderComponent));
+    expect(llmProvider.componentInstance.activeProject()).toBe('other-project');
   });
 
-  it('cleans up project ready listener on destroy', async () => {
-    const projectState = TestBed.inject(ProjectStateService);
-    await projectState.init();
-    component.ngOnInit();
-    await fixture.whenStable();
+  describe('project-scoped sections across a project switch', () => {
+    const configs: Record<string, unknown> = {
+      'no-llm': {
+        provider: 'anthropic',
+        model: null,
+        base_url: null,
+        default_base_url: null,
+        providers: [],
+      },
+      'with-openrouter': {
+        provider: 'anthropic',
+        model: 'openai/gpt-4o-mini',
+        base_url: null,
+        default_base_url: null,
+        providers: [
+          {
+            id: 'openrouter',
+            kind: 'open_router',
+            model: 'openai/gpt-4o-mini',
+            has_api_key: true,
+            context_tokens: 128000,
+          },
+        ],
+        active: { provider_id: 'openrouter', model: 'openai/gpt-4o-mini' },
+      },
+    };
+    const emptyPolicy = {
+      enabled_policies: [],
+      forced_policies: [],
+      effective_rules: [],
+      custom_policies: [],
+    };
+    let backendProject = 'no-llm';
+    let configLoads: string[] = [];
+    let policyLoads: string[] = [];
+    let authCalls: string[] = [];
+    let authStatus: (project: string) => Promise<unknown>;
+    let updateLlmConfig: (update: Record<string, unknown>) => Promise<unknown>;
+    let updateSecurityPolicy: (project: unknown) => Promise<unknown>;
+    let restartLlmProxy: () => Promise<unknown>;
 
-    // Verify the unsub function exists before destroy
-    expect(
-      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
-    ).not.toBeNull();
+    function refuseUnlessActive(project: unknown): void {
+      if (project != null && project !== backendProject) {
+        throw new Error(
+          `the active project is now '${backendProject}', not '${String(project)}'; nothing was saved`
+        );
+      }
+    }
 
-    component.ngOnDestroy();
+    beforeEach(() => {
+      backendProject = 'no-llm';
+      configLoads = [];
+      policyLoads = [];
+      authCalls = [];
+      authStatus = async () => ({ api_key_configured: false, oauth_authenticated: false });
+      updateLlmConfig = async (update) => refuseUnlessActive(update['project']);
+      updateSecurityPolicy = async (project) => refuseUnlessActive(project);
+      restartLlmProxy = async () => undefined;
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        switch (cmd) {
+          case 'get_llm_config': {
+            const project = String(args?.['project'] ?? backendProject);
+            configLoads.push(project);
+            return configs[project];
+          }
+          case 'get_security_policy':
+            policyLoads.push(String(args?.['project'] ?? backendProject));
+            return emptyPolicy;
+          case 'list_pii_rules':
+          case 'list_security_policy_templates':
+            return [];
+          case 'discover_llm_models':
+            return { models: [{ id: 'openai/gpt-4o-mini', context_length: 128000 }] };
+          case 'get_auth_status':
+            authCalls.push(String(args?.['project']));
+            return authStatus(String(args?.['project']));
+          case 'update_llm_config':
+            return updateLlmConfig(args?.['update'] as Record<string, unknown>);
+          case 'update_security_policy':
+            return updateSecurityPolicy(args?.['project']);
+          case 'restart_llm_proxy':
+            return restartLlmProxy();
+          default:
+            return base(cmd, args);
+        }
+      };
+    });
 
-    // Verify unsub was called and nulled
-    expect(
-      (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
-    ).toBeNull();
+    async function settle(on: ComponentFixture<SettingsComponent> = fixture): Promise<void> {
+      on.detectChanges();
+      await on.whenStable();
+      await new Promise((resolve) => setTimeout(resolve));
+    }
+
+    async function listenToSwitches(): Promise<void> {
+      await (
+        TestBed.inject(ProjectStateService) as unknown as { setupListeners(): Promise<void> }
+      ).setupListeners();
+    }
+
+    function startSwitch(to: string): void {
+      backendProject = to;
+      mockTauri.dispatchEvent('project_switch_started', { project: to });
+    }
+
+    function failSwitchBackTo(project: string): void {
+      backendProject = project;
+      mockTauri.dispatchEvent('project_switch_failed', { project, error: 'switch failed' });
+    }
+
+    async function showProject(project: string): Promise<LlmProviderComponent> {
+      backendProject = project;
+      TestBed.inject(ProjectStateService).activeProject.set(project);
+      await settle();
+      return llmForm();
+    }
+
+    function llmForm(on: ComponentFixture<SettingsComponent> = fixture): LlmProviderComponent {
+      return on.debugElement.query(By.directive(LlmProviderComponent))
+        .componentInstance as LlmProviderComponent;
+    }
+
+    function securitySection(): SecuritySectionComponent {
+      return fixture.debugElement.query(By.directive(SecuritySectionComponent))
+        .componentInstance as SecuritySectionComponent;
+    }
+
+    it('loads the provider form of the project a switch lands on, keeping nothing from the one it left', async () => {
+      const before = await showProject('no-llm');
+      before.onExtraKeyInput(before.extraProviders()[0], 'sk-or-typed-for-the-project-left');
+
+      const after = await showProject('with-openrouter');
+
+      expect(after).not.toBe(before);
+      expect(configLoads).toEqual(['no-llm', 'with-openrouter']);
+      const openrouter = after.extraProviders().find((p) => p.id === 'openrouter');
+      expect(openrouter?.model).toBe('openai/gpt-4o-mini');
+      expect(openrouter?.hasKey).toBe(true);
+      expect(openrouter?.contextTokens).toBe(128000);
+      expect(openrouter?.keyInput).toBe('');
+      expect(openrouter?.keyTouched).toBe(false);
+    });
+
+    it('keeps the form and its unsaved input through a switch that fails back to the same project', async () => {
+      await listenToSwitches();
+      const projectState = TestBed.inject(ProjectStateService);
+      const before = await showProject('with-openrouter');
+      before.onExtraKeyInput(before.extraProviders()[0], 'sk-or-still-editing');
+
+      startSwitch('no-llm');
+      await settle();
+      expect(projectState.status()).toBe('switching');
+      failSwitchBackTo('with-openrouter');
+      await settle();
+
+      expect(projectState.status()).toBe('error');
+      expect(projectState.activeProject()).toBe('with-openrouter');
+      expect(llmForm()).toBe(before);
+      expect(before.extraProviders()[0].keyInput).toBe('sk-or-still-editing');
+      expect(configLoads).toEqual(['with-openrouter']);
+    });
+
+    it("loads a form opened during a switch for the project the app still shows, so a failed switch saves that project's providers", async () => {
+      await listenToSwitches();
+      await showProject('with-openrouter');
+      startSwitch('no-llm');
+      const reopened = TestBed.createComponent(SettingsComponent);
+      await settle(reopened);
+      failSwitchBackTo('with-openrouter');
+      await settle(reopened);
+      expect(configLoads).toEqual(['with-openrouter', 'with-openrouter']);
+      const sent: Record<string, unknown>[] = [];
+      updateLlmConfig = async (update) => {
+        refuseUnlessActive(update['project']);
+        sent.push(update);
+      };
+
+      await llmForm(reopened).saveConfig();
+
+      expect(sent.map((u) => u['project'])).toEqual(['with-openrouter']);
+      const saved = sent[0]['providers'] as { id: string; model: string | null }[];
+      expect(saved.find((p) => p.id === 'openrouter')?.model).toBe('openai/gpt-4o-mini');
+      reopened.destroy();
+    });
+
+    it('applies a sign-in status that lands after Settings is left while the app stays on its project', async () => {
+      const late = { api_key_configured: true, oauth_authenticated: true };
+      const status = createDeferred();
+      authStatus = () => status.promise.then(() => late);
+      const applied = vi.spyOn(TestBed.inject(ProjectStateService), 'applyAuthStatus');
+      await showProject('no-llm');
+
+      fixture.destroy();
+      status.resolve();
+      await new Promise((resolve) => setTimeout(resolve));
+
+      expect(authCalls).toEqual(['no-llm']);
+      expect(applied).toHaveBeenCalledWith(late);
+    });
+
+    it('drops a sign-in status for the project a switch left', async () => {
+      const left = { api_key_configured: true, oauth_authenticated: true };
+      const status = createDeferred();
+      authStatus = (project) =>
+        project === 'no-llm'
+          ? status.promise.then(() => left)
+          : Promise.resolve({ api_key_configured: false, oauth_authenticated: false });
+      const applied = vi.spyOn(TestBed.inject(ProjectStateService), 'applyAuthStatus');
+
+      await showProject('no-llm');
+      await showProject('with-openrouter');
+      status.resolve();
+      await settle();
+
+      expect(authCalls).toEqual(['no-llm', 'with-openrouter']);
+      expect(applied).not.toHaveBeenCalledWith(left);
+    });
+
+    it('shows that a save started before a switch saved nothing', async () => {
+      await listenToSwitches();
+      const sent: unknown[] = [];
+      updateLlmConfig = async (update) => {
+        sent.push(update['project']);
+        refuseUnlessActive(update['project']);
+      };
+      const form = await showProject('with-openrouter');
+
+      startSwitch('no-llm');
+      await form.saveConfig();
+      await settle();
+
+      expect(sent).toEqual(['with-openrouter']);
+      expect(component.error).toContain('nothing was saved');
+    });
+
+    it('still requests the restart of a save that lands after Settings is left', async () => {
+      const save = createDeferred();
+      updateLlmConfig = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      const warn = vi.spyOn(console, 'warn');
+      const form = await showProject('with-openrouter');
+
+      const saving = form.saveConfig();
+      await settle();
+      fixture.destroy();
+      save.resolve();
+      await saving;
+
+      expect(restart).toHaveBeenCalledTimes(1);
+      expect(
+        warn.mock.calls.filter((args) => args.some((a) => String(a).includes('NG0953')))
+      ).toEqual([]);
+    });
+
+    it('requests no restart for a save that lands after a switch replaced its form', async () => {
+      const save = createDeferred();
+      updateLlmConfig = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      const before = await showProject('with-openrouter');
+
+      const saving = before.saveConfig();
+      await settle();
+      await showProject('no-llm');
+      save.resolve();
+      await saving;
+
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('keeps the restart of a save that lands while a switch runs for a switch that fails back', async () => {
+      await listenToSwitches();
+      const save = createDeferred();
+      updateLlmConfig = () => save.promise;
+      const projectState = TestBed.inject(ProjectStateService);
+      const restart = vi.spyOn(projectState, 'requestRestart');
+      const owed = vi.spyOn(projectState, 'requestRestartFor');
+      const form = await showProject('with-openrouter');
+
+      const saving = form.saveConfig();
+      await settle();
+      startSwitch('no-llm');
+      save.resolve();
+      await saving;
+
+      expect(restart).not.toHaveBeenCalled();
+      expect(owed).toHaveBeenCalledWith('with-openrouter');
+    });
+
+    it('requests no restart when the proxy restart fails after a switch started', async () => {
+      await listenToSwitches();
+      const projectState = TestBed.inject(ProjectStateService);
+      const restart = vi.spyOn(projectState, 'requestRestart');
+      let proxyRestarts = 0;
+      restartLlmProxy = async () => {
+        proxyRestarts++;
+        startSwitch('no-llm');
+        throw new Error('proxy restart failed');
+      };
+      const form = await showProject('with-openrouter');
+      projectState.status.set('ready');
+
+      await form.saveConfig();
+
+      expect(proxyRestarts).toBe(1);
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('recreates the security section for the project a switch lands on', async () => {
+      await showProject('no-llm');
+      const before = securitySection();
+
+      await showProject('with-openrouter');
+
+      expect(securitySection()).not.toBe(before);
+      expect(policyLoads).toEqual(['no-llm', 'with-openrouter']);
+    });
+
+    it('requests no restart for a security save that lands after a switch', async () => {
+      const save = createDeferred();
+      const sent: unknown[] = [];
+      updateSecurityPolicy = (project) => {
+        sent.push(project);
+        return save.promise;
+      };
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      await showProject('with-openrouter');
+
+      const saving = securitySection().save();
+      await settle();
+      await showProject('no-llm');
+      save.resolve();
+      await saving;
+
+      expect(sent).toEqual(['with-openrouter']);
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('still requests the restart of a security save that lands after Settings is left', async () => {
+      const save = createDeferred();
+      updateSecurityPolicy = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      await showProject('with-openrouter');
+
+      const saving = securitySection().save();
+      await settle();
+      fixture.destroy();
+      save.resolve();
+      await saving;
+
+      expect(restart).toHaveBeenCalledTimes(1);
+    });
+
+    it('recreates the forms without the dev-mode warning about a re-created collection', async () => {
+      const warn = vi.spyOn(console, 'warn');
+      await showProject('no-llm');
+      await showProject('with-openrouter');
+
+      const recreationWarnings = warn.mock.calls.filter((args) =>
+        args.some((a) => String(a).includes('NG0956'))
+      );
+      expect(recreationWarnings).toEqual([]);
+    });
   });
 
   describe('terminal-minimal restyle', () => {
@@ -254,7 +568,6 @@ describe('SettingsComponent', () => {
       const title = fixture.nativeElement.querySelector('[data-testid="settings-title"]');
       expect(title).not.toBeNull();
       expect(title.textContent).toContain('Settings');
-      // Mockup uses .view-title (IBM Plex Sans, 14px) for view headers.
       expect(title.classList.contains('view-title')).toBe(true);
     });
 
@@ -275,7 +588,6 @@ describe('SettingsComponent', () => {
 
   describe('Appearance section', () => {
     beforeEach(() => {
-      // Reset accent before each test so active-state assertions start clean.
       const theme = TestBed.inject(ThemeService);
       theme.setTheme('crimson');
     });
@@ -363,7 +675,6 @@ describe('SettingsComponent', () => {
       ) as HTMLButtonElement;
       expect(active.getAttribute('aria-pressed')).toBe('true');
       expect(inactive.getAttribute('aria-pressed')).toBe('false');
-      // Reset for other tests in the same suite.
       theme.setMode('dark');
     });
 
@@ -383,9 +694,7 @@ describe('SettingsComponent', () => {
       const section: HTMLElement = fixture.nativeElement.querySelector(
         '[data-testid="settings-section-appearance"]'
       );
-      // Lower-cased mode label per mono uppercase styling.
       expect(section.textContent?.toLowerCase()).toContain('mode');
-      // The "Backgrounds stay dark" copy must be gone.
       expect(section.textContent).not.toContain('Backgrounds stay dark');
     });
   });

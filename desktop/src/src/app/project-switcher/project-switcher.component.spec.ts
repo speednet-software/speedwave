@@ -7,6 +7,7 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
@@ -43,7 +44,6 @@ describe('ProjectSwitcherComponent', () => {
     component = fixture.componentInstance;
     projectState = TestBed.inject(ProjectStateService);
     ui = TestBed.inject(UiStateService);
-    // Reset shared UI state between tests so each starts closed.
     ui.closeProjectSwitcher();
   });
 
@@ -146,9 +146,6 @@ describe('ProjectSwitcherComponent', () => {
   });
 
   describe('add-project modal lifecycle', () => {
-    // Create/error-handling logic lives in CreateProjectModalComponent (own spec); here we only
-    // assert the switcher opens, closes, and reacts to the `created` event correctly.
-
     it('openAddForm() makes the modal visible and closes the dropdown', () => {
       ui.toggleProjectSwitcher();
       expect(ui.projectSwitcherOpen()).toBe(true);
@@ -329,6 +326,81 @@ describe('ProjectSwitcherComponent', () => {
       await component.confirmRemove('beta');
       expect(invokeSpy).toHaveBeenCalledWith('remove_project', { name: 'beta' });
       expect(component.pendingDeleteName()).toBeNull();
+    });
+
+    it('confirmRemove() marks the row as removing and blocks a second removal until it settles', async () => {
+      const pendingRemove = createDeferred();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'remove_project') return pendingRemove.promise;
+        if (cmd === 'list_projects')
+          return {
+            projects: [
+              { name: 'alpha', dir: '/tmp/alpha' },
+              { name: 'beta', dir: '/tmp/beta' },
+              { name: 'gamma', dir: '/tmp/gamma' },
+            ],
+            active_project: 'alpha',
+          };
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'alpha' });
+      await fixture.whenStable();
+      component.requestRemove('beta');
+      const inFlight = component.confirmRemove('beta');
+      fixture.detectChanges();
+      expect(component.removingName()).toBe('beta');
+      expect(component.pendingDeleteName()).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-removing-beta"]')
+      ).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-beta"]')
+      ).toBeNull();
+      const itemButton = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-beta"]'
+      ) as HTMLButtonElement | null;
+      expect(itemButton?.disabled).toBe(true);
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-gamma"]')
+      ).toBeNull();
+      const gammaButton = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-gamma"]'
+      ) as HTMLButtonElement | null;
+      expect(gammaButton?.disabled).toBe(true);
+      component.requestRemove('gamma');
+      expect(component.pendingDeleteName()).toBeNull();
+      await component.confirmRemove('gamma');
+      expect(invokeSpy).not.toHaveBeenCalledWith('remove_project', { name: 'gamma' });
+      expect(component.removingName()).toBe('beta');
+
+      pendingRemove.resolve();
+      await inFlight;
+      fixture.detectChanges();
+      expect(component.removingName()).toBeNull();
+      expect(gammaButton?.disabled).toBe(false);
+    });
+
+    it('confirmRemove() restores the row and surfaces the error when the backend fails', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'remove_project')
+          throw new Error("Failed to start the container engine to clean up 'beta': boot failed");
+        return undefined;
+      };
+      await component.confirmRemove('beta');
+      fixture.detectChanges();
+      expect(component.removingName()).toBeNull();
+      expect(component.removeError()).toEqual({
+        msg: "Failed to start the container engine to clean up 'beta': boot failed",
+        project: 'beta',
+      });
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-removing-beta"]')
+      ).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-beta"]')
+      ).not.toBeNull();
     });
 
     it('surfaces backend error inline and strips the runtime sentinel prefix', async () => {

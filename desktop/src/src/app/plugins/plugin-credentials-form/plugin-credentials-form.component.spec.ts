@@ -58,8 +58,6 @@ describe('PluginCredentialsFormComponent', () => {
     component = fixture.componentInstance;
   });
 
-  // ── Happy path ──────────────────────────────────────────────────────────
-
   it('renders a password input for is_secret=true / field_type=password fields', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
@@ -108,7 +106,6 @@ describe('PluginCredentialsFormComponent', () => {
     ) as HTMLElement;
     expect(el.tagName).toBe('TEXTAREA');
 
-    // onFieldInput must accept HTMLTextAreaElement (not just HTMLInputElement).
     const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
     component.save.subscribe(saveSpy);
     setInputValue(fixture, '[data-testid="cred-input-service_account"]', '{"k":"v"}');
@@ -142,21 +139,18 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('omits the description element when the field has no description', () => {
-    // makeAuthFields() entries have no `description` → element absent.
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="cred-description"]')).toBeNull();
   });
 
-  // ── #6: per-field configured status + clear ─────────────────────────────
-
   it('shows the "✓ set" badge only for fields in configuredFields', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
-    fixture.componentRef.setInput('configuredFields', ['example_pat']); // only PAT stored
+    fixture.componentRef.setInput('configuredFields', ['example_pat']);
     fixture.detectChanges();
 
     const badges = fixture.nativeElement.querySelectorAll('[data-testid="cred-configured-badge"]');
-    expect(badges.length).toBe(1); // only example_pat, not example_oauth
+    expect(badges.length).toBe(1);
   });
 
   it('shows no configured badges when configuredFields is empty (default)', () => {
@@ -168,7 +162,6 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('per-field clear is confirm-gated (first click stages, Yes emits)', () => {
-    // First click stages confirm; only Yes emits clearField.
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.componentRef.setInput('configuredFields', ['example_pat']);
     fixture.detectChanges();
@@ -176,7 +169,6 @@ describe('PluginCredentialsFormComponent', () => {
     const clearFieldSpy = vi.fn<(key: string) => void>();
     component.clearField.subscribe(clearFieldSpy);
 
-    // First click stages the confirm — no emit yet.
     (
       fixture.nativeElement.querySelector(
         '[data-testid="cred-clear-example_pat"]'
@@ -189,7 +181,6 @@ describe('PluginCredentialsFormComponent', () => {
     ) as HTMLButtonElement;
     expect(confirmBtn).not.toBeNull();
 
-    // Confirm — now emit.
     confirmBtn.click();
     expect(clearFieldSpy).toHaveBeenCalledWith('example_pat');
   });
@@ -215,7 +206,6 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.detectChanges();
 
     expect(clearFieldSpy).not.toHaveBeenCalled();
-    // After cancel the confirm is gone — original "clear" link is back.
     expect(
       fixture.nativeElement.querySelector('[data-testid="cred-clear-example_pat"]')
     ).not.toBeNull();
@@ -233,10 +223,8 @@ describe('PluginCredentialsFormComponent', () => {
       '[data-testid="cred-input-example_oauth"]'
     ) as HTMLInputElement;
     expect(patInput.placeholder).toContain('stored');
-    expect(oauthInput.placeholder).toBe('exmcp_...'); // not configured → original placeholder
+    expect(oauthInput.placeholder).toBe('exmcp_...');
   });
-
-  // ── Read-back of non-secret values (config, not secrets) ────────────────
 
   it('prefills a non-secret field from currentValues, keeping the manifest placeholder', () => {
     const fields: PluginAuthField[] = [
@@ -258,7 +246,6 @@ describe('PluginCredentialsFormComponent', () => {
       '[data-testid="cred-input-base_url"]'
     ) as HTMLInputElement;
     expect(input.value).toBe('https://tenant.example.com');
-    // Non-secret prefilled → manifest placeholder, never the masked "stored" hint.
     expect(input.placeholder).toBe('https://api.example.com');
   });
 
@@ -275,7 +262,6 @@ describe('PluginCredentialsFormComponent', () => {
     ];
     fixture.componentRef.setInput('authFields', fields);
     fixture.componentRef.setInput('configuredFields', ['api_key']);
-    // Defense-in-depth: a value here must still never prefill a secret input.
     fixture.componentRef.setInput('currentValues', { api_key: 'sk-must-not-render' });
     fixture.detectChanges();
 
@@ -320,9 +306,7 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     const labels = fixture.nativeElement.querySelectorAll('[data-testid="cred-label"]');
-    // example_pat (required: true) → label has the "*" marker
     expect(labels[0].querySelector('[aria-label="required"]')).not.toBeNull();
-    // example_oauth (required: false) → no marker
     expect(labels[1].querySelector('[aria-label="required"]')).toBeNull();
   });
 
@@ -346,7 +330,6 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('renders a typed input for oauth_flow client fields and emits their value on save', () => {
-    // An oauth_flow:true client field must be typeable and submitted.
     fixture.componentRef.setInput('authFields', [
       {
         key: 'client_id',
@@ -393,8 +376,6 @@ describe('PluginCredentialsFormComponent', () => {
     expect(clearSpy).toHaveBeenCalledOnce();
   });
 
-  // ── Edge cases ──────────────────────────────────────────────────────────
-
   it('does not render anything when authFields is empty', () => {
     fixture.componentRef.setInput('authFields', []);
     fixture.detectChanges();
@@ -432,7 +413,7 @@ describe('PluginCredentialsFormComponent', () => {
     component.save.subscribe(saveSpy);
 
     setInputValue(fixture, '[data-testid="cred-input-example_pat"]', '  ex_TRIMMED  ');
-    setInputValue(fixture, '[data-testid="cred-input-example_oauth"]', '    '); // whitespace-only
+    setInputValue(fixture, '[data-testid="cred-input-example_oauth"]', '    ');
     fixture.detectChanges();
 
     const form = fixture.nativeElement.querySelector(
@@ -472,8 +453,6 @@ describe('PluginCredentialsFormComponent', () => {
     expect(input.getAttribute('maxlength')).toBe(String(MAX_PLUGIN_CREDENTIAL_BYTES));
   });
 
-  // ── H7 a11y wiring ─────────────────────────────────────────────────────
-
   it('wires aria-describedby to description + error ids when present', () => {
     const fields: PluginAuthField[] = [
       {
@@ -493,7 +472,6 @@ describe('PluginCredentialsFormComponent', () => {
     const input = fixture.nativeElement.querySelector(
       '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
-    // Description present → described-by includes it; no error yet → only desc.
     expect(input.getAttribute('aria-describedby')).toBe('cred-desc-example_pat');
     expect(input.getAttribute('aria-invalid')).toBeNull();
     expect(
@@ -501,7 +479,6 @@ describe('PluginCredentialsFormComponent', () => {
       'description <p> must have the bound id'
     ).not.toBeNull();
 
-    // Submit invalid value → error appears, both ids in described-by + aria-invalid=true.
     setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ghp_wrong');
     (
       fixture.nativeElement.querySelector(
@@ -519,15 +496,13 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('drops aria-describedby when neither description nor error is present', () => {
-    fixture.componentRef.setInput('authFields', makeAuthFields()); // no description
+    fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector(
       '[data-testid="cred-input-example_pat"]'
     ) as HTMLInputElement;
     expect(input.getAttribute('aria-describedby')).toBeNull();
   });
-
-  // ── H8 secret masking on textarea ──────────────────────────────────────
 
   it('applies the secret-mask CSS class to <textarea> when is_secret', () => {
     const fields: PluginAuthField[] = [
@@ -547,8 +522,6 @@ describe('PluginCredentialsFormComponent', () => {
     ) as HTMLTextAreaElement;
     expect(el.classList.contains('cred-secret-mask')).toBe(true);
   });
-
-  // ── M7 blur validation ─────────────────────────────────────────────────
 
   it('re-validates on blur (not just on submit)', () => {
     const fields: PluginAuthField[] = [
@@ -578,8 +551,6 @@ describe('PluginCredentialsFormComponent', () => {
     ).not.toBeNull();
   });
 
-  // ── M8 Save button disabled during in-flight ──────────────────────────
-
   it('disables Save and switches label to "Saving…" while inFlight', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.componentRef.setInput('inFlight', true);
@@ -598,7 +569,6 @@ describe('PluginCredentialsFormComponent', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();
 
-    // Synthetic event with a non-input target (e.g. a div).
     const fakeEvent = { target: document.createElement('div') } as unknown as Event;
     component.onFieldInput('example_pat', fakeEvent);
 
@@ -606,8 +576,6 @@ describe('PluginCredentialsFormComponent', () => {
     expect(component.hasAnyValue()).toBe(false);
     expect(component.getValue('example_pat')).toBe('');
   });
-
-  // ── State transitions ──────────────────────────────────────────────────
 
   it('clears local buffer after a successful save (next render shows empty inputs)', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
@@ -622,7 +590,6 @@ describe('PluginCredentialsFormComponent', () => {
     form.dispatchEvent(new Event('submit'));
     fixture.detectChanges();
 
-    // After save, getValue returns empty — buffer was wiped.
     expect(component.getValue('example_pat')).toBe('');
     expect(component.hasAnyValue()).toBe(false);
   });
@@ -647,8 +614,6 @@ describe('PluginCredentialsFormComponent', () => {
       credentials: { example_pat: 'ex_AAA', example_oauth: 'exmcp_BBB' },
     });
   });
-
-  // ── #5: auth_field validation (regex pattern + message) ───────────────────
 
   function validatedField(message?: string): PluginAuthField[] {
     return [
@@ -705,7 +670,7 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('falls back to a generic message when validation has no message', () => {
-    fixture.componentRef.setInput('authFields', validatedField()); // no message
+    fixture.componentRef.setInput('authFields', validatedField());
     fixture.detectChanges();
 
     setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'nope');
@@ -740,7 +705,6 @@ describe('PluginCredentialsFormComponent', () => {
   });
 
   it('rejects a partial match — the pattern is anchored full-match', () => {
-    // Author pattern is un-anchored; component wraps it in ^(?:…)$.
     fixture.componentRef.setInput('authFields', [
       {
         key: 'example_pat',
@@ -788,7 +752,6 @@ describe('PluginCredentialsFormComponent', () => {
       fixture.nativeElement.querySelector('[data-testid="cred-error-example_pat"]')
     ).not.toBeNull();
 
-    // Editing the field clears the error immediately.
     setInputValue(fixture, '[data-testid="cred-input-example_pat"]', 'ex_now_valid');
     fixture.detectChanges();
     expect(

@@ -13,7 +13,6 @@ import {
 } from './channel-tools.js';
 import type { SlackClients } from '../client.js';
 
-// Mock the client module
 vi.mock('../client.js', async () => {
   const actual = await vi.importActual('../client.js');
   return {
@@ -29,7 +28,6 @@ vi.mock('../client.js', async () => {
   };
 });
 
-// Mock the user-directory boundary; its machinery has its own test file.
 vi.mock('../user-directory.js', () => ({
   enrichMessagesWithAuthors: vi.fn(async (_clients: unknown, msgs: unknown[]) => msgs),
 }));
@@ -93,6 +91,43 @@ describe('channel-tools', () => {
       expect(client.sendChannel).toHaveBeenCalledWith(mockClients, {
         channel: 'C1234567890',
         message: 'Test message',
+      });
+    });
+
+    it('forwards thread_ts and reply_broadcast to the client', async () => {
+      const mockResult = { ok: true, ts: '1717000000.000200', channel: 'C1234567890' };
+      vi.mocked(client.sendChannel).mockResolvedValue(mockResult);
+
+      await handleSendChannel(mockClients, {
+        channel: 'C1234567890',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      });
+
+      expect(client.sendChannel).toHaveBeenCalledWith(mockClients, {
+        channel: 'C1234567890',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      });
+    });
+
+    it('maps a rejected thread parameter to SEND_FAILED', async () => {
+      const error = new Error('thread_ts "1717000000" does not look like a Slack timestamp');
+      vi.mocked(client.sendChannel).mockRejectedValue(error);
+      vi.mocked(client.formatSlackError).mockReturnValue(error.message);
+
+      const result = await handleSendChannel(mockClients, {
+        channel: '#general',
+        message: 'Reply',
+        thread_ts: '1717000000',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toEqual({
+        code: 'SEND_FAILED',
+        message: 'thread_ts "1717000000" does not look like a Slack timestamp',
       });
     });
 
@@ -183,7 +218,6 @@ describe('channel-tools', () => {
       expect(enrichMessagesWithAuthors).toHaveBeenCalledWith(mockClients, mockMessages);
       const data = result.data as { messages: { author?: string; user: string }[] };
       expect(data.messages[0].author).toBe('Paweł Kowalski');
-      // Unresolvable ID stays raw — the read still succeeds.
       expect(data.messages[1].author).toBeUndefined();
       expect(data.messages[1].user).toBe('UX');
     });
@@ -456,7 +490,6 @@ describe('channel-tools', () => {
         name: 'general',
         is_private: false,
       });
-      // Verify num_members is not included in the output
       expect(data?.channels[0]).not.toHaveProperty('num_members');
     });
 
@@ -467,6 +500,28 @@ describe('channel-tools', () => {
 
       expect(client.getChannels).toHaveBeenCalledWith(mockClients, { types: 'public_channel' });
     });
+  });
+});
+
+describe('sendChannel tool definition', () => {
+  it('declares thread_ts and reply_broadcast as optional parameters', () => {
+    const tools = createChannelTools(unconfiguredClients());
+    const schema = tools.find((t) => t.tool.name === 'sendChannel')!.tool.inputSchema;
+
+    expect(schema.properties).toHaveProperty('thread_ts');
+    expect(schema.properties).toHaveProperty('reply_broadcast');
+    expect((schema.properties as Record<string, { type: string }>).reply_broadcast.type).toBe(
+      'boolean'
+    );
+    expect(schema.required).toEqual(['channel', 'message']);
+  });
+
+  it('documents replying in a thread in its input examples', () => {
+    const tools = createChannelTools(unconfiguredClients());
+    const tool = tools.find((t) => t.tool.name === 'sendChannel')!.tool;
+
+    expect(tool.inputExamples!.some((e) => 'thread_ts' in (e.input as object))).toBe(true);
+    expect(tool.inputExamples!.some((e) => 'reply_broadcast' in (e.input as object))).toBe(true);
   });
 });
 

@@ -69,8 +69,6 @@ export function requireFields(
   return { valid: true };
 }
 
-// ── Input Validation — max length, control chars, types (SEC-012) ────────
-
 /** Maximum allowed lengths per field category. */
 export const MAX_LENGTHS = { id: 512, short: 1_000, body: 100_000 } as const;
 
@@ -80,8 +78,19 @@ export type StringFieldSpec = [name: string, maxLength: number, allowNewlines: b
 /** Spec for a number field: [name, min, max]. */
 export type NumberFieldSpec = [name: string, min: number, max: number];
 
-/** Spec for a string-array field: [name, maxItems, maxItemLength]. */
-export type StringArrayFieldSpec = [name: string, maxItems: number, maxItemLength: number];
+/** Characters an array item must not contain, with the wording used in the teaching error. */
+export interface ForbiddenChars {
+  pattern: RegExp;
+  describe: string;
+}
+
+/** Spec for a string-array field: [name, maxItems, maxItemLength, forbidden?]. */
+export type StringArrayFieldSpec = [
+  name: string,
+  maxItems: number,
+  maxItemLength: number,
+  forbidden?: ForbiddenChars,
+];
 
 /** Regex matching control characters \x00-\x1f EXCEPT \t(\x09), \n(\x0a), \r(\x0d). */
 // eslint-disable-next-line no-control-regex
@@ -188,6 +197,35 @@ export function validateNumberFields(
 }
 
 /**
+ * Validate number fields that must also be whole numbers (e.g. a priority level).
+ * @param params - Tool input parameters to validate.
+ * @param specs - Array of number field specs [name, min, max].
+ */
+export function validateIntegerFields(
+  params: Record<string, unknown>,
+  specs: NumberFieldSpec[]
+): { valid: true } | { valid: false; error: ToolResult } {
+  const numeric = validateNumberFields(params, specs);
+  if (!numeric.valid) return numeric;
+  for (const [name, min, max] of specs) {
+    const value = params[name];
+    if (value === undefined || Number.isInteger(value)) continue;
+    return {
+      valid: false,
+      error: teachingToolResult(
+        {
+          paramName: name,
+          received: value,
+          nextStep: `Pass ${name} as a whole number between ${min} and ${max}.`,
+        },
+        'INVALID_TYPE'
+      ),
+    };
+  }
+  return { valid: true };
+}
+
+/**
  * Validate boolean fields for strict `typeof === 'boolean'`.
  * @param params - Tool input parameters to validate.
  * @param fields - List of boolean field names to check.
@@ -225,7 +263,7 @@ export function validateStringArrayFields(
   params: Record<string, unknown>,
   specs: StringArrayFieldSpec[]
 ): { valid: true } | { valid: false; error: ToolResult } {
-  for (const [name, maxItems, maxItemLength] of specs) {
+  for (const [name, maxItems, maxItemLength, forbidden] of specs) {
     const value = params[name];
     if (value === undefined) continue;
     if (!Array.isArray(value)) {
@@ -301,6 +339,19 @@ export function validateStringArrayFields(
           ),
         };
       }
+      if (forbidden?.pattern.test(item)) {
+        return {
+          valid: false,
+          error: teachingToolResult(
+            {
+              paramName: itemName,
+              received: item,
+              nextStep: `Remove ${forbidden.describe} from ${itemName}.`,
+            },
+            'INVALID_CHARACTERS'
+          ),
+        };
+      }
     }
   }
   return { valid: true };
@@ -311,8 +362,11 @@ export interface ValidationSpec {
   required?: string[];
   strings?: StringFieldSpec[];
   numbers?: NumberFieldSpec[];
+  integers?: NumberFieldSpec[];
   booleans?: string[];
   dates?: string[];
+  /** Date fields that accept an explicit null (a PATCH "clear this field"); every other null is rejected. */
+  nullable?: string[];
   stringArrays?: StringArrayFieldSpec[];
 }
 
@@ -341,8 +395,12 @@ export function validateAll(
     const n = validateNumberFields(params, spec.numbers);
     if (!n.valid) return n;
   }
+  if (spec.integers) {
+    const i = validateIntegerFields(params, spec.integers);
+    if (!i.valid) return i;
+  }
   if (spec.dates) {
-    const d = validateDateFields(params, spec.dates);
+    const d = validateDateFields(params, spec.dates, spec.nullable);
     if (!d.valid) return d;
   }
   if (spec.stringArrays) {
@@ -364,13 +422,28 @@ export function asRecord(params: unknown): Record<string, unknown> {
  * Validate that optional date fields, when present, are in strict ISO8601 format.
  * @param params - Tool input parameters to validate.
  * @param fields - List of field names to check.
+ * @param nullable - Fields for which an explicit null is accepted (a PATCH "clear this field").
  */
 export function validateDateFields(
   params: Record<string, unknown>,
-  fields: string[]
+  fields: string[],
+  nullable: string[] = []
 ): { valid: true } | { valid: false; error: ToolResult } {
   for (const field of fields) {
     const value = params[field];
+    if (value === null && !nullable.includes(field)) {
+      return {
+        valid: false,
+        error: teachingToolResult(
+          {
+            paramName: field,
+            received: value,
+            nextStep: `Pass ${field} as an ISO8601 date string, or omit it; null is not accepted here.`,
+          },
+          'INVALID_TYPE'
+        ),
+      };
+    }
     if (value !== undefined && value !== null) {
       if (typeof value !== 'string' || !isValidISO8601(value)) {
         return {
@@ -379,7 +452,7 @@ export function validateDateFields(
             {
               paramName: field,
               received: value,
-              nextStep: `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".`,
+              nextStep: `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00".`,
             },
             'INVALID_DATE'
           ),
@@ -402,7 +475,6 @@ export function isValidISO8601(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   if (!ISO8601_RE.test(value)) return false;
 
-  // Validate month/day ranges to prevent silent rollover (e.g., Feb 30 → Mar 2)
   const year = parseInt(value.slice(0, 4), 10);
   const month = parseInt(value.slice(5, 7), 10);
   const day = parseInt(value.slice(8, 10), 10);

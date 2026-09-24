@@ -1,28 +1,3 @@
-# Desktop Release — builds Tauri desktop app + CLI binaries for all platforms
-#
-# Based on the official Tauri v2 GitHub Actions guide:
-#   https://v2.tauri.app/distribute/pipelines/github/
-#
-# tauri-action handles release creation, artifact upload, and updater JSON
-# generation automatically — no custom release management needed.
-#
-# Triggers:
-#   - workflow_call (from release-please.yml — provides version, tag_name)
-#   - workflow_dispatch (manual, with version input)
-#
-# Required secrets:
-#   TAURI_SIGNING_PRIVATE_KEY          — Ed25519 private key for Tauri updater signatures
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — passphrase for the signing key (can be empty string)
-#
-# Optional secrets (code signing):
-#   APPLE_CERTIFICATE                  — base64-encoded .p12 Developer ID Application certificate
-#   APPLE_CERTIFICATE_PASSWORD         — passphrase for the .p12 certificate
-#   APPLE_SIGNING_IDENTITY             — e.g. "Developer ID Application: Your Name (TEAMID)"
-#   APPLE_ID                           — Apple ID email for notarization
-#   APPLE_PASSWORD                     — app-specific password for notarization
-#   APPLE_TEAM_ID                      — Apple Developer Team ID
-#   WINDOWS_CERTIFICATE                — base64-encoded .pfx code signing certificate
-#   WINDOWS_CERTIFICATE_PASSWORD       — passphrase for the .pfx certificate
 
 name: Desktop Release
 
@@ -48,7 +23,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Resolve version from trigger source ────────────────────────────────
   resolve:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -118,11 +92,12 @@ jobs:
 
           echo "Resolved: version=$VERSION tag=$TAG release_id=$RELEASE_ID tag_exists=$TAG_EXISTS"
 
-  # ── Desktop app (Tauri) — official tauri-action pattern ──────────────────
   publish-tauri:
     needs: resolve
+    environment: release
     permissions:
       contents: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -136,13 +111,29 @@ jobs:
           - platform: windows-latest
             args: ""
             arch_label: ""
-    timeout-minutes: 45
+    timeout-minutes: 75
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
+
+      - name: Use a short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          echo 'CARGO_TARGET_DIR=D:\st' >> "$GITHUB_ENV"
+          # Cache key folds in the runner image: a VS bump invalidates CMakeCache generators.
+          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
+      - name: Cache the short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: D:\st
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-
 
       - name: Setup toolchain (Node + Rust + cache)
         uses: ./.github/actions/setup-toolchain
@@ -154,8 +145,6 @@ jobs:
         run: npm ci
         working-directory: desktop/src
 
-      # Set APPLE_* in GITHUB_ENV only when the secret is real (tauri-action
-      # imports on any non-null APPLE_CERTIFICATE).
       - name: Configure macOS code signing
         if: matrix.platform == 'macos-latest'
         env:
@@ -185,8 +174,6 @@ jobs:
             echo "::notice::macOS code signing skipped (no APPLE_CERTIFICATE secret)"
           fi
 
-      # Import the .p12 into a throwaway build keychain so codesign can resolve
-      # APPLE_SIGNING_IDENTITY. See: https://v2.tauri.app/distribute/sign/macos/
       - name: Import Apple signing certificate to keychain
         if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         shell: bash
@@ -241,20 +228,14 @@ jobs:
 
       - name: Configure Windows code signing
         if: matrix.platform == 'windows-latest'
-        env:
-          CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
-          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: bash
-        run: |
-          if [ -n "$CERT" ]; then
-            echo "::add-mask::$CERT"
-            echo "::add-mask::$CERT_PASSWORD"
-            echo "WINDOWS_CERTIFICATE=$CERT" >> "$GITHUB_ENV"
-            echo "WINDOWS_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
-            echo "::notice::Windows code signing configured"
-          else
-            echo "::notice::Windows code signing skipped (no WINDOWS_CERTIFICATE secret)"
-          fi
+        uses: ./.github/actions/azure-signing-login
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
 
       - name: Prepare desktop bundle
         uses: ./.github/actions/prepare-desktop-bundle
@@ -262,9 +243,7 @@ jobs:
           platform: ${{ matrix.platform }}
           args: ${{ matrix.args }}
 
-      # releaseId set: upload to existing release (tag* ignored); empty: create
-      # by tag.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5  # v0.6.2
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -278,12 +257,11 @@ jobs:
           releaseDraft: ${{ needs.resolve.outputs.release_id == '' && 'true' || 'false' }}
           prerelease: false
           args: ${{ matrix.args }}
-          assetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
+          releaseAssetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
 
-  # ── CLI binary cross-compilation ─────────────────────────────────────────
-  # Runs after publish-tauri so the GitHub release already exists
   cli:
     needs: [resolve, publish-tauri]
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -301,14 +279,15 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           targets: ${{ matrix.target }}
 
@@ -319,7 +298,7 @@ jobs:
         run: rustup target add "$TARGET"
 
       - name: Rust cache
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: cli-${{ matrix.target }}
 
@@ -328,6 +307,24 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --target "$TARGET" -p speedwave-cli
+
+      - name: Configure Windows code signing
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/azure-signing-login
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+
+      - name: Sign CLI binary (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\sign-windows-binaries.ps1 "target\$env:TARGET\release\speedwave.exe"
 
       - name: Package CLI (unix)
         if: matrix.archive == 'tar.gz'
@@ -359,7 +356,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" --repo "$REPO" --clobber
 
-  # ── Publish release: draft → live after all builds succeed ──────────────
   publish-release:
     needs: [resolve, publish-tauri, cli]
     runs-on: ubuntu-latest
@@ -367,7 +363,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Verify release assets (pre-publish)
         env:

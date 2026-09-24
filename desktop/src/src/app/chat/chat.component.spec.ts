@@ -2,17 +2,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
 import { RouterModule } from '@angular/router';
+import { By } from '@angular/platform-browser';
 import { ChatComponent } from './chat.component';
+import { ComposerComponent } from './composer/composer.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
+import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { createDeferred } from '../testing/deferred';
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('ChatComponent', () => {
   let component: ChatComponent;
@@ -66,23 +67,18 @@ describe('ChatComponent', () => {
     projectState = TestBed.inject(ProjectStateService);
     uiState = TestBed.inject(UiStateService);
 
-    // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
     chatState.isStreaming = false;
   });
-
-  // ── resumeConversation: transcript-loading flag ────────────────────────────
 
   describe('resumeConversation loading flag', () => {
     it('sets loadingTranscript true during fetch and false after it resolves', async () => {
       projectState.activeProject.set('test');
 
-      let releaseGetConversation: (() => void) | null = null;
+      const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseGetConversation = resolve;
-          });
+          await pendingGetConversation.promise;
           return { session_id: 's1', messages: [] };
         }
         return undefined;
@@ -90,12 +86,10 @@ describe('ChatComponent', () => {
 
       const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
       await Promise.resolve();
-      // Mid-flight: loader is showing.
       expect(chatState.loadingTranscriptFromState()).toBe(true);
 
-      releaseGetConversation!();
+      pendingGetConversation.resolve();
       await resumePromise;
-      // Settled: loader is hidden.
       expect(chatState.loadingTranscriptFromState()).toBe(false);
     });
 
@@ -113,17 +107,13 @@ describe('ChatComponent', () => {
 
     it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
       projectState.activeProject.set('test');
-      // Wrap the real disposer so we can assert when the start-in-progress flag
-      // is released (the disposer replaces the old endStartingSession method).
       const dispose = vi.fn();
       const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
 
-      let releaseGetConversation: (() => void) | null = null;
+      const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseGetConversation = resolve;
-          });
+          await pendingGetConversation.promise;
           return { session_id: 's1', messages: [] };
         }
         return undefined;
@@ -131,18 +121,14 @@ describe('ChatComponent', () => {
 
       const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
       await Promise.resolve();
-      // Mid-flight: the start-in-progress flag is set, not yet cleared.
       expect(begin).toHaveBeenCalledTimes(1);
       expect(dispose).not.toHaveBeenCalled();
 
-      releaseGetConversation!();
+      pendingGetConversation.resolve();
       await resumePromise;
-      // Settled: disposer released so later sends can start a session normally.
       expect(dispose).toHaveBeenCalledTimes(1);
     });
   });
-
-  // ── Composition — shell sub-components ─────────────────────────────────────
 
   describe('shell composition', () => {
     it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
@@ -167,8 +153,6 @@ describe('ChatComponent', () => {
       const link = view.querySelector('a');
       expect(link).toBeTruthy();
       expect(link.getAttribute('href')).toBe('/settings');
-      // Header (with project pill) stays available so the user can switch away;
-      // the composer is still gone since there is no conversation.
       expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-project-pill')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
@@ -188,8 +172,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
-
   describe('handleStreamChunk Text', () => {
     it('accumulates text in currentBlocks and sets isStreaming to true', () => {
       chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello ' } });
@@ -204,8 +186,6 @@ describe('ChatComponent', () => {
       expect(chatState.currentBlocks[0]).toEqual({ type: 'text', content: 'Hello world!' });
     });
   });
-
-  // ── handleStreamChunk: 'Result' ────────────────────────────────────────────
 
   describe('handleStreamChunk Result', () => {
     it('saves accumulated currentBlocks as assistant message and stops streaming', () => {
@@ -241,8 +221,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'Error' ─────────────────────────────────────────────
-
   describe('handleStreamChunk Error', () => {
     it('adds error block, finalizes message, and stops streaming', () => {
       chatState.isStreaming = true;
@@ -264,8 +242,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'ToolStart' ─────────────────────────────────────────
-
   describe('handleStreamChunk ToolStart', () => {
     it('adds tool_use block to currentBlocks', () => {
       chatState.handleStreamChunk({
@@ -283,8 +259,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'Thinking' ──────────────────────────────────────────
-
   describe('handleStreamChunk Thinking', () => {
     it('creates thinking block', () => {
       chatState.handleStreamChunk({ chunk_type: 'Thinking', data: { content: 'hmm...' } });
@@ -298,11 +272,8 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── sendMessage guards ─────────────────────────────────────────────────────
-
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      // ComposerComponent emits already-trimmed text; empty payload = empty composer state.
       await component.sendMessage({ payload: '', displayText: '' });
 
       expect(chatState.messages).toHaveLength(0);
@@ -316,8 +287,6 @@ describe('ChatComponent', () => {
       expect(chatState.messages).toHaveLength(0);
     });
   });
-
-  // ── sendMessage success ────────────────────────────────────────────────────
 
   describe('sendMessage success', () => {
     it('adds user message and sets isStreaming', async () => {
@@ -353,16 +322,137 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── composer integration ─────────────────────────────────────────────────
+  describe('staged meeting transcript', () => {
+    async function stage(): Promise<TranscriptionService> {
+      const transcription = TestBed.inject(TranscriptionService);
+      const prior = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return { language: 'en' };
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return prior(cmd);
+      };
+      await transcription.stageForChat('sess-1', 'current-chat');
+      mockTauri.invokeHandler = prior;
+      return transcription;
+    }
+
+    it('appends the transcript after a blank line and unstages it', async () => {
+      const transcription = await stage();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockResolvedValue(undefined);
+
+      await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
+
+      expect(invokeSpy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: 'summarize this\n\n# Meeting transcript' }],
+        displayText: 'summarize this',
+      });
+      expect(transcription.stagedTranscript()).toBe('');
+    });
+
+    it('shows only the typed text in the local bubble', async () => {
+      await stage();
+      await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
+      expect(chatState.messages[0].blocks[0]).toEqual({
+        type: 'text',
+        content: 'summarize this',
+      });
+    });
+
+    it('sends the message alone once the transcript is unpinned', async () => {
+      const transcription = await stage();
+      transcription.clearStagedTranscript();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockResolvedValue(undefined);
+
+      await component.sendMessage({ payload: 'never mind', displayText: 'never mind' });
+
+      expect(invokeSpy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: 'never mind' }],
+        displayText: 'never mind',
+      });
+    });
+
+    it('rides along with a message queued mid-stream', async () => {
+      const transcription = await stage();
+      await component.onQueueRequested('summarize this');
+      expect(chatState.pendingQueueFromState()?.text).toBe(
+        'summarize this\n\n# Meeting transcript'
+      );
+      expect(transcription.stagedTranscript()).toBe('');
+    });
+
+    it('keeps the transcript staged when the send is refused mid-stream', async () => {
+      const transcription = await stage();
+      chatState.isStreaming = true;
+      await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
+      expect(transcription.stagedTranscript()).toBe('# Meeting transcript');
+    });
+
+    it('marks the composer while a transcript is staged', async () => {
+      projectState.status.set('ready');
+      await stage();
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="composer-transcript"]')
+      ).toBeTruthy();
+    });
+  });
+
   describe('composer integration', () => {
     it('mounts app-composer when a live session is active', async () => {
       projectState.status.set('ready');
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
-  });
 
-  // ── onQuestionAnswered ──────────────────────────────────────────────────
+    it('hands the composer the live session-start block, not a rendered copy', () => {
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+      expect(composer.componentInstance.sendBlocked()).toBe(
+        chatState.sessionStartInFlightFromState
+      );
+
+      const endStartingSession = chatState.beginStartingSession();
+      expect(composer.componentInstance.sendBlocked()()).toBe(true);
+
+      endStartingSession();
+      expect(composer.componentInstance.sendBlocked()()).toBe(false);
+    });
+
+    it('binds composerContextLabel to the composer contextLabel input, formatted from session stats', () => {
+      projectState.status.set('ready');
+      chatState._setState({
+        sessionStats: {
+          session_id: 's1',
+          total_cost: 0,
+          context_window_size: 200000,
+          total_output_tokens: 0,
+        },
+      });
+      fixture.detectChanges();
+
+      expect(component.composerContextLabel()).toBe('200k');
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+      expect(composer.componentInstance.contextLabel()).toBe('200k');
+    });
+
+    it('leaves contextLabel empty when the context window is unknown (local model)', () => {
+      projectState.status.set('ready');
+      chatState._setState({
+        sessionStats: {
+          session_id: 's1',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      fixture.detectChanges();
+
+      expect(component.composerContextLabel()).toBe('');
+    });
+  });
 
   describe('onQuestionAnswered', () => {
     it('calls submitAnswer with the correct tool ID, slot index, and value', async () => {
@@ -393,8 +483,6 @@ describe('ChatComponent', () => {
       expect(answerSpy).toHaveBeenCalledWith('test-tool', 0, 'answer1');
     });
   });
-
-  // ── loadConversations ───────────────────────────────────────────────────────
 
   describe('loadConversations', () => {
     it('calls backend with active project and sets conversations', async () => {
@@ -455,13 +543,10 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── resume decider lifecycle (ngOnInit / ngOnDestroy) ──────────────────────
-
   describe('resume decider lifecycle', () => {
     it('ngOnInit registers a resume decider function on the service', async () => {
       const setSpy = vi.spyOn(chatState, 'setResumeDecider');
       await component.ngOnInit();
-      // A mounted component opts into the overflow prompt via a callback.
       const last = setSpy.mock.calls[setSpy.mock.calls.length - 1]?.[0];
       expect(typeof last).toBe('function');
     });
@@ -473,8 +558,6 @@ describe('ChatComponent', () => {
       expect(setSpy).toHaveBeenCalledWith(null);
     });
   });
-
-  // ── resumeConversation ──────────────────────────────────────────────────────
 
   describe('resumeConversation', () => {
     it('calls resume_conversation and closes the sidebar', async () => {
@@ -518,7 +601,6 @@ describe('ChatComponent', () => {
 
       await component.resumeConversation('11111111-1111-1111-1111-111111111111');
 
-      // Optimistic accent cleared on failure → drawer doesn't show it as active.
       expect(component.currentViewSessionId).toBeNull();
     });
 
@@ -537,8 +619,6 @@ describe('ChatComponent', () => {
       retrySpy.mockRestore();
     });
   });
-
-  // ── deleteConversation ──────────────────────────────────────────────────────
 
   describe('deleteConversation', () => {
     it('calls delete_conversation and removes the row locally', async () => {
@@ -614,7 +694,6 @@ describe('ChatComponent', () => {
 
     it('clears the durable restart-resume id when deleting that session even if it is not the viewed one', async () => {
       projectState.activeProject.set('test');
-      // Durable id points at an older session; the live view shows a different one.
       chatState.seedSessionId('s-old');
       chatState._setState({
         sessionStats: {
@@ -633,15 +712,11 @@ describe('ChatComponent', () => {
 
       await component.deleteConversation('s-old');
 
-      // The durable id is cleared so a later restart cannot resume a deleted session…
       expect(chatState.lastKnownSessionId).toBeNull();
-      // …while the viewed session keeps running (no live-chat reset).
       expect(resetSpy).not.toHaveBeenCalled();
       expect(component.conversations).toEqual([]);
     });
   });
-
-  // ── newConversation ─────────────────────────────────────────────────────────
 
   describe('newConversation', () => {
     it('resets all state and re-initialises', async () => {
@@ -662,8 +737,6 @@ describe('ChatComponent', () => {
       expect(component.showMemory).toBe(false);
     });
   });
-
-  // ── toggleHistory / toggleMemory ────────────────────────────────────────────
 
   describe('toggleHistory', () => {
     it('toggles showHistory boolean', async () => {
@@ -788,8 +861,6 @@ describe('ChatComponent', () => {
       expect(component.memoryError).toBe('');
     });
   });
-
-  // ── onLinkClick — external links open in system browser ───────────────────
 
   describe('onLinkClick', () => {
     it('opens https links via open_url and prevents default', () => {
@@ -924,8 +995,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── project_switch_succeeded event ──────────────────────────────────────────
-
   describe('project_switch_succeeded event', () => {
     it('reloads conversations when history panel is open', async () => {
       projectState.activeProject.set('test');
@@ -1000,8 +1069,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── state persistence ─────────────────────────────────────────────────────
-
   describe('state persistence', () => {
     it('ChatStateService is a singleton — state survives component recreation', () => {
       chatState._setState({
@@ -1024,8 +1091,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── Auth-expired redirect ───────────────────────────────────────────────
-
   describe('auth-expired redirect', () => {
     it('navigates to /settings when projectState becomes auth_required', async () => {
       const router = TestBed.inject(Router);
@@ -1035,7 +1100,6 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      // Simulate auth expiry via notifyChange
       projectState.status.set('auth_required');
       projectState['notifyChange']();
 
@@ -1046,7 +1110,6 @@ describe('ChatComponent', () => {
 
   describe('Stop button and ESC handler', () => {
     it('shows Stop button when streaming, hides it when idle', () => {
-      // Send button lives in <app-composer>; chat.component owns only the Stop button.
       projectState.status.set('ready');
       chatState.isStreaming = false;
       fixture.detectChanges();
@@ -1064,7 +1127,6 @@ describe('ChatComponent', () => {
       projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
-      // isStreamingFromState() refreshes only after notifyChange rebuilds the tree.
       chatState['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
@@ -1102,7 +1164,6 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      // currentBlocksFromState() sees the block only after notifyChange rebuilds the tree.
       chatState['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
@@ -1140,8 +1201,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── context-overflow dialog ─────────────────────────────────────────────────
-
   describe('context-overflow dialog', () => {
     it('promptResumeOrFresh opens the dialog and resolves "resume" on confirm', async () => {
       const choice = component.promptResumeOrFresh();
@@ -1159,8 +1218,6 @@ describe('ChatComponent', () => {
     });
 
     it('renders the confirm dialog HTML while open and hides it when closed', async () => {
-      // The overlay renders into a CDK Dialog container on document.body, not
-      // into fixture.nativeElement — query the document.
       projectState.status.set('ready');
       await component.ngOnInit();
       component.promptResumeOrFresh();
@@ -1182,18 +1239,14 @@ describe('ChatComponent', () => {
       const first = component.promptResumeOrFresh();
       const second = component.promptResumeOrFresh();
 
-      // Re-entrancy: the superseded prompt settles (fresh) instead of leaking.
       await expect(first).resolves.toBe('fresh');
       expect(component.contextOverflowOpen()).toBe(true);
 
-      // Only the latest prompt is still user-controlled.
       component.onContextOverflowResume();
       await expect(second).resolves.toBe('resume');
       expect(component.contextOverflowOpen()).toBe(false);
     });
   });
-
-  // ── isLastAssistant: O(1) cached lookup ────────────────────────────────────
 
   describe('isLastAssistant', () => {
     it('returns false when there are no messages', () => {
@@ -1245,6 +1298,89 @@ describe('ChatComponent', () => {
       ]);
       expect(component.isLastAssistant(1)).toBe(false);
       expect(component.isLastAssistant(3)).toBe(true);
+    });
+  });
+
+  describe('model selector wiring', () => {
+    it('forwards the composer modelSelected event straight to ChatStateService.applyModelSelection', () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const applySpy = vi
+        .spyOn(fixture.componentInstance.chat, 'applyModelSelection')
+        .mockResolvedValue(undefined);
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+
+      composer.triggerEventHandler('modelSelected', {
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(applySpy).toHaveBeenCalledWith({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+    });
+  });
+
+  describe('deferred effort notice (SPEED-650)', () => {
+    async function deferEffort(level: string): Promise<void> {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'get_chat_takes_wire_effort' ? false : base(cmd, args);
+      chatState.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-held' },
+      });
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      chatState.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-held' },
+      } as never);
+      await chatState.applyEffortSelection(level);
+      fixture.detectChanges();
+    }
+
+    const notice = () =>
+      fixture.debugElement.query(By.css('[data-testid="effort-deferred-notice"]'));
+    const restart = () =>
+      fixture.debugElement.query(By.css('[data-testid="effort-deferred-restart"]'));
+
+    it('stays hidden while no pick is deferred', () => {
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      expect(notice()).toBeNull();
+    });
+
+    it('names the deferred level and warns that restarting stops background tasks', async () => {
+      await deferEffort('max');
+
+      const text = (notice().nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Effort Max applies from the next session');
+      expect(text).toContain("stops this session's background tasks");
+    });
+
+    it('Restart now asks the chat state to restart for the deferred effort', async () => {
+      await deferEffort('low');
+      const restartSpy = vi.spyOn(chatState, 'restartForDeferredEffort').mockResolvedValue();
+
+      (restart().nativeElement as HTMLButtonElement).click();
+
+      expect(restartSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('disables Restart now while a turn streams', async () => {
+      await deferEffort('low');
+      void chatState.sendMessage('next question');
+      fixture.detectChanges();
+
+      expect((restart().nativeElement as HTMLButtonElement).disabled).toBe(true);
     });
   });
 });

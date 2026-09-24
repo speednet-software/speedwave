@@ -6,7 +6,9 @@ paths:
 
 # Logging Rules
 
-All Rust code uses the `log` crate facade for diagnostic output. **Never use `eprintln!` or `println!` for logging** — the only acceptable use of `eprintln!` is for direct user-facing CLI output (e.g., "speedwave check FAILED") and the panic hook's last-resort fallback.
+All Rust code uses the `log` crate facade for diagnostic output. **Never use `eprintln!` or `println!` for logging** — the only acceptable use of `eprintln!` is for direct user-facing CLI output (e.g., "speedwave check FAILED").
+
+**The Desktop log path never panics on a closed stdout or stderr** (the app outlives the shell or SSH session that started it). A panic raised while the panic hook runs aborts the process; `eprintln!` and `println!` panic on a failed write, and fern's built-in stdout output panics when its stderr fallback fails too. The stdout target is therefore `main.rs::line_output` and the panic hook's stderr fallback is `main.rs::write_panic_line`; both drop write errors.
 
 ## Architecture
 
@@ -17,11 +19,12 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 | Library (`speedwave-runtime`) | `log` crate facade only (no backend opinion) | Callers provide the backend                         |
 
 - **SSOT for secret redaction:** `crates/speedwave-runtime/src/log_sanitizer.rs` — all log output passes through `sanitize()` via `.format()` callbacks in both Desktop and CLI loggers. Secrets never reach disk or stdout.
+- **Child-process failure text is shaped once, in `runtime/mod.rs::user_facing_failure_text`** (every `RealRunner` failure and `run_with_timeout`): logrus chatter lines (`level=trace|debug|info|warn|warning`) are dropped when anything else remains, the untouched output goes to `log::debug!`, and the survivors pass through `sanitize()` before the `anyhow` error exists. Error classifiers (`is_propagation_error`, `name_store_conflicts`, `is_eof_error`, …) key on `level=fatal`/`level=error` or unstructured lines, never on an `info` line. Desktop's `SwitchResult::failed` re-sanitizes whatever reaches the project-switch banner.
 - **SSOT for diagnostics:** `crates/speedwave-runtime/src/diagnostic_sources.rs::DIAGNOSTIC_SOURCES` — every file surfaced in the /logs UI and packed into the diagnostics ZIP. New log file = new registry entry (non-`displayable` sources are ZIP-only); never hand-wire a path into one consumer.
 - **File helpers:** timestamped chmod-600 append + rotation live in `log_file.rs` (used by the Desktop claude-session log and the host-worker drain `host_mcp_process/drain.rs`, shared by mcp-os AND oauth via the `WorkerSpec` trait); timestamps only via `log_ts::log_timestamp()` / mcp-shared `ts()`. Exemption: the OAuth audit log (`mcp-servers/oauth/src/audit-log.ts`, ADR-060) is a structured audit-record contract with bare-Z UTC timestamps, not a log line.
 - **Claude Code `ANTHROPIC_LOG=debug` output** passes through `http_debug_collator.rs` (block grouping + per-transaction summarizing) before the session log — extend it rather than logging raw multi-line debug blocks.
 - **Poll loops log on state change only** — never one line per iteration (follow the IDE Bridge pattern).
-- **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%LOCALAPPDATA%/<bundle-id>/logs` (Windows) — must match `tauri-plugin-log v2 TargetKind::LogDir`. Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.dev` under `make dev`; resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
+- **Desktop log files:** `~/Library/Logs/<bundle-id>/` (macOS), `%LOCALAPPDATA%/<bundle-id>/logs` (Windows) — must match `tauri-plugin-log v2 TargetKind::LogDir`. Bundle id is `pl.speedwave.desktop` in release, `pl.speedwave.desktop.$(DEV_INSTANCE)` under `make dev` (so `pl.speedwave.desktop.dev` by default, and a named instance logs to its own directory); resolved at runtime in `desktop_log_dir()`. Rotation: 50 MB per file, `KeepSome(10)` — tauri-plugin-log prunes on every rotation; no separate cleanup timer.
 - **CLI:** `RUST_LOG=debug speedwave check` enables debug output on stderr.
 
 ## Rules for writing log statements
@@ -29,6 +32,7 @@ All Rust code uses the `log` crate facade for diagnostic output. **Never use `ep
 - **Level selection:** `error!` for failures preventing operation, `warn!` for degraded/fallback conditions, `info!` for significant lifecycle events, `debug!` for diagnostic details, `trace!` for verbose internals.
 - **No `identifier:` prefixes in log messages** — the format `[{level}][{target}]` carries the module, and the `log` crate's own convention keeps context in `target` or structured data, never in message prefixes. The message is a self-contained sentence: write `warn!("failed to bind relay socket on {addr}")`, not `warn!("bind_with_retry: bind failed")`. No exceptions — a module hosting multiple subsystems disambiguates by wording the message, not by prefixing it.
 - **Never log secrets.** Do not log tokens, passwords, API keys, HTTP Authorization headers, request/response bodies, or PEM keys. The `log_sanitizer` is a safety net, not a license to log secrets. When logging errors that might contain credentials, redact explicitly.
+- **CodeQL `rust/cleartext-logging` fires on the identifier name, not the value.** A name matching `oauth`, `api_key`, `secret`, `session_id` or `password` is treated as sensitive even when what reaches the log is a path, a boolean, a length, or a service id, and `assert!` messages in `#[cfg(test)]` modules count as sinks. Never reword or truncate a log line to satisfy the heuristic. A credential value reaching a log is a real bug and gets fixed; everything else is dismissed on GitHub as `false positive`, and test-module asserts as `used in tests`, each with a comment naming what the value actually is. Inline `// codeql[...]` has no effect in Rust (no `AlertSuppression.ql`, github/codeql#21637).
 - **Structs containing secrets must not derive `Debug`** — implement a manual `Debug` that redacts sensitive fields, or wrap secret fields in a newtype with a redacting `Debug` impl.
 - **Container/external logs** returned to the frontend (e.g., `get_all_logs`) must pass through `sanitize()` before being sent to the webview.
 

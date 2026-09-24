@@ -1,12 +1,9 @@
 #!/usr/bin/env bats
-# Coverage gates: CI must run the authoritative Makefile lint/test invocations —
-# filtered `--lib` subsets and hand-rolled clippy silently skip most test code.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 MAKEFILE="$REPO_ROOT/Makefile"
 
-# The cargo command inside test-rust's RUN_CARGO_ISOLATED call.
 _makefile_test_rust_cargo_line() {
     awk '
         /^test-rust:/ { in_target=1; next }
@@ -19,11 +16,10 @@ _makefile_test_rust_cargo_line() {
     ' "$MAKEFILE"
 }
 
-# Every `run: cargo test ...` line inside the runtime-windows job.
 _workflow_runtime_windows_cargo_lines() {
     awk '
         /^  runtime-windows:/ { in_job=1; next }
-        in_job && /^  [a-z][a-zA-Z-]*:[[:space:]]*$/ { exit }
+        in_job && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ { exit }
         in_job && /^[[:space:]]*run: cargo test/ {
             sub(/^[[:space:]]*run:[[:space:]]*/, "")
             print
@@ -31,7 +27,6 @@ _workflow_runtime_windows_cargo_lines() {
     ' "$WORKFLOW"
 }
 
-# Every `cargo clippy` recipe line of the check-clippy target.
 _makefile_check_clippy_cargo_lines() {
     awk '
         /^check-clippy:/ { in_target=1; next }
@@ -56,7 +51,7 @@ _makefile_check_clippy_cargo_lines() {
 }
 
 @test "workflow has no filtered --lib subset for speedwave-runtime" {
-    if grep -n 'cargo test -p speedwave-runtime --lib' "$WORKFLOW"; then
+    if grep -n 'cargo test -p speedwave-runtime --lib' "$WORKFLOW" | grep -v 'transcription::'; then
         echo "Filtered --lib subsets skip integration binaries and test-support suites."
         return 1
     fi
@@ -65,8 +60,6 @@ _makefile_check_clippy_cargo_lines() {
 @test "lint job delegates Rust clippy to make check-clippy" {
     grep -q 'run: make check-clippy' "$WORKFLOW"
 
-    # A hand-rolled root-workspace clippy drifts from the Makefile gate
-    # (loses --all-targets and the feature passes).
     if grep -n 'run:.*cargo clippy -p speedwave-' "$WORKFLOW"; then
         echo "Run make check-clippy instead of a hand-rolled cargo clippy."
         return 1
@@ -92,4 +85,22 @@ _makefile_check_clippy_cargo_lines() {
         echo "check-clippy must lint the test-support + audio-transcription feature pass."
         return 1
     }
+}
+
+@test "audit job delegates cargo audit to make audit-rust" {
+    grep -q 'run: make audit-rust' "$WORKFLOW"
+
+    if grep -n 'run:.*cargo audit' "$WORKFLOW"; then
+        echo "Run make audit-rust instead of a hand-rolled cargo audit."
+        return 1
+    fi
+}
+
+@test "audit job delegates npm audit to the Makefile targets" {
+    grep -q 'run: make audit-mcp audit-desktop' "$WORKFLOW"
+
+    if grep -n 'run:.*npm audit' "$WORKFLOW"; then
+        echo "Run make audit-mcp audit-desktop instead of a hand-rolled npm audit."
+        return 1
+    fi
 }

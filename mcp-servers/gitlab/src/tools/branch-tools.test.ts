@@ -9,7 +9,6 @@ import { createBranchTools } from './branch-tools.js';
 import { expectNotFoundTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
-// Mock client type with all branch-related methods
 type MockClient = {
   listBranches: Mock;
   getBranch: Mock;

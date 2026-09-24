@@ -124,7 +124,6 @@ export class JSONRPCHandler {
     sessionId: string | null,
     context?: ToolHandlerContext
   ): Promise<ProcessRequestResult> {
-    // Check for notification before full validation (notifications have no id)
     const message = body as Record<string, unknown>;
     if (
       typeof message === 'object' &&
@@ -355,13 +354,21 @@ export class JSONRPCHandler {
 
     const name = params.name;
     const rawArgs = params.arguments;
-    const args: Record<string, unknown> =
+    if (
       rawArgs !== null &&
       rawArgs !== undefined &&
-      typeof rawArgs === 'object' &&
-      !Array.isArray(rawArgs)
-        ? (rawArgs as Record<string, unknown>)
-        : {};
+      (typeof rawArgs !== 'object' || Array.isArray(rawArgs))
+    ) {
+      const received = Array.isArray(rawArgs) ? 'an array' : `a ${typeof rawArgs}`;
+      return this.buildErrorResponse(
+        request.id,
+        JSONRPCErrorBuilder.invalidParams(
+          `tools/call arguments must be an object of named parameters, received ${received}; ` +
+            `call the tool as tool({ name: value })`
+        )
+      );
+    }
+    const args: Record<string, unknown> = (rawArgs as Record<string, unknown> | null) ?? {};
 
     if (!validateToolName(name)) {
       return this.buildErrorResponse(
@@ -384,7 +391,6 @@ export class JSONRPCHandler {
 
     try {
       console.log(`${ts()} 🔧 Executing tool: ${name}`);
-      // Pass context only when present so tests asserting `handler(args)` keep passing.
       const result = context === undefined ? await handler(args) : await handler(args, context);
       return { jsonrpc: '2.0', id: request.id, result };
     } catch (error) {

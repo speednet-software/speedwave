@@ -7,6 +7,7 @@ pub mod audio;
 pub mod audio_macos;
 #[cfg(windows)]
 pub mod audio_windows;
+mod gpu_probe;
 pub mod mix;
 pub mod model_catalog;
 pub mod model_store;
@@ -15,7 +16,10 @@ pub mod transcript;
 pub mod transcript_driver;
 pub mod transcript_store;
 
-pub use accel::{best_model_for_this_build, compiled_backends, has_gpu_backend, Backend};
+pub use accel::{
+    accel_label, decode_threads, finalize_model_for_this_build, gpu_class,
+    live_model_for_this_build, GpuClass,
+};
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
     wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream,
@@ -71,8 +75,6 @@ mod tests {
 
     #[test]
     fn dirs_are_under_the_data_dir() {
-        // Structural invariant only — both dirs share one data-dir parent, without naming the
-        // production `data_dir()` singleton, so it holds under any isolated tempdir.
         let transcripts = transcripts_dir();
         let models = models_dir();
         assert!(transcripts.ends_with(crate::consts::TRANSCRIPTS_SUBDIR));
@@ -93,8 +95,6 @@ mod tests {
     #[test]
     fn detect_audio_capture_picks_the_host_backend() {
         let caps = detect_audio_capture().capabilities();
-        // Windows flags are host-dependent (output device); other OSes use
-        // FileAudioCapture.
         if cfg!(target_os = "macos") {
             assert!(caps.supports_system_audio);
         } else if cfg!(windows) {
@@ -102,7 +102,6 @@ mod tests {
         } else {
             assert!(!caps.supports_system_audio);
         }
-        // Every backend annotates a UI note.
         assert!(caps.note.is_some());
     }
 }

@@ -6,6 +6,7 @@ import {
   OnInit,
   computed,
   inject,
+  input,
   output,
   signal,
 } from '@angular/core';
@@ -353,6 +354,9 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
   `,
 })
 export class SecuritySectionComponent implements OnInit, OnDestroy {
+  /** The project whose policy this section loads and saves. */
+  readonly project = input<string | null>(null);
+
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
@@ -441,7 +445,9 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       const [categories, templates, policy] = await Promise.all([
         this.tauri.invoke<PiiRuleInfo[]>('list_pii_rules'),
         this.tauri.invoke<SecurityPolicyTemplateInfo[]>('list_security_policy_templates'),
-        this.tauri.invoke<SecurityPolicyResponse>('get_security_policy'),
+        this.tauri.invoke<SecurityPolicyResponse>('get_security_policy', {
+          project: this.project(),
+        }),
       ]);
       this.categories.set(categories);
       this.templates.set(templates);
@@ -837,14 +843,13 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
     try {
       const update = this.buildUpdate();
-      await this.tauri.invoke('update_security_policy', { update });
+      const project = this.project();
+      await this.tauri.invoke('update_security_policy', { update, project });
       await this.refresh();
-      // refresh() swallows its own errors into error(), so gate success feedback
-      // on it being clear: never show "Saved" next to an error.
       if (this.error()) {
         this.saveError.set(this.error());
       } else {
-        this.projectState.requestRestart();
+        this.projectState.requestRestartFor(project);
         this.saved.set(true);
         setTimeout(() => {
           this.saved.set(false);

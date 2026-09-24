@@ -172,7 +172,6 @@ export class Context7Client {
     let lastError: Context7Error | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // No `redirect` interceptor set, so 3xx surfaces as an error status.
         const response = await request(url, {
           method: 'GET',
           headers,
@@ -187,7 +186,6 @@ export class Context7Client {
         if (status === 200) {
           return { body, tier };
         }
-        // Non-200: throw; the catch below makes the single retry decision.
         throw mapErrorStatus(status, body, response.headers, tier, !!this.apiKey);
       } catch (e) {
         if (e instanceof Context7Error) {
@@ -206,7 +204,6 @@ export class Context7Client {
       }
       await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
     }
-    // Unreachable — loop either returns or throws — but keeps the compiler happy.
     /* c8 ignore next */
     throw lastError ?? new Context7Error('Context7 retries exhausted', 0, 'unknown', true);
   }
@@ -315,9 +312,7 @@ function extractMessage(body: string): string {
     if (parsed && typeof parsed.message === 'string' && parsed.message.length > 0) {
       return parsed.message;
     }
-  } catch {
-    // Fall through to truncated raw body
-  }
+  } catch {}
   return body.length > 200 ? `${body.slice(0, 200)}…` : body;
 }
 

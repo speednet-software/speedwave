@@ -113,7 +113,6 @@ export interface JiraIssuesClient {
  * @returns A Jira issues client.
  */
 export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClient {
-  // Enforce the Jira project allowlist for an issue ref (see assertJiraIssueKeyAllowed).
   const enforceFromIssueKey = (issueIdOrKey: string): void =>
     assertJiraIssueKeyAllowed(issueIdOrKey, client.jiraProjectKeys);
 
@@ -132,7 +131,6 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
           fields: [...ISSUE_FIELDS],
         };
         if (cursor) body.nextPageToken = cursor;
-        // POST search is idempotent → safe to retry transient 5xx.
         const res = await client.post<{
           issues?: unknown[];
           nextPageToken?: string | null;
@@ -183,7 +181,6 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       if (labels) fields.labels = labels;
       if (assigneeAccountId) fields.assignee = { accountId: assigneeAccountId };
       const created = await client.post<{ key: string }>('/rest/api/3/issue', { fields });
-      // Re-fetch for a fully-populated, normalised issue.
       const raw = await client.get<unknown>(
         `/rest/api/3/issue/${encodeURIComponent(created.key)}`,
         {
@@ -242,14 +239,11 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
     async addAttachment(issueIdOrKey, { filename, data, contentType }) {
       enforceFromIssueKey(issueIdOrKey);
       const res = await client.uploadAttachment<unknown>(issueIdOrKey, filename, data, contentType);
-      // Jira returns an array of created attachments; normalise the first.
       const first = Array.isArray(res) ? res[0] : res;
       return mapAttachment(first);
     },
 
     async deleteAttachment(attachmentId) {
-      // Attachment delete is by global attachment ID; when a project allowlist is
-      // configured we cannot verify the attachment's project, so fail closed.
       if (client.jiraProjectKeys.length > 0) {
         throw new ScopeError(
           'Deleting attachments is not allowed while a Jira project allowlist is configured ' +
@@ -277,8 +271,6 @@ export function mapAttachment(raw: unknown): JiraAttachment {
     author: o.author ? mapUser(o.author) : null,
   };
 }
-
-// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
  * Map a raw Jira issue (with `fields`, Atlassian REST API shape) to {@link JiraIssue}.

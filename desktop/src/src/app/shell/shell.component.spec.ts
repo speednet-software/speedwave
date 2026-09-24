@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { signal } from '@angular/core';
+import { signal, computed } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
@@ -9,17 +9,19 @@ import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { TranscriptionService } from '../services/transcription.service';
 
 describe('ShellComponent', () => {
   let component: ShellComponent;
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
-  // Beta on by default so the meeting-transcription nav entry is present.
   const betaEnabled = signal(true);
+  const recordingSessionId = signal<string | null>(null);
 
   beforeEach(async () => {
     betaEnabled.set(true);
+    recordingSessionId.set(null);
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
@@ -47,13 +49,19 @@ describe('ShellComponent', () => {
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        {
+          provide: TranscriptionService,
+          useValue: {
+            recordingSessionId: recordingSessionId.asReadonly(),
+            recording: computed(() => recordingSessionId() !== null),
+          },
+        },
       ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ShellComponent);
     component = fixture.componentInstance;
     projectState = TestBed.inject(ProjectStateService);
-    // Reset shared UI state so ⌘B keybinding tests start from a clean slate.
     const ui = TestBed.inject(UiStateService);
     ui.closeSidebar();
     ui.closeMemory();
@@ -177,7 +185,6 @@ describe('ShellComponent', () => {
     component.ngOnDestroy();
 
     mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
-    // After destroy, component should not update (no crash)
     expect(component).toBeTruthy();
   });
 
@@ -255,7 +262,6 @@ describe('ShellComponent', () => {
   });
 
   it('keeps the Chat nav link visible when status is auth_required', async () => {
-    // Chat icon persists in nav even when auth is required; auth surfaces inline.
     await component.ngOnInit();
     projectState.status.set('auth_required');
     component['cdr'].markForCheck();
@@ -326,8 +332,81 @@ describe('ShellComponent', () => {
     ]);
   });
 
+  describe('recording indicator', () => {
+    const DOT = '[data-testid="nav-recording-dot-meeting-transcription"]';
+    const SESSION = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+    function startRecording(): void {
+      recordingSessionId.set(SESSION);
+      fixture.detectChanges();
+    }
+
+    it('has no dot while recordingSessionId is null', () => {
+      expect(fixture.nativeElement.querySelector(DOT)).toBeNull();
+    });
+
+    it('shows the dot when recordingSessionId is set and drops it when it clears', () => {
+      startRecording();
+      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
+
+      recordingSessionId.set(null);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector(DOT)).toBeNull();
+    });
+
+    it('stays visible after navigating away from the transcription tab', async () => {
+      startRecording();
+
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      fixture.detectChanges();
+
+      expect(component.activeViewId()).toBe('settings');
+      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
+    });
+
+    it('names the recording state on the entry so it is not colour-only', () => {
+      startRecording();
+
+      const entry = fixture.nativeElement.querySelector(
+        '[data-testid="nav-meeting-transcription"]'
+      );
+      expect(entry.getAttribute('aria-label')).toBe('Meeting transcription (recording)');
+    });
+
+    it('marks no other entry as recording', () => {
+      startRecording();
+
+      const dots = fixture.nativeElement.querySelectorAll('[data-testid^="nav-recording-dot-"]');
+      expect(dots.length).toBe(1);
+    });
+
+    it('keeps the entry and its dot when beta is turned off mid-recording', () => {
+      startRecording();
+      betaEnabled.set(false);
+      fixture.detectChanges();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
+      ).not.toBeNull();
+      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
+    });
+
+    it('drops the entry again once the recording ends with beta off', () => {
+      startRecording();
+      betaEnabled.set(false);
+      fixture.detectChanges();
+
+      recordingSessionId.set(null);
+      fixture.detectChanges();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
+      ).toBeNull();
+    });
+  });
+
   describe('restart overlay', () => {
-    // CDK Dialog renders into document.body, outside the host fixture.
     function q(sel: string): HTMLElement | null {
       return document.querySelector(sel) as HTMLElement | null;
     }
@@ -347,13 +426,11 @@ describe('ShellComponent', () => {
 
       const overlay = q('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
-      // Terminal-minimal restart overlay copy.
       expect(overlay!.textContent).toContain('restart required');
       expect(overlay!.textContent).toContain('Container config changed');
     });
 
     it('shows overlay when needsRestart is true and status is auth_required', () => {
-      // Restart prompt must surface in auth_required, not only in ready.
       projectState.status.set('auth_required');
       projectState.needsRestart = true;
       component['cdr'].markForCheck();
@@ -408,7 +485,7 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue('restarted');
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement;
       btn.click();
 
@@ -435,7 +512,6 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      // Spinner branch lives in the host template, so it stays in the fixture DOM.
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');
@@ -443,6 +519,18 @@ describe('ShellComponent', () => {
       expect(overlay.textContent).not.toContain('restart required');
       expect(q('[data-testid="restart-now-btn"]')).toBeNull();
       expect(q('[data-testid="restart-later-btn"]')).toBeNull();
+    });
+
+    it('shows spinner for a restart nothing asked the user to confirm', () => {
+      projectState.needsRestart = false;
+      projectState.restarting = true;
+      component['cdr'].markForCheck();
+      fixture.detectChanges();
+
+      const overlay = q('[data-testid="restart-overlay"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay!.textContent).toContain('Restarting containers...');
+      expect(q('[data-testid="restart-now-btn"]')).toBeNull();
     });
 
     it('shows error when restartError is set', () => {
@@ -465,7 +553,7 @@ describe('ShellComponent', () => {
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement | null;
       expect(btn).not.toBeNull();
 
-      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue();
+      const spy = vi.spyOn(projectState, 'restartContainers').mockResolvedValue('restarted');
       btn!.click();
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();
@@ -537,6 +625,33 @@ describe('ShellComponent', () => {
       const before = theme.theme();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true }));
       expect(theme.theme()).toBe(before);
+    });
+  });
+
+  describe('Cmd+4 meeting-transcription shortcut', () => {
+    function pressCmd4(): void {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '4', metaKey: true }));
+    }
+
+    it('navigates when beta is enabled', () => {
+      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+      pressCmd4();
+      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
+    });
+
+    it('navigates during a recording even with beta disabled', () => {
+      betaEnabled.set(false);
+      recordingSessionId.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+      pressCmd4();
+      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
+    });
+
+    it('stays inert with beta disabled and no recording', () => {
+      betaEnabled.set(false);
+      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+      pressCmd4();
+      expect(nav).not.toHaveBeenCalled();
     });
   });
 });

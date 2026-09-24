@@ -15,7 +15,6 @@ pub(crate) async fn list_conversations(
             log::error!("failed to list conversations for project={project}: {e}");
             e.to_string()
         })?;
-        // Display-only copy: the on-disk sessions stay tokenized.
         let policy = crate::pii_display::load_display_policy(
             speedwave_runtime::consts::data_dir(),
             &project,
@@ -39,7 +38,6 @@ pub(crate) async fn get_conversation(
             log::error!("failed to get conversation for project={project}: {e}");
             e.to_string()
         })?;
-        // Detokenize the returned copy only; the tokenized source file stays unchanged.
         let policy = crate::pii_display::load_display_policy(
             speedwave_runtime::consts::data_dir(),
             &project,

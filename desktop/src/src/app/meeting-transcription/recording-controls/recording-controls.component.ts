@@ -10,7 +10,8 @@ import {
 } from '@angular/core';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import type { AudioSource, AudioSourceInfo, Backend, Language } from '../../models/transcript';
+import { LoggerService } from '../../services/logger.service';
+import type { AudioSource, AudioSourceInfo, Language } from '../../models/transcript';
 
 /** A named input device for the microphone dropdown. */
 interface MicChoice {
@@ -32,15 +33,6 @@ function micDeviceId(s: AudioSource): string | null {
  */
 function micName(label: string): string {
   return label.replace(/^Microphone:\s*/, '');
-}
-
-/**
- * Joins compiled backends into a short "Acceleration: …" string.
- * @param backends - whisper.cpp backends compiled into this build.
- */
-function accelLabel(backends: Backend[]): string {
-  if (backends.includes('metal')) return 'Acceleration: Metal';
-  return 'Acceleration: CPU only';
 }
 
 /**
@@ -107,10 +99,30 @@ function accelLabel(backends: Backend[]): string {
           </label>
         }
 
-        <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
-          {{ accel() }}
-        </span>
+        <label class="mono flex items-center gap-1 text-[10px] text-[var(--ink-mute)]">
+          <input
+            type="checkbox"
+            data-testid="live-transcript-toggle"
+            [checked]="liveTranscript()"
+            [disabled]="recording()"
+            (change)="onLiveToggle($any($event.target).checked)"
+          />
+          live transcript
+        </label>
+
+        @if (accel()) {
+          <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
+            {{ accel() }}
+          </span>
+        }
       </div>
+
+      @if (!liveTranscript()) {
+        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="record-only-note">
+          Live transcript is off — recording only. The transcript is produced after you stop, which
+          keeps the CPU free during the meeting.
+        </p>
+      }
 
       @if (mixedSourceSelected()) {
         <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
@@ -123,6 +135,14 @@ function accelLabel(backends: Backend[]): string {
         <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="no-model-note">
           No speech-to-text model is downloaded yet. Download it in Settings → Meeting transcription
           — the download uses the network.
+        </p>
+      }
+
+      @if (hasModel() && missingFinalizeModel(); as missing) {
+        <p class="mono mt-2 text-[10px] text-amber-300" data-testid="finalize-model-warning">
+          The final-pass model ({{ missing }}) is not downloaded — the transcript produced after you
+          stop will fall back to the lower-quality live model. Download it in Settings → Meeting
+          transcription.
         </p>
       }
 
@@ -166,10 +186,13 @@ export class RecordingControlsComponent implements OnInit {
   readonly sources = signal<AudioSourceInfo[]>([]);
   /** Index into `sources()` of the chosen source. */
   readonly sourceIndex = signal(0);
-  /** Compiled whisper.cpp backends for this build. */
-  readonly backends = signal<Backend[]>([]);
-  /** Derived acceleration label. */
-  readonly accel = computed(() => accelLabel(this.backends()));
+  /** Acceleration badge text, from the host-computed `accel_label` (empty until loaded). */
+  readonly accel = signal('');
+  /**
+   * Live-pass mode shown in the checkbox: the persisted preference, or the in-progress
+   * recording's actual mode while one is running.
+   */
+  readonly liveTranscript = signal(true);
   /** Disables Start/Stop while a transition is in flight. */
   readonly busy = signal(false);
   /** Local error string. */
@@ -178,6 +201,12 @@ export class RecordingControlsComponent implements OnInit {
   readonly modelsKnown = signal(false);
   /** `true` if at least one Whisper model is downloaded (Start needs one). */
   readonly hasModel = signal(false);
+  /**
+   * Display name of this host's finalize-pass model when it is not downloaded, else null.
+   * Start stays allowed — the offline pass falls back to the live model — but the quality
+   * cost must be visible before the recording, not discovered in the finished transcript.
+   */
+  readonly missingFinalizeModel = signal<string | null>(null);
   /** `true` when the chosen source is the mixed (system + mic) one. */
   readonly mixedSourceSelected = computed(
     () => this.sources()[this.sourceIndex()]?.source.kind === 'mixed'
@@ -197,29 +226,27 @@ export class RecordingControlsComponent implements OnInit {
   });
 
   private readonly transcription = inject(TranscriptionService);
+  private readonly log = inject(LoggerService);
   private readonly cdr = inject(ChangeDetectorRef);
 
   /**
    * `true` while a recording is in progress — read from the service so it
    * survives this tab being destroyed on navigation (the driver keeps going).
    */
-  readonly recording = computed(() => this.transcription.recordingSessionId() !== null);
+  readonly recording = this.transcription.recording;
 
-  /** Loads backends + source list + model availability on first paint. */
+  /** Loads capabilities + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
     try {
       const caps = await this.transcription.getCapabilities();
-      this.backends.set(caps.backends);
+      this.accel.set(`Acceleration: ${caps.accel_label}`);
+      this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
       const inProgressSource = this.transcription.recordingSource();
       if (inProgressSource) {
-        // A recording started before this instance existed (remount) — restore its
-        // picker selection instead of showing the compile-time defaults.
         this.restoreFromInProgressRecording(list, inProgressSource);
       } else {
-        // Default to "Whole meeting" (mixed) if offered, else "System
-        // (everything)", else the first entry.
         const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
         const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
         this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
@@ -236,7 +263,7 @@ export class RecordingControlsComponent implements OnInit {
   }
 
   /**
-   * Restores `sourceIndex`/`micDevice` to match the source of a recording already in progress.
+   * Restores the picker selection and live mode of a recording already in progress.
    * @param list - the freshly-loaded source list.
    * @param source - the in-progress recording's source.
    */
@@ -245,6 +272,8 @@ export class RecordingControlsComponent implements OnInit {
     if (idx >= 0) this.sourceIndex.set(idx);
     if (source.kind === 'mixed') this.micDevice.set(source.mic);
     else if (source.kind === 'microphone') this.micDevice.set(source.device);
+    const live = this.transcription.recordingLive();
+    if (live !== null) this.liveTranscript.set(live);
   }
 
   /**
@@ -257,8 +286,16 @@ export class RecordingControlsComponent implements OnInit {
       this.hasModel.set(ack.whisper.some((m) => m.downloaded));
       this.modelsKnown.set(true);
     } catch {
-      // Non-fatal — leave Start enabled and let start() surface any error.
       this.modelsKnown.set(false);
+    }
+    try {
+      const fin = (await this.transcription.recommendedModel()).finalize;
+      this.missingFinalizeModel.set(
+        fin && !fin.downloaded && !fin.downloading ? fin.display_name : null
+      );
+    } catch (e: unknown) {
+      this.log.warn(`recommended-model check failed: ${e instanceof Error ? e.message : e}`);
+      this.missingFinalizeModel.set(null);
     }
     this.cdr.markForCheck();
   }
@@ -298,6 +335,15 @@ export class RecordingControlsComponent implements OnInit {
     return src;
   }
 
+  /**
+   * Persists and applies the live-transcript choice.
+   * @param live - the checkbox state.
+   */
+  onLiveToggle(live: boolean): void {
+    this.liveTranscript.set(live);
+    this.transcription.setLiveTranscriptPreferred(live);
+  }
+
   /** Starts recording the chosen source in the chosen language. */
   async start(): Promise<void> {
     const picked: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
@@ -312,7 +358,11 @@ export class RecordingControlsComponent implements OnInit {
       if (src.kind !== 'system_wide' && !(await this.ensureMicConsent())) {
         return;
       }
-      const ack = await this.transcription.startRecording(src, this.language());
+      const ack = await this.transcription.startRecording(
+        src,
+        this.language(),
+        this.liveTranscript()
+      );
       this.started.emit(ack.session_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -332,7 +382,6 @@ export class RecordingControlsComponent implements OnInit {
     const verdict = await this.transcription.requestMicrophonePermission();
     if (verdict === 'granted') return true;
     if (verdict === 'previously_denied') {
-      // Nothing to re-prompt — only the Settings pane can restore access.
       await this.transcription.openMicrophonePrivacyPane().catch(() => undefined);
     }
     const msg =
@@ -356,6 +405,7 @@ export class RecordingControlsComponent implements OnInit {
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
+    this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
     this.busy.set(false);
     this.cdr.markForCheck();
   }

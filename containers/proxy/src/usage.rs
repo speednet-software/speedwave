@@ -2,8 +2,6 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 
-/// One appended JSONL line — field names must match `UsageRecord` in
-/// `crates/speedwave-runtime/src/usage.rs` exactly (aggregator-parity).
 #[derive(Debug, Serialize)]
 pub struct UsageLine {
     pub ts: String,
@@ -25,7 +23,12 @@ pub struct UsageLine {
     pub cache_write: u64,
 }
 
-/// Accumulates SSE usage frames for a single request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InBandError {
+    pub kind: String,
+    pub message: String,
+}
+
 #[derive(Default)]
 pub struct UsageAcc {
     pub prompt_tokens: u64,
@@ -33,17 +36,12 @@ pub struct UsageAcc {
     pub cache_read: u64,
     pub cache_write: u64,
     pub response_id: Option<String>,
-    /// OpenRouter generation id (`gen-…`) sniffed from the response, used
-    /// host-side for real cost via `/generation`. `None` for other providers.
     pub gen_id: Option<String>,
-    /// True once any usage frame was observed — distinguishes "0/0 real" from "never seen".
     pub saw_usage: bool,
-    /// Elapsed ms to the first output `text_delta` frame; `None` if none seen.
     pub ttft_ms: Option<u64>,
+    pub in_band_error: Option<InBandError>,
 }
 
-/// Latches `acc.ttft_ms` to elapsed ms on the first non-empty output `text_delta` (not
-/// `thinking_delta`, so extended-thinking models report decode throughput on the visible answer).
 pub fn note_first_text_delta(frame: &Value, started: std::time::Instant, acc: &mut UsageAcc) {
     if acc.ttft_ms.is_some() {
         return;
@@ -62,11 +60,9 @@ pub fn note_first_text_delta(frame: &Value, started: std::time::Instant, acc: &m
     }
 }
 
-/// Update `acc` from one parsed SSE frame `Value`.
 pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
     let event_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
 
-    // OpenRouter surfaces a `gen-…` generation id; capture it wherever it appears.
     if acc.gen_id.is_none() {
         for id in [
             frame.get("id").and_then(Value::as_str),
@@ -96,7 +92,6 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
                     if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
                         acc.prompt_tokens = v;
                     }
-                    // Coalesced/single-frame backends put output on message_start.
                     if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
                         acc.completion_tokens = v;
                     }
@@ -115,13 +110,11 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
         "message_delta" => {
             if let Some(usage) = frame.get("usage") {
                 acc.saw_usage = true;
-                // input_tokens on a delta overrides the message_start value (vLLM/bridged case).
                 if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
                     if v > 0 {
                         acc.prompt_tokens = v;
                     }
                 }
-                // Guard >0: a trailing 0 must not wipe a message_start value.
                 if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
                     if v > 0 {
                         acc.completion_tokens = v;
@@ -142,11 +135,25 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
                 }
             }
         }
+        "error" => {
+            if acc.in_band_error.is_none() {
+                let err = frame.get("error");
+                let field = |name: &str| {
+                    err.and_then(|e| e.get(name))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string()
+                };
+                acc.in_band_error = Some(InBandError {
+                    kind: field("type"),
+                    message: field("message"),
+                });
+            }
+        }
         _ => {}
     }
 }
 
-/// Terminal status on the usage line; `Failure` = upstream ≥400 or aborted stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestStatus {
     Success,
@@ -163,8 +170,6 @@ impl RequestStatus {
 }
 
 impl UsageAcc {
-    /// Convert to a `UsageLine`; `None` when no usage frame was seen.
-    /// Falls back to `gen_id` for `response_id` when `message.id` is absent.
     pub fn finish(
         self,
         model: &str,
@@ -197,8 +202,6 @@ impl UsageAcc {
     }
 }
 
-/// Append `line` as a compact JSON line to `path`. IO errors are logged but
-/// never propagated — usage logging must not break request forwarding.
 pub fn append_usage(path: &Path, line: &UsageLine) {
     if let Err(e) = append_usage_inner(path, line) {
         log::warn!("usage append failed ({}): {e}", path.display());
@@ -207,8 +210,6 @@ pub fn append_usage(path: &Path, line: &UsageLine) {
 
 fn append_usage_inner(path: &Path, line: &UsageLine) -> std::io::Result<()> {
     use std::io::Write;
-    // One buffer, one write_all: O_APPEND is atomic per write() only; concurrent tasks with
-    // no lock using writeln! (two writes) could interleave and corrupt a line in the usage SSOT.
     let mut buf = serde_json::to_vec(line).map_err(std::io::Error::other)?;
     buf.push(b'\n');
     let mut file = std::fs::OpenOptions::new()
@@ -267,7 +268,6 @@ mod tests {
             &mut a,
         );
         assert_eq!(a.gen_id.unwrap(), "gen-xyz");
-        // The `msg_…` id is still the response id, not the gen id.
         assert_eq!(a.response_id.unwrap(), "msg_3");
     }
 
@@ -357,8 +357,6 @@ mod tests {
 
     #[test]
     fn cross_aggregator_round_trip_bytes_match() {
-        // Write a UsageLine and verify the bytes the host aggregator would parse.
-        // Field names and types must match UsageRecord in speedwave-runtime/src/usage.rs.
         let line = UsageLine {
             ts: "2026-06-12T10:00:00.000+02:00".to_string(),
             status: "success".to_string(),
@@ -380,7 +378,6 @@ mod tests {
         append_usage(&path, &line);
         let written = std::fs::read_to_string(&path).unwrap();
         let trimmed = written.trim_end_matches('\n');
-        // Must round-trip through serde_json as a valid object with required fields.
         let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
         assert_eq!(parsed["ts"], "2026-06-12T10:00:00.000+02:00");
         assert_eq!(parsed["status"], "success");
@@ -396,21 +393,15 @@ mod tests {
         assert_eq!(parsed["cache_write"], 0);
         assert_eq!(parsed["provider_kind"], "anthropic_oauth");
         assert_eq!(parsed["provider_id"], "anthropic");
-        // gen_id must be absent for non-OpenRouter (skip_serializing_if None).
         assert!(parsed.get("gen_id").is_none(), "gen_id must be absent");
-        // cost_usd must be absent (skip_serializing_if None).
         assert!(parsed.get("cost_usd").is_none(), "cost_usd must be absent");
-        // ttft_ms must be absent when None (skip_serializing_if).
         assert!(
             parsed.get("ttft_ms").is_none(),
             "ttft_ms must be absent when None"
         );
-        // Each line is a single terminated append (json + '\n', one write_all).
         assert!(written.ends_with('\n'));
     }
 
-    /// Concurrent appends must each land as one intact newline-terminated line —
-    /// no interleaving that would corrupt the usage SSOT.
     #[test]
     fn concurrent_appends_produce_intact_lines() {
         let dir = tempfile::tempdir().unwrap();
@@ -464,7 +455,6 @@ mod tests {
 
     #[test]
     fn output_tokens_captured_from_message_start_only_stream() {
-        // Coalesced backend: final output count arrives on message_start, no delta.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{
@@ -482,7 +472,6 @@ mod tests {
 
     #[test]
     fn message_delta_output_overrides_message_start_output() {
-        // A later message_delta carries the authoritative final output count.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{"input_tokens":5,"output_tokens":1}}}),
@@ -506,7 +495,6 @@ mod tests {
 
     #[test]
     fn zero_output_delta_does_not_wipe_message_start_output() {
-        // A trailing message_delta with output_tokens:0 must keep message_start's value.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{"output_tokens":42}}}),
@@ -533,7 +521,6 @@ mod tests {
 
     #[test]
     fn zero_cache_delta_does_not_wipe_message_start_cache() {
-        // A delta re-sending cache fields as 0 must keep the message_start values.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{
@@ -567,7 +554,6 @@ mod tests {
 
     #[test]
     fn nonzero_cache_delta_still_overrides() {
-        // A delta with a real (>0) cache value still updates the accumulator.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{"cache_read_input_tokens":40}}}),
@@ -617,7 +603,6 @@ mod tests {
     #[test]
     fn append_usage_swallows_bad_path() {
         let line = fixture_line();
-        // Non-existent directory — must not panic.
         append_usage(
             Path::new("/nonexistent/dir/that/cannot/exist/usage.jsonl"),
             &line,
@@ -654,7 +639,7 @@ mod tests {
             .finish(
                 "m",
                 0,
-                "anthropic_apikey",
+                "anthropic_api_key",
                 "anthropic",
                 RequestStatus::Failure,
             )
@@ -695,7 +680,6 @@ mod tests {
         use std::time::Instant;
         let mut acc = UsageAcc::default();
         let start = Instant::now();
-        // Non-text / empty frames before the first token must NOT set ttft.
         note_first_text_delta(&json!({"type":"message_start"}), start, &mut acc);
         note_first_text_delta(
             &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":""}}),
@@ -706,7 +690,6 @@ mod tests {
             acc.ttft_ms.is_none(),
             "empty/other frames must not set ttft"
         );
-        // First non-empty text_delta sets it.
         note_first_text_delta(
             &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}),
             start,
@@ -714,12 +697,85 @@ mod tests {
         );
         let first = acc.ttft_ms;
         assert!(first.is_some(), "first text_delta must set ttft");
-        // A later text_delta must NOT overwrite it.
         note_first_text_delta(
             &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"!"}}),
             start,
             &mut acc,
         );
         assert_eq!(acc.ttft_ms, first, "ttft must latch on the first token");
+    }
+
+    #[test]
+    fn sniff_captures_in_band_error_type_and_message() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"error","error":{"type":"api_error","message":"Internal server error"}}),
+            &mut a,
+        );
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "api_error");
+        assert_eq!(err.message, "Internal server error");
+    }
+
+    #[test]
+    fn sniff_in_band_error_falls_back_to_unknown_on_missing_fields() {
+        let mut a = UsageAcc::default();
+        sniff(&json!({"type":"error"}), &mut a);
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "unknown");
+        assert_eq!(err.message, "unknown");
+    }
+
+    #[test]
+    fn sniff_in_band_error_falls_back_to_unknown_when_error_field_is_a_string() {
+        let mut a = UsageAcc::default();
+        sniff(&json!({"type":"error","error":"boom"}), &mut a);
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "unknown");
+        assert_eq!(err.message, "unknown");
+    }
+
+    #[test]
+    fn sniff_in_band_error_falls_back_to_unknown_when_error_field_is_a_number() {
+        let mut a = UsageAcc::default();
+        sniff(&json!({"type":"error","error":42}), &mut a);
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "unknown");
+        assert_eq!(err.message, "unknown");
+    }
+
+    #[test]
+    fn sniff_first_in_band_error_wins() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"error","error":{"type":"first","message":"m1"}}),
+            &mut a,
+        );
+        sniff(
+            &json!({"type":"error","error":{"type":"second","message":"m2"}}),
+            &mut a,
+        );
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "first", "first in-band error must win");
+    }
+
+    #[test]
+    fn sniff_non_error_frames_leave_in_band_error_none() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        assert!(a.in_band_error.is_none());
+    }
+
+    #[test]
+    fn sniff_message_delta_never_sets_in_band_error() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_delta","usage":{"output_tokens":5}}),
+            &mut a,
+        );
+        assert!(a.in_band_error.is_none());
     }
 }

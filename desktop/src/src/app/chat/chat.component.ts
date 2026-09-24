@@ -14,10 +14,13 @@ import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
+import { PlanUsageService } from '../services/plan-usage.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
 import type { ConversationSummary, ChatAttachment } from '../models/chat';
+import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { ComposerComponent } from './composer/composer.component';
@@ -25,6 +28,7 @@ import { SessionStatsComponent } from './session-stats/session-stats.component';
 import { MemoryPanelComponent } from './memory-panel/memory-panel.component';
 import { ConversationsSidebarComponent } from './conversations-sidebar/conversations-sidebar.component';
 import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
+import { capitalizeLevel } from './composer/model-selector/effort-slider.component';
 
 /** Chat component that handles message rendering, user input, and streaming responses from Claude. */
 @Component({
@@ -54,14 +58,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   historyError = '';
   projectMemory = '';
   memoryError = '';
-  /**
-   * Active project's git branch, or `null` when not a repo. Re-read after each turn.
-   */
   readonly gitBranch = signal<string | null>(null);
-  /**
-   * Index of the most recent assistant message in `messagesFromState()`;
-   * `-1` when none.
-   */
   readonly lastAssistantIndex = computed(() => {
     const msgs = this.chat.messagesFromState();
     for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -70,17 +67,34 @@ export class ChatComponent implements OnInit, OnDestroy {
     return -1;
   });
 
-  /** Controls the context-overflow confirm dialog visibility. */
+  readonly deferredEffortLabel = computed(() => {
+    const level = this.chat.deferredEffort();
+    return level ? capitalizeLevel(level) : '';
+  });
+
+  readonly composerContextLabel = computed(() => {
+    const windowSize = this.chat.sessionStatsFromState()?.context_window_size;
+    return windowSize ? formatContextLabel(windowSize) : '';
+  });
+
+  readonly usageClock = signal(Date.now());
+  readonly planLimits = computed(() =>
+    this.planUsage.limits(this.projectState.activeProject(), this.usageClock())
+  );
+  readonly planLimitSignal = computed(() =>
+    this.planUsage.lastSignal(this.projectState.activeProject())
+  );
+
   readonly contextOverflowOpen = signal(false);
-  /** Resolves the pending `promptResumeOrFresh` promise when a button is chosen. */
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
-  /** Composer reference used to refocus the textarea after parent-driven state resets. */
   @ViewChild('composer') private composer?: { focusInput: () => void };
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
+  private readonly planUsage = inject(PlanUsageService);
   readonly ui = inject(UiStateService);
+  readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
@@ -104,7 +118,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Wires effects driven by the state-tree signal and the drawer toggles. */
   constructor() {
-    // Refresh branch on streaming->idle to catch mid-turn git checkout.
     let wasStreaming = false;
     effect(() => {
       const streaming = this.chat.isStreamingFromState();
@@ -113,10 +126,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
       wasStreaming = streaming;
       this.cdr.markForCheck();
-      // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
 
-    // Decouple toggle from data load so keyboard shortcut works like button.
     effect(() => {
       if (this.ui.sidebarOpen()) void this.loadConversations();
     });
@@ -127,7 +138,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
-    // Run init and branch read in parallel; they are independent.
     await Promise.all([this.chat.init(), this.refreshGitBranch()]);
     this.cdr.markForCheck();
 
@@ -137,8 +147,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     });
 
-    // Resume-on-restart lives in ChatStateService (survives this component being destroyed on
-    // /settings); register the overflow-prompt opener while mounted, else the service auto-resumes.
     this.chat.setResumeDecider(() => this.promptResumeOrFresh());
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -148,7 +156,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.projectMemory = '';
       this.memoryError = '';
       this.cdr.markForCheck();
-      // Bypass TTL: project switch is a strong signal the branch could be different.
       await this.refreshGitBranch(true);
       if (wasHistoryOpen) {
         await this.loadConversations();
@@ -159,15 +166,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Min interval between two `get_git_branch` IPC roundtrips. */
   private static readonly GIT_BRANCH_TTL_MS = 1500;
-  /** Epoch-ms of the last branch read; `0` forces the next call. */
   private gitBranchLastReadAt = 0;
 
-  /**
-   * Pulls the active project's git branch; silent on errors (chip hides) and a no-op within the TTL window.
-   * @param force - Skip the TTL check (used after a project switch).
-   */
   private async refreshGitBranch(force = false): Promise<void> {
     const project = this.projectState.activeProject();
     if (!project) {
@@ -187,7 +188,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** True if the current turn is paused on an unanswered AskUserQuestion slot. */
   private hasUnansweredQuestion(): boolean {
     return this.chat
       .currentBlocksFromState()
@@ -201,7 +201,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   onEscape(event: Event): void {
     if (!this.chat.isStreaming) return;
-    if (this.hasUnansweredQuestion()) return; // let the block own ESC semantics
+    if (this.hasUnansweredQuestion()) return;
     event.preventDefault();
     this.chat.stopConversation();
   }
@@ -209,6 +209,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   /** Stops the current turn unconditionally (Stop button). */
   async onStopClicked(): Promise<void> {
     await this.chat.stopConversation();
+  }
+
+  /** The usage popover opened: re-evaluate reset times and re-read the limits and the context. */
+  onUsageOpened(): void {
+    this.usageClock.set(Date.now());
+    void this.chat.refreshUsage();
   }
 
   /**
@@ -227,7 +233,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.chat.isStreaming) return;
     if (!event?.payload && attachments.length === 0) return;
     this.cdr.markForCheck();
-    await this.chat.sendMessage({ text: event.payload ?? '', attachments }, event.displayText);
+    await this.chat.sendMessage(
+      { text: this.withStagedTranscript(event.payload ?? ''), attachments },
+      event.displayText
+    );
+    this.transcription.clearStagedTranscript();
   }
 
   /**
@@ -236,8 +246,14 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   async onQueueRequested(text: string): Promise<void> {
     if (!text) return;
-    await this.chat.queueMessage(text);
+    await this.chat.queueMessage(this.withStagedTranscript(text));
+    this.transcription.clearStagedTranscript();
     this.cdr.markForCheck();
+  }
+
+  private withStagedTranscript(text: string): string {
+    const staged = this.transcription.stagedTranscript();
+    return staged ? `${text}\n\n${staged}` : text;
   }
 
   /** ADR-045 — composer signalled queue cancellation (X button). */
@@ -346,7 +362,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
-    // Re-focus composer so user can type immediately after clicking new conversation.
     this.composer?.focusInput();
   }
 
@@ -385,12 +400,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     const href = target.getAttribute('href');
     if (!href) return;
 
-    // Fragments/relative links are same-origin; let the WebView handle them.
     const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(href);
     if (!schemeMatch) return;
 
-    // Absolute URL: open http(s) externally, block every other scheme
-    // (data:/vbscript:/javascript:) from navigating the main WebView.
     event.preventDefault();
     const scheme = schemeMatch[1].toLowerCase();
     if (scheme === 'http' || scheme === 'https') {
@@ -408,9 +420,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.unsubAuthWatch();
       this.unsubAuthWatch = null;
     }
-    // Unregister the overflow-prompt opener → service auto-resumes while unmounted.
     this.chat.setResumeDecider(null);
-    // Dismiss any pending context-overflow dialog.
     this.contextOverflowResolve?.('fresh');
     this.contextOverflowResolve = null;
     this.contextOverflowOpen.set(false);

@@ -1,7 +1,6 @@
 import Foundation
 import SharedCLI
 
-// MARK: - CLI Entry Point
 
 /// mail-cli <command> [json-args]
 /// Commands: check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email
@@ -11,7 +10,6 @@ struct MailCLI {
         "check_permission, detect_clients, list_mailboxes, list_emails, get_email, search_emails, send_email, reply_to_email"
 
     static func main() {
-        // check_permission validates Apple Mail automation via AppleEventsGate; Outlook is checked by resolveClient.
         runCLI(
             cliName: "mail-cli",
             commandList: commandList,
@@ -39,14 +37,11 @@ struct MailCLI {
     }
 }
 
-// MARK: - Client Resolution
 
 func resolveClient(preferred: String?) throws -> String {
     if let preferred = preferred {
         switch preferred.lowercased() {
         case "outlook", "microsoft outlook":
-            // A thrown ScriptError (permission/timeout) propagates verbatim so the
-            // user sees the real cause, not a misleading "not running" message.
             guard try OutlookClient.isAvailable() else {
                 throw MailError.clientNotAvailable("Microsoft Outlook")
             }
@@ -57,18 +52,14 @@ func resolveClient(preferred: String?) throws -> String {
             throw MailError.unknownClient(preferred)
         }
     }
-    // Default: Apple Mail (always available on macOS)
     return "mail"
 }
 
-// MARK: - Commands
 
 func detectClients() -> [String: Any] {
     var clients: [[String: Any]] = [
         ["name": AppleMailClient.name, "available": true, "default": true]
     ]
-    // A permission/timeout error is NOT "Outlook not installed" — surface it in
-    // an `error` field so the UI distinguishes a denial from a genuine absence.
     var outlook: [String: Any] = ["name": OutlookClient.name, "default": false]
     do {
         outlook["available"] = try OutlookClient.isAvailable()
@@ -161,8 +152,6 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
     let client = try resolveClient(preferred: params["client"] as? String)
     let cc = params["cc"] as? String
     let bcc = params["bcc"] as? String
-    // A provided cc/bcc that reduces to zero addresses would silently vanish from the
-    // generated AppleScript; reject it the same way an empty `to` is rejected.
     if let cc = cc, splitAddressList(cc).isEmpty {
         throw MailError.emptyRecipients("cc")
     }
@@ -200,7 +189,6 @@ func replyToEmail(params: [String: Any]) throws -> [String: Any] {
     }
 }
 
-// MARK: - Error Handling
 
 enum MailError: LocalizedError {
     case missingField(String)
@@ -225,8 +213,6 @@ enum MailError: LocalizedError {
     }
 }
 
-// MARK: - Permission Helpers
 
 /// AppleScript for check_permission; must access real data to trigger the macOS Automation prompt.
-// SYNC: permissionCheckScript rationale must match notes/Sources/NotesCLI.swift
 let permissionCheckScript = "tell application \"Mail\" to count of accounts"

@@ -61,7 +61,8 @@
           "builder": "@angular/build:unit-test",
           "options": {
             "buildTarget": "speedwave-desktop-ui:build:development",
-            "tsConfig": "tsconfig.spec.json"
+            "tsConfig": "tsconfig.spec.json",
+            "runnerConfig": "vitest.config.ts"
           }
         },
         "serve": {

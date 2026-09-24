@@ -14,7 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::audit;
 use crate::pii::{self, PiiEngineState};
-use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
+use crate::router::{resolve, Auth, BareAuth, Config, Route, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
 /// Cap on the SSE sniff buffer. A partial line past this is not a real usage
@@ -70,7 +70,6 @@ pub fn outbound_headers_with(
 
     match auth {
         Auth::Bare(BareAuth::Passthrough) => {
-            // Copy auth and Anthropic headers verbatim — inject nothing.
             for name in &[
                 "authorization",
                 "x-api-key",
@@ -84,8 +83,6 @@ pub fn outbound_headers_with(
             }
         }
         Auth::Bare(BareAuth::None) => {
-            // Local server, no key: drop inbound auth, keep non-auth headers,
-            // inject nothing.
             for name in &["anthropic-version", "content-type"] {
                 if let Some(v) = inbound.get(*name) {
                     out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
@@ -93,14 +90,11 @@ pub fn outbound_headers_with(
             }
         }
         Auth::Swap { env, scheme } => {
-            // Drop inbound auth (client sends a dummy bearer on non-Anthropic legs).
-            // Keep non-auth Anthropic headers.
             for name in &["anthropic-version", "content-type"] {
                 if let Some(v) = inbound.get(*name) {
                     out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
                 }
             }
-            // Inject real provider key according to scheme.
             match (scheme, lookup(env)) {
                 (Scheme::Bearer, Some(key)) => {
                     let value = format!("Bearer {key}");
@@ -109,13 +103,9 @@ pub fn outbound_headers_with(
                     }
                 }
                 (Scheme::Bearer, None) => {
-                    // Key absent or env name tampered — forward with NO auth (the
-                    // provider answers 401). Surface it; env name only, never a value.
                     log::warn!("swap leg: no provider key for {env}; forwarding without auth");
                 }
-                (Scheme::None, _) => {
-                    // Local servers accept any/none — no auth header expected.
-                }
+                (Scheme::None, _) => {}
             }
         }
     }
@@ -177,10 +167,105 @@ fn format_resp_log(
     )
 }
 
-/// Terminal status for a forwarded request: failure on an upstream ≥400 or a
-/// byte stream that errored mid-flight, success otherwise.
-fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStatus {
-    if status_code >= 400 || stream_errored {
+/// Cap on an in-band error field before logging — a crafted upstream `error` frame
+/// must not be able to flood the proxy log.
+const MAX_LOGGED_ERROR_MESSAGE: usize = 200;
+
+/// Strips control characters (so a crafted value can't forge extra log lines) and caps
+/// `s` at `max` bytes (rounded down to a char boundary), appending `…` when truncated.
+fn bound_for_log(s: &str, max: usize) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if cleaned.len() <= max {
+        return cleaned;
+    }
+    let mut end = max;
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &cleaned[..end])
+}
+
+/// Claude Code's gateway token for a rejected mid-conversation `{role:"system"}` turn: on a 400
+/// carrying exactly this message it resends without such turns until `/clear` or `/compact`.
+const MID_CONV_SYSTEM_REJECTION: &str = "capability_rejected: mid_conv_system";
+
+/// True for the native Anthropic route, the only upstream that accepts mid-conversation system
+/// turns; a route file without `provider_kind` falls back to the `anthropic` prefix.
+fn is_anthropic_route(route: &Route) -> bool {
+    if route.provider_kind.is_empty() {
+        route.prefix == "anthropic"
+    } else {
+        route.provider_kind.starts_with("anthropic")
+    }
+}
+
+/// True when `messages` carries a `{role:"system"}` turn (Claude Code's `mid_conv_system`).
+fn has_mid_conversation_system_turn(body: &serde_json::Value) -> bool {
+    body.get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|messages| {
+            messages
+                .iter()
+                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        })
+}
+
+/// Answers a routed request that carries a mid-conversation system turn with Claude Code's
+/// rejection token instead of forwarding it; `None` lets the request through.
+fn reject_routed_mid_conversation_system(
+    cfg: &Config,
+    body: &serde_json::Value,
+) -> Option<Response> {
+    let model = body.get("model").and_then(|m| m.as_str())?;
+    let route = resolve(cfg, model)?;
+    if is_anthropic_route(route) || !has_mid_conversation_system_turn(body) {
+        return None;
+    }
+    log::info!(
+        "proxy req: model='{}' carries a mid-conversation system turn; answering 400 '{}' so \
+         Claude Code resends without it",
+        bound_for_log(model, MAX_LOGGED_ERROR_MESSAGE),
+        MID_CONV_SYSTEM_REJECTION
+    );
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": MID_CONV_SYSTEM_REJECTION}
+            })),
+        )
+            .into_response(),
+    )
+}
+
+/// Cap on a logged upstream connection error: long enough for reqwest's full source chain.
+const MAX_LOGGED_UPSTREAM_ERROR: usize = 600;
+
+/// `err` and every `source()` under it, joined with `: `; reqwest's own Display stops at
+/// "error sending request", which hides whether DNS, TCP or TLS failed.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
+}
+
+/// Terminal status for a forwarded request: failure on an upstream ≥400, an aborted byte
+/// stream, or an in-band SSE `error` frame; success otherwise.
+fn resolve_request_status(
+    status_code: u16,
+    stream_errored: bool,
+    in_band_error: bool,
+) -> RequestStatus {
+    if status_code >= 400 || stream_errored || in_band_error {
         RequestStatus::Failure
     } else {
         RequestStatus::Success
@@ -190,8 +275,6 @@ fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStat
 /// Resolve the route, forward with swapped/verbatim headers, relay the SSE byte
 /// stream unbuffered while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
-    // Parse the body once: the model selects the backend route, the same
-    // parsed value is reused (now PII-scanned) to strip the route prefix before forwarding.
     let mut parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -203,7 +286,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         }
     };
 
-    // Fail-closed (ADR-073 F4): a broken PII engine must never let cleartext forward.
+    if let Some(rejection) = reject_routed_mid_conversation_system(&cfg, &parsed) {
+        return rejection;
+    }
+
     let (policy, key) = match cfg.pii.as_ref() {
         PiiEngineState::Ready { policy, key } => (policy, key),
         PiiEngineState::Failed(reason) => {
@@ -228,7 +314,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     };
     audit::write_pii_audit(cfg.audit_dir.as_deref(), &detections);
 
-    // Re-serialize the scanned value: this, not the original raw bytes, is what forwards.
     let scanned_body = match serde_json::to_vec(&parsed) {
         Ok(b) => b,
         Err(e) => {
@@ -271,14 +356,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let out_headers = outbound_headers(&route.auth, &headers);
     let upstream_url = format!("{}/v1/messages", route.base_url);
-    // Strip the route prefix so the backend sees its own model name (the
-    // anthropic passthrough has no prefix and is untouched).
     let outbound_body = strip_model_prefix(&scanned_body, &parsed, &model);
-    // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
 
-    // Shared client (built once with no-redirect — SSRF, ADR-041); clone is cheap.
     let client = cfg.client.clone();
 
     let mut req = client.post(&upstream_url).body(outbound_body);
@@ -286,22 +367,26 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         req = req.header(name, value);
     }
 
-    // Clock starts before send() so latency includes connect + TTFT, not just body.
     let start = std::time::Instant::now();
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
+            let cause = bound_for_log(&error_chain(&e.without_url()), MAX_LOGGED_UPSTREAM_ERROR);
+            log::warn!(
+                "upstream request for model '{}' via prefix '{}' to {} failed: {cause}",
+                bound_for_log(&model, MAX_LOGGED_ERROR_MESSAGE),
+                route.prefix,
+                upstream_host(&route.base_url)
+            );
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("upstream error: {e}")})),
+                Json(json!({"error": format!("upstream error: {cause}")})),
             )
                 .into_response();
         }
     };
 
     let status = upstream.status();
-    // Surface backend rejections at the proxy (model name only, never a key or
-    // body) — else a 401/403/5xx only shows up in the Claude Code logs.
     if status.as_u16() >= 400 {
         log::warn!(
             "upstream {} for model '{}' via prefix '{}'",
@@ -313,43 +398,40 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let response_headers = upstream.headers().clone();
     let upstream_is_sse = is_event_stream(&response_headers);
 
-    // Usage path resolved once at startup and stored in Config — no env read per request.
     let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
     let status_code = status.as_u16();
-    // Cheap Arc clone: the spawned task outlives this handler and needs its own handle to
-    // unmask keywords and detokenize PII spans before the response reaches the agent (§5.1).
     let pii_state = cfg.pii.clone();
 
-    // Channel-based relay: each upstream chunk is rewritten (keywords unmasked, PII spans
-    // detokenized) then forwarded as soon as the rolling buffer judges it safe.
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     tokio::spawn(async move {
         let PiiEngineState::Ready { policy, key } = pii_state.as_ref() else {
-            // Unreachable: `messages` already required `Ready` before ever calling upstream,
-            // and the engine state never changes after startup. Fail closed rather than
-            // forward a response nobody has rewritten.
             log::error!("PII engine unavailable for response rewrite; dropping stream");
             return;
         };
         let mut byte_stream = upstream.bytes_stream();
         let mut acc = UsageAcc::default();
-        // Buffer for incomplete SSE lines across chunks (usage sniffing only).
         let mut line_buf = String::new();
         let mut rewrite_buffer = crate::rewrite::ResponseRewriter::new(upstream_is_sse);
-        // Stream aborted mid-flight (upstream byte error, or a detokenization failure) →
-        // failure, even on a 2xx.
         let mut stream_errored = false;
-        // The client dropped the connection — stop pushing, and skip the final flush send.
         let mut client_disconnected = false;
 
         use futures_util::StreamExt;
-        while let Some(chunk) = byte_stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                () = tx.closed() => {
+                    client_disconnected = true;
+                    break;
+                }
+                next = byte_stream.next() => match next {
+                    Some(chunk) => chunk,
+                    None => break,
+                },
+            };
             match chunk {
                 Ok(bytes) => {
-                    // Sniff SSE frames from the original chunk — unaffected by the rewrite
-                    // below, since usage numbers reflect what the upstream actually billed.
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         line_buf.push_str(text);
                         for line in drain_complete_lines(&mut line_buf) {
@@ -366,11 +448,8 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                                 }
                             }
                         }
-                        // Only sniffing is bounded; the rewrite buffer below is separate.
                         bound_sniff_buffer(&mut line_buf, MAX_SNIFF_BUF);
                     }
-                    // Unmask keywords then detokenize PII spans (§5.1/§7.2/§7.3) on decoded
-                    // event text — a span split across SSE delta events still matches.
                     let forward_bytes =
                         match rewrite_buffer.push_chunk(&bytes, policy.keywords(), key) {
                             Ok(b) => b,
@@ -385,10 +464,11 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                         && tx.send(Ok(Bytes::from(forward_bytes))).await.is_err()
                     {
                         client_disconnected = true;
-                        break; // Client disconnected.
+                        break;
                     }
                 }
                 Err(e) => {
+                    log::warn!("upstream byte stream failed mid-response: {e}");
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     stream_errored = true;
                     break;
@@ -410,7 +490,15 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         }
 
         let latency_ms = start.elapsed().as_millis() as u64;
-        let req_status = resolve_request_status(status_code, stream_errored);
+        if let Some(err) = &acc.in_band_error {
+            log::warn!(
+                "in-band SSE error from upstream: type='{}' message='{}'",
+                bound_for_log(&err.kind, MAX_LOGGED_ERROR_MESSAGE),
+                bound_for_log(&err.message, MAX_LOGGED_ERROR_MESSAGE)
+            );
+        }
+        let req_status =
+            resolve_request_status(status_code, stream_errored, acc.in_band_error.is_some());
         let (in_tok, out_tok) = if acc.saw_usage {
             (Some(acc.prompt_tokens), Some(acc.completion_tokens))
         } else {
@@ -429,13 +517,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         ) {
             append_usage(&usage_path, &line);
         }
-        // tx is dropped here; ReceiverStream terminates cleanly.
     });
 
     let stream = ReceiverStream::new(rx);
     let mut builder = Response::builder().status(status);
-    // Forward upstream headers (content-type, etc.), minus hop-by-hop ones —
-    // axum re-frames the body, so relaying them corrupts the client transfer.
     for (name, value) in &response_headers {
         if !is_hop_by_hop(name.as_str()) {
             builder = builder.header(name, value);
@@ -493,7 +578,6 @@ mod tests {
             upstream_host("http://host:8080/v1/messages?x=1"),
             "host:8080"
         );
-        // No scheme — return as-is up to the first slash.
         assert_eq!(upstream_host("barehost:9000/x"), "barehost:9000");
     }
 
@@ -510,7 +594,6 @@ mod tests {
         assert!(line.contains("prefix='openrouter'"), "{line}");
         assert!(line.contains("provider=open_router/openrouter"), "{line}");
         assert!(line.contains("api.openrouter.ai"), "{line}");
-        // Host only — never the full URL path.
         assert!(
             !line.contains("/api/v1"),
             "req log must not carry the URL path: {line}"
@@ -544,13 +627,11 @@ mod tests {
         let out = strip_model_prefix(body, &parsed, "local/unsloth/Qwen3.6");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["model"], "unsloth/Qwen3.6");
-        // Other fields survive the rewrite.
         assert_eq!(v["max_tokens"], 16);
     }
 
     #[test]
     fn strip_model_prefix_leaves_anthropic_untouched() {
-        // No prefix (anthropic passthrough) → body byte-identical.
         let body = br#"{"model":"claude-opus-4-8","max_tokens":16}"#;
         let parsed = serde_json::from_slice(body).unwrap();
         let out = strip_model_prefix(body, &parsed, "claude-opus-4-8");
@@ -559,7 +640,6 @@ mod tests {
 
     #[test]
     fn strip_model_prefix_only_drops_first_segment() {
-        // openrouter/anthropic/claude-3.5 → anthropic/claude-3.5 (one level).
         let body = br#"{"model":"openrouter/anthropic/claude-3.5"}"#;
         let parsed = serde_json::from_slice(body).unwrap();
         let out = strip_model_prefix(body, &parsed, "openrouter/anthropic/claude-3.5");
@@ -603,8 +683,6 @@ mod tests {
 
     #[test]
     fn swap_bearer_with_no_key_drops_dummy_and_injects_nothing() {
-        // Missing/tampered key: dummy auth dropped, no real key available → the
-        // request forwards with NO authorization header (provider answers 401).
         let mut h = HeaderMap::new();
         h.insert(
             "authorization",
@@ -683,7 +761,6 @@ mod tests {
     #[test]
     fn split_sse_frame_across_chunks_parses_once() {
         let full_line = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n";
-        // Split arbitrarily in the middle of the JSON payload.
         let split_at = full_line.find("\"output_to").unwrap();
         let chunk1 = &full_line[..split_at];
         let chunk2 = &full_line[split_at..];
@@ -691,7 +768,6 @@ mod tests {
         let mut buf = String::new();
         let mut acc = UsageAcc::default();
 
-        // First chunk — no complete line yet.
         buf.push_str(chunk1);
         for line in drain_complete_lines(&mut buf) {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -702,7 +778,6 @@ mod tests {
         }
         assert_eq!(acc.completion_tokens, 0, "must not sniff before full line");
 
-        // Second chunk — completes the line.
         buf.push_str(chunk2);
         for line in drain_complete_lines(&mut buf) {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -722,13 +797,11 @@ mod tests {
     fn sniff_buffer_is_bounded_against_newlineless_stream() {
         let max = 64;
         let mut buf = String::new();
-        // No newline: drain yields nothing, buffer would grow unbounded.
         buf.push_str(&"x".repeat(max + 10));
         assert!(drain_complete_lines(&mut buf).is_empty());
         bound_sniff_buffer(&mut buf, max);
         assert!(buf.is_empty(), "over-cap partial line must be dropped");
 
-        // A partial line UNDER the cap is preserved (real split frame).
         buf.push_str("data: {\"type\":\"mes");
         bound_sniff_buffer(&mut buf, max);
         assert_eq!(
@@ -744,7 +817,6 @@ mod tests {
         let mut acc = UsageAcc::default();
         buf.push_str(&"y".repeat(max + 10));
         bound_sniff_buffer(&mut buf, max);
-        // A complete frame after the reset still parses.
         buf.push_str("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n");
         for line in drain_complete_lines(&mut buf) {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -758,12 +830,89 @@ mod tests {
 
     #[test]
     fn request_status_failure_on_4xx_5xx_or_abort() {
-        assert_eq!(resolve_request_status(200, false), RequestStatus::Success);
-        assert_eq!(resolve_request_status(200, true), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(401, false), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(429, false), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(500, false), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(503, true), RequestStatus::Failure);
+        assert_eq!(
+            resolve_request_status(200, false, false),
+            RequestStatus::Success
+        );
+        assert_eq!(
+            resolve_request_status(200, true, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(401, false, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(429, false, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(500, false, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(503, true, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(200, false, true),
+            RequestStatus::Failure,
+            "an in-band error must fail the request even on a clean 200 stream"
+        );
+    }
+
+    #[test]
+    fn error_chain_follows_every_source() {
+        let inner =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
+        let outer = std::io::Error::other(inner);
+        assert_eq!(error_chain(&outer), "Connection refused");
+        let wrapped = std::io::Error::other(ChainLayer(outer));
+        assert_eq!(
+            error_chain(&wrapped),
+            "client error (Connect): Connection refused"
+        );
+    }
+
+    #[derive(Debug)]
+    struct ChainLayer(std::io::Error);
+
+    impl std::fmt::Display for ChainLayer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("client error (Connect)")
+        }
+    }
+
+    impl std::error::Error for ChainLayer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn bound_for_log_keeps_short_messages_unchanged() {
+        assert_eq!(bound_for_log("short message", 200), "short message");
+    }
+
+    #[test]
+    fn bound_for_log_caps_long_messages_with_ellipsis() {
+        let long = "x".repeat(500);
+        let out = bound_for_log(&long, 200);
+        assert_eq!(out, format!("{}…", "x".repeat(200)));
+    }
+
+    #[test]
+    fn bound_for_log_never_splits_a_utf8_char_boundary() {
+        let s = "€".repeat(100);
+        let out = bound_for_log(&s, 200);
+        assert_eq!(out, format!("{}…", "€".repeat(66)));
+    }
+
+    #[test]
+    fn bound_for_log_strips_control_characters_to_prevent_log_forging() {
+        let out = bound_for_log("line one\nfake WARN\r\ninjected", 200);
+        assert_eq!(out, "line one fake WARN  injected");
+        assert!(!out.chars().any(|c| c.is_control()));
     }
 
     #[test]
@@ -785,5 +934,90 @@ mod tests {
             "Text/Event-Stream; charset=utf-8".parse().unwrap(),
         );
         assert!(is_event_stream(&headers), "params and case are tolerated");
+    }
+
+    fn route(prefix: &str, provider_kind: &str) -> Route {
+        Route {
+            prefix: prefix.to_string(),
+            base_url: "http://upstream".to_string(),
+            auth: Auth::Bare(BareAuth::None),
+            provider_kind: provider_kind.to_string(),
+            provider_id: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn anthropic_route_is_told_apart_by_kind_then_by_prefix() {
+        assert!(is_anthropic_route(&route("anthropic", "anthropic_oauth")));
+        assert!(is_anthropic_route(&route("anthropic", "anthropic_api_key")));
+        assert!(!is_anthropic_route(&route("local", "local")));
+        assert!(!is_anthropic_route(&route("openrouter", "openrouter")));
+        assert!(
+            is_anthropic_route(&route("anthropic", "")),
+            "a route file without provider_kind keeps the anthropic prefix native"
+        );
+        assert!(!is_anthropic_route(&route("local", "")));
+    }
+
+    #[test]
+    fn mid_conversation_system_turn_is_any_system_role_in_messages() {
+        let with = |messages: serde_json::Value| json!({"model": "local/x", "messages": messages});
+        assert!(has_mid_conversation_system_turn(&with(json!([
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": [{"type": "text", "text": "reminder"}]}
+        ]))));
+        assert!(has_mid_conversation_system_turn(&with(json!([
+            {"role": "system", "content": "first"},
+            {"role": "user", "content": "hi"}
+        ]))));
+        assert!(!has_mid_conversation_system_turn(&with(json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"}
+        ]))));
+        assert!(!has_mid_conversation_system_turn(&with(json!([]))));
+        assert!(!has_mid_conversation_system_turn(
+            &json!({"model": "local/x", "system": "top-level system prompt stays allowed"})
+        ));
+        assert!(!has_mid_conversation_system_turn(
+            &json!({"model": "local/x", "messages": "not an array"})
+        ));
+    }
+
+    #[test]
+    fn only_a_routed_model_with_a_system_turn_is_rejected() {
+        let cfg = Config {
+            routes: vec![
+                route("anthropic", "anthropic_oauth"),
+                route("local", "local"),
+            ],
+            ..Default::default()
+        };
+        let system_turn = json!([
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "reminder"}
+        ]);
+        let routed = json!({"model": "local/qwen3.8-27b", "messages": system_turn});
+        assert_eq!(
+            reject_routed_mid_conversation_system(&cfg, &routed).map(|r| r.status()),
+            Some(StatusCode::BAD_REQUEST),
+            "a routed system turn must be answered locally"
+        );
+
+        let native = json!({"model": "claude-sonnet-5", "messages": system_turn});
+        assert!(reject_routed_mid_conversation_system(&cfg, &native).is_none());
+
+        let plain =
+            json!({"model": "local/qwen3.8-27b", "messages": [{"role": "user", "content": "hi"}]});
+        assert!(reject_routed_mid_conversation_system(&cfg, &plain).is_none());
+
+        let unrouted = json!({"model": "nowhere/model", "messages": system_turn});
+        assert!(
+            reject_routed_mid_conversation_system(&cfg, &unrouted).is_none(),
+            "an unknown prefix keeps its existing no-route answer"
+        );
+        assert!(
+            reject_routed_mid_conversation_system(&cfg, &json!({"messages": system_turn}))
+                .is_none()
+        );
     }
 }

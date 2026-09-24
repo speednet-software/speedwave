@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  ITEM_KEYS,
   paginate,
   collectPages,
   findInPages,
@@ -39,15 +40,12 @@ describe('paginate', () => {
         pages.push(page);
       }
 
-      // Verify page count
       expect(pages.length).toBeLessThanOrEqual(3);
 
-      // Verify actual item count (the important check!)
       const allItems = pages.flatMap((p) => p.items);
       expect(allItems.length).toBeLessThanOrEqual(25);
-      expect(allItems.length).toBeGreaterThanOrEqual(20); // Should get close to maxItems
+      expect(allItems.length).toBeGreaterThanOrEqual(20);
 
-      // Verify items are sequential (offset calculation works)
       allItems.forEach((item, index) => {
         expect(item.id).toBe(index);
       });
@@ -66,7 +64,7 @@ describe('paginate', () => {
       }
 
       const allItems = pages.flatMap((p) => p.items);
-      expect(allItems.length).toBe(20); // Exactly 20 items (2 pages of 10)
+      expect(allItems.length).toBe(20);
     });
 
     it('last page has reduced limit when approaching maxItems', async () => {
@@ -82,12 +80,11 @@ describe('paginate', () => {
       }
 
       expect(pages).toHaveLength(2);
-      expect(pages[0].items).toHaveLength(10); // First page: full 10
-      expect(pages[1].items).toHaveLength(5); // Second page: only 5 (15 - 10 = 5)
+      expect(pages[0].items).toHaveLength(10);
+      expect(pages[1].items).toHaveLength(5);
 
-      // Verify fetcher was called with correct limits
       expect(mockFetcher).toHaveBeenNthCalledWith(1, 0, 10);
-      expect(mockFetcher).toHaveBeenNthCalledWith(2, 10, 5); // limit reduced to 5!
+      expect(mockFetcher).toHaveBeenNthCalledWith(2, 10, 5);
     });
 
     it('respects maxPages config', async () => {
@@ -136,7 +133,6 @@ describe('paginate', () => {
     });
 
     it('extracts items when fetcher returns a plain array (no wrapper object)', async () => {
-      // A plain-array response is returned by the Array.isArray fallback.
       const mockFetcher = vi
         .fn()
         .mockResolvedValueOnce([{ id: 1 }, { id: 2 }] as unknown as {
@@ -156,7 +152,6 @@ describe('paginate', () => {
     });
 
     it('returns empty page when response has no known keys and is not an array', async () => {
-      // extractItems: no known key found, result is not an array → return [] (line 198)
       const mockFetcher = vi
         .fn()
         .mockResolvedValueOnce({ count: 5, status: 'ok' } as unknown as { items: unknown[] })
@@ -167,12 +162,111 @@ describe('paginate', () => {
         pages.push(page);
       }
 
-      // extractItems returns [] so the page has zero items → pagination stops immediately
       expect(pages).toHaveLength(0);
+    });
+
+    it('throws a teaching error when a page carries arrays only under unrecognised keys', async () => {
+      const mockFetcher = vi.fn().mockResolvedValue({ mrs: [{ iid: 1 }], count: 1 });
+
+      await expect(collectPages(paginate(mockFetcher))).rejects.toThrow(
+        `arrays under unrecognised keys (mrs); recognised keys: ${ITEM_KEYS.join(', ')}`
+      );
+      expect(mockFetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads an unpaginated { versions, total_count } list as one page', async () => {
+      const versions = [{ id: 87 }, { id: 88 }];
+      const mockFetcher = vi.fn().mockResolvedValue({ versions, total_count: 2 });
+
+      const all = await collectPages(paginate<{ id: number }>(mockFetcher));
+
+      expect(all).toEqual(versions);
+      expect(mockFetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('pages through every id when the fetcher returns { ids, total_count }', async () => {
+      const allIds = Array.from({ length: 23 }, (_, i) => i + 1);
+      const mockFetcher = vi
+        .fn()
+        .mockImplementation((offset: number, limit: number) =>
+          Promise.resolve({ ids: allIds.slice(offset, offset + limit), total_count: allIds.length })
+        );
+
+      const pages: Array<{ items: number[]; offset: number }> = [];
+      for await (const page of paginate<number>(mockFetcher, { limit: 10 })) {
+        pages.push(page);
+      }
+
+      expect(pages.map((p) => p.items.length)).toEqual([10, 10, 3]);
+      expect(pages.map((p) => p.offset)).toEqual([0, 10, 20]);
+      expect(pages.flatMap((p) => p.items)).toEqual(allIds);
+      expect(mockFetcher.mock.calls).toEqual([
+        [0, 10],
+        [10, 10],
+        [20, 10],
+      ]);
+    });
+
+    it('terminates on an empty ids page', async () => {
+      const mockFetcher = vi.fn().mockResolvedValue({ ids: [], total_count: 0 });
+
+      const pages: unknown[] = [];
+      for await (const page of paginate(mockFetcher)) {
+        pages.push(page);
+      }
+
+      expect(pages).toHaveLength(0);
+      expect(mockFetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('drives hasMore from total_count across ids pages', async () => {
+      const mockFetcher = vi
+        .fn()
+        .mockImplementation((offset: number, limit: number) =>
+          Promise.resolve({ ids: [7, 8, 9].slice(offset, offset + limit), total_count: 3 })
+        );
+
+      const pages: Array<{ hasMore: boolean; totalCount?: number }> = [];
+      for await (const page of paginate<number>(mockFetcher, { limit: 2 })) {
+        pages.push(page);
+      }
+
+      expect(pages.map((p) => p.hasMore)).toEqual([true, false]);
+      expect(pages.map((p) => p.totalCount)).toEqual([3, 3]);
+      expect(mockFetcher).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops after a full ids page that reaches total_count without another fetch', async () => {
+      const mockFetcher = vi.fn().mockResolvedValue({ ids: [7, 8, 9], total_count: 3 });
+
+      const pages: Array<{ hasMore: boolean }> = [];
+      for await (const page of paginate<number>(mockFetcher, { limit: 3 })) {
+        pages.push(page);
+      }
+
+      expect(pages).toHaveLength(1);
+      expect(pages[0].hasMore).toBe(false);
+      expect(mockFetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('prefers ids over a sibling detail array in an ids-only response', async () => {
+      const mockFetcher = vi.fn().mockResolvedValue({
+        ids: [1, 2],
+        projects: [
+          { id: 1, name: 'a' },
+          { id: 2, name: 'b' },
+        ],
+        total_count: 2,
+      });
+
+      const items = await collectPages(paginate(mockFetcher));
+
+      expect(items).toEqual([1, 2]);
     });
 
     it('extracts items from different response shapes', async () => {
       const responseShapes = [
+        { ids: [1], total_count: 1 },
         { issues: [{ id: 1 }], total_count: 1 },
         { projects: [{ id: 2 }], total_count: 1 },
         { messages: [{ id: 3 }], total_count: 1 },
@@ -277,7 +371,6 @@ describe('paginate', () => {
         (item) => item.id === 5
       );
 
-      // Should stop after first page since item is found
       expect(mockFetcher).toHaveBeenCalledTimes(1);
     });
   });
@@ -307,7 +400,7 @@ describe('paginate', () => {
         (item) => item.even
       );
 
-      expect(count).toBe(10); // 0,2,4,6,8,10,12,14,16,18
+      expect(count).toBe(10);
     });
   });
 
@@ -383,7 +476,6 @@ describe('paginate', () => {
 
       await takeFromPages(paginate(mockFetcher, { limit: 10 }), 5);
 
-      // Should only fetch first page
       expect(mockFetcher).toHaveBeenCalledTimes(1);
     });
   });

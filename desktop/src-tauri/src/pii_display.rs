@@ -1,6 +1,3 @@
-//! Host-side PII detokenization at the Desktop presentation boundary.
-//! Chat emissions and history to webview are detokenized for display; the tokenized JSONL source and model-readable content stay on disk.
-
 use std::path::Path;
 
 use speedwave_pii_engine::{
@@ -10,8 +7,6 @@ use speedwave_pii_engine::{
 
 use crate::history::{ConversationSummary, ConversationTranscript, MessageBlock};
 
-/// Display-rewrite inputs: the project's tokenization key plus its resolved keyword aliases,
-/// loaded once per display pass.
 #[derive(Default)]
 pub(crate) struct DisplayPolicy {
     key: Option<EngineKey>,
@@ -19,26 +14,21 @@ pub(crate) struct DisplayPolicy {
 }
 
 impl DisplayPolicy {
-    /// Builds a policy from parts (loader, chat/history call sites, tests).
     pub(crate) fn new(key: Option<EngineKey>, keywords: Vec<CompiledKeyword>) -> Self {
         Self { key, keywords }
     }
 
-    /// True when neither a key nor keywords are configured, so the display rewrite is a no-op.
     pub(crate) fn is_noop(&self) -> bool {
         self.key.is_none() && self.keywords.is_empty()
     }
 }
 
-/// Loads the active project's PII tokenization key once per session. Returns `None` if the project has no key yet.
 pub(crate) fn load_display_key(data_dir: &Path, project: &str) -> Option<EngineKey> {
     speedwave_runtime::pii_key::read_project_key_in(data_dir, project)
         .ok()
         .map(EngineKey::from_bytes)
 }
 
-/// Loads the display policy: the project's key plus the rendered policy.json's keywords (the
-/// same file hub/proxy run with). Missing or unparseable pieces degrade to a partial rewrite.
 pub(crate) fn load_display_policy(data_dir: &Path, project: &str) -> DisplayPolicy {
     let keywords = std::fs::read_to_string(speedwave_runtime::pii_policy::policy_config_path_in(
         data_dir, project,
@@ -50,9 +40,6 @@ pub(crate) fn load_display_policy(data_dir: &Path, project: &str) -> DisplayPoli
     DisplayPolicy::new(load_display_key(data_dir, project), keywords)
 }
 
-/// Rewrites one string for display: keyword aliases are unmasked first (token spans skipped),
-/// then tokens are resolved per span — unresolvable spans stay verbatim (a model-garbled span
-/// must not hide its valid neighbors).
 pub(crate) fn detokenize_for_display(policy: &DisplayPolicy, text: &str) -> String {
     let mut result = text.to_string();
     for keyword in &policy.keywords {
@@ -69,8 +56,6 @@ pub(crate) fn detokenize_for_display(policy: &DisplayPolicy, text: &str) -> Stri
     }
 }
 
-/// Rewrites a `ConversationTranscript` in place for display, on a copy parsed from disk.
-/// The tokenized source file stays unchanged; `ToolUse.input_json` remains tokenized (not display prose).
 pub(crate) fn detokenize_transcript(
     transcript: &mut ConversationTranscript,
     policy: &DisplayPolicy,
@@ -97,13 +82,15 @@ pub(crate) fn detokenize_transcript(
                 MessageBlock::Error { content } => {
                     *content = detokenize_for_display(policy, content)
                 }
+                MessageBlock::ControlChip { argument, .. } => {
+                    *argument = detokenize_for_display(policy, argument)
+                }
                 MessageBlock::ToolUse { .. } => {}
             }
         }
     }
 }
 
-/// Rewrites each summary's `preview` in place (the only display-facing text field returned by `list_conversations`).
 pub(crate) fn detokenize_summaries(summaries: &mut [ConversationSummary], policy: &DisplayPolicy) {
     if policy.is_noop() {
         return;
@@ -127,7 +114,6 @@ mod tests {
         compile_policy_v3(&default_policy_json()).expect("default policy compiles")
     }
 
-    /// Key-only display policy (no keywords configured).
     fn key_policy(key: EngineKey) -> DisplayPolicy {
         DisplayPolicy::new(Some(key), Vec::new())
     }
@@ -181,7 +167,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
         let key = load_display_key(tmp.path(), "proj").expect("key must load");
-        // Well-formed span shape but bogus ciphertext: must not decode, and must not error.
         let text = "see [EMAIL:TOKEN_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] there";
         assert_eq!(detokenize_for_display(&key_policy(key), text), text);
     }
@@ -199,7 +184,6 @@ mod tests {
         )
         .expect("scan succeeds")
         .text;
-        // A model reply that garbles one span (e.g. a literal example token) alongside a real one.
         let mixed = format!("{tokenized} but not [EMAIL:TOKEN_XYZ]");
 
         let displayed = detokenize_for_display(&key_policy(key), &mixed);
@@ -229,12 +213,9 @@ mod tests {
             .expect("scan succeeds")
             .text;
 
-        // Displaying under proj-b's key must not resolve proj-a's token.
         let displayed = detokenize_for_display(&key_policy(key_b), &tokenized);
         assert_eq!(displayed, tokenized);
     }
-
-    // ── detokenize_transcript / detokenize_summaries ──
 
     fn setup_key(tmp: &std::path::Path, project: &str) -> EngineKey {
         speedwave_runtime::pii_key::ensure_project_key_in(tmp, project).unwrap();
@@ -296,6 +277,7 @@ mod tests {
                 | MessageBlock::ToolResult { content, .. }
                 | MessageBlock::Error { content } => content,
                 MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 4"),
+                MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 4"),
             };
             assert_eq!(content.as_str(), "jan@example.com");
         }
@@ -344,8 +326,6 @@ mod tests {
         detokenize_summaries(&mut summaries, &key_policy(key));
         assert_eq!(summaries[0].preview, "jan@example.com");
     }
-
-    // ── keyword unmasking at display ──
 
     fn keyword_policy(key: Option<EngineKey>) -> DisplayPolicy {
         DisplayPolicy::new(

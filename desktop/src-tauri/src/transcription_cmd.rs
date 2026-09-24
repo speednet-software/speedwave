@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DriverConfig, FinalizeConfig,
+    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, FinalizeConfig,
     Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions, TranscriptDriver,
     TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
 };
@@ -50,24 +50,25 @@ fn short_id(id: Uuid) -> String {
     s
 }
 
-// ---- 1) capability + source listing ---------------------------------------
-
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitiesAck {
     /// What the host's audio backend can do.
     pub capabilities: CaptureCapabilities,
-    /// Which whisper.cpp backends were compiled in.
-    pub backends: Vec<Backend>,
+    /// Probed host GPU class (ADR-085) — drives the live-transcript default in the UI.
+    pub gpu_class: transcription::GpuClass,
+    /// Acceleration label computed by `accel::accel_label()` — the UI renders it verbatim.
+    pub accel_label: String,
 }
 
 #[tauri::command]
 pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
-    let capabilities = transcription::detect_audio_capture().capabilities();
-    let backends = transcription::compiled_backends();
-    Ok(CapabilitiesAck {
-        capabilities,
-        backends,
+    tokio::task::spawn_blocking(|| CapabilitiesAck {
+        capabilities: transcription::detect_audio_capture().capabilities(),
+        gpu_class: transcription::gpu_class(),
+        accel_label: transcription::accel_label(),
     })
+    .await
+    .map_err(|e| format!("capabilities task panicked: {e}"))
 }
 
 #[tauri::command]
@@ -76,8 +77,6 @@ pub async fn list_audio_sources() -> Result<Vec<AudioSourceInfo>, String> {
         .enumerate_sources()
         .map_err(|e| e.to_string())
 }
-
-// ---- 3) start / stop / subscribe ------------------------------------------
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct StartAck {
@@ -96,6 +95,15 @@ pub struct StartAck {
 pub struct StartParams {
     pub source: serde_json::Value,
     pub language: String,
+    /// `false` = record-only: skip the live pass entirely; the transcript comes from the
+    /// offline pass after stop (ADR-056 Am. 13). Defaults on for older frontends.
+    #[serde(default = "default_live")]
+    pub live: bool,
+}
+
+/// Serde default for [`StartParams::live`].
+fn default_live() -> bool {
+    true
 }
 
 #[tauri::command]
@@ -107,8 +115,11 @@ pub async fn start_transcription(
     forwarders: tauri::State<'_, ForwardersHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
-    let StartParams { source, language } = params;
-    // Force-language is enum-validated at the Rust boundary.
+    let StartParams {
+        source,
+        language,
+        live,
+    } = params;
     let lang = match language.as_str() {
         "pl" => Language::Pl,
         "en" => Language::En,
@@ -119,14 +130,11 @@ pub async fn start_transcription(
 
     let capture = transcription::detect_audio_capture();
     let caps = capture.capabilities();
-    // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
     let store_arc = store.inner().clone();
-    let (live_key, transcriber) = load_live_transcriber(models.inner()).await?;
+    let live_transcriber = prepare_live_transcriber(live, models.inner()).await?;
 
-    // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
-    // path is then correct from the first persisted write (no fragile post-create patch).
     let session_id = Uuid::new_v4();
     let session_dir = store.session_dir(session_id);
     let audio_wav = session_dir.join("audio.wav");
@@ -140,21 +148,18 @@ pub async fn start_transcription(
         },
         audio_wav.clone(),
     );
-    session.models_used.live = Some(live_key.clone());
-    // Register the driver entry before creating the session so the delete guard
-    // covers the whole start window (delete refuses while an entry is live).
+    session.models_used.live = live_transcriber.as_ref().map(|(key, _)| key.clone());
     let stop = StopSignal::new();
-    register_driver(drivers.inner(), session_id, &stop)?;
+    register_driver_and_repaint_tray(&app, drivers.inner(), session_id, &stop)?;
     if let Err(e) = store.create(session) {
-        unregister_driver(drivers.inner(), session_id, &stop);
+        unregister_driver_and_repaint_tray(&app, drivers.inner(), session_id, &stop);
         return Err(format!("store create: {e}"));
     }
 
     let stream = match capture.start(audio_source) {
         Ok(s) => s,
         Err(e) => {
-            unregister_driver(drivers.inner(), session_id, &stop);
-            // Mark the session failed so the UI shows the error, not a hang.
+            unregister_driver_and_repaint_tray(&app, drivers.inner(), session_id, &stop);
             let _ = store.set_status(
                 session_id,
                 TranscriptStatus::Failed {
@@ -165,9 +170,8 @@ pub async fn start_transcription(
         }
     };
 
-    // Wire the event forwarder before the driver mutates anything.
     spawn_event_forwarder(
-        app,
+        app.clone(),
         store_arc.clone(),
         forwarders.inner().clone(),
         session_id,
@@ -178,12 +182,13 @@ pub async fn start_transcription(
             id: session_id,
             store: store_arc.clone(),
             audio: stream,
-            transcriber: Box::new(transcriber),
+            transcriber: live_transcriber.map(|(_, t)| Box::new(t) as _),
             transcribe_opts: TranscribeOptions::for_language(lang),
             stop,
             time_base: std::time::Duration::ZERO,
         },
         audio_wav,
+        app,
         drivers.inner().clone(),
     );
 
@@ -195,9 +200,8 @@ pub async fn start_transcription(
     })
 }
 
-/// Claims the driver-registry slot for `id`. Rejecting an occupied slot is the
-/// single-recording invariant per session — a blind insert would let a losing
-/// concurrent start/resume clobber the winner's live entry.
+/// Claims the driver-registry slot for `id`; rejecting an occupied slot is the one-recording-
+/// per-session invariant (a blind insert would let a losing start/resume clobber the winner).
 fn register_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) -> Result<(), String> {
     let mut g = drivers
         .lock()
@@ -224,23 +228,53 @@ fn unregister_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) {
     }
 }
 
+pub fn is_recording(drivers: &DriversHandle) -> bool {
+    !drivers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty()
+}
+
+fn register_driver_and_repaint_tray(
+    app: &AppHandle,
+    drivers: &DriversHandle,
+    id: Uuid,
+    stop: &StopSignal,
+) -> Result<(), String> {
+    register_driver(drivers, id, stop)?;
+    crate::tray::refresh_tray_icon(app);
+    Ok(())
+}
+
+fn unregister_driver_and_repaint_tray(
+    app: &AppHandle,
+    drivers: &DriversHandle,
+    id: Uuid,
+    stop: &StopSignal,
+) {
+    unregister_driver(drivers, id, stop);
+    crate::tray::refresh_tray_icon(app);
+}
+
 /// Runs a built driver on a blocking task; cleans up the stop-signal registry
 /// and wakes `await_finished()` waiters when it winds down.
-fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: DriversHandle) {
+fn spawn_driver(
+    cfg: DriverConfig,
+    audio_wav: std::path::PathBuf,
+    app: AppHandle,
+    drivers: DriversHandle,
+) {
     let session_id = cfg.id;
     let stop_for_cleanup = cfg.stop.clone();
     let driver = TranscriptDriver::new(cfg);
-    // The driver loop blocks on `next_chunk` — run it on a blocking task.
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
-            // Log only the id's first chunk — CodeQL flags any "session_id"-looking variable;
-            // UUIDs aren't secrets and the short form is enough to correlate.
             log::warn!(
                 "transcript driver for {} ended with error: {e}",
                 short_id(session_id)
             );
         }
-        unregister_driver(&drivers, session_id, &stop_for_cleanup);
+        unregister_driver_and_repaint_tray(&app, &drivers, session_id, &stop_for_cleanup);
         stop_for_cleanup.signal_finished();
     });
 }
@@ -268,6 +302,7 @@ fn resume_time_base(parts: &[std::path::PathBuf]) -> Result<std::time::Duration,
 #[tauri::command]
 pub async fn resume_transcription(
     session_id: String,
+    live: Option<bool>,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
@@ -286,27 +321,24 @@ pub async fn resume_transcription(
     validate_source_against_caps(&audio_source, &capture.capabilities())?;
 
     let store_arc = store.inner().clone();
-    let (_live_key, transcriber) = load_live_transcriber(models.inner()).await?;
+    let live_transcriber =
+        prepare_live_transcriber(live.unwrap_or_else(default_live), models.inner()).await?;
 
-    // The new part records past the earlier ones on the session timeline.
     let time_base = resume_time_base(&session.all_audio_parts())?;
     let part_no = session.all_audio_parts().len() + 1;
     let next_part = store.session_dir(id).join(format!("audio-{part_no}.wav"));
 
-    // Register the driver entry before mutating the session so the delete guard
-    // covers the whole resume window (delete refuses while an entry is live).
     let stop = StopSignal::new();
-    register_driver(drivers.inner(), id, &stop)?;
-    if let Err(e) = store.resume(id, next_part.clone()) {
-        unregister_driver(drivers.inner(), id, &stop);
+    register_driver_and_repaint_tray(&app, drivers.inner(), id, &stop)?;
+    let resumed_live_model = live_transcriber.as_ref().map(|(key, _)| key.clone());
+    if let Err(e) = store.resume(id, next_part.clone(), resumed_live_model) {
+        unregister_driver_and_repaint_tray(&app, drivers.inner(), id, &stop);
         return Err(e.to_string());
     }
     let stream = match capture.start(audio_source) {
         Ok(s) => s,
         Err(e) => {
-            unregister_driver(drivers.inner(), id, &stop);
-            // Roll back to Done: resume requires Done, so leaving the mutated session
-            // behind would strand a finished transcript on a transient capture error.
+            unregister_driver_and_repaint_tray(&app, drivers.inner(), id, &stop);
             if let Err(re) = store.rollback_resume(id, &next_part) {
                 log::error!(
                     "failed to roll back resumed transcript {} after a capture-start error: {re}",
@@ -323,18 +355,24 @@ pub async fn resume_transcription(
         }
     };
 
-    spawn_event_forwarder(app, store_arc.clone(), forwarders.inner().clone(), id);
+    spawn_event_forwarder(
+        app.clone(),
+        store_arc.clone(),
+        forwarders.inner().clone(),
+        id,
+    );
     spawn_driver(
         DriverConfig {
             id,
             store: store_arc,
             audio: stream,
-            transcriber: Box::new(transcriber),
+            transcriber: live_transcriber.map(|(_, t)| Box::new(t) as _),
             transcribe_opts: TranscribeOptions::for_language(lang),
             stop,
             time_base,
         },
         next_part,
+        app,
         drivers.inner().clone(),
     );
 
@@ -354,8 +392,6 @@ pub async fn stop_transcription(
     drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Signal the driver to wind down and grab its finish-notifier (idempotent if exited);
-    // `await_finished` then suspends until wind-down notify or the timeout below trips).
     let stop_handle = drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?
@@ -364,26 +400,18 @@ pub async fn stop_transcription(
     if let Some(stop) = stop_handle.as_ref() {
         stop.stop();
     } else {
-        // No live driver: just flip to Finalizing so a subsequent finalize pass
-        // (below) can run against whatever was recorded.
         let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
     }
 
-    // Wait for the driver loop to actually exit, bounded so a wedged driver
-    // can't hang the command. 5 s mirrors the previous spin-poll budget.
     if let Some(stop) = stop_handle {
         let _ =
             tokio::time::timeout(std::time::Duration::from_secs(5), stop.await_finished()).await;
     }
 
-    // Offline pass: re-transcribe the WAV (prefer `large-v3`, fall back to the
-    // live model) and mark Done; on failure the live transcript stays.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
     let audio_paths = offline_pass_parts(&store, id)?;
     tokio::task::spawn_blocking(move || {
-        // Pick the offline model: `large-v3` if present, else fall back to any
-        // downloaded Whisper model (the live one is guaranteed present).
         let offline_key = pick_offline_model(&models_arc);
         let Some(key) = offline_key else {
             let _ = store_arc.set_status(
@@ -406,21 +434,22 @@ pub async fn stop_transcription(
                 return;
             }
         };
-        let transcriber = match WhisperCppTranscriber::load(&path, key.clone()) {
-            Ok(mut t) => {
-                attach_vad(&mut t, &models_arc);
-                Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
-            }
-            Err(e) => {
-                let _ = store_arc.set_status(
-                    id,
-                    TranscriptStatus::Failed {
-                        reason: format!("transcriber: {e}"),
-                    },
-                );
-                return;
-            }
-        };
+        let transcriber =
+            match WhisperCppTranscriber::load(&path, key.clone(), transcription::gpu_class()) {
+                Ok(mut t) => {
+                    attach_vad(&mut t, &models_arc);
+                    Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
+                }
+                Err(e) => {
+                    let _ = store_arc.set_status(
+                        id,
+                        TranscriptStatus::Failed {
+                            reason: format!("transcriber: {e}"),
+                        },
+                    );
+                    return;
+                }
+            };
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
@@ -456,15 +485,11 @@ fn validate_source_against_caps(
     src: &AudioSource,
     caps: &CaptureCapabilities,
 ) -> Result<(), String> {
-    // Guard system audio at the boundary so a direct API call (the UI already
-    // hides unsupported sources) gets a clean error, not a deep backend one.
     if matches!(src, AudioSource::SystemWide | AudioSource::Mixed { .. })
         && !caps.supports_system_audio
     {
         return Err("this host does not support system audio capture".to_string());
     }
-    // Exhaustive (no `_` arm) so a new `AudioSource` variant forces a conscious
-    // validation decision here.
     let needs_microphone: bool = match src {
         AudioSource::SystemWide => false,
         AudioSource::Microphone { .. } => true,
@@ -507,10 +532,10 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
     store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
-/// Picks the model for the offline pass: this build's model if downloaded, else the first
-/// downloaded Whisper model (the live one is guaranteed present); `None` if none is downloaded.
+/// Picks the model for the offline pass: this build's finalize model if downloaded, else the
+/// first downloaded one; `None` when nothing is (record-only sessions load no live model).
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
-    let best = transcription::best_model_for_this_build().key;
+    let best = transcription::finalize_model_for_this_build().key;
     if models.whisper_is_present_by_key(best) {
         return Some(best.to_string());
     }
@@ -521,19 +546,44 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .map(|m| m.key)
 }
 
+/// The shared start/resume gate (ADR-056 Am. 13): loads the live transcriber, or for record-only
+/// verifies the offline pass has a model — fail at Start (actionable), not at Stop.
+async fn prepare_live_transcriber(
+    live: bool,
+    models: &ModelStoreHandle,
+) -> Result<Option<(String, WhisperCppTranscriber)>, String> {
+    if live {
+        return Ok(Some(load_live_transcriber(models).await?));
+    }
+    let m = models.clone();
+    tokio::task::spawn_blocking(move || {
+        if pick_offline_model(&m).is_none() {
+            return Err(
+                "no Whisper model is downloaded — download it in Settings → Meeting transcription"
+                    .to_string(),
+            );
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(|e| format!("model check task panicked: {e}"))?
+}
+
 /// Picks the live model (recommended → any downloaded), ensures it on disk,
 /// loads the transcriber, and attaches the VAD gate — shared by start and resume.
 async fn load_live_transcriber(
     models: &ModelStoreHandle,
 ) -> Result<(String, WhisperCppTranscriber), String> {
     let m = models.clone();
-    let recommended = transcription::best_model_for_this_build().key.to_string();
     tokio::task::spawn_blocking(move || -> Result<(String, WhisperCppTranscriber), String> {
-        let key = pick_live_model(&m, &recommended)?;
+        let recommended = transcription::live_model_for_this_build().key.to_string();
+        let class = transcription::gpu_class();
+        let key = pick_live_model(&m, &recommended, class)?;
         let path = m
             .ensure_model(&key, &mut |_| {})
             .map_err(|e| e.to_string())?;
-        let mut t = WhisperCppTranscriber::load(&path, key.clone()).map_err(|e| e.to_string())?;
+        let mut t =
+            WhisperCppTranscriber::load(&path, key.clone(), class).map_err(|e| e.to_string())?;
         attach_vad(&mut t, &m);
         Ok((key, t))
     })
@@ -558,22 +608,32 @@ fn attach_vad(transcriber: &mut WhisperCppTranscriber, models: &ModelStoreHandle
     });
 }
 
-/// Picks the model for the live pass: `override_key` (must be downloaded) → `recommended` (if
-/// downloaded) → first downloaded model → download-hint error (no auto-dl; UI prompts).
-fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, String> {
+/// Picks the model for the live pass: `recommended` (if downloaded) → first downloaded model
+/// live-capable on this host's `class` → download-hint error (no auto-dl; UI prompts).
+fn pick_live_model(
+    models: &ModelStore,
+    recommended: &str,
+    class: transcription::GpuClass,
+) -> Result<String, String> {
     if models.whisper_is_present_by_key(recommended) {
         return Ok(recommended.to_string());
     }
-    if let Some(any) = models.whisper_status().into_iter().find(|m| m.downloaded) {
+    if let Some(any) = models
+        .whisper_status()
+        .into_iter()
+        .filter(|m| m.downloaded)
+        .find(|m| transcription::whisper_model(&m.key).is_some_and(|i| i.live_capable_on(class)))
+    {
         log::info!(
             "recommended live model '{recommended}' not downloaded — falling back to '{}'",
             any.key
         );
         return Ok(any.key);
     }
-    Err(format!(
-        "no Whisper model is downloaded — download one (e.g. '{recommended}') first"
-    ))
+    Err(
+        "no downloaded model is live-capable on this hardware — download one in Settings → Meeting transcription"
+            .to_string(),
+    )
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -607,8 +667,6 @@ fn spawn_event_forwarder(
     forwarders: ForwardersHandle,
     id: Uuid,
 ) {
-    // Already-running forwarder: skip — emitting twice would duplicate every
-    // event to the frontend.
     if let Ok(mut set) = forwarders.lock() {
         if !set.insert(id) {
             return;
@@ -654,8 +712,6 @@ async fn forward_events(
     }
 }
 
-// ---- 4) list / get / delete / markdown ------------------------------------
-
 #[tauri::command]
 pub async fn list_transcripts(
     store: tauri::State<'_, TranscriptStoreHandle>,
@@ -679,9 +735,6 @@ pub async fn delete_transcript(
     drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // A live driver writes into the session dir — deleting under it would orphan
-    // an unstoppable capture. The registry lock is held across the delete so a
-    // concurrent start/resume cannot register into the check→delete gap.
     let guard = drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?;
@@ -702,8 +755,6 @@ pub async fn get_transcript_markdown(
     let s = store.get(id).map_err(|e| e.to_string())?;
     Ok(s.to_markdown())
 }
-
-// ---- 5) model management --------------------------------------------------
 
 /// RAII slot in the in-flight download registry: removed on drop, so the
 /// registry empties on every exit path of the owning download task.
@@ -747,10 +798,9 @@ pub struct ModelsAck {
     pub total_bytes_used: u64,
 }
 
-/// The single model Speedwave recommends for this hardware (the only one the UI
-/// offers): `large-v3` on GPU builds, `large-v3-turbo` on CPU-only.
+/// One model the pipeline needs, with its on-disk state.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct RecommendedModelAck {
+pub struct RecommendedModelEntry {
     /// Catalogue key to download.
     pub key: String,
     /// Human-readable model name.
@@ -761,17 +811,39 @@ pub struct RecommendedModelAck {
     pub downloaded: bool,
     /// `true` while a download is in flight (a remounted UI re-syncs on this).
     pub downloading: bool,
+}
+
+/// The models Speedwave needs on this hardware: one for the live pass and, when they differ,
+/// one for the higher-quality offline pass. The UI offers exactly these, with no picker.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecommendedModelAck {
+    /// The live-pass model.
+    pub live: RecommendedModelEntry,
+    /// The offline-pass model, or `None` when the live model serves both passes.
+    pub finalize: Option<RecommendedModelEntry>,
     /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
     pub accel_label: String,
 }
 
-/// Short acceleration label from the compiled backends (a GPU backend wins).
-fn accel_label() -> String {
-    let backends = transcription::compiled_backends();
-    match backends.iter().find(|b| b.is_gpu()) {
-        Some(gpu) => format!("{} (GPU)", gpu.label()),
-        None => "CPU".to_string(),
-    }
+/// Resolves one catalogue model to its UI entry (on-disk state plus any in-flight download).
+/// `status` is a pre-scanned `whisper_status()` list — the Settings UI polls this every 2 s,
+/// so the directory is scanned once per call, not once per entry.
+fn model_entry(
+    info: &transcription::WhisperModelInfo,
+    status: &[ModelStatusEntry],
+    downloads: &DownloadsHandle,
+) -> Result<RecommendedModelEntry, String> {
+    let status = status
+        .iter()
+        .find(|m| m.key == info.key)
+        .ok_or_else(|| format!("model '{}' missing from catalogue", info.key))?;
+    Ok(RecommendedModelEntry {
+        key: info.key.to_string(),
+        display_name: info.display_name.to_string(),
+        size_bytes: status.size_bytes,
+        downloaded: status.downloaded,
+        downloading: is_downloading(downloads, info.key),
+    })
 }
 
 #[tauri::command]
@@ -779,20 +851,26 @@ pub async fn recommended_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
     downloads: tauri::State<'_, DownloadsHandle>,
 ) -> Result<RecommendedModelAck, String> {
-    let best = transcription::best_model_for_this_build();
-    let status = models
-        .whisper_status()
-        .into_iter()
-        .find(|m| m.key == best.key)
-        .ok_or_else(|| format!("recommended model '{}' missing from catalogue", best.key))?;
-    Ok(RecommendedModelAck {
-        key: best.key.to_string(),
-        display_name: best.display_name.to_string(),
-        size_bytes: status.size_bytes,
-        downloaded: status.downloaded,
-        downloading: is_downloading(downloads.inner(), best.key),
-        accel_label: accel_label(),
+    let models = models.inner().clone();
+    let downloads = downloads.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let live_info = transcription::live_model_for_this_build();
+        let finalize_info = transcription::finalize_model_for_this_build();
+        let status = models.whisper_status();
+        let live = model_entry(live_info, &status, &downloads)?;
+        let finalize = if finalize_info.key == live_info.key {
+            None
+        } else {
+            Some(model_entry(finalize_info, &status, &downloads)?)
+        };
+        Ok(RecommendedModelAck {
+            live,
+            finalize,
+            accel_label: transcription::accel_label(),
+        })
     })
+    .await
+    .map_err(|e| format!("recommended-model task panicked: {e}"))?
 }
 
 #[tauri::command]
@@ -815,11 +893,7 @@ pub async fn download_transcription_model(
     let slot = try_begin_download(downloads.inner(), &model_id)?;
     let models = models.inner().clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        // The slot lives inside the blocking task: the registry entry clears
-        // exactly when the download work ends, even if this future is dropped.
         let _slot = slot;
-        // The Silero VAD gate rides along with every model download (~1 MB;
-        // ADR-056 Amendment 8). Non-fatal: recording degrades to signal gates.
         if let Err(e) = models.ensure_vad_model() {
             log::warn!(target: "transcription::models", "VAD model download failed: {e}");
         }
@@ -847,11 +921,58 @@ pub async fn delete_transcription_model(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap freely"
+)]
 mod tests {
     use super::*;
     use speedwave_runtime::transcription::TranscriptSession;
     use std::path::PathBuf;
+
+    #[test]
+    fn capabilities_ack_field_set_matches_ts() {
+        let ack = CapabilitiesAck {
+            capabilities: CaptureCapabilities {
+                supports_system_audio: true,
+                supports_microphone: false,
+                note: None,
+            },
+            gpu_class: transcription::GpuClass::Discrete,
+            accel_label: "Metal (GPU)".to_string(),
+        };
+        let json = serde_json::to_value(&ack).unwrap();
+        let mut rust: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust.sort_unstable();
+        assert_eq!(rust, ["accel_label", "capabilities", "gpu_class"]);
+
+        let src = include_str!("../../src/src/app/models/transcript.ts");
+        let marker = "export interface CapabilitiesAck {";
+        let idx = src
+            .find(marker)
+            .expect("transcript.ts must declare `export interface CapabilitiesAck`");
+        let body = src[idx + marker.len()..]
+            .split('}')
+            .next()
+            .expect("the CapabilitiesAck interface must be closed");
+        let mut ts: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts.sort_unstable();
+        assert_eq!(
+            rust, ts,
+            "TS CapabilitiesAck must mirror the Rust ack fields"
+        );
+    }
 
     fn mk_session_in(store: &TranscriptStore) -> Uuid {
         let s = TranscriptSession::new(
@@ -871,12 +992,9 @@ mod tests {
         let id = Uuid::new_v4();
         let winner = StopSignal::new();
         register_driver(&drivers, id, &winner).unwrap();
-        // A concurrent second attempt for the same session is rejected...
         let err = register_driver(&drivers, id, &StopSignal::new()).unwrap_err();
         assert!(err.contains("already recording"), "got: {err}");
-        // ...and never clobbers the winner's live entry.
         assert!(drivers.lock().unwrap().get(&id).unwrap().same_as(&winner));
-        // A different session registers independently.
         register_driver(&drivers, Uuid::new_v4(), &StopSignal::new()).unwrap();
         assert_eq!(drivers.lock().unwrap().len(), 2);
     }
@@ -887,15 +1005,96 @@ mod tests {
         let id = Uuid::new_v4();
         let winner = StopSignal::new();
         register_driver(&drivers, id, &winner).unwrap();
-        // A stale predecessor's cleanup must not clobber the winner's entry.
         unregister_driver(&drivers, id, &StopSignal::new());
         assert!(drivers.lock().unwrap().contains_key(&id));
-        // Unknown id is a no-op.
         unregister_driver(&drivers, Uuid::new_v4(), &winner);
         assert_eq!(drivers.lock().unwrap().len(), 1);
-        // The owning stop removes its own entry.
         unregister_driver(&drivers, id, &winner);
         assert!(drivers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn is_recording_follows_register_and_unregister() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        assert!(
+            !is_recording(&drivers),
+            "an empty registry is not recording"
+        );
+
+        let first = StopSignal::new();
+        let first_id = Uuid::new_v4();
+        register_driver(&drivers, first_id, &first).unwrap();
+        assert!(is_recording(&drivers));
+
+        let second = StopSignal::new();
+        let second_id = Uuid::new_v4();
+        register_driver(&drivers, second_id, &second).unwrap();
+        unregister_driver(&drivers, first_id, &first);
+        assert!(is_recording(&drivers));
+
+        unregister_driver(&drivers, second_id, &second);
+        assert!(!is_recording(&drivers));
+    }
+
+    #[test]
+    fn is_recording_reads_through_a_poisoned_lock() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let poisoner = drivers.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = poisoner.lock().unwrap();
+            panic!("poison the drivers lock");
+        })
+        .join();
+        assert!(drivers.is_poisoned());
+        assert!(!is_recording(&drivers));
+    }
+
+    #[test]
+    fn every_registry_mutation_repaints_the_tray() {
+        let source = include_str!("transcription_cmd.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module must exist")];
+
+        for (raw, wrapper) in [
+            ("register_driver", "register_driver_and_repaint_tray"),
+            ("unregister_driver", "unregister_driver_and_repaint_tray"),
+        ] {
+            let body = fn_body(production, wrapper);
+            assert!(
+                body.contains("refresh_tray_icon"),
+                "{wrapper} must repaint the tray"
+            );
+            assert!(
+                body.contains(&format!("{raw}(")),
+                "{wrapper} must delegate to {raw}"
+            );
+            assert_eq!(
+                count_calls(production, raw),
+                2,
+                "`{raw}` must appear only at its definition and inside {wrapper}; a direct \
+                 call elsewhere leaves the tray disagreeing with the registry"
+            );
+        }
+    }
+
+    fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        let rest = &source[start..];
+        &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
+    }
+
+    fn count_calls(source: &str, name: &str) -> usize {
+        let needle = format!("{name}(");
+        source
+            .match_indices(&needle)
+            .filter(|(idx, _)| {
+                source[..*idx]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            })
+            .count()
     }
 
     #[test]
@@ -927,12 +1126,12 @@ mod tests {
         buf.extend_from_slice(&(36 + data_len).to_le_bytes());
         buf.extend_from_slice(b"WAVEfmt ");
         buf.extend_from_slice(&16u32.to_le_bytes());
-        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
         buf.extend_from_slice(&sample_rate.to_le_bytes());
-        buf.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-        buf.extend_from_slice(&2u16.to_le_bytes()); // block align
-        buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        buf.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&16u16.to_le_bytes());
         buf.extend_from_slice(b"data");
         buf.extend_from_slice(&data_len.to_le_bytes());
         buf.resize(44 + data_len as usize, 0);
@@ -948,7 +1147,6 @@ mod tests {
         write_test_wav(&b, 2);
         let total = resume_time_base(&[a, b]).unwrap();
         assert_eq!(total, std::time::Duration::from_secs(3));
-        // No prior parts → zero base.
         assert_eq!(resume_time_base(&[]).unwrap(), std::time::Duration::ZERO);
     }
 
@@ -957,12 +1155,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("audio.wav");
         write_test_wav(&good, 1);
-        // Missing part file.
         let missing = dir.path().join("audio-2.wav");
         let err = resume_time_base(&[good.clone(), missing.clone()]).unwrap_err();
         assert!(err.contains(&missing.display().to_string()), "got: {err}");
         assert!(err.contains("resum"), "actionable wording expected: {err}");
-        // Corrupt part file.
         let corrupt = dir.path().join("audio-3.wav");
         std::fs::write(&corrupt, b"not a wav").unwrap();
         let err = resume_time_base(&[good, corrupt.clone()]).unwrap_err();
@@ -996,10 +1192,8 @@ mod tests {
     fn offline_pass_parts_fails_loud_when_the_session_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
-        // Unknown session.
         let err = offline_pass_parts(&store, Uuid::new_v4()).unwrap_err();
         assert!(err.contains("offline pass"), "got: {err}");
-        // Corrupt session json must not degrade to a partial part list.
         let bad = Uuid::new_v4();
         std::fs::create_dir_all(store.session_dir(bad)).unwrap();
         std::fs::write(store.session_dir(bad).join("transcript.json"), b"{ broken").unwrap();
@@ -1020,8 +1214,9 @@ mod tests {
         let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
         let stop = StopSignal::new();
         register_driver(&drivers, id, &stop).unwrap();
-        store.resume(id, next_part.clone()).unwrap();
-        // Capture failed → the command unregisters and rolls back.
+        store
+            .resume(id, next_part.clone(), Some("small".to_string()))
+            .unwrap();
         unregister_driver(&drivers, id, &stop);
         store.rollback_resume(id, &next_part).unwrap();
 
@@ -1029,9 +1224,8 @@ mod tests {
         assert!(matches!(snap.status, TranscriptStatus::Done));
         assert!(snap.audio_parts.is_empty(), "phantom part must be dropped");
         assert!(drivers.lock().unwrap().is_empty());
-        // A later resume succeeds: the transient failure did not strand the session.
         register_driver(&drivers, id, &StopSignal::new()).unwrap();
-        store.resume(id, next_part).unwrap();
+        store.resume(id, next_part, None).unwrap();
         assert!(matches!(
             store.get(id).unwrap().status,
             TranscriptStatus::Recording
@@ -1043,7 +1237,7 @@ mod tests {
         assert!(parse_transcript_id("nope").is_err());
         assert!(parse_transcript_id("../escape").is_err());
         assert!(parse_transcript_id("").is_err());
-        assert!(parse_transcript_id("550E8400-E29B-41D4-A716-446655440000").is_err()); // uppercase rejected
+        assert!(parse_transcript_id("550E8400-E29B-41D4-A716-446655440000").is_err());
         assert!(parse_transcript_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
     }
 
@@ -1063,34 +1257,29 @@ mod tests {
     }
 
     #[test]
-    fn accel_label_matches_the_compiled_backend_tier() {
-        let label = accel_label();
-        let expected = if transcription::has_gpu_backend() {
-            "(GPU)"
-        } else {
-            "CPU"
-        };
-        assert!(
-            label.contains(expected),
-            "label '{label}' should reflect the build's backend"
-        );
+    fn both_recommended_models_resolve_in_the_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        for info in [
+            transcription::live_model_for_this_build(),
+            transcription::finalize_model_for_this_build(),
+        ] {
+            let found = store
+                .whisper_status()
+                .into_iter()
+                .find(|m| m.key == info.key);
+            assert!(found.is_some(), "model '{}' missing", info.key);
+            assert!(
+                !found.unwrap().downloaded,
+                "nothing downloaded in a tmp dir"
+            );
+        }
     }
 
     #[test]
-    fn recommended_model_status_is_present_in_the_catalogue() {
-        // The recommended key must resolve to a whisper_status entry — the same
-        // lookup the command does, minus the Tauri State wrapper.
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::with_root(dir.path());
-        let best = transcription::best_model_for_this_build();
-        let found = store
-            .whisper_status()
-            .into_iter()
-            .find(|m| m.key == best.key);
-        assert!(found.is_some(), "best model '{}' missing", best.key);
+    fn the_live_pass_never_asks_for_the_offline_only_model() {
         assert!(
-            !found.unwrap().downloaded,
-            "nothing downloaded in a tmp dir"
+            transcription::live_model_for_this_build().live_capable_on(transcription::gpu_class())
         );
     }
 
@@ -1101,10 +1290,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = mk_session_in(&store);
-        // get / list reflect a freshly created session.
         assert_eq!(store.get(id).unwrap().id, id);
         assert_eq!(store.list().len(), 1);
-        // Append a segment so the markdown body renders.
         store
             .append_segment(
                 id,
@@ -1117,11 +1304,9 @@ mod tests {
                 },
             )
             .unwrap();
-        // markdown renders the segment text + footer (no speaker labels).
         let md = store.get(id).unwrap().to_markdown();
         assert!(md.contains("hi"), "expected text in markdown, got:\n{md}");
         assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
-        // delete removes it.
         store.delete(id).unwrap();
         assert!(store.list().is_empty());
     }
@@ -1130,9 +1315,8 @@ mod tests {
     fn session_language_reads_the_session_or_defaults_to_pl() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
-        let id = mk_session_in(&store); // created with Language::Pl
+        let id = mk_session_in(&store);
         assert_eq!(session_language(&store, id), Language::Pl);
-        // Unknown id → default.
         let missing = Uuid::new_v4();
         assert_eq!(session_language(&store, missing), Language::Pl);
     }
@@ -1142,10 +1326,8 @@ mod tests {
         let downloads = DownloadsHandle::default();
         let slot = try_begin_download(&downloads, "large-v3").unwrap();
         assert!(is_downloading(&downloads, "large-v3"));
-        // Second concurrent claim of the same key is refused with the reason.
         let err = try_begin_download(&downloads, "large-v3").err().unwrap();
         assert!(err.contains("already downloading"), "got: {err}");
-        // A different key is independent.
         let other = try_begin_download(&downloads, "large-v3-turbo").unwrap();
         drop(other);
         drop(slot);
@@ -1159,7 +1341,6 @@ mod tests {
             assert!(is_downloading(&downloads, "large-v3"));
         }
         assert!(!is_downloading(&downloads, "large-v3"));
-        // The key is claimable again after the slot dropped.
         assert!(try_begin_download(&downloads, "large-v3").is_ok());
     }
 
@@ -1172,26 +1353,87 @@ mod tests {
     }
 
     #[test]
-    fn pick_offline_model_prefers_large_v3_then_any_downloaded() {
+    fn pick_offline_model_prefers_the_builds_finalize_model_then_any_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        // Nothing downloaded → None.
         assert_eq!(pick_offline_model(&store), None);
+        plant_model(dir.path(), "tiny");
+        assert_eq!(pick_offline_model(&store).as_deref(), Some("tiny"));
+        let best = speedwave_runtime::transcription::finalize_model_for_this_build().key;
+        plant_model(dir.path(), best);
+        assert_eq!(pick_offline_model(&store).as_deref(), Some(best));
+    }
+
+    #[tokio::test]
+    async fn record_only_start_gate_requires_some_downloaded_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: ModelStoreHandle = Arc::new(ModelStore::with_root(dir.path()));
+        let e = match prepare_live_transcriber(false, &store).await {
+            Ok(_) => panic!("expected the record-only gate to fail without a model"),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("no Whisper model") && e.contains("Settings"),
+            "got: {e}"
+        );
+        plant_model(dir.path(), "tiny");
+        assert!(prepare_live_transcriber(false, &store)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn pick_live_model_errors_with_a_download_hint_when_nothing_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        // No model on disk: errors naming the recommended one, with guidance.
-        let e = pick_live_model(&store, "large-v3-turbo").unwrap_err();
-        assert!(e.contains("download") && e.contains("large-v3-turbo"));
+        let e = pick_live_model(
+            &store,
+            "large-v3-turbo",
+            speedwave_runtime::transcription::GpuClass::Discrete,
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("live-capable") && e.contains("Settings"),
+            "got: {e}"
+        );
+        assert!(!e.contains("large-v3-turbo"));
+    }
+
+    /// Plants a catalogue model as "downloaded" (a sparse file of the expected size —
+    /// presence checks are size-window based, the SHA runs only at download time).
+    fn plant_model(root: &std::path::Path, key: &str) {
+        let info = speedwave_runtime::transcription::whisper_model(key).unwrap();
+        let dir = root.join("whisper");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = std::fs::File::create(dir.join(info.file)).unwrap();
+        f.set_len(info.approx_bytes).unwrap();
+    }
+
+    #[test]
+    fn pick_live_model_falls_back_only_to_models_live_capable_on_the_host_class() {
+        use speedwave_runtime::transcription::GpuClass;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        plant_model(dir.path(), "large-v3");
+        let e = pick_live_model(&store, "large-v3-turbo", GpuClass::Discrete).unwrap_err();
+        assert!(e.contains("live-capable"), "got: {e}");
+        plant_model(dir.path(), "large-v3-turbo-q5_0");
+        let e = pick_live_model(&store, "small", GpuClass::None).unwrap_err();
+        assert!(e.contains("live-capable"), "got: {e}");
+        plant_model(dir.path(), "small");
+        assert_eq!(
+            pick_live_model(&store, "large-v3-turbo", GpuClass::Discrete).unwrap(),
+            "small"
+        );
+        assert_eq!(
+            pick_live_model(&store, "medium", GpuClass::None).unwrap(),
+            "small"
+        );
     }
 
     #[test]
     fn source_label_falls_back_when_no_match() {
-        // FileAudioCapture's enumerate_sources lists only the bound file (or
-        // nothing) — so a SystemWide source has no match and we fall back.
         let cap = speedwave_runtime::transcription::FileAudioCapture::new();
         assert_eq!(
             source_label(
@@ -1227,13 +1469,11 @@ mod tests {
             supports_microphone: true,
             note: None,
         };
-        // SystemWide, a bare Microphone, and a Mixed are fine on a full host.
         assert!(validate_source_against_caps(&AudioSource::SystemWide, &full).is_ok());
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &full).is_ok()
         );
         assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &full).is_ok());
-        // A Mixed (or bare mic) is rejected on a host with no microphone.
         let no_mic = CaptureCapabilities {
             supports_system_audio: true,
             supports_microphone: false,
@@ -1244,7 +1484,6 @@ mod tests {
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_mic)
                 .is_err()
         );
-        // SystemWide and Mixed are rejected on a host with no system audio.
         let no_sys = CaptureCapabilities {
             supports_system_audio: false,
             supports_microphone: true,
@@ -1252,10 +1491,21 @@ mod tests {
         };
         assert!(validate_source_against_caps(&AudioSource::SystemWide, &no_sys).is_err());
         assert!(validate_source_against_caps(&AudioSource::Mixed { mic: None }, &no_sys).is_err());
-        // A bare Microphone is still fine without system audio.
         assert!(
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_sys)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn start_params_live_defaults_on_for_older_frontends() {
+        let old: StartParams =
+            serde_json::from_str(r#"{"source":{"kind":"system_wide"},"language":"pl"}"#).unwrap();
+        assert!(old.live);
+        let off: StartParams = serde_json::from_str(
+            r#"{"source":{"kind":"system_wide"},"language":"pl","live":false}"#,
+        )
+        .unwrap();
+        assert!(!off.live);
     }
 }

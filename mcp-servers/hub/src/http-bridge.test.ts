@@ -29,8 +29,6 @@ import {
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 import * as authTokens from './auth-tokens.js';
 
-// ── Tests for HTTP Bridge (method delegation to workers, auth, session handling, errors) ──────
-
 describe('http-bridge', () => {
   beforeAll(() => {
     _resetRegistryForTesting();
@@ -67,7 +65,6 @@ describe('http-bridge', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {
-      // Mock global fetch
       fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
     });
@@ -161,7 +158,6 @@ describe('http-bridge', () => {
     });
 
     it('should handle timeout', async () => {
-      // Mock fetch to listen to abort signal (like real fetch does with AbortSignal.timeout())
       fetchMock.mockImplementation((_url: string, options?: { signal?: AbortSignal }) => {
         return new Promise((_, reject) => {
           if (options?.signal) {
@@ -187,10 +183,7 @@ describe('http-bridge', () => {
     });
 
     it('should use default 120000ms (2 min) when WORKER_REQUEST_TIMEOUT env not set', () => {
-      // Note: This test assumes env var is not set during test run
-      // If env var is set, the test verifies the getter works correctly
       const timeout = getRequestTimeout();
-      // Default is 120000ms unless overridden by env var
       if (!process.env.WORKER_REQUEST_TIMEOUT) {
         expect(timeout).toBe(120000);
       } else {
@@ -202,7 +195,6 @@ describe('http-bridge', () => {
       const fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
 
-      // Mock fetch to listen to abort signal (AbortSignal.timeout() throws TimeoutError)
       fetchMock.mockImplementation((_url: string, options?: { signal?: AbortSignal }) => {
         return new Promise((_, reject) => {
           if (options?.signal) {
@@ -214,7 +206,6 @@ describe('http-bridge', () => {
         });
       });
 
-      // Use very short custom timeout (50ms)
       const customTimeout = 50;
       await expect(callWorker('gitlab', 'test', {}, { timeoutMs: customTimeout })).rejects.toThrow(
         `timeout after ${customTimeout}ms`
@@ -247,14 +238,12 @@ describe('http-bridge', () => {
       const result = await isWorkerAvailable('gitlab');
 
       expect(result).toBe(true);
-      // First call is the MCP ping POST (no /health path)
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const callUrl = fetchMock.mock.calls[0][0] as string;
       expect(callUrl).not.toContain('/health');
     });
 
     it('should return true via /health fallback when ping fails', async () => {
-      // Ping fails (e.g. network error), /health succeeds
       let callCount = 0;
       fetchMock.mockImplementation(() => {
         callCount++;
@@ -312,7 +301,7 @@ describe('http-bridge', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       await isWorkerAvailable('sharepoint');
-      expect(fetchMock).toHaveBeenCalledTimes(1); // Still 1, used cache
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -339,7 +328,6 @@ describe('http-bridge', () => {
     });
 
     it('should return list of available services', async () => {
-      // Mock ping success for all services
       fetchMock.mockResolvedValue({
         ok: true,
         headers: new Headers({ 'content-type': 'application/json' }),
@@ -356,7 +344,6 @@ describe('http-bridge', () => {
 
     it('should filter out unavailable services', async () => {
       fetchMock.mockImplementation((url: string) => {
-        // Ping requests (POST without /health)
         if (!url.includes('/health')) {
           if (url.includes('gitlab') || url.includes('slack')) {
             return Promise.resolve({
@@ -365,10 +352,8 @@ describe('http-bridge', () => {
               json: async () => ({ jsonrpc: '2.0', id: '1', result: {} }),
             });
           }
-          // Ping fails for others
           return Promise.reject(new Error('Connection refused'));
         }
-        // /health fallback also fails
         return Promise.resolve({ ok: false });
       });
 
@@ -390,7 +375,6 @@ describe('http-bridge', () => {
       global.fetch = fetchMock as unknown as typeof fetch;
       bridge = createGitLabBridge();
 
-      // Default mock response
       fetchMock.mockResolvedValue({
         ok: true,
         headers: new Headers({ 'content-type': 'application/json' }),
@@ -411,10 +395,8 @@ describe('http-bridge', () => {
     it('should define all GitLab methods from registry', () => {
       const expectedMethods = getServiceMethods('gitlab');
 
-      // Bridge should have exactly the methods defined in registry
       expect(Object.keys(bridge).sort()).toEqual(expectedMethods.sort());
 
-      // Each method should be a function
       expectedMethods.forEach((method) => {
         expect(bridge).toHaveProperty(method);
         expect(typeof bridge[method as keyof typeof bridge]).toBe('function');
@@ -649,10 +631,8 @@ describe('http-bridge', () => {
       const bridge = createRedmineBridge();
       const expectedMethods = getServiceMethods('redmine');
 
-      // Bridge should have exactly the methods defined in registry
       expect(Object.keys(bridge).sort()).toEqual(expectedMethods.sort());
 
-      // Each method should be a function
       expectedMethods.forEach((method) => {
         expect(bridge).toHaveProperty(method);
         expect(typeof bridge[method as keyof typeof bridge]).toBe('function');
@@ -661,7 +641,6 @@ describe('http-bridge', () => {
 
     it('should include essential issue methods', () => {
       const bridge = createRedmineBridge();
-      // Core methods that must always exist
       expect(bridge).toHaveProperty('listIssueIds');
       expect(bridge).toHaveProperty('getIssueFull');
       expect(bridge).toHaveProperty('createIssue');
@@ -670,7 +649,6 @@ describe('http-bridge', () => {
 
     it('should include relation methods (regression test)', () => {
       const bridge = createRedmineBridge();
-      // These were missing before SSOT refactor
       expect(bridge).toHaveProperty('listRelations');
       expect(bridge).toHaveProperty('createRelation');
       expect(bridge).toHaveProperty('deleteRelation');
@@ -678,19 +656,18 @@ describe('http-bridge', () => {
   });
 
   describe('createOsBridge', () => {
-    it('should define all 25 OS methods', () => {
+    it('should define all 26 OS methods', () => {
       const bridge = createOsBridge();
 
-      expect(Object.keys(bridge).length).toBe(25);
+      expect(Object.keys(bridge).length).toBe(26);
 
-      // Reminders
       expect(bridge).toHaveProperty('listReminderLists');
       expect(bridge).toHaveProperty('listReminders');
       expect(bridge).toHaveProperty('getReminder');
       expect(bridge).toHaveProperty('createReminder');
+      expect(bridge).toHaveProperty('updateReminder');
       expect(bridge).toHaveProperty('completeReminder');
 
-      // Calendar
       expect(bridge).toHaveProperty('listCalendars');
       expect(bridge).toHaveProperty('listEvents');
       expect(bridge).toHaveProperty('getEvent');
@@ -698,7 +675,6 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('updateEvent');
       expect(bridge).toHaveProperty('deleteEvent');
 
-      // Mail
       expect(bridge).toHaveProperty('detectMailClients');
       expect(bridge).toHaveProperty('listMailboxes');
       expect(bridge).toHaveProperty('listEmails');
@@ -707,7 +683,6 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('sendEmail');
       expect(bridge).toHaveProperty('replyToEmail');
 
-      // Notes
       expect(bridge).toHaveProperty('listNoteFolders');
       expect(bridge).toHaveProperty('listNotes');
       expect(bridge).toHaveProperty('getNote');
@@ -720,7 +695,6 @@ describe('http-bridge', () => {
 
   describe('plugin service bridge', () => {
     it('should create bridge for plugin service when registered', () => {
-      // Manually register a plugin service in the registry for testing
       const mutableRegistry = TOOL_REGISTRY as Record<
         string,
         Record<string, Record<string, unknown>>
@@ -744,7 +718,6 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('searchCustomers');
       expect(typeof bridge.searchCustomers).toBe('function');
 
-      // Cleanup
       delete mutableRegistry['example-plugin'];
       delete process.env.WORKER_EXAMPLE_PLUGIN_URL;
     });
@@ -752,7 +725,6 @@ describe('http-bridge', () => {
     it('should create bridge for plugin service from ENABLED_SERVICES via initializeAllBridges', async () => {
       vi.useFakeTimers();
 
-      // Register a plugin service in the registry
       const mutableRegistry = TOOL_REGISTRY as Record<
         string,
         Record<string, Record<string, unknown>>
@@ -769,32 +741,26 @@ describe('http-bridge', () => {
         },
       };
 
-      // Set ENABLED_SERVICES to include the plugin service
       const origEnabled = process.env.ENABLED_SERVICES;
       process.env.ENABLED_SERVICES = 'gitlab,analytics';
       process.env.WORKER_ANALYTICS_URL = 'http://mcp-analytics:4020';
 
-      // Reset enabled services cache so new env value is picked up
       const { resetServiceCaches } = await import('./tool-registry.js');
       resetServiceCaches();
 
-      // Mock fetch for health checks — always fail (both ping and /health)
       const fetchMock = vi.fn().mockRejectedValue(new Error('Connection refused'));
       global.fetch = fetchMock as unknown as typeof fetch;
 
-      // Run initializeAllBridges with fake timers to skip retry delays
       const bridgesPromise = initializeAllBridges();
       for (let i = 0; i < STARTUP_HEALTH_RETRIES; i++) {
         await vi.advanceTimersByTimeAsync(STARTUP_RETRY_DELAYS_MS[i]);
       }
       const bridges = await bridgesPromise;
 
-      // Plugin service should have a bridge (not null)
       expect(bridges['analytics']).not.toBeNull();
       expect(bridges['analytics']).toHaveProperty('runReport');
       expect(typeof bridges['analytics']!.runReport).toBe('function');
 
-      // Cleanup
       delete mutableRegistry['analytics'];
       delete process.env.WORKER_ANALYTICS_URL;
       if (origEnabled === undefined) {
@@ -808,8 +774,6 @@ describe('http-bridge', () => {
     });
 
     it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', () => {
-      // Plugin slug `my-cool-plugin` must look up `WORKER_MY_COOL_PLUGIN_URL` (the form
-      // compose injects), not `WORKER_MY-COOL-PLUGIN_URL` — not a valid POSIX env name.
       const mutableRegistry = TOOL_REGISTRY as Record<
         string,
         Record<string, Record<string, unknown>>
@@ -833,15 +797,11 @@ describe('http-bridge', () => {
       expect(bridge).toHaveProperty('doThing');
       expect(typeof bridge.doThing).toBe('function');
 
-      // Negative: the unnormalized env name must NOT be the lookup path
       delete process.env.WORKER_MY_COOL_PLUGIN_URL;
       process.env['WORKER_MY-COOL-PLUGIN_URL'] = 'http://wrong:4030';
       const bridge2 = buildServiceBridge('my-cool-plugin', callWorker);
-      // Bridge object always exists; the URL check happens at call time, so
-      // we assert via the public `isWorkerAvailable` path instead.
       expect(bridge2).toHaveProperty('doThing');
 
-      // Cleanup
       delete mutableRegistry['my-cool-plugin'];
       delete process.env['WORKER_MY-COOL-PLUGIN_URL'];
     });
@@ -925,8 +885,6 @@ describe('http-bridge', () => {
         }),
       });
 
-      // Content item with type 'text' but no text field: textItems filter
-      // excludes it (text === undefined), producing an empty joined string.
       const result = await callWorker('slack', 'test', {});
       expect(result).toBe('');
     });
@@ -1102,7 +1060,6 @@ describe('http-bridge', () => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
-        // 1st call: tools/call → 400 not initialized
         if (callCount === 1) {
           return Promise.resolve({
             ok: false,
@@ -1111,7 +1068,6 @@ describe('http-bridge', () => {
             text: async () => 'Bad Request: Server not initialized',
           });
         }
-        // 2nd call: initialize → success with session id
         if (callCount === 2 && body.method === 'initialize') {
           return Promise.resolve({
             ok: true,
@@ -1141,7 +1097,6 @@ describe('http-bridge', () => {
               }),
           });
         }
-        // 3rd call: notifications/initialized → 202
         if (callCount === 3 && body.method === 'notifications/initialized') {
           return Promise.resolve({
             ok: true,
@@ -1150,7 +1105,6 @@ describe('http-bridge', () => {
             text: async () => '',
           });
         }
-        // 4th call: retry tools/call with session → success
         if (callCount === 4) {
           return Promise.resolve({
             ok: true,
@@ -1170,19 +1124,16 @@ describe('http-bridge', () => {
       expect(result).toEqual({ navigated: true });
       expect(callCount).toBe(4);
 
-      // Verify session header was sent on retry
       const retryHeaders = fetchMock.mock.calls[3][1].headers;
       expect(retryHeaders['Mcp-Session-Id']).toBe('sess-123');
     });
 
     it('uses cached session on subsequent calls', async () => {
-      // Pre-populate session cache by doing a full init flow
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
-        // 1st call: tools/call → 400
         if (callCount === 1) {
           return Promise.resolve({
             ok: false,
@@ -1191,7 +1142,6 @@ describe('http-bridge', () => {
             text: async () => 'Server not initialized',
           });
         }
-        // 2nd: initialize
         if (callCount === 2) {
           return Promise.resolve({
             ok: true,
@@ -1212,7 +1162,6 @@ describe('http-bridge', () => {
             text: async () => '{}',
           });
         }
-        // 3rd: notification
         if (callCount === 3) {
           return Promise.resolve({
             ok: true,
@@ -1221,7 +1170,6 @@ describe('http-bridge', () => {
             text: async () => '',
           });
         }
-        // 4th+: tools/call with cached session — success
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -1234,11 +1182,9 @@ describe('http-bridge', () => {
         });
       });
 
-      // First call triggers init
       await callWorker('gitlab', 'test_tool', {});
       expect(callCount).toBe(4);
 
-      // Second call should use cached session — only 1 fetch (tools/call directly)
       await callWorker('gitlab', 'test_tool', {});
       expect(callCount).toBe(5);
       const secondCallHeaders = fetchMock.mock.calls[4][1].headers;
@@ -1251,7 +1197,6 @@ describe('http-bridge', () => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
-        // 1st: tools/call → 404 (expired session)
         if (callCount === 1) {
           return Promise.resolve({
             ok: false,
@@ -1260,7 +1205,6 @@ describe('http-bridge', () => {
             text: async () => 'Not Found',
           });
         }
-        // 2nd: initialize
         if (callCount === 2) {
           return Promise.resolve({
             ok: true,
@@ -1281,7 +1225,6 @@ describe('http-bridge', () => {
             text: async () => '{}',
           });
         }
-        // 3rd: notification
         if (callCount === 3) {
           return Promise.resolve({
             ok: true,
@@ -1290,7 +1233,6 @@ describe('http-bridge', () => {
             text: async () => '',
           });
         }
-        // 4th: retry tools/call
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -1463,7 +1405,6 @@ describe('http-bridge', () => {
 
       await isWorkerAvailable('gitlab');
 
-      // First call is the MCP ping POST
       expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
     });
   });
@@ -1591,7 +1532,6 @@ describe('http-bridge', () => {
       fetchMock = vi.fn();
       global.fetch = fetchMock as unknown as typeof fetch;
 
-      // Enable only gitlab for simpler test setup
       origEnabled = process.env.ENABLED_SERVICES;
       process.env.ENABLED_SERVICES = 'gitlab';
       process.env.WORKER_GITLAB_URL = 'http://mcp-gitlab:3004';
@@ -1613,14 +1553,10 @@ describe('http-bridge', () => {
     });
 
     it('retries startup health checks with backoff when worker is not ready', async () => {
-      // All fetches fail (ping + /health, 2 calls each) until the 4th attempt's ping
-      // succeeds (1 call): 4 attempts total, 3 failed * 2 + 1 success * 1 = 7 calls.
       let callCount = 0;
       fetchMock.mockImplementation(() => {
         callCount++;
-        // First 6 calls fail (3 attempts * 2 calls each for ping+health)
         if (callCount <= 6) return Promise.reject(new Error('Connection refused'));
-        // 7th call (4th attempt's ping) succeeds
         return Promise.resolve({
           ok: true,
           headers: new Headers({ 'content-type': 'application/json' }),
@@ -1634,12 +1570,10 @@ describe('http-bridge', () => {
       }
       await bridgesPromise;
 
-      // 3 failed attempts (2 calls each: ping + /health) + 1 success (1 call: ping)
       expect(fetchMock.mock.calls.length).toBe(7);
     });
 
     it('succeeds on first attempt without retrying', async () => {
-      // Ping succeeds on first try
       fetchMock.mockResolvedValue({
         ok: true,
         headers: new Headers({ 'content-type': 'application/json' }),
@@ -1650,16 +1584,13 @@ describe('http-bridge', () => {
       await vi.advanceTimersByTimeAsync(0);
       await bridgesPromise;
 
-      // Checked exactly once via MCP ping — no retries needed
       expect(fetchMock.mock.calls.length).toBe(1);
-      // First call is ping POST, not /health
       expect(fetchMock.mock.calls[0][0]).not.toContain('/health');
     });
 
     it('logs at info level (not warn) during startup retries', async () => {
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      // All health check attempts fail (both ping and /health)
       fetchMock.mockRejectedValue(new Error('Connection refused'));
 
       const bridgesPromise = initializeAllBridges();
@@ -1668,13 +1599,11 @@ describe('http-bridge', () => {
       }
       await bridgesPromise;
 
-      // Retry messages should be logged at info level (console.log)
       const retryLogs = consoleSpy.mock.calls
         .map((c) => c.join(' '))
         .filter((msg) => msg.includes('not ready, retrying'));
       expect(retryLogs.length).toBeGreaterThan(0);
 
-      // No warn-level logs for startup health checks
       const startupWarns = warnSpy.mock.calls
         .map((c) => c.join(' '))
         .filter((msg) => msg.includes('Worker health check failed'));
@@ -1685,8 +1614,6 @@ describe('http-bridge', () => {
     });
 
     it('STARTUP_RETRY_DELAYS_MS has an entry for each retry index', () => {
-      // If STARTUP_HEALTH_RETRIES is bumped, STARTUP_RETRY_DELAYS_MS must grow too; the
-      // nullish fallback (?? 4_000) in checkWorkerHealthAtStartup handles drift regardless.
       expect(STARTUP_RETRY_DELAYS_MS.length).toBeGreaterThanOrEqual(STARTUP_HEALTH_RETRIES);
     });
 
@@ -1703,7 +1630,6 @@ describe('http-bridge', () => {
 
       const callsBefore = fetchMock.mock.calls.length;
 
-      // Subsequent isWorkerAvailable should use cache (no new fetch)
       const available = await isWorkerAvailable('gitlab');
       expect(available).toBe(true);
       expect(fetchMock.mock.calls.length).toBe(callsBefore);
@@ -1885,7 +1811,6 @@ describe('http-bridge', () => {
       const result = await isWorkerAvailable('gitlab');
       expect(result).toBe(true);
 
-      // Only 1 call — ping succeeded, no /health fallback needed
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body.method).toBe('ping');
@@ -1920,10 +1845,8 @@ describe('http-bridge', () => {
       fetchMock.mockImplementation(() => {
         callCount++;
         if (callCount === 1) {
-          // Ping fails
           return Promise.reject(new Error('Connection error'));
         }
-        // /health succeeds
         return Promise.resolve({ ok: true });
       });
 
@@ -1941,7 +1864,6 @@ describe('http-bridge', () => {
       const result = await isWorkerAvailable('gitlab');
       expect(result).toBe(false);
 
-      // 2 calls: ping attempt + /health attempt
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
@@ -1950,7 +1872,6 @@ describe('http-bridge', () => {
       fetchMock.mockImplementation(() => {
         callCount++;
         if (callCount === 1) {
-          // Ping returns error response
           return Promise.resolve({
             ok: true,
             headers: new Headers({ 'content-type': 'application/json' }),
@@ -1961,7 +1882,6 @@ describe('http-bridge', () => {
             }),
           });
         }
-        // /health succeeds
         return Promise.resolve({ ok: true });
       });
 
@@ -1976,7 +1896,6 @@ describe('http-bridge', () => {
         callCount++;
         const body = options.body ? JSON.parse(options.body) : {};
 
-        // 1st call: ping → "not initialized" error
         if (callCount === 1 && body.method === 'ping') {
           return Promise.resolve({
             ok: true,
@@ -1989,7 +1908,6 @@ describe('http-bridge', () => {
             }),
           });
         }
-        // 2nd call: initialize → success
         if (callCount === 2 && body.method === 'initialize') {
           return Promise.resolve({
             ok: true,
@@ -2019,7 +1937,6 @@ describe('http-bridge', () => {
               }),
           });
         }
-        // 3rd call: notifications/initialized → 202
         if (callCount === 3 && body.method === 'notifications/initialized') {
           return Promise.resolve({
             ok: true,
@@ -2028,7 +1945,6 @@ describe('http-bridge', () => {
             text: async () => '',
           });
         }
-        // 4th call: ping with session → success
         if (callCount === 4 && body.method === 'ping') {
           return Promise.resolve({
             ok: true,
@@ -2065,7 +1981,6 @@ describe('http-bridge', () => {
     });
 
     it('classifies ENOTFOUND errors (DNS_ERROR) from ping failures', async () => {
-      // DNS error classification from ping failure
       const dnsError = Object.assign(new Error('getaddrinfo ENOTFOUND mcp-slack'), {
         code: 'ENOTFOUND',
       });
@@ -2075,7 +1990,6 @@ describe('http-bridge', () => {
       const result = await isWorkerAvailable('slack');
 
       expect(result).toBe(false);
-      // classifyHealthError returned DNS_ERROR which is logged inside postPing's catch
       const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
       expect(warnCalls.some((m) => m.includes('DNS_ERROR'))).toBe(true);
       warnSpy.mockRestore();
@@ -2097,7 +2011,6 @@ describe('http-bridge', () => {
     });
 
     it('returns error code as-is for unknown error codes', async () => {
-      // Unknown error code returned as-is
       const customError = Object.assign(new Error('custom error'), { code: 'ECUSTOM' });
       fetchMock.mockRejectedValue(customError);
 
@@ -2127,15 +2040,12 @@ describe('http-bridge', () => {
     });
 
     it('returns null when notifications/initialized is rejected (!ok response)', async () => {
-      // Exercised via callWorker's 400 session-recovery flow: tools/call -> 400 "not
-      // initialized" -> initialize succeeds -> notifications/initialized -> 500 -> null.
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
         if (callCount === 1) {
-          // tools/call → 400 not initialized
           return Promise.resolve({
             ok: false,
             status: 400,
@@ -2144,7 +2054,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 2 && body.method === 'initialize') {
-          // initialize → success
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -2174,7 +2083,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 3 && body.method === 'notifications/initialized') {
-          // notifications/initialized → 500 (not ok) → performMcpInitialize returns null
           return Promise.resolve({
             ok: false,
             status: 500,
@@ -2191,7 +2099,6 @@ describe('http-bridge', () => {
         'Worker gitlab: initialize handshake failed'
       );
 
-      // Line 290-293: console.error was called about notifications/initialized rejection
       const errorCalls = errorSpy.mock.calls.map((c) => c.join(' '));
       expect(errorCalls.some((m) => m.includes('notifications/initialized rejected'))).toBe(true);
 
@@ -2199,14 +2106,12 @@ describe('http-bridge', () => {
     });
 
     it('returns null when initialize fetch throws (network error during handshake)', async () => {
-      // Same flow as above but step 2 (initialize) throws instead of returning !ok
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
         if (callCount === 1) {
-          // tools/call → 400 not initialized
           return Promise.resolve({
             ok: false,
             status: 400,
@@ -2215,7 +2120,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 2 && body.method === 'initialize') {
-          // initialize → network error (performMcpInitialize catch block lines 298-302)
           return Promise.reject(new Error('network error during initialize'));
         }
         return Promise.reject(new Error(`Unexpected call #${callCount}: ${body.method}`));
@@ -2227,7 +2131,6 @@ describe('http-bridge', () => {
         'Worker gitlab: initialize handshake failed'
       );
 
-      // Line 299-301: console.warn was called about the handshake failure
       const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
       expect(warnCalls.some((m) => m.includes('initialize handshake failed'))).toBe(true);
 
@@ -2250,8 +2153,6 @@ describe('http-bridge', () => {
     });
 
     it('throws when 400 response body does not match session-issue patterns (line 724)', async () => {
-      // A 400 response whose body does NOT contain "not initialized" or session keywords
-      // hits line 724: throw new Error(`Worker ${service} returned ${response.status}: ...`)
       fetchMock.mockResolvedValue({
         ok: false,
         status: 400,
@@ -2265,8 +2166,6 @@ describe('http-bridge', () => {
     });
 
     it('throws when 404 response body does not contain session or not-found keywords', async () => {
-      // For 404, looksLikeSessionIssue requires body to contain "session" or "not found".
-      // A body that contains neither hits the else branch (line 710 / previously 724).
       fetchMock.mockResolvedValue({
         ok: false,
         status: 404,
@@ -2281,8 +2180,6 @@ describe('http-bridge', () => {
   });
 
   describe('classifyHealthError non-Error and AbortError/TLS paths', () => {
-    // classifyHealthError is private; we exercise it via isWorkerAvailable which
-    // calls checkWorkerHealth → postPing → catch(classifyHealthError).
     let fetchMock: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {
@@ -2296,21 +2193,18 @@ describe('http-bridge', () => {
     });
 
     it('classifies a thrown non-Error value as UNKNOWN', async () => {
-      // Non-Error values classified as UNKNOWN
       fetchMock.mockRejectedValue('plain string error');
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const result = await isWorkerAvailable('slack');
 
       expect(result).toBe(false);
-      // classifyHealthError returned UNKNOWN for the non-Error throw
       const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
       expect(warnCalls.some((m) => m.includes('UNKNOWN'))).toBe(true);
       warnSpy.mockRestore();
     });
 
     it('classifies AbortError (name=AbortError) as TIMEOUT', async () => {
-      // AbortError classified as TIMEOUT
       const abortError = new Error('The operation was aborted');
       abortError.name = 'AbortError';
       fetchMock.mockRejectedValue(abortError);
@@ -2325,7 +2219,6 @@ describe('http-bridge', () => {
     });
 
     it('classifies TLS error messages as TLS_ERROR', async () => {
-      // TLS/SSL error messages classified as TLS_ERROR
       const tlsError = new Error('TLS handshake failed');
       fetchMock.mockRejectedValue(tlsError);
 
@@ -2339,7 +2232,6 @@ describe('http-bridge', () => {
     });
 
     it('classifies SSL error messages as TLS_ERROR', async () => {
-      // 'SSL' in message also hits the TLS_ERROR branch (line 216 OR condition)
       const sslError = new Error('SSL certificate verification failed');
       fetchMock.mockRejectedValue(sslError);
 
@@ -2369,15 +2261,12 @@ describe('http-bridge', () => {
     });
 
     it('returns null when initialize response contains a JSON-RPC error field', async () => {
-      // performMcpInitialize returns null when initialize's JSON body has an `error` field;
-      // exercised via callWorker's 400 recovery flow.
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
         if (callCount === 1) {
-          // tools/call → 400 not initialized
           return Promise.resolve({
             ok: false,
             status: 400,
@@ -2386,7 +2275,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 2 && body.method === 'initialize') {
-          // initialize → 200 but with JSON-RPC error in body (line 266: result.error)
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -2407,24 +2295,19 @@ describe('http-bridge', () => {
         return Promise.reject(new Error(`Unexpected call #${callCount}`));
       });
 
-      // ensureWorkerSession throws because performMcpInitialize returned null
       await expect(callWorker('gitlab', 'test_tool', {})).rejects.toThrow(
         'Worker gitlab: initialize handshake failed'
       );
-      // initialize was called exactly once (callCount = 2)
       expect(callCount).toBe(2);
     });
 
     it('swallows notifResponse.text() rejection gracefully', async () => {
-      // `await notifResponse.text().catch(() => undefined)`: when text() rejects, the
-      // socket stays reusable even though draining the body failed.
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
         const body = JSON.parse(options.body ?? '{}');
 
         if (callCount === 1) {
-          // tools/call → 400 not initialized
           return Promise.resolve({
             ok: false,
             status: 400,
@@ -2433,7 +2316,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 2 && body.method === 'initialize') {
-          // initialize → success
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -2463,7 +2345,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 3 && body.method === 'notifications/initialized') {
-          // notifications response: ok=true but text() rejects (line 288 .catch fires)
           return Promise.resolve({
             ok: true,
             status: 202,
@@ -2474,7 +2355,6 @@ describe('http-bridge', () => {
           });
         }
         if (callCount === 4) {
-          // Retry tools/call → success
           return Promise.resolve({
             ok: true,
             status: 200,
@@ -2489,7 +2369,6 @@ describe('http-bridge', () => {
         return Promise.reject(new Error(`Unexpected call #${callCount}`));
       });
 
-      // Should succeed despite text() rejecting on the notification response
       const result = await callWorker('gitlab', 'test_tool', {});
       expect(result).toEqual({ ok: true });
       expect(callCount).toBe(4);

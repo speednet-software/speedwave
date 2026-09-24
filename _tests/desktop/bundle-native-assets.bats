@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# bundle-native-assets.sh must deploy the newest built artifact per package —
-# a stale universal build must never shadow a fresh `swift build -c release`.
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-native-assets.sh"
 
@@ -16,7 +14,6 @@ teardown() {
     rm -rf "$NATIVE_ROOT" "$DEST"
 }
 
-# write_artifact <path> <content> [touch -t timestamp]
 write_artifact() {
     mkdir -p "$(dirname "$1")"
     printf '%s' "$2" > "$1"

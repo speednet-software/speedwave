@@ -33,7 +33,6 @@ export function truncate(text: string, maxChars: number): { content: string; tru
  * @returns A Markdown string covering every sheet.
  */
 function workbookToMarkdown(wb: XLSX.WorkBook): string {
-  // Escape Markdown-table cell: `\` → `\\`, `|` → `\|`, newline runs → space.
   const escape = (cell: unknown): string =>
     (cell == null ? '' : String(cell)).replace(/[\\|]|[\r\n]+/g, (m) =>
       m === '\\' ? '\\\\' : m === '|' ? '\\|' : ' '
@@ -42,7 +41,6 @@ function workbookToMarkdown(wb: XLSX.WorkBook): string {
   for (const name of wb.SheetNames) {
     const sheet = wb.Sheets[name];
     parts.push(`## ${name}`);
-    // Array-of-arrays over the used range.
     const grid = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: false });
     const width = grid.reduce((w, r) => Math.max(w, r.length), 0);
     const rows = grid.map((r) => Array.from({ length: width }, (_, i) => escape(r[i])));
@@ -82,16 +80,13 @@ export async function readDocumentToMarkdown(
     return { content, bytes, truncated, engine: 'sheetjs' };
   }
 
-  // markitdown handles docx/pptx/pdf/html/images; let it try first.
   try {
     const r = await runOk('markitdown', [abs]);
     const { content, truncated } = truncate(r.stdout, maxChars);
     if (content.trim().length > 0) {
       return { content, bytes, truncated, engine: 'markitdown' };
     }
-    // markitdown ran but produced nothing — fall through to the type-specific fallbacks.
   } catch (err) {
-    // markitdown crashed, timed out, or is missing; the fallback engine below still tries.
     process.stderr.write(`[office] markitdown failed (falling back): ${(err as Error).message}\n`);
   }
 
@@ -106,7 +101,6 @@ export async function readDocumentToMarkdown(
     const { content, truncated } = truncate(md, maxChars);
     return { content, bytes, truncated, engine: 'python-docx' };
   }
-  // Last resort: pandoc can read many formats and emit Markdown.
   const r = await runOk('pandoc', ['-t', 'markdown', abs]);
   const { content, truncated } = truncate(r.stdout, maxChars);
   return { content, bytes, truncated, engine: 'pandoc' };

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Verifies a draft Release has every updater asset. Idempotent/read-only/retry-safe; portable
-# Bash (no mapfile, bash 3.2). Names ← desktop-release.yml assetNamePattern; version bare semver.
 set -euo pipefail
 
 : "${VERSION:?VERSION required}"
@@ -8,8 +6,6 @@ set -euo pipefail
 : "${RID:?RID required}"
 : "${TAG_NAME:?TAG_NAME required}"
 
-# Defense-in-depth: VERSION regex also enforced in desktop-release.yml resolve job.
-# Both must stay in sync if the format contract ever changes.
 [[ "$VERSION"  =~ ^[0-9]+\.[0-9]+\.[0-9]+$           ]] || { echo "::error::Invalid VERSION format: '$VERSION' (expected X.Y.Z)" >&2; exit 1; }
 [[ "$REPO"     =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$  ]] || { echo "::error::Invalid REPO format: '$REPO' (expected owner/name)" >&2; exit 1; }
 [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$          ]] || { echo "::error::Invalid TAG_NAME format: '$TAG_NAME' (expected vX.Y.Z)" >&2; exit 1; }
@@ -41,7 +37,6 @@ fail() {
   exit 1
 }
 
-# Portable array load (no mapfile — works on macOS Bash 3.2).
 PRESENT=()
 while IFS= read -r line; do
   PRESENT+=("$line")
@@ -86,7 +81,8 @@ required_keys = (
     "darwin-aarch64", "darwin-aarch64-app",
     "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis",
 )
-url_prefix = f"https://github.com/{repo}/releases/"
+# tauri-action >= 1.0.0 writes GitHub API asset URLs (repos/.../releases/assets/<id>).
+url_prefix = f"https://api.github.com/repos/{repo}/releases/assets/"
 for key in required_keys:
     entry = platforms.get(key)
     if not entry:
@@ -100,7 +96,6 @@ for key in required_keys:
         sys.exit(f"latest.json platforms.{key}.url does not start with {url_prefix}: {url}")
 PY
 
-# Download each .sig explicitly by name — never a glob, never `*.sig`.
 for name in "${SIGNED_ASSETS[@]}"; do
   sig="${name}.sig"
   gh release download "$TAG_NAME" --repo "$REPO" --pattern "$sig" --dir "$TMP"

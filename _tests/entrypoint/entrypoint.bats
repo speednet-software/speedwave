@@ -1,11 +1,8 @@
 #!/usr/bin/env bats
-# Tests for containers/entrypoint.sh, run on the host (macOS) — no container required.
-# Stubs out 'curl' and 'claude' to avoid network calls.
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"
 DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
 
-# Extract pinned version from defaults.rs (SSOT) — avoids hardcoding "2.1.76" in tests.
 PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
 [[ -n "$PINNED_VERSION" ]] || { echo "ERROR: could not extract CLAUDE_VERSION from defaults.rs" >&2; exit 1; }
 
@@ -17,14 +14,10 @@ setup() {
     RESOURCES_DIR="$(mktemp -d)"
     export SPEEDWAVE_RESOURCES="$RESOURCES_DIR"
 
-    # CLAUDE_VERSION is required — set a default for tests that don't care about it
     export CLAUDE_VERSION="$PINNED_VERSION"
 
-    # Resolve real jq before stripping PATH — the container has it via apt-get,
-    # but on a macOS test host it may live under the homebrew prefix stripped below.
     REAL_JQ="$(command -v jq || true)"
 
-    # Stubs dir goes first in PATH; also strip real claude locations
     STUBS_DIR="$(mktemp -d)"
     export STUBS_DIR
     CLEAN_PATH="$STUBS_DIR:$(echo "$PATH" | tr ':' '\n' \
@@ -32,22 +25,17 @@ setup() {
         | tr '\n' ':' | sed 's/:$//')"
     export PATH="$CLEAN_PATH"
 
-    # jq passthrough — guarantees the plugin-guard's jq resolves regardless of the
-    # runner PATH; skip suite if jq is genuinely absent (documented in the guard test).
     if [ -n "$REAL_JQ" ]; then
         printf '#!/bin/bash\nexec %q "$@"\n' "$REAL_JQ" > "$STUBS_DIR/jq"
         chmod +x "$STUBS_DIR/jq"
     fi
 
-    # Default stub: claude already installed — skip install
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
 
-    # `timeout` (coreutils) is on PATH in the container but may live under the
-    # homebrew prefix stripped above on a macOS test host — stub a passthrough.
     cat > "$STUBS_DIR/timeout" << 'EOF'
 #!/bin/bash
 shift
@@ -55,7 +43,6 @@ exec "$@"
 EOF
     chmod +x "$STUBS_DIR/timeout"
 
-    # Default curl stub — fail loudly if unexpectedly called
     cat > "$STUBS_DIR/curl" << 'EOF'
 #!/bin/bash
 echo "UNEXPECTED curl: $*" >&2
@@ -63,15 +50,10 @@ exit 1
 EOF
     chmod +x "$STUBS_DIR/curl"
 
-    # Tests run outside the compose network, so there is no mcp-hub to wait
-    # for. The startup gate is opt-in via this env var so tests stay fast.
     export SPEEDWAVE_SKIP_HUB_WAIT=1
 
-    # OS_AVAILABLE_SUBS is normally injected by compose.rs from TOGGLEABLE_OS_SERVICES.
     export OS_AVAILABLE_SUBS="reminders,calendar,mail,notes"
 
-    # Per-test health marker under TEST_HOME so parallel runs (bats --jobs) and concurrent
-    # worktrees never collide on a shared /tmp path. Cleaned up by teardown's rm -rf.
     export CLAUDE_READY_MARKER="$TEST_HOME/claude-ready"
 }
 
@@ -79,7 +61,6 @@ teardown() {
     rm -rf "$TEST_HOME" "$STUBS_DIR" "$RESOURCES_DIR"
 }
 
-# ── CLAUDE_VERSION — required (no default) ──────────────────────────────────────────────────────────
 
 @test "fails when CLAUDE_VERSION is not set" {
     unset CLAUDE_VERSION
@@ -88,7 +69,6 @@ teardown() {
     [[ "$output" == *"CLAUDE_VERSION"* ]]
 }
 
-# ── Version skew between baked binary and pinned CLAUDE_VERSION ─────────────────────────────────────
 
 @test "warns when installed claude version differs from pinned CLAUDE_VERSION" {
     cat > "$STUBS_DIR/claude" << 'EOF'
@@ -119,12 +99,10 @@ EOF
     [[ "$output" != *"WARNING: image has Claude Code"* ]]
 }
 
-# ── CLAUDE_VERSION env var forwarded to install-claude.sh ───────────────────────────────────────────
 
 @test "CLAUDE_VERSION env var is forwarded to install-claude.sh" {
-    rm -f "$STUBS_DIR/claude"  # force install path
+    rm -f "$STUBS_DIR/claude"
 
-    # Create a fake install-claude.sh that records the version
     local version_file
     version_file="$(mktemp)"
 
@@ -152,15 +130,12 @@ EOF
     rm -f "$version_file" "$patched"
 }
 
-# ── Skip download when claude is already installed ──────────────────────────────────────────────────
 
 @test "does not call curl when claude is already installed" {
-    # curl stub exits 1 — test fails if it is called
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
 }
 
-# ── Health check marker ─────────────────────────────────────────────────────────────────────────────
 
 @test "creates /tmp/claude-ready health marker" {
     run bash "$ENTRYPOINT" true
@@ -168,21 +143,17 @@ EOF
     [ -f "$CLAUDE_READY_MARKER" ]
 }
 
-# ── set -e kills the entrypoint when HOME is not writable: fatal error, never a silent half-setup ─
 
 @test "exits non-zero when HOME is not writable (mimics uid-mismatch EACCES)" {
-    # root ignores DAC mode bits, so this assertion is only meaningful as a
-    # non-root user (the real container is uid 1000, never root).
     [ "$(id -u)" -ne 0 ] || skip "must run as non-root to enforce mode bits"
 
-    chmod 0555 "$HOME"  # readable+executable, NOT writable by the owner
+    chmod 0555 "$HOME"
     run bash "$ENTRYPOINT" true
-    chmod 0755 "$HOME"  # restore so teardown's rm -rf works
+    chmod 0755 "$HOME"
 
     [ "$status" -ne 0 ]
 }
 
-# ── Command passthrough ─────────────────────────────────────────────────────────────────────────────
 
 @test "executes the passed command" {
     run bash "$ENTRYPOINT" echo "hello-from-entrypoint"
@@ -196,7 +167,6 @@ EOF
     [[ "$output" == *"arg=myarg"* ]]
 }
 
-# ── CLAUDE.md symlink from resources ────────────────────────────────────────────────────────────────
 
 @test "symlinks CLAUDE.md from resources" {
     echo "# Speedwave System Context" > "${SPEEDWAVE_RESOURCES}/CLAUDE.md"
@@ -213,7 +183,6 @@ EOF
     [ ! -e "$HOME/.claude/CLAUDE.md" ]
 }
 
-# ── Resource symlinking via SPEEDWAVE_RESOURCES ─────────────────────────────────────────────────────
 
 @test "symlinks skills entries when present in resources" {
     mkdir -p "$RESOURCES_DIR/skills"
@@ -221,8 +190,6 @@ EOF
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # skills is a real directory of per-entry symlinks, not a whole-directory
-    # symlink.
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
     [ -L "$HOME/.claude/skills/my-skill.md" ]
@@ -232,16 +199,12 @@ EOF
 @test "resource directory exists but is empty when source is absent" {
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # The entrypoint always creates the four resource dirs; an absent source
-    # mount leaves the directory empty.
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
     [ -z "$(ls -A "$HOME/.claude/skills")" ]
 }
 
-@test "links the bundled core web-authoring skills from the real resources tree" {
-    # Point at the real claude-resources tree; top-level core skills are
-    # unconditionally linked (no integration gating, no ENABLED_SERVICES).
+@test "links the bundled core skills from the real resources tree" {
     real_resources="$BATS_TEST_DIRNAME/../../containers/claude-resources"
     export SPEEDWAVE_RESOURCES="$real_resources"
 
@@ -250,14 +213,13 @@ EOF
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
 
-    for skill in speedwave-sitemap speedwave-site-audit speedwave-product-showcase; do
+    for skill in speedwave-sitemap speedwave-site-audit speedwave-product-showcase speedwave-wait-what; do
         [ -L "$HOME/.claude/skills/$skill" ]
         [ "$(readlink "$HOME/.claude/skills/$skill")" = "$real_resources/skills/$skill" ]
         [ -f "$HOME/.claude/skills/$skill/SKILL.md" ]
     done
 }
 
-# ── DISABLE_AUTOUPDATER ─────────────────────────────────────────────────────────────────────────────
 
 @test "exports DISABLE_AUTOUPDATER=1" {
     run bash "$ENTRYPOINT" bash -c 'echo "AUTOUPDATER=$DISABLE_AUTOUPDATER"'
@@ -265,7 +227,6 @@ EOF
     [[ "$output" == *"AUTOUPDATER=1"* ]]
 }
 
-# ── PATH includes ~/.local/bin for Claude Code installed by install.sh ──────────────────────────────
 
 @test "adds HOME/.local/bin to PATH" {
     run bash "$ENTRYPOINT" bash -c 'echo "PATH=$PATH"'
@@ -274,31 +235,25 @@ EOF
 }
 
 @test "claude in HOME/.local/bin is found without reinstalling" {
-    # Place a claude stub in the fake ~/.local/bin
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/claude" << EOF
 #!/bin/bash
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$HOME/.local/bin/claude"
-    # Remove stub from STUBS_DIR so only the ~/.local/bin one exists
     rm -f "$STUBS_DIR/claude"
 
-    # curl stub still exits 1 — install must NOT be triggered
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
 }
 
-# ── Symlink claude from /usr/local/bin to ~/.local/bin ──────────────────────────────────────────────
 
 @test "symlinks claude from /usr/local/bin to ~/.local/bin" {
-    # Create a temporary "fake /usr/local/bin" to satisfy the -x check
     local fake_usr_local="$TEST_HOME/fake-usr-local-bin"
     mkdir -p "$fake_usr_local"
     cp "$STUBS_DIR/claude" "$fake_usr_local/claude"
     chmod +x "$fake_usr_local/claude"
 
-    # Patch entrypoint to use our fake path instead of /usr/local/bin
     local patched
     patched="$(mktemp)"
     sed "s|/usr/local/bin/claude|${fake_usr_local}/claude|g" "$ENTRYPOINT" > "$patched"
@@ -311,7 +266,6 @@ EOF
     rm -f "$patched"
 }
 
-# ── bashrc PATH export ──────────────────────────────────────────────────────────────────────────────
 
 @test "bashrc PATH export is added" {
     run bash "$ENTRYPOINT" true
@@ -330,7 +284,6 @@ EOF
     [ "$count" -eq 1 ]
 }
 
-# ── Resource symlinks: commands, agents, hooks ──────────────────────────────────────────────────────
 
 @test "commands entries are symlinked into a real dir" {
     mkdir -p "$RESOURCES_DIR/commands"
@@ -368,16 +321,12 @@ EOF
     [ "$(readlink "$HOME/.claude/hooks/my-hook.sh")" = "$RESOURCES_DIR/hooks/my-hook.sh" ]
 }
 
-# ── Default command keeps container alive (sleep infinity) ──────────────────────────────────────────
 
 @test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
-    # No-args branch must keep PID1 alive AND responsive to SIGTERM —
-    # bare `exec sleep infinity` ignored TERM and ate the 10s kill timeout.
     grep -q "while :; do sleep 86400 & wait" "$ENTRYPOINT"
     ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
 }
 
-# ── MCP config: mcp-os is routed through hub, not directly from entrypoint ──────────────────────────
 
 @test "mcp-config has only speedwave-hub when MCP_OS vars are unset" {
     unset MCP_OS_URL
@@ -400,7 +349,6 @@ EOF
     [[ "$output" != *"speedwave-os"* ]]
 }
 
-# ── Output styles: Speedwave.md symlink from resources ──────────────────────────────────────────────
 
 @test "symlinks output-styles/Speedwave.md file from resources" {
     mkdir -p "${SPEEDWAVE_RESOURCES}/output-styles"
@@ -423,7 +371,6 @@ EOF
     grep -q "My Custom Style" "${TEST_HOME}/.claude/output-styles/MyStyle.md"
 }
 
-# ── ~/.claude.json pre-seed: pre-accepts /workspace trust; onboarding completes only when logged in (ADR-052)
 
 @test "pre-accepts /workspace trust+project-onboarding but skips login onboarding when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude.json" ]
@@ -431,15 +378,12 @@ EOF
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     [ -f "${TEST_HOME}/.claude.json" ]
-    # Per-workspace flags are always-on (independent of login).
     grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
     grep -q '"hasCompletedProjectOnboarding": true' "${TEST_HOME}/.claude.json"
-    # No credentials → top-level login onboarding NOT completed → claude still shows the login prompt.
     ! grep -q '"hasCompletedOnboarding"' "${TEST_HOME}/.claude.json"
 }
 
 @test "creates ~/.claude.json with onboarding AND trust when credentials exist" {
-    # Simulate a logged-in user: credentials present, no .claude.json yet.
     printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     [ ! -e "${TEST_HOME}/.claude.json" ]
     run bash "${ENTRYPOINT}" echo ok
@@ -461,18 +405,59 @@ EOF
     python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
 }
 
-@test "preserves existing ~/.claude.json keys when no credentials (no merge)" {
+@test "merges only /workspace trust into an existing ~/.claude.json when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # Without credentials the merge does not run; the file is left untouched.
-    [ "$(cat "${TEST_HOME}/.claude.json")" = '{"my":"existing-state"}' ]
+    python3 - "${TEST_HOME}/.claude.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+assert j["my"] == "existing-state", j
+ws = j["projects"]["/workspace"]
+assert ws["hasTrustDialogAccepted"] is True, j
+assert ws["hasCompletedProjectOnboarding"] is True, j
+assert "hasCompletedOnboarding" not in j, j
+assert "installMethod" not in j, j
+PY
+}
+
+@test "restores a dropped /workspace trust flag without credentials and keeps other project keys" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    printf '{"projects":{"/workspace":{"hasTrustDialogAccepted":false,"allowedTools":["Bash"]},"/other":{"hasTrustDialogAccepted":false}}}' \
+        > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 - "${TEST_HOME}/.claude.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+ws = j["projects"]["/workspace"]
+assert ws["hasTrustDialogAccepted"] is True, j
+assert ws["allowedTools"] == ["Bash"], j
+assert j["projects"]["/other"] == {"hasTrustDialogAccepted": False}, j
+PY
+}
+
+@test "leaves an already trusted ~/.claude.json byte-identical without credentials" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    printf '{"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' \
+        > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = '{"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' ]
+}
+
+@test "trust merge leaves a corrupt ~/.claude.json untouched without credentials" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = 'NOT_JSON' ]
+    [ ! -e "${TEST_HOME}/.claude.json.tmp" ]
+    [[ "$output" == *".claude.json unparseable — onboarding merge skipped"* ]]
 }
 
 @test "merges onboarding+trust into an existing ~/.claude.json when credentials exist" {
-    # Headless Desktop login leaves oauthAccount but no hasCompletedOnboarding;
-    # the CLI TUI would re-onboard unless the entrypoint backfills it.
     printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
     printf '{"oauthAccount":{"userID":"u1"}}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
@@ -480,7 +465,6 @@ EOF
     python3 -c "import json; json.load(open('${TEST_HOME}/.claude.json'))"
     grep -q '"hasCompletedOnboarding": true' "${TEST_HOME}/.claude.json"
     grep -q '"hasTrustDialogAccepted": true' "${TEST_HOME}/.claude.json"
-    # Existing oauthAccount is preserved (not clobbered).
     grep -q '"userID": "u1"' "${TEST_HOME}/.claude.json"
 }
 
@@ -490,24 +474,19 @@ EOF
         > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # Already complete → no rewrite; assert by value (format-agnostic), not grep.
     python3 -c "import json; assert json.load(open('${TEST_HOME}/.claude.json'))['hasCompletedOnboarding'] is True"
 }
 
 @test "onboarding merge degrades gracefully on corrupt credentialed .claude.json" {
     printf '{"token":"x"}' > "${TEST_HOME}/.claude/.credentials.json"
-    # File exists, has credentials, but is NOT valid JSON → node parse fails.
     printf 'NOT_JSON' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
-    # Best-effort: entrypoint still exits 0, file left intact, no stale tmp.
     [ "$status" -eq 0 ]
     [ "$(cat "${TEST_HOME}/.claude.json")" = 'NOT_JSON' ]
     [ ! -e "${TEST_HOME}/.claude.json.tmp" ]
-    # The skip is logged (stderr), never silent.
     [[ "$output" == *".claude.json unparseable — onboarding merge skipped"* ]]
 }
 
-# ── Statusline: symlink from resources ──────────────────────────────────────────────────────────────
 
 @test "symlinks statusline.sh from resources" {
     echo '#!/bin/bash' > "${SPEEDWAVE_RESOURCES}/statusline.sh"
@@ -535,7 +514,6 @@ EOF
     [ ! -e "${TEST_HOME}/.claude/statusline.sh" ]
 }
 
-# ── settings.json: WRITABLE copy (not a symlink) — CC writes it via /effort, /model; RO mount → EROFS ─
 
 @test "seeds settings.json as a writable copy, not a symlink" {
     echo '{"statusLine":{"type":"command","command":"~/.claude/statusline.sh"}}' > "${SPEEDWAVE_RESOURCES}/settings.json"
@@ -548,7 +526,6 @@ EOF
 }
 
 @test "replaces a stale settings.json symlink with a writable copy" {
-    # Older builds linked settings.json into the read-only resources mount.
     echo '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     ln -s "${SPEEDWAVE_RESOURCES}/settings.json" "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
@@ -561,11 +538,9 @@ EOF
     echo '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # Simulate /effort low writing the user's choice into the copy.
     echo '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # Use node for assertion — merge output is pretty-printed JSON (spaces after colons).
     run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
     [ "$status" -eq 0 ]
 }
@@ -577,28 +552,21 @@ EOF
 }
 
 @test "merges new template keys into existing settings.json without overwriting user values" {
-    # Template ships with effortLevel=high and a new key newKey=42.
     printf '{"effortLevel":"high","newKey":42}' > "${SPEEDWAVE_RESOURCES}/settings.json"
-    # User already has settings.json with effortLevel set to low.
     printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # User's effortLevel choice is preserved.
     run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
     [ "$status" -eq 0 ]
-    # New template key is added.
     run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.newKey===42?0:1)"
     [ "$status" -eq 0 ]
 }
 
 @test "merge degrades gracefully when node fails (corrupt settings.json)" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
-    # On-disk file is not valid JSON; node parse fails → silent continue.
     printf 'NOT_JSON' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
-    # Entrypoint must still exit 0 — the merge failure is best-effort.
     [ "$status" -eq 0 ]
-    # On-disk file is unchanged (node exited non-zero, || true swallowed it).
     run cat "${TEST_HOME}/.claude/settings.json"
     [[ "$output" == "NOT_JSON" ]]
 }
@@ -608,32 +576,34 @@ EOF
     printf '{"effortLevel":"low"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # Atomic write: .tmp must be renamed away, not left behind.
     [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
-    # Destination must be valid JSON (not truncated).
     run node -e "JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8'))"
     [ "$status" -eq 0 ]
 }
 
-# E1 (ADR-073): a stale /model in settings.json that disagrees with the
-# injected ANTHROPIC_MODEL is dropped, so the routed model wins on next start.
-@test "drops a stale settings.json model that disagrees with ANTHROPIC_MODEL" {
+@test "keeps a settings.json model that differs from ANTHROPIC_MODEL" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
-    printf '{"effortLevel":"low","model":"opus"}' > "${TEST_HOME}/.claude/settings.json"
+    printf '{"effortLevel":"low","model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
     ANTHROPIC_MODEL="openrouter/z-ai/glm-5.2" run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # The stale "model" key is removed (Claude Code then uses the env).
-    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
     [ "$status" -eq 0 ]
-    # Unrelated user keys are preserved.
     run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps a foreign settings.json model while ANTHROPIC_MODEL routes the session" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"openrouter/z-ai/glm-5.2"}' > "${TEST_HOME}/.claude/settings.json"
+    ANTHROPIC_MODEL="local/qwen3" run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='openrouter/z-ai/glm-5.2'?0:1)"
     [ "$status" -eq 0 ]
 }
 
 @test "keeps settings.json model when ANTHROPIC_MODEL is unset (account default)" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     printf '{"model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
-    # No ANTHROPIC_MODEL exported → user's /model preference must survive.
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
     run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
@@ -651,8 +621,6 @@ EOF
 
 @test "drops a FOREIGN settings.json model when ANTHROPIC_MODEL is unset (CR#1)" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
-    # Account-default path (no ANTHROPIC_MODEL) but a leaked provider/model id —
-    # must be dropped, else Claude Code sends it on the /anthropic passthrough → 404.
     printf '{"model":"openrouter/z-ai/glm-5.2"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
@@ -660,13 +628,62 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-# ── SPEEDWAVE_PLUGINS: symlink plugin resources ─────────────────────────────────────────────────────
+@test "drops a slash-free non-Claude settings.json model when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"llama3.3"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps a Claude Code alias settings.json model when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"fable[1m]"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='fable[1m]'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "drops a non-alias settings.json model without a slash when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    for model in mistral Sonnet opus1 ""; do
+        printf '{"model":"%s"}' "${model}" > "${TEST_HOME}/.claude/settings.json"
+        run bash "${ENTRYPOINT}" echo ok
+        [ "$status" -eq 0 ]
+        run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+        [ "$status" -eq 0 ] || { echo "model kept: ${model}"; false; }
+    done
+}
+
+@test "keeps every Claude Code model alias when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    aliases="$(sed -n 's/.*claude-\.+|(\([a-z|]*\)).*/\1/p' "${ENTRYPOINT}" | tr '|' ' ')"
+    [[ " ${aliases} " == *" default "* && " ${aliases} " == *" opusplan "* ]]
+    for alias in ${aliases} "opusplan[1m]"; do
+        printf '{"model":"%s"}' "$alias" > "${TEST_HOME}/.claude/settings.json"
+        run bash "${ENTRYPOINT}" echo ok
+        [ "$status" -eq 0 ]
+        run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='${alias}'?0:1)"
+        [ "$status" -eq 0 ] || { echo "alias dropped: ${alias}"; false; }
+    done
+}
+
+@test "leaves settings.json byte-identical when the template merge changes nothing" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"effortLevel":"low","model":"claude-opus-5"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run cat "${TEST_HOME}/.claude/settings.json"
+    [ "$output" = '{"effortLevel":"low","model":"claude-opus-5"}' ]
+}
+
 
 @test "SPEEDWAVE_PLUGINS creates symlinks for all resource types" {
     local plugins_dir
     plugins_dir="$(mktemp -d)"
 
-    # Create a plugin with all four resource types
     mkdir -p "${plugins_dir}/my-plugin/commands"
     mkdir -p "${plugins_dir}/my-plugin/agents"
     mkdir -p "${plugins_dir}/my-plugin/skills"
@@ -676,7 +693,6 @@ EOF
     echo "skill content" > "${plugins_dir}/my-plugin/skills/analyze.md"
     echo "hook content" > "${plugins_dir}/my-plugin/hooks/pre-run.sh"
 
-    # Patch entrypoint to use our temp plugins dir instead of /speedwave/plugins
     local patched
     patched="$(mktemp)"
     sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
@@ -684,13 +700,11 @@ EOF
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Verify symlinks for each resource type
     [ -L "${TEST_HOME}/.claude/commands/do-thing.md" ]
     [ -L "${TEST_HOME}/.claude/agents/helper.md" ]
     [ -L "${TEST_HOME}/.claude/skills/analyze.md" ]
     [ -L "${TEST_HOME}/.claude/hooks/pre-run.sh" ]
 
-    # Verify symlink targets
     [ "$(readlink "${TEST_HOME}/.claude/commands/do-thing.md")" = "${plugins_dir}/my-plugin/commands/do-thing.md" ]
     [ "$(readlink "${TEST_HOME}/.claude/agents/helper.md")" = "${plugins_dir}/my-plugin/agents/helper.md" ]
     [ "$(readlink "${TEST_HOME}/.claude/skills/analyze.md")" = "${plugins_dir}/my-plugin/skills/analyze.md" ]
@@ -703,7 +717,6 @@ EOF
     local plugins_dir
     plugins_dir="$(mktemp -d)"
 
-    # Create a plugin with a skill directory containing SKILL.md
     mkdir -p "${plugins_dir}/my-plugin/skills/my-skill"
     echo "# My Skill" > "${plugins_dir}/my-plugin/skills/my-skill/SKILL.md"
 
@@ -714,7 +727,6 @@ EOF
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Verify the skill directory is symlinked (not just files)
     [ -L "${TEST_HOME}/.claude/skills/my-skill" ]
     [ -d "${TEST_HOME}/.claude/skills/my-skill" ]
     [ -f "${TEST_HOME}/.claude/skills/my-skill/SKILL.md" ]
@@ -726,7 +738,6 @@ EOF
     local plugins_dir
     plugins_dir="$(mktemp -d)"
 
-    # Create a plugin with a command subdirectory
     mkdir -p "${plugins_dir}/my-plugin/commands/iteration"
     echo "# Create" > "${plugins_dir}/my-plugin/commands/iteration/create.md"
     echo "# List" > "${plugins_dir}/my-plugin/commands/iteration/list.md"
@@ -738,7 +749,6 @@ EOF
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Verify the command subdirectory is symlinked
     [ -L "${TEST_HOME}/.claude/commands/iteration" ]
     [ -d "${TEST_HOME}/.claude/commands/iteration" ]
     [ -f "${TEST_HOME}/.claude/commands/iteration/create.md" ]
@@ -791,10 +801,8 @@ EOF
     SPEEDWAVE_PLUGINS="../etc/passwd" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Verify warning was printed
     [[ "$output" == *"WARNING: Skipping invalid plugin slug: ../etc/passwd"* ]]
 
-    # No symlinks should be created
     [ ! -e "${TEST_HOME}/.claude/commands/../etc/passwd" ]
 
     rm -rf "$plugins_dir" "$patched"
@@ -811,7 +819,6 @@ EOF
     SPEEDWAVE_PLUGINS="MyPlugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Verify warning was printed
     [[ "$output" == *"WARNING: Skipping invalid plugin slug: MyPlugin"* ]]
 
     rm -rf "$plugins_dir" "$patched"
@@ -853,7 +860,6 @@ EOF
     local plugins_dir
     plugins_dir="$(mktemp -d)"
 
-    # Create a valid plugin
     mkdir -p "${plugins_dir}/good-plugin/commands"
     echo "cmd" > "${plugins_dir}/good-plugin/commands/cmd.md"
 
@@ -864,23 +870,19 @@ EOF
     SPEEDWAVE_PLUGINS="good-plugin,../BAD,also-good" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Valid plugin should be symlinked
     [ -L "${TEST_HOME}/.claude/commands/cmd.md" ]
 
-    # Invalid slug should have produced a warning
     [[ "$output" == *"WARNING: Skipping invalid plugin slug: ../BAD"* ]]
 
     rm -rf "$plugins_dir" "$patched"
 }
 
 @test "plugin resources coexist with core resources (no read-only conflict)" {
-    # Setup core resources
     mkdir -p "$RESOURCES_DIR/skills"
     mkdir -p "$RESOURCES_DIR/commands"
     echo "# Core Skill" > "$RESOURCES_DIR/skills/core-skill.md"
     echo "# Core Command" > "$RESOURCES_DIR/commands/core-command.md"
 
-    # Setup plugin resources
     local plugins_dir
     plugins_dir="$(mktemp -d)"
     mkdir -p "${plugins_dir}/example-plugin/skills"
@@ -895,19 +897,16 @@ EOF
     SPEEDWAVE_PLUGINS="example-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Resource dirs must be real directories (not symlinks to RO mount)
     [ -d "${TEST_HOME}/.claude/skills" ]
     [ ! -L "${TEST_HOME}/.claude/skills" ]
     [ -d "${TEST_HOME}/.claude/commands" ]
     [ ! -L "${TEST_HOME}/.claude/commands" ]
 
-    # Both core and plugin entries accessible
     [ -L "${TEST_HOME}/.claude/skills/core-skill.md" ]
     [ -L "${TEST_HOME}/.claude/skills/example-plugin-skill.md" ]
     [ -L "${TEST_HOME}/.claude/commands/core-command.md" ]
     [ -L "${TEST_HOME}/.claude/commands/example-plugin-cmd.md" ]
 
-    # Content is correct
     grep -q "Core Skill" "${TEST_HOME}/.claude/skills/core-skill.md"
     grep -q "Plugin Skill" "${TEST_HOME}/.claude/skills/example-plugin-skill.md"
     grep -q "Core Command" "${TEST_HOME}/.claude/commands/core-command.md"
@@ -922,8 +921,6 @@ EOF
     echo "# Skill" > "$RESOURCES_DIR/skills/my-skill.md"
     echo "# Command" > "$RESOURCES_DIR/commands/my-command.md"
 
-    # No SPEEDWAVE_PLUGINS set — dirs are always real dirs of per-entry symlinks (not whole-dir),
-    # so the integrations/ gate works and the entrypoint cleans up stale links on toggle-off.
     unset SPEEDWAVE_PLUGINS
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -942,7 +939,6 @@ EOF
     local plugins_dir
     plugins_dir="$(mktemp -d)"
 
-    # Do NOT create the plugin directory — it should be silently skipped
     local patched
     patched="$(mktemp)"
     sed "s|/speedwave/plugins/|${plugins_dir}/|g" "$ENTRYPOINT" > "$patched"
@@ -950,7 +946,6 @@ EOF
     SPEEDWAVE_PLUGINS="nonexistent-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # No symlinks should be created for the missing plugin
     [ ! -e "${TEST_HOME}/.claude/commands/nonexistent-plugin" ]
 
     rm -rf "$plugins_dir" "$patched"
@@ -960,7 +955,6 @@ EOF
     local plugins_dir
     plugins_dir="$(mktemp -d)"
 
-    # Two plugins both ship commands/do-thing.md
     mkdir -p "${plugins_dir}/alpha/commands"
     mkdir -p "${plugins_dir}/beta/commands"
     echo "alpha version" > "${plugins_dir}/alpha/commands/do-thing.md"
@@ -973,26 +967,19 @@ EOF
     SPEEDWAVE_PLUGINS="alpha,beta" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Warning about collision should appear on stderr (captured in output by bats)
     [[ "$output" == *"WARNING: plugin 'beta' overwrites commands/do-thing.md from another plugin"* ]]
 
-    # Second plugin wins (last-wins semantics)
     [ -L "${TEST_HOME}/.claude/commands/do-thing.md" ]
     [ "$(readlink "${TEST_HOME}/.claude/commands/do-thing.md")" = "${plugins_dir}/beta/commands/do-thing.md" ]
 
     rm -rf "$plugins_dir" "$patched"
 }
 
-# ── Migration: ~/.claude/<resource_type> mode flips between runs; persistent volume needs stale-layout normalization
 
 @test "plugin mode replaces stale whole-directory symlink left from no-plugins run" {
-    # No-plugins run leaves skills as a symlink to read-only resources; a later
-    # plugin run must replace it instead of writing through it.
     mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
     echo "# Core skill" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
 
-    # Simulate the stale symlink left by an earlier no-plugins run, pointing
-    # at a read-only directory (chmod 555 is sufficient on the host).
     chmod 555 "$RESOURCES_DIR/skills"
     ln -sfn "$RESOURCES_DIR/skills" "$HOME/.claude/skills"
 
@@ -1007,16 +994,13 @@ EOF
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
 
-    # Restore writability so teardown can clean up the tempdir
     chmod 755 "$RESOURCES_DIR/skills"
 
     [ "$status" -eq 0 ]
 
-    # ~/.claude/skills must now be a real directory, not a symlink
     [ ! -L "$HOME/.claude/skills" ]
     [ -d "$HOME/.claude/skills" ]
 
-    # Both core and plugin entries are present as per-entry symlinks
     [ -L "$HOME/.claude/skills/code-review-basic" ]
     [ "$(readlink "$HOME/.claude/skills/code-review-basic")" = "$RESOURCES_DIR/skills/code-review-basic" ]
     [ -L "$HOME/.claude/skills/extra-skill" ]
@@ -1026,13 +1010,9 @@ EOF
 }
 
 @test "no-plugins mode preserves real directory of per-entry symlinks" {
-    # The directory layout is always a real dir of per-entry symlinks (whether or not plugins are
-    # loaded), so subsequent no-plugin runs must leave it intact and keep exposing core entries.
     mkdir -p "$RESOURCES_DIR/skills/core-skill"
     echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
 
-    # Untracked stale plugin link (not in the state file): the entrypoint leaves
-    # it alone — only links it owns get cleaned up.
     mkdir -p "$HOME/.claude/skills"
     ln -sfn "/some/old/plugin/path/leftover" "$HOME/.claude/skills/leftover"
 
@@ -1044,28 +1024,21 @@ EOF
     [ ! -L "$HOME/.claude/skills" ]
     [ -L "$HOME/.claude/skills/core-skill" ]
     [ "$(readlink "$HOME/.claude/skills/core-skill")" = "$RESOURCES_DIR/skills/core-skill" ]
-    # The pre-existing leftover link was not created by entrypoint, so it must
-    # not be tracked in the state file and must survive the run untouched.
     [ -L "$HOME/.claude/skills/leftover" ]
     [ "$(readlink "$HOME/.claude/skills/leftover")" = "/some/old/plugin/path/leftover" ]
 }
 
 
-# ── MCP hub wait — startup race claude↔hub fix ──────────────────────────────
 
 @test "SPEEDWAVE_SKIP_HUB_WAIT=1 bypasses the hub readiness probe" {
-    # Default in setup() — confirms no waiting when explicitly skipped.
     export SPEEDWAVE_SKIP_HUB_WAIT=1
     SECONDS=0
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # Should be ~instant, never near the 30s timeout.
     [ "$SECONDS" -lt 5 ]
 }
 
 @test "without SPEEDWAVE_SKIP_HUB_WAIT, hub probe runs but tolerates failure" {
-    # mcp-hub host does not resolve in test env; probe must fail within bounded time and
-    # entrypoint must still succeed. Patch attempts from 30 to 2 so the test is fast.
     unset SPEEDWAVE_SKIP_HUB_WAIT
     local patched
     patched="$(mktemp)"
@@ -1074,16 +1047,13 @@ EOF
     run bash "$patched" true
     [ "$status" -eq 0 ]
     [ -f "$CLAUDE_READY_MARKER" ]
-    # Stderr should carry the warning so operators see the degraded mode.
     [[ "$output" == *"did not respond"* ]]
     rm -f "$patched"
 }
 
 
-# ── Per-integration gating of claude-resources via ENABLED_SERVICES ─────────
 
 setup_integrations_fixture() {
-    # Core skill (always-on) + three integration-bound skills.
     mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
     echo "# Core" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
     mkdir -p "$RESOURCES_DIR/skills/integrations/office"
@@ -1099,7 +1069,6 @@ setup_integrations_fixture() {
     ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
-    # `integrations` itself must never be linked as if it were a skill.
     [ ! -e "${TEST_HOME}/.claude/skills/integrations" ]
 }
 
@@ -1109,7 +1078,6 @@ setup_integrations_fixture() {
     [ "$status" -eq 0 ]
     [ -L "${TEST_HOME}/.claude/skills/office" ]
     [ "$(readlink "${TEST_HOME}/.claude/skills/office")" = "$RESOURCES_DIR/skills/integrations/office" ]
-    # The other two integration skills must NOT appear.
     [ ! -e "${TEST_HOME}/.claude/skills/playwright" ]
     [ ! -e "${TEST_HOME}/.claude/skills/context7" ]
 }
@@ -1133,7 +1101,6 @@ setup_integrations_fixture() {
 }
 
 @test "missing integrations/ directory is not an error" {
-    # Only core entries; no integrations bucket.
     mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
     echo "# Core" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
 
@@ -1160,7 +1127,6 @@ setup_integrations_fixture() {
         [ "$(readlink "${TEST_HOME}/.claude/$rt/office")" = "$RESOURCES_DIR/$rt/integrations/office" ]
     done
 
-    # Toggle off — all four must lose their office link.
     ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     for rt in skills commands agents hooks; do
@@ -1178,30 +1144,25 @@ setup_integrations_fixture() {
     [ -L "${TEST_HOME}/.claude/skills/slack" ]
     [ "$(readlink "${TEST_HOME}/.claude/skills/slack")" = "$RESOURCES_DIR/skills/integrations/slack" ]
 
-    # Toggle off — the link must disappear (managed-links cleanup).
     ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/skills/slack" ]
 }
 
-# ~/.claude persists across restarts; a toggled-off integration link must be
-# cleaned up via the state file.
 @test "toggle off removes previously-linked integration skill" {
     setup_integrations_fixture
 
-    # Run 1 — Office enabled.
     ENABLED_SERVICES="office" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ -L "${TEST_HOME}/.claude/skills/office" ]
     [ -f "${TEST_HOME}/.claude/.speedwave-managed-links" ]
     grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
 
-    # Run 2 — Office disabled. The link MUST be gone.
     ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/skills/office" ]
-    ! grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
-    # Core entries survive the toggle.
+    run grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+    [ "$status" -ne 0 ]
     [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
 }
 
@@ -1239,7 +1200,6 @@ setup_integrations_fixture() {
 
 @test "reverse migration: pre-existing whole-dir symlink is replaced with real dir" {
     setup_integrations_fixture
-    # Simulate an older install where skills was a whole-dir symlink.
     rm -rf "${TEST_HOME}/.claude/skills"
     ln -sfn "$RESOURCES_DIR/skills" "${TEST_HOME}/.claude/skills"
     [ -L "${TEST_HOME}/.claude/skills" ]
@@ -1266,13 +1226,9 @@ setup_integrations_fixture() {
 
     SPEEDWAVE_PLUGINS="foo" ENABLED_SERVICES="office" run bash "$patched" true
     [ "$status" -eq 0 ]
-    # Core stays.
     [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
-    # Integration symlinked because ENABLED_SERVICES includes it.
     [ -L "${TEST_HOME}/.claude/skills/office" ]
-    # Plugin symlinked because SPEEDWAVE_PLUGINS includes it.
     [ -L "${TEST_HOME}/.claude/skills/foo-skill" ]
-    # The state file owns all three so the next toggle cleans them up.
     grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
     grep -q "skills/foo-skill$" "${TEST_HOME}/.claude/.speedwave-managed-links"
 
@@ -1280,7 +1236,6 @@ setup_integrations_fixture() {
 }
 
 @test "plugin toggle off cleans up plugin link via state file" {
-    # Core skill so the run has something stable to compare.
     mkdir -p "$RESOURCES_DIR/skills/core-skill"
     echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
 
@@ -1297,7 +1252,6 @@ setup_integrations_fixture() {
     [ "$status" -eq 0 ]
     [ -L "${TEST_HOME}/.claude/skills/foo-skill" ]
 
-    # Plugin disabled on next run — link must be gone.
     unset SPEEDWAVE_PLUGINS
     run bash "$patched" true
     [ "$status" -eq 0 ]
@@ -1308,7 +1262,6 @@ setup_integrations_fixture() {
 }
 
 setup_os_subservice_fixture() {
-    # Core skill + integrations/ with each OS sub-service.
     mkdir -p "$RESOURCES_DIR/skills/code-review-basic"
     echo "# Core" > "$RESOURCES_DIR/skills/code-review-basic/SKILL.md"
     for sub in reminders calendar mail notes; do
@@ -1320,7 +1273,6 @@ setup_os_subservice_fixture() {
 @test "OS sub-service skills are gated jointly by ENABLED_SERVICES and DISABLED_OS_SERVICES" {
     setup_os_subservice_fixture
 
-    # os enabled with mail and notes disabled — only reminders + calendar link.
     ENABLED_SERVICES="os" DISABLED_OS_SERVICES="mail,notes" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ -L "${TEST_HOME}/.claude/skills/reminders" ]
@@ -1332,28 +1284,24 @@ setup_os_subservice_fixture() {
 @test "no OS sub-service skill is linked when os is not in ENABLED_SERVICES" {
     setup_os_subservice_fixture
 
-    # `os` absent — even with DISABLED_OS_SERVICES empty, none of the sub-services link.
     ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/skills/reminders" ]
     [ ! -e "${TEST_HOME}/.claude/skills/calendar" ]
     [ ! -e "${TEST_HOME}/.claude/skills/mail" ]
     [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
-    # Core entries still linked.
     [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
 }
 
 @test "toggling a single OS sub-service off removes only that link" {
     setup_os_subservice_fixture
 
-    # Run 1: everything enabled.
     ENABLED_SERVICES="os" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     for sub in reminders calendar mail notes; do
         [ -L "${TEST_HOME}/.claude/skills/$sub" ]
     done
 
-    # Run 2: mail disabled — its symlink must go, the others must stay.
     ENABLED_SERVICES="os" DISABLED_OS_SERVICES="mail" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ -L "${TEST_HOME}/.claude/skills/reminders" ]
@@ -1364,7 +1312,6 @@ setup_os_subservice_fixture() {
 
 @test "OS sub-services coexist with regular MCP integrations in ENABLED_SERVICES" {
     setup_os_subservice_fixture
-    # Also add an MCP-integration-bound skill.
     mkdir -p "$RESOURCES_DIR/skills/integrations/office"
     echo "# Office" > "$RESOURCES_DIR/skills/integrations/office/SKILL.md"
 
@@ -1375,15 +1322,11 @@ setup_os_subservice_fixture() {
     [ -L "${TEST_HOME}/.claude/skills/calendar" ]
     [ -L "${TEST_HOME}/.claude/skills/mail" ]
     [ ! -e "${TEST_HOME}/.claude/skills/notes" ]
-    # `os` itself must NOT be linked as a skill — only its sub-services exist as skills.
     [ ! -e "${TEST_HOME}/.claude/skills/os" ]
 }
 
-# ── Keep-alive PID1 must exit 0 on SIGTERM (trap), not die killed (143) — else PID1 eats the 10s timeout ─
 
 @test "SIGTERM during startup phase exits promptly via top trap" {
-    # Block startup on the hub probe (no SPEEDWAVE_SKIP_HUB_WAIT) so TERM lands mid-startup,
-    # before the ready marker exists.
     unset SPEEDWAVE_SKIP_HUB_WAIT
     bash "$ENTRYPOINT" &
     pid=$!
@@ -1421,14 +1364,12 @@ setup_os_subservice_fixture() {
     [ "$status" -eq 0 ]
 }
 
-# ── Bundled official Anthropic plugins — install at start ──────────────────
 
-# Stub: `plugin list --json` reports nothing installed (so the guard proceeds),
-# `plugin install` records the target; version query still works.
 _stub_claude_recording_plugin_installs() {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+echo "\$*" >> "$TEST_HOME/claude-calls.log"
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
 if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
     echo "\$3" >> "$TEST_HOME/installed-plugins.log"
     exit 0
@@ -1438,16 +1379,28 @@ EOF
     chmod +x "$STUBS_DIR/claude"
 }
 
-@test "installs each bundled plugin at start with the marketplace suffix" {
+_plant_installed_plugins() {
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    local ids entries="" id
+    read -ra ids <<< "$1"
+    for id in "${ids[@]}"; do
+        [ -n "$entries" ] && entries+=","
+        entries+="\"${id}\":[{\"scope\":\"user\",\"version\":\"1.0.0\",\"installedAt\":\"2026-03-17T23:13:39.280Z\",\"path\":\"/home/speedwave/.claude/plugins/cache/x/x\"}]"
+    done
+    printf '{"version":2,"plugins":{%s}}' "$entries" > "$TEST_HOME/.claude/plugins/installed_plugins.json"
+    [ -f "$TEST_HOME/.claude/plugins/installed_plugins.json" ]
+}
+
+@test "installs each bundled plugin when no record exists" {
     _stub_claude_recording_plugin_installs
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/installed-plugins.log"
     [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
-    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"example-plugin@claude-plugins-official"* ]]
 }
 
 @test "does not install any plugin when the bundled-plugins env is unset" {
@@ -1458,35 +1411,8 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
-# Stub: `plugin list --json` prints NOTHING with exit 0 — the real CLI does this
-# on a cold container start; `plugin install` records the target.
-_stub_claude_empty_plugin_list() {
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
-    exit 0
-fi
-echo "${PINNED_VERSION} (Claude Code)"
-EOF
-    chmod +x "$STUBS_DIR/claude"
-}
-
-@test "an empty plugin list output means nothing installed, never everything" {
-    _stub_claude_empty_plugin_list
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,superpowers"
-    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
-    run bash "$ENTRYPOINT" true
-    [ "$status" -eq 0 ]
-    run cat "$TEST_HOME/installed-plugins.log"
-    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
-    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
-}
-
-@test "a whitespace-only plugin list output means nothing installed" {
-    _stub_claude_empty_plugin_list
-    sed -i.bak 's|then exit 0; fi|then printf "\\n  \\n"; exit 0; fi|' "$STUBS_DIR/claude"
+@test "a missing install record means nothing installed" {
+    _stub_claude_recording_plugin_installs
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
@@ -1495,9 +1421,23 @@ EOF
     [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
 }
 
-@test "a malformed plugin list output means nothing installed" {
-    _stub_claude_empty_plugin_list
-    sed -i.bak 's|then exit 0; fi|then echo "not json"; exit 0; fi|' "$STUBS_DIR/claude"
+@test "a malformed install record means nothing installed" {
+    _stub_claude_recording_plugin_installs
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo "not json" > "$TEST_HOME/.claude/plugins/installed_plugins.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+}
+
+@test "a record whose entry is an empty array means not installed" {
+    _stub_claude_recording_plugin_installs
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo '{"version":2,"plugins":{"frontend-design@claude-plugins-official":[]}}' \
+        > "$TEST_HOME/.claude/plugins/installed_plugins.json"
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
@@ -1507,7 +1447,7 @@ EOF
 }
 
 @test "a pre-fix marker poisoned by the empty-list bug does not skip installs" {
-    _stub_claude_empty_plugin_list
+    _stub_claude_recording_plugin_installs
     mkdir -p "$TEST_HOME/.claude"
     printf '%s\n' "frontend-design@claude-plugins-official" \
         > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed"
@@ -1523,7 +1463,8 @@ EOF
 @test "a failing plugin install is non-fatal and surfaces the error reason" {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+echo "\$*" >> "$TEST_HOME/claude-calls.log"
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
 if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
     echo "network down" >&2
     exit 1
@@ -1535,18 +1476,17 @@ EOF
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"failed to install bundled plugin"* ]]
-    # the captured stderr reason is surfaced, not discarded
     [[ "$output" == *"network down"* ]]
 }
 
 @test "skips an invalid bundled-plugin name and continues with the rest" {
     _stub_claude_recording_plugin_installs
-    export SPEEDWAVE_BUNDLED_PLUGINS="Bad_Name,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="Bad_Name,example-plugin"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"invalid bundled-plugin name: Bad_Name"* ]]
     run cat "$TEST_HOME/installed-plugins.log"
-    [[ "$output" == *"superpowers@"* ]]
+    [[ "$output" == *"example-plugin@"* ]]
     [[ "$output" != *"Bad_Name"* ]]
 }
 
@@ -1560,59 +1500,37 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
-# Stub: `plugin list --json` logs each invocation (to prove it was skipped),
-# reports nothing installed; `plugin install` records the target.
-_stub_claude_logging_plugin_list_calls() {
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
-    echo "call" >> "$TEST_HOME/plugin-list.log"
-    echo '[]'; exit 0
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
-    exit 0
-fi
-echo "${PINNED_VERSION} (Claude Code)"
-EOF
-    chmod +x "$STUBS_DIR/claude"
-}
-
-@test "an invalid bundled-plugin marketplace skips the plugin list subprocess entirely" {
-    _stub_claude_logging_plugin_list_calls
+@test "an invalid bundled-plugin marketplace runs no claude plugin command at all" {
+    _stub_claude_recording_plugin_installs
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="Bad/Marketplace"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ ! -f "$TEST_HOME/plugin-list.log" ]
+    run grep -c '^plugin' "$TEST_HOME/claude-calls.log"
+    [ "$output" = "0" ]
 }
 
-@test "a restart with every bundled plugin already recorded skips the plugin list subprocess" {
+@test "a restart with every bundled plugin already recorded runs no claude plugin command at all" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    _stub_claude_logging_plugin_list_calls
+    _stub_claude_recording_plugin_installs
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
 
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ -f "$TEST_HOME/plugin-list.log" ]
-    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
     run cat "$TEST_HOME/installed-plugins.log"
     [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
 
-    # Second start with the identical config: nothing left to install, so the
-    # subprocess (and its 30s timeout budget) is skipped entirely.
+    rm -f "$TEST_HOME/claude-calls.log"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
+    run grep -c '^plugin' "$TEST_HOME/claude-calls.log"
+    [ "$output" = "0" ]
 }
 
 @test "missing jq warns and deterministically skips bundled-plugin install" {
     rm -f "$STUBS_DIR/jq"
-    # The stub dir goes first on PATH (setup()); with the stub gone, jq only
-    # resolves if the bare test host itself ships one outside stripped homebrew/
-    # .local/bin locations — skip rather than assert on host-dependent behavior.
     command -v jq &> /dev/null && skip "a non-stub jq is reachable on this test host"
     _stub_claude_recording_plugin_installs
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
@@ -1623,80 +1541,40 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
-@test "a newly added bundled plugin still triggers plugin list on the next start" {
+@test "a newly added bundled plugin is still installed on the next start" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    _stub_claude_logging_plugin_list_calls
+    _stub_claude_recording_plugin_installs
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
 
     SPEEDWAVE_BUNDLED_PLUGINS="frontend-design" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
 
-    # A second bundled plugin appears (e.g. app update) — must still be checked.
     SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 2 ]
     run cat "$TEST_HOME/installed-plugins.log"
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
 }
 
-@test "does not reinstall a plugin already present (composite id, guard respects user disable)" {
+@test "does not reinstall a plugin whose record entry is a non-empty array" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    # plugin list reports frontend-design already installed; install must be skipped.
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
-    echo '[{"id":"frontend-design@claude-plugins-official","enabled":false}]'; exit 0
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
-fi
-echo "${PINNED_VERSION} (Claude Code)"
-EOF
-    chmod +x "$STUBS_DIR/claude"
+    _stub_claude_recording_plugin_installs
+    _plant_installed_plugins "frontend-design@claude-plugins-official"
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/installed-plugins.log"
-    # already-present frontend-design (disabled by user) is NOT reinstalled
     [[ "$output" != *"frontend-design@"* ]]
-    # the missing one still installs
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
 }
 
-@test "does not reinstall a plugin already present (separate name+marketplace fields)" {
-    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    # plugin list reports name+marketplace as separate fields (no composite id).
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
-    echo '[{"name":"frontend-design","marketplace":"claude-plugins-official","enabled":false}]'
-    exit 0
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
-fi
-echo "${PINNED_VERSION} (Claude Code)"
-EOF
-    chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
-    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
-    run bash "$ENTRYPOINT" true
-    [ "$status" -eq 0 ]
-    run cat "$TEST_HOME/installed-plugins.log"
-    # already-present frontend-design is matched by name+marketplace, so NOT reinstalled
-    [[ "$output" != *"frontend-design@"* ]]
-    # the missing one still installs
-    [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
-}
-
-# Stub: records marketplace-add and install calls in order; `plugin list` says
-# nothing is installed, so the install loop runs for every bundled plugin.
 _stub_claude_recording_all_plugin_calls() {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+echo "\$*" >> "$TEST_HOME/claude-calls.log"
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
 if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ] && [ "\$3" = "add" ]; then
     echo "marketplace-add \$4" >> "$TEST_HOME/plugin-calls.log"; exit 0
 fi
@@ -1710,25 +1588,25 @@ EOF
 
 @test "bootstraps the official marketplace once, before the first bundled-plugin install" {
     _stub_claude_recording_all_plugin_calls
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
     [ "${lines[1]}" = "install frontend-design@claude-plugins-official" ]
-    [ "${lines[2]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[2]}" = "install example-plugin@claude-plugins-official" ]
     [ "${#lines[@]}" -eq 3 ]
 }
 
 @test "does not bootstrap a custom bundled-plugin marketplace" {
     _stub_claude_recording_all_plugin_calls
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="custom-mp"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install superpowers@custom-mp" ]
+    [ "${lines[0]}" = "install example-plugin@custom-mp" ]
     [ "${#lines[@]}" -eq 1 ]
 }
 
@@ -1738,12 +1616,12 @@ EOF
     mkdir -p "$TEST_HOME/.claude/plugins"
     echo '{"claude-plugins-official":{"source":{"source":"github"}}}' \
         > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[0]}" = "install example-plugin@claude-plugins-official" ]
     [ "${#lines[@]}" -eq 1 ]
 }
 
@@ -1752,13 +1630,17 @@ EOF
     _stub_claude_recording_all_plugin_calls
     mkdir -p "$TEST_HOME/.claude/plugins"
     echo '{"claude-plugins-official":null}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[1]}" = "install example-plugin@claude-plugins-official" ]
+}
+
+@test "bundled-plugin install carries at least a 120s timeout budget" {
+    grep -qE 'timeout (1[2-9][0-9]|[2-9][0-9][0-9]) claude plugin install' "$ENTRYPOINT"
 }
 
 @test "a registry listing only other marketplaces does not skip the official add" {
@@ -1766,20 +1648,20 @@ EOF
     _stub_claude_recording_all_plugin_calls
     mkdir -p "$TEST_HOME/.claude/plugins"
     echo '{"some-other-mp":{}}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[1]}" = "install example-plugin@claude-plugins-official" ]
 }
 
 @test "skips marketplace bootstrap when every bundled plugin is already installed" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     _stub_claude_recording_all_plugin_calls
-    sed -i.bak 's|\[\]|[{"id":"superpowers@claude-plugins-official","enabled":true}]|' "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    _plant_installed_plugins "example-plugin@claude-plugins-official"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -1789,22 +1671,338 @@ EOF
 @test "a failed marketplace bootstrap is non-fatal, logged, and installs still run" {
     _stub_claude_recording_all_plugin_calls
     sed -i.bak 's|echo "marketplace-add .*|echo "network unreachable" >\&2; exit 1|' "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"failed to add plugin marketplace"* ]]
     [[ "$output" == *"network unreachable"* ]]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[0]}" = "install example-plugin@claude-plugins-official" ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"WARN CONFIG"* ]]
     [[ "$output" == *"marketplace add claude-plugins-official: network unreachable"* ]]
 }
 
-# ── Hook registration (ADR-078): hooks.json merged into settings "hooks" key — symlinks under ~/.claude/hooks/ alone never execute ─
 
-# Writes a plugin with a UserPromptSubmit hooks.json + script into $1/<slug>.
+_stub_claude_retired_plugin() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+echo "\$*" >> "$TEST_HOME/claude-calls.log"
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "uninstall" ]; then
+    echo "\$3" >> "$TEST_HOME/uninstall.log"
+    if [ -f "$TEST_HOME/uninstall-fail" ]; then cat "$TEST_HOME/uninstall-fail" >&2; exit 1; fi
+    exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ] && [ "\$3" = "add" ]; then
+    echo "marketplace-add \$4" >> "$TEST_HOME/plugin-calls.log"; exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+}
+
+@test "a marker-recorded retired plugin is uninstalled once and its cache tree removed" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+    mkdir -p "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0"
+    echo "# skill" > "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/SKILL.md"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/uninstall.log"
+    [ "${lines[0]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    [ ! -e "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO OK"* ]]
+    [[ "$output" == *"uninstalled retired plugin superpowers@claude-plugins-official"* ]]
+}
+
+@test "a plugin Speedwave never recorded installing is left alone" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+
+    rm -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+}
+
+@test "a failing retired-plugin uninstall is non-fatal and keeps the marker entry for a retry" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+    printf '%s\n' "boom" > "$TEST_HOME/uninstall-fail"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"failed to uninstall retired plugin superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"boom"* ]]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"WARN PLUGIN"* ]]
+    [[ "$output" == *"uninstall superpowers@claude-plugins-official: boom"* ]]
+    grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+}
+
+@test "a well-formed record without the retired plugin drops the marker entry without calling uninstall" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    mkdir -p "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0"
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo '{"version":2,"plugins":{}}' > "$TEST_HOME/.claude/plugins/installed_plugins.json"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    [ ! -e "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO SKIP"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official not installed"* ]]
+
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "frontend-design@claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO SKIP"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official not installed"* ]]
+}
+
+@test "a second start after a successful removal does not call uninstall again" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$TEST_HOME/uninstall.log")" -eq 1 ]
+}
+
+@test "an uninstall rejected as not installed is treated as already removed" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+    printf '%s\n' 'Plugin "superpowers@claude-plugins-official" not found in installed plugins' \
+        > "$TEST_HOME/uninstall-fail"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"failed to uninstall retired plugin"* ]]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO SKIP"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official already removed"* ]]
+}
+
+@test "a missing or malformed install record is treated as unknown, so the retired uninstall still runs" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/uninstall.log"
+    [ "${lines[0]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    rm -f "$TEST_HOME/uninstall.log"
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo "not json" > "$TEST_HOME/.claude/plugins/installed_plugins.json"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/uninstall.log"
+    [ "${lines[0]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+}
+
+@test "removing the retired marker entry leaves the other bundled-plugin entries intact" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+    [ "$(wc -l < "$TEST_HOME/uninstall.log")" -eq 1 ]
+}
+
+@test "missing jq warns and skips the retired-plugin removal, keeping the marker entry" {
+    rm -f "$STUBS_DIR/jq"
+    command -v jq &> /dev/null && skip "a non-stub jq is reachable on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: jq not found"* ]]
+    [[ "$output" == *"skipping removal of retired plugin superpowers@claude-plugins-official"* ]]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+}
+
+@test "the retired-plugin uninstall carries a timeout budget" {
+    grep -qE 'timeout ([6-9][0-9]|[1-9][0-9]{2,}) claude plugin uninstall' "$ENTRYPOINT"
+}
+
+@test "a failing retired-plugin uninstall keeps its marker line through a bundled-install rebuild" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+    printf '%s\n' "boom" > "$TEST_HOME/uninstall-fail"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official" ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official" ]
+    [ "${lines[1]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "a marker rewrite that cannot write its temp file warns and keeps the entry" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+    mkdir -p "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2.tmp"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not rewrite the bundled-plugins marker"* ]]
+    grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"WARN PLUGIN"* ]]
+    [[ "$output" == *"marker rewrite failed"* ]]
+}
+
+@test "a bundled plugin found installed without a Speedwave record is marked found and counts as recorded" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    _plant_installed_plugins "frontend-design@claude-plugins-official"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official#found" ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    rm -f "$TEST_HOME/claude-calls.log"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run grep -c '^plugin' "$TEST_HOME/claude-calls.log"
+    [ "$output" = "0" ]
+}
+
+@test "a retired plugin recorded as found is the user's install and is never uninstalled" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official#found" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "superpowers@claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    grep -qxF "superpowers@claude-plugins-official#found" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+}
+
+@test "a marker rebuild carries over Speedwave's own install records unchanged" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    _plant_installed_plugins "frontend-design@claude-plugins-official"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "feature-dev@claude-plugins-official" ]
+    [ "${lines[1]}" = "frontend-design@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "plugin bookkeeping starts no Claude Code process" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    _plant_installed_plugins "frontend-design@claude-plugins-official feature-dev@claude-plugins-official example-plugin@claude-plugins-official"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev,example-plugin"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run grep -c '^plugin' "$TEST_HOME/claude-calls.log"
+    [ "$output" = "0" ]
+}
+
+
 _make_hook_plugin() {
     local dir="$1" slug="$2"
     mkdir -p "${dir}/${slug}/hooks"
@@ -1818,7 +2016,6 @@ _make_hook_plugin() {
 EOF
 }
 
-# Copies the entrypoint with /speedwave/plugins/ redirected into $1; echoes the path.
 _patch_plugins_dir() {
     local patched
     patched="$(mktemp)"
@@ -1826,7 +2023,6 @@ _patch_plugins_dir() {
     echo "$patched"
 }
 
-# jq-free JSON assertion: node exits 0 when the expression is truthy.
 _settings_check() {
     node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(($1)?0:1)"
 }
@@ -1844,10 +2040,8 @@ _settings_check() {
     [ "$status" -eq 0 ]
     run _settings_check "s.hooks.UserPromptSubmit[0].hooks[0].timeout===10"
     [ "$status" -eq 0 ]
-    # The declaration manifest is never exposed as a hook entry; scripts still are.
     [ ! -e "${TEST_HOME}/.claude/hooks/hooks.json" ]
     [ -L "${TEST_HOME}/.claude/hooks/hook.mjs" ]
-    # Injected entries are tracked for the next run's cleanup.
     [ -f "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
 
     rm -rf "$plugins_dir" "$patched"
@@ -1880,7 +2074,6 @@ _settings_check() {
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # User adds their own hook under the same event between runs.
     node -e "
 const fs=require('fs');
 const p='${TEST_HOME}/.claude/settings.json';
@@ -1894,12 +2087,10 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # Plugin hook gone, both user hooks intact.
     run _settings_check "s.hooks.UserPromptSubmit.length===1 && s.hooks.UserPromptSubmit[0].hooks[0].command==='echo user-hook'"
     [ "$status" -eq 0 ]
     run _settings_check "s.hooks.SessionStart[0].hooks[0].command==='echo user-session'"
     [ "$status" -eq 0 ]
-    # Nothing managed anymore — the tracking manifest is removed.
     [ ! -e "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
 
     rm -rf "$plugins_dir" "$patched"
@@ -1914,8 +2105,6 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # User independently adds a byte-identical copy of the managed group
-    # (minus the Speedwave marker field) under the same event.
     node -e "
 const fs=require('fs');
 const p='${TEST_HOME}/.claude/settings.json';
@@ -1932,7 +2121,6 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     run bash "$patched" true
     [ "$status" -eq 0 ]
 
-    # The managed (marker-tagged) copy is gone; the user's identical copy remains.
     run _settings_check "s.hooks.UserPromptSubmit.length===1 && s.hooks.UserPromptSubmit[0]._speedwaveHookId===undefined"
     [ "$status" -eq 0 ]
 
@@ -1980,15 +2168,12 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     mkdir -p "${plugins_dir}/evt-plugin/hooks" "${plugins_dir}/shape-plugin/hooks" "${plugins_dir}/empty-plugin/hooks"
-    # lowercase event name — rejected by the event-shape gate.
     cat > "${plugins_dir}/evt-plugin/hooks/hooks.json" << 'EOF'
 { "userPromptSubmit": [ { "hooks": [ { "type": "command", "command": "echo x" } ] } ] }
 EOF
-    # missing type:"command" — rejected.
     cat > "${plugins_dir}/shape-plugin/hooks/hooks.json" << 'EOF'
 { "UserPromptSubmit": [ { "hooks": [ { "command": "echo x" } ] } ] }
 EOF
-    # whitespace-only command — rejected.
     cat > "${plugins_dir}/empty-plugin/hooks/hooks.json" << 'EOF'
 { "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "  " } ] } ] }
 EOF
@@ -1997,7 +2182,6 @@ EOF
     SPEEDWAVE_PLUGINS="evt-plugin,shape-plugin,empty-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARNING: ignoring invalid hooks declaration"* ]]
-    # Nothing registered → no settings.json created (no template in this fixture).
     [ ! -e "${TEST_HOME}/.claude/settings.json" ]
 
     rm -rf "$plugins_dir" "$patched"
@@ -2066,10 +2250,8 @@ EOF
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
     diff "$snapshot" "${TEST_HOME}/.claude/settings.json"
-    # Exactly one entry — no duplication across restarts.
     run _settings_check "s.hooks.UserPromptSubmit.length===1"
     [ "$status" -eq 0 ]
-    # Template keys and hooks coexist.
     run _settings_check "s.effortLevel==='high'"
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/settings.json.tmp" ]
@@ -2130,14 +2312,12 @@ EOF
     local plugins_dir patched
     plugins_dir="$(mktemp -d)"
     _make_hook_plugin "$plugins_dir" "my-plugin"
-    # User broke one event by hand; the plugin also declares it.
     printf '{"hooks":{"UserPromptSubmit":"oops"}}' > "${TEST_HOME}/.claude/settings.json"
     patched="$(_patch_plugins_dir "$plugins_dir")"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"hooks.UserPromptSubmit is not an array"* ]]
-    # The broken user value is preserved, not clobbered.
     run _settings_check "s.hooks.UserPromptSubmit==='oops'"
     [ "$status" -eq 0 ]
 
@@ -2152,7 +2332,6 @@ EOF
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
-    # User hand-deletes the injected entry (unsupported removal path).
     node -e "
 const fs=require('fs');
 const p='${TEST_HOME}/.claude/settings.json';
@@ -2177,12 +2356,10 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
-    # Simulate a crash that lost the manifest after settings.json was written.
     rm -f "${TEST_HOME}/.claude/.speedwave-managed-hooks"
 
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
-    # Structural dedupe: still exactly one entry, and it is tracked again.
     run _settings_check "s.hooks.UserPromptSubmit.length===1"
     [ "$status" -eq 0 ]
     [ -f "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
@@ -2203,7 +2380,6 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"managed-hooks state unparseable"* ]]
-    # Dedupe keeps the registration single; the manifest is valid again.
     run _settings_check "s.hooks.UserPromptSubmit.length===1"
     [ "$status" -eq 0 ]
     run node -e "JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/.speedwave-managed-hooks','utf8'))"
@@ -2212,7 +2388,6 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     rm -rf "$plugins_dir" "$patched"
 }
 
-# ── Persistent startup diagnostics log (${HOME}/.speedwave-entrypoint.log) ──────────────────────────
 
 @test "startup log records a failed bundled-plugin install with reason and level" {
     cat > "$STUBS_DIR/claude" << EOF
@@ -2225,15 +2400,14 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # stderr contract unchanged (existing bats depend on it)
     [[ "$output" == *"failed to install bundled plugin"* ]]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"ERROR FAIL"* ]]
-    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"example-plugin@claude-plugins-official"* ]]
     [[ "$output" == *"Failed to clone repository"* ]]
     [[ "$output" == *"entrypoint done (1 failure"* ]]
 }
@@ -2259,8 +2433,6 @@ EOF
     [ "$output" -eq 1 ]
 }
 
-# P0 regression: `set -e` turns a failing append into a dead container. The stub
-# revokes write access mid-start, so every later _diag write genuinely fails.
 @test "a write failure mid-start never fails the container start" {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
@@ -2283,12 +2455,10 @@ EOF
     ln -sf /etc/passwd "$TEST_HOME/.speedwave-entrypoint.log"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
-    # producer must not write through the symlink
     run bash -c "grep -o 'speedwave entrypoint' /etc/passwd 2>/dev/null | wc -l | tr -d ' '"
     [ "$output" -eq 0 ]
 }
 
-# ── _diag_redact: token-shaped secrets never reach the persisted log ───────────────────────────────
 
 @test "startup log redacts Bearer ghp_, xoxe rotating and x-speedwave-proxy-auth secrets" {
     cat > "$STUBS_DIR/claude" << EOF
@@ -2301,7 +2471,7 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -2310,7 +2480,6 @@ EOF
     [[ "$output" != *"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn"* ]]
     [[ "$output" != *"xoxe."* ]]
     [[ "$output" != *"synthetic-test-token-0000000000000000000000"* ]]
-    # The header name itself is diagnostic value, not a secret; it survives redaction.
     [[ "$output" == *"x-speedwave-proxy-auth: [REDACTED]"* ]]
 }
 
@@ -2325,7 +2494,7 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -2347,8 +2516,6 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    # Plugin/marketplace are single chars so the "p@m: " prefix is exactly 5 bytes:
-    # 5 + 494 A's + 1 Z == 500, the exact cap: the trailing Z must survive uncut.
     export SPEEDWAVE_BUNDLED_PLUGINS="p"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="m"
     run bash "$ENTRYPOINT" true
@@ -2371,8 +2538,6 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    # Same 5-byte "p@m: " prefix; 5 + 495 A's + 1 Z == 501, one over the cap: the
-    # cut must drop exactly the trailing Z, leaving 500 bytes ending in A.
     export SPEEDWAVE_BUNDLED_PLUGINS="p"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="m"
     run bash "$ENTRYPOINT" true

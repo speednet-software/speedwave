@@ -14,11 +14,9 @@ export async function readJsonCapped(
   response: Response
 ): Promise<{ ok: true; json: Record<string, unknown> } | { ok: false; message: string }> {
   const ctype = response.headers.get('content-type') ?? '';
-  // application/json or a +json suffix type (e.g. application/problem+json).
   if (!/^application\/(?:[^;]+\+)?json\b/i.test(ctype)) {
     return { ok: false, message: `unexpected content-type '${ctype}'` };
   }
-  // Reject early when the endpoint declares an oversized body.
   const declared = Number(response.headers.get('content-length') ?? '');
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { ok: false, message: `response exceeds ${MAX_BODY_BYTES} bytes` };
@@ -46,7 +44,6 @@ export async function readJsonCapped(
 async function readTextCapped(response: Response, maxBytes: number): Promise<string | null> {
   const reader = response.body?.getReader();
   if (!reader) {
-    // No stream (e.g. a test stub) — fall back to a buffered read with the cap.
     const buf = await response.arrayBuffer();
     return buf.byteLength > maxBytes ? null : Buffer.from(buf).toString('utf8');
   }

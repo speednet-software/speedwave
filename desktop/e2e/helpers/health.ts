@@ -37,7 +37,6 @@ export async function waitForHealthy(project: string): Promise<void> {
           return false;
         }
         lastObservation = JSON.stringify(result);
-        // `name` is the compose-prefix-stripped service name (PR #730).
         return (
           result.overall_healthy &&
           result.vm.running &&

@@ -31,8 +31,17 @@ require_non_empty_dir() {
   find "$path" -mindepth 1 -print -quit | grep -q . || fail "Bundled directory is empty: $path"
 }
 
-# Any Mach-O under the tree — including one wrapped in gzip — fails Apple
-# notarization if unsigned. `file -z` inspects compressed payloads directly.
+require_pinned_vulkan_dll() {
+  local path="$1"
+  require_file "$path"
+  local pin_file expected actual
+  pin_file="$(cd "$(dirname "$0")" && pwd)/install-vulkan-sdk.ps1"
+  expected="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-fA-F]\{64\}\)'.*/\1/p" "$pin_file" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$expected" ]] || fail "Could not read \$RuntimeDllSha256 from $pin_file"
+  actual="$( (sha256sum "$path" 2>/dev/null || shasum -a 256 "$path") | cut -d' ' -f1)"
+  [[ "$actual" == "$expected" ]] || fail "vulkan-1.dll SHA256 mismatch: got $actual, expected $expected"
+}
+
 require_no_macho_under() {
   local root_dir="$1"
   local f
@@ -68,6 +77,7 @@ require_file "$root/mcp-os/shared/package-lock.json"
 require_non_empty_dir "$root/mcp-os/shared/node_modules"
 [[ -d "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "Missing mcp-shared dir: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
 [[ ! -L "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "mcp-shared must be a real directory, not a symlink: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
+require_non_empty_dir "$root/THIRD-PARTY-LICENSES"
 
 case "$platform" in
   macos)
@@ -89,6 +99,8 @@ case "$platform" in
     require_file "$root/cli/speedwave.exe"
     require_file "$root/windows/sweep.ps1"
     require_file "$root/windows/firewall.ps1"
+    require_pinned_vulkan_dll "$root/vulkan-1.dll"
+    require_file "$root/THIRD-PARTY-LICENSES/VulkanRT-License.txt"
     ;;
 esac
 

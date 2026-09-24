@@ -3,20 +3,27 @@
  * Tests path traversal prevention, URL encoding attacks, and whitelist enforcement
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { SharePointClient, SharePointConfig } from './client.js';
 import { PathValidator } from './path-validator.js';
 import fsPromises from 'fs/promises';
 
 vi.mock('fs/promises');
 
-// Test configuration
 const mockConfig: SharePointConfig = {
   siteId: 'test-site-id',
   accessToken: 'test-access-token',
 };
 
 const mockTokensDir = '/test/tokens';
+
+const GRAPH_DRIVE_URL = `https://graph.microsoft.com/v1.0/sites/${mockConfig.siteId}/drive`;
+
+let fetchMock: Mock;
+
+beforeEach(() => {
+  fetchMock = vi.mocked(fetch) as unknown as Mock;
+});
 
 describe('Security: validatePath', () => {
   let client: SharePointClient;
@@ -25,13 +32,10 @@ describe('Security: validatePath', () => {
     vi.clearAllMocks();
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
 
-    // Mock console methods to reduce noise
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
-
-  // ── Path Traversal Attacks ─────────────────────────────────────────────────────────────────────
 
   describe('Path Traversal Attacks', () => {
     it('should reject path with ../ traversal', async () => {
@@ -98,8 +102,6 @@ describe('Security: validatePath', () => {
     });
   });
 
-  // ── URL-Encoded Traversal Attacks ──────────────────────────────────────────────────────────────
-
   describe('URL-Encoded Traversal Attacks', () => {
     it('should reject URL-encoded ../ (%2e%2e%2f)', async () => {
       const maliciousPath = '%2e%2e%2f%2e%2e%2fetc/passwd';
@@ -156,9 +158,28 @@ describe('Security: validatePath', () => {
         'Invalid path (security check failed)'
       );
     });
-  });
 
-  // ── Null Byte Injection ────────────────────────────────────────────────────────────────────────
+    it('should reject a path URL-encoded more than 5 times', async () => {
+      const maliciousPath = 'C%25252525253A%25252525255CWindows';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject a drive path that decodes fully at the fifth encoding level', async () => {
+      const maliciousPath = 'C%252525253A%252525255CWindows';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject malformed encoding revealed only at the sixth decoding step', async () => {
+      const maliciousPath = 'Documents%2525252525ZZ';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+  });
 
   describe('Null Byte Injection', () => {
     it('should reject path with URL-encoded null byte (%00)', async () => {
@@ -190,8 +211,6 @@ describe('Security: validatePath', () => {
     });
   });
 
-  // ── Absolute Paths ─────────────────────────────────────────────────────────────────────────────
-
   describe('Absolute Paths', () => {
     it('should reject Unix absolute path (/etc/passwd)', async () => {
       const maliciousPath = '/etc/passwd';
@@ -207,11 +226,39 @@ describe('Security: validatePath', () => {
       );
     });
 
+    it('should reject a bare slash instead of treating it as the drive root (/)', async () => {
+      const slashPath = '/';
+      await expect(client.listFiles({ path: slashPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
     it('should reject Windows absolute path (C:\\Windows)', async () => {
-      // Note: The path contains backslash which triggers validation failure
       const maliciousPath = 'C:\\Windows\\System32';
-      // This will fail because of backslashes, not because it starts with C:
-      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow();
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject lowercase Windows drive path with forward slashes (c:/windows)', async () => {
+      const maliciousPath = 'c:/windows/system32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject drive-relative Windows path (C:Windows)', async () => {
+      const maliciousPath = 'C:Windows\\System32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject URL-encoded Windows drive path (C%3A%5CWindows → C:\\Windows)', async () => {
+      const maliciousPath = 'C%3A%5CWindows%5CSystem32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
     });
 
     it('should reject Windows UNC path (\\\\server\\share)', async () => {
@@ -236,7 +283,6 @@ describe('Security: validatePath', () => {
     });
 
     it('should reject URL-encoded absolute path (%2Fetc%2Fpasswd → /etc/passwd)', async () => {
-      // After decoding, the path starts with '/' — line 94 decodedPath branch
       const maliciousPath = '%2Fetc%2Fpasswd';
       await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
         'Invalid path (security check failed)'
@@ -244,18 +290,44 @@ describe('Security: validatePath', () => {
     });
   });
 
-  // ── Edge Cases ─────────────────────────────────────────────────────────────────────────────────
-
-  describe('Edge Cases', () => {
-    it('should reject empty string path', async () => {
-      // Empty string is actually allowed (represents root), testing invalid types
-      const maliciousPath = null as unknown as string;
-      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow();
+  describe('Colons', () => {
+    it('should reject a drive path after a leading space ( C:\\Windows)', async () => {
+      const maliciousPath = ' C:\\Windows\\System32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
     });
 
-    it('should reject undefined path (type coercion)', async () => {
-      const maliciousPath = undefined as unknown as string;
-      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow();
+    it('should reject a drive path after a zero-width space', async () => {
+      const maliciousPath = '\u200BC:\\Windows\\System32';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+
+    it('should reject a colon in a later segment (Docs/C:/x)', async () => {
+      const maliciousPath = 'Docs/C:/x';
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+    });
+  });
+
+  describe('Edge Cases', () => {
+    beforeEach(() => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({ value: [] }),
+      });
+    });
+
+    it.each([null, undefined])('should list the drive root when path is %s', async (rootPath) => {
+      await expect(client.listFiles({ path: rootPath as unknown as string })).resolves.toEqual({
+        files: [],
+        exists: true,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith(`${GRAPH_DRIVE_URL}/root/children`, expect.anything());
     });
 
     it('should reject non-string path (number)', async () => {
@@ -272,41 +344,25 @@ describe('Security: validatePath', () => {
       );
     });
 
-    it('should reject very long path (potential DoS)', async () => {
-      const maliciousPath = 'a/'.repeat(10000) + 'file.txt';
-      // This should either reject or handle gracefully
-      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow();
+    it('should validate a very long path without throwing', () => {
+      const longPath = 'a/'.repeat(10000) + 'file.txt';
+      expect(() => new PathValidator().validatePath(longPath)).not.toThrow();
     });
 
     it('should handle path with spaces safely', async () => {
-      // Mock successful response
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
       const validPath = 'Documents/My Folder/file.txt';
       await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
     });
 
     it('should handle path with Unicode characters safely', async () => {
-      // Mock successful response
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ value: [] }),
-      });
-
       const validPath = 'Documents/文件夹/файл.txt';
       await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
     });
   });
 
-  // ── Valid Paths (should pass) ──────────────────────────────────────────────────────────────────
-
   describe('Valid Paths', () => {
     beforeEach(() => {
-      // Mock successful fetch responses for valid paths
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ value: [] }),
       });
@@ -361,9 +417,75 @@ describe('Security: validatePath', () => {
       const validPath = 'Documents/@archive/file.txt';
       await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
     });
+
+    it('should accept path starting with a single-letter folder (C/Windows)', async () => {
+      const validPath = 'C/Windows/file.txt';
+      await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
+    });
+
+    it('should accept a path URL-encoded exactly 5 times', async () => {
+      const validPath = 'Documents%2525252520Q1';
+      await expect(client.listFiles({ path: validPath })).resolves.toBeDefined();
+    });
   });
 
-  // ── Complex Attack Scenarios ───────────────────────────────────────────────────────────────────
+  describe('Security Logging', () => {
+    it('should log security warning for a colon path', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const maliciousPath = 'C:\\Windows\\System32';
+
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Security: Path validation blocked potential attack'),
+        expect.objectContaining({
+          attackType: 'invalid_character',
+          attemptedPath: maliciousPath,
+          decodedPath: undefined,
+          reason: 'Path contains a colon (drive letter or Graph path syntax)',
+        })
+      );
+    });
+
+    it('should log decoded path for a URL-encoded colon path', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const maliciousPath = 'C%3A%5CWindows%5CSystem32';
+
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Security: Path validation blocked potential attack'),
+        expect.objectContaining({
+          attackType: 'invalid_character',
+          attemptedPath: maliciousPath,
+          decodedPath: 'C:\\Windows\\System32',
+          reason: 'Path contains a colon (drive letter or Graph path syntax)',
+        })
+      );
+    });
+
+    it('should log security warning for a path URL-encoded more than 5 times', async () => {
+      const warnSpy = vi.spyOn(console, 'warn');
+      const maliciousPath = 'C%25252525253A%25252525255CWindows';
+
+      await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
+        'Invalid path (security check failed)'
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Security: Path validation blocked potential attack'),
+        {
+          attemptedPath: maliciousPath,
+          attackType: 'excessive_url_encoding',
+          reason: 'Path is URL-encoded more than 5 times',
+        }
+      );
+    });
+  });
 
   describe('Complex Attack Scenarios', () => {
     it('should reject mixed encoding and traversal', async () => {
@@ -388,7 +510,6 @@ describe('Security: validatePath', () => {
     });
 
     it('should reject Unicode normalization attack', async () => {
-      // Using Unicode characters that might normalize to ../
       const maliciousPath = 'Documents/\u002e\u002e\u002f\u002e\u002e\u002fetc';
       await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow(
         'Invalid path (security check failed)'
@@ -404,13 +525,10 @@ describe('Security: validateLocalPath', () => {
     vi.clearAllMocks();
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
 
-    // Mock console methods
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
-
-  // ── Whitelist Enforcement ──────────────────────────────────────────────────────────────────────
 
   describe('Whitelist Enforcement', () => {
     it('should reject path outside allowed directory', async () => {
@@ -456,7 +574,6 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject Windows paths', async () => {
-      // path.resolve consults process.cwd(); pin it so the assertion holds for a checkout under /workspace too.
       const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/home/node');
       try {
         await expect(client.uploadFile('docs/test.txt', 'C:\\Users\\speedwave')).rejects.toThrow(
@@ -467,8 +584,6 @@ describe('Security: validateLocalPath', () => {
       }
     });
   });
-
-  // ── Path Traversal in Local Paths ──────────────────────────────────────────────────────────────
 
   describe('Path Traversal in Local Paths', () => {
     it('should reject relative path with traversal escaping whitelist', async () => {
@@ -484,14 +599,12 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject path with embedded ../ after resolution', async () => {
-      // After path.resolve(), this should normalize and fail validation
       await expect(
         client.uploadFile('docs/test.txt', '/workspace/folder/../../..')
       ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
 
     it('should reject relative path starting with ../', async () => {
-      // path.resolve consults process.cwd(); pin it so the traversal escapes /workspace regardless of checkout location.
       const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/home/node');
       try {
         await expect(client.uploadFile('docs/test.txt', '../../../etc/passwd')).rejects.toThrow(
@@ -502,8 +615,6 @@ describe('Security: validateLocalPath', () => {
       }
     });
   });
-
-  // ── Edge Cases for Local Paths ─────────────────────────────────────────────────────────────────
 
   describe('Edge Cases for Local Paths', () => {
     it('should reject empty string path', async () => {
@@ -549,12 +660,9 @@ describe('Security: validateLocalPath', () => {
     });
   });
 
-  // ── Valid Local Paths (should pass) ────────────────────────────────────────────────────────────
-
   describe('Valid Local Paths', () => {
     beforeEach(() => {
-      // Mock fs operations for successful scenarios
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
@@ -594,13 +702,9 @@ describe('Security: validateLocalPath', () => {
     });
   });
 
-  // ── Similarity Attacks (paths that look like whitelist but aren't) ─────────────────────────────
-
   describe('Similarity Attacks', () => {
     it('should normalize path with extra leading slash', async () => {
-      // path.resolve() normalizes //workspace to /workspace
-      // So this actually passes validation after normalization
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
@@ -610,7 +714,7 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should accept path with trailing slash removed from whitelist', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
@@ -621,7 +725,6 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject path that looks similar but is not a subdirectory (workspace2)', async () => {
-      // SECURITY FIX: /workspace2 is NOT a subdirectory of /workspace
       await expect(client.uploadFile('docs/test.txt', '/workspace2')).rejects.toThrow(
         'Invalid local_path: must be under /workspace'
       );
@@ -634,14 +737,11 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject path with unicode lookalike characters', async () => {
-      // Using Cyrillic 'а' instead of Latin 'a'
       await expect(
         client.uploadFile('docs/test.txt', '/home/speedwave/.clаude/context')
       ).rejects.toThrow('Invalid local_path: must be under /workspace');
     });
   });
-
-  // ── Security Logging Tests ─────────────────────────────────────────────────────────────────────
 
   describe('Security Logging', () => {
     it('should log security warning when path traversal is detected in validatePath', async () => {
@@ -665,7 +765,6 @@ describe('Security: validateLocalPath', () => {
 
       await expect(client.listFiles({ path: maliciousPath })).rejects.toThrow();
 
-      // Timestamp is the `ts()` prefix `[<ISO 8601 with local offset>]`, not in the object.
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringMatching(
           /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:Z|[+-]\d{2}:\d{2})\].*Security/
@@ -745,8 +844,6 @@ describe('Security: validateLocalPath', () => {
   });
 });
 
-// ── Denylist Tests ───────────────────────────────────────────────────────────────────────────────
-
 describe('Security: denylist enforcement', () => {
   let client: SharePointClient;
 
@@ -754,7 +851,6 @@ describe('Security: denylist enforcement', () => {
     vi.clearAllMocks();
     client = new SharePointClient({ ...mockConfig }, mockTokensDir);
 
-    // Mock console methods
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -774,8 +870,7 @@ describe('Security: denylist enforcement', () => {
     });
 
     it('should allow /workspace/.gitignore (not a prefix match)', async () => {
-      // .gitignore starts with .git but is not .git/ or .git itself
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
@@ -787,7 +882,7 @@ describe('Security: denylist enforcement', () => {
     });
 
     it('should allow /workspace/.github/workflows/ci.yml', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
@@ -807,7 +902,7 @@ describe('Security: denylist enforcement', () => {
     });
 
     it('should allow /workspace/.envrc (not exact match)', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });
@@ -817,7 +912,7 @@ describe('Security: denylist enforcement', () => {
     });
 
     it('should allow /workspace/.env.example (not exact match)', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      fetchMock.mockResolvedValue({
         ok: true,
         json: async () => ({ eTag: 'test-etag', size: 100 }),
       });

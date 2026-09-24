@@ -22,15 +22,11 @@ export class BetaService {
     try {
       const value = await this.tauri.invoke<boolean>('get_beta_enabled');
       this.state.set(value);
-    } catch {
-      // No Tauri host (web tests) or command not registered yet — stay off.
-    }
+    } catch {}
     try {
       await this.tauri.listen<boolean>('beta-changed', (event) => {
         this.state.set(event.payload);
       });
-    } catch {
-      // Ignore — listen() throws only when the Tauri event bus is absent.
-    }
+    } catch {}
   }
 }

@@ -50,7 +50,6 @@ export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsC
     },
 
     async listIssueTypes(projectIdOrKey) {
-      // Enforce scope first.
       const project = await this.get(projectIdOrKey);
       const res = await client.get<unknown[]>(`/rest/api/3/issuetype/project`, {
         projectId: project.id,

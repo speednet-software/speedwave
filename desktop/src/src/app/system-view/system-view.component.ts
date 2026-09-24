@@ -81,7 +81,6 @@ export class SystemViewComponent implements OnInit, OnDestroy {
     this.restarting.add(name);
     this.cdr.markForCheck();
     try {
-      // recreate_project_containers restarts all — per-container restart not exposed by runtime
       await this.tauri.invoke('recreate_project_containers', { project });
       await this.refresh();
     } catch (e: unknown) {

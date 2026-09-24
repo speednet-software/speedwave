@@ -1,5 +1,3 @@
-// SharePoint OAuth Device Code Flow. Two-file persistence per ADR-060.
-
 use crate::oauth_flow::{
     self, emit_error, save_credential_file, DeviceCodeInfo, DeviceCodeProvider, FlowRegistry,
     PollStep, ProgressStatus,
@@ -10,8 +8,6 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const PROGRESS_EVENT: &str = "sharepoint_oauth_progress";
-
-// ── Serde DTOs — Microsoft identity platform responses ──────────────────────────────────
 
 #[derive(Deserialize)]
 struct MsDeviceCodeResponse {
@@ -47,8 +43,6 @@ struct MsTokenErrorResponse {
 
 static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 
-// ── Validation helpers ──────────────────────────────────────────────────────────────────
-
 fn validate_tenant_id(tenant_id: &str) -> Result<(), String> {
     if tenant_id.is_empty() {
         return Err("tenant_id is required".to_string());
@@ -69,7 +63,6 @@ fn validate_tenant_id(tenant_id: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // FQDN-like: alphanumeric, dots, hyphens; must start and end with alphanumeric.
     let bytes = tenant_id.as_bytes();
     let first = bytes[0];
     let last = bytes[bytes.len() - 1];
@@ -186,7 +179,6 @@ fn save_tokens_in(
     tenant_id: &str,
     tokens: &MsTokenResponse,
 ) -> Result<(), String> {
-    // State first, mounted token second.
     save_oauth_state_in(
         data_dir,
         project,
@@ -257,8 +249,6 @@ impl DeviceCodeProvider for SharepointProvider {
         }
     }
 }
-
-// ── Tauri commands ──────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn start_sharepoint_oauth(
@@ -371,8 +361,6 @@ pub fn cancel_sharepoint_oauth() {
 mod tests {
     use super::*;
 
-    // -- Tenant ID validation --
-
     #[test]
     fn validate_tenant_id_accepts_uuid_with_hyphens() {
         assert!(validate_tenant_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
@@ -455,8 +443,6 @@ mod tests {
         assert!(validate_tenant_id(&long).is_ok());
     }
 
-    // -- Client ID validation (UUID) --
-
     #[test]
     fn client_id_accepts_valid_uuid() {
         assert!(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").is_ok());
@@ -466,8 +452,6 @@ mod tests {
     fn client_id_rejects_non_uuid() {
         assert!(uuid::Uuid::parse_str("not-a-uuid").is_err());
     }
-
-    // -- DTO deserialization --
 
     #[test]
     fn ms_device_code_response_deserializes() {
@@ -529,8 +513,6 @@ mod tests {
         assert_eq!(resp.error, "bad_verification_code");
     }
 
-    // -- redact_ms_error_description --
-
     #[test]
     fn redact_keeps_aadsts_code_and_drops_free_text() {
         let raw = "AADSTS50158: External challenge; UPN=alice@contoso.com; tenant=11111111-2222-3333-4444-555555555555; policy=\"Require Compliant Device\"";
@@ -553,8 +535,6 @@ mod tests {
     fn redact_returns_no_description_for_empty() {
         assert_eq!(redact_ms_error_description(""), "no description");
     }
-
-    // -- save_oauth_state (ADR-060 split) --
 
     #[test]
     fn save_oauth_state_writes_json_with_required_fields() {
@@ -612,7 +592,6 @@ mod tests {
     /// `mcp-servers/oauth/src/oauth-state.ts::assertOAuthState`.
     #[test]
     fn save_oauth_state_key_set_matches_documented_ts_schema() {
-        // Mirror of OAuthState in oauth-state.ts (top-level + providerData keys).
         const EXPECTED_TOP_LEVEL: &[&str] = &[
             "provider",
             "providerData",
@@ -736,8 +715,6 @@ mod tests {
         assert_eq!(json["providerData"]["tenantId"], "common");
     }
 
-    // -- classify_sharepoint_response: poll-loop mechanics (mirrors github) --
-
     #[test]
     fn classify_sp_accepts_success_body() {
         let body =
@@ -783,7 +760,6 @@ mod tests {
 
     #[test]
     fn classify_sp_other_error_redacts_description() {
-        // The `other` branch routes error_description through redaction.
         let body =
             br#"{"error":"invalid_grant","error_description":"AADSTS9000 secret tenant detail"}"#;
         match classify_sharepoint_response(400, body) {
@@ -803,8 +779,6 @@ mod tests {
             _ => panic!("expected Failed with HTTP status"),
         }
     }
-
-    // -- SharepointProvider::handle_token_response classification --
 
     fn provider() -> SharepointProvider {
         provider_in(std::env::temp_dir())

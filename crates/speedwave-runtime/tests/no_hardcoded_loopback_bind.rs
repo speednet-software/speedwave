@@ -45,7 +45,6 @@ const PATTERNS: &[&str] = &[
 ];
 
 fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
-    // Walk backwards looking for `mod tests {` / `#[cfg(test)] mod` / `#[test]`.
     for i in (0..idx).rev() {
         let l = lines[i].trim_start();
         if l.starts_with("mod tests")
@@ -55,9 +54,7 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
         {
             return true;
         }
-        // Closing brace of a sibling top-level item — stop scanning back.
         if l == "}" && lines[i].starts_with('}') {
-            // Top-level close before any test marker: not test code.
             return false;
         }
     }
@@ -71,17 +68,12 @@ fn has_allow_marker(line: &str, prev: Option<&&str>) -> bool {
 /// Files known to bind/connect loopback for legitimate host-internal reasons (upstream IDE
 /// WebSocket, plugin local-UI URL, etc.); new entries require justification in the PR.
 const ALLOWLISTED_FILES: &[&str] = &[
-    // Host→host: WS URL Tauri uses to dial the external IDE (VSCode/Cursor).
     "desktop/src-tauri/src/bridges/ide_bridge.rs",
-    // Host→host: local UI URL returned to the Angular webview.
     "desktop/src-tauri/src/bridges/plugin_host_bridge.rs",
-    // SSRF policy + URL validators — match loopback literals, not bind.
     "desktop/src-tauri/src/url_validation.rs",
     "desktop/src-tauri/src/http_util.rs",
     "desktop/src-tauri/src/llm_cmd.rs",
-    // External-IDE discovery: probes loopback for VSCode/Cursor sentinel files.
     "desktop/src-tauri/src/health.rs",
-    // E2E WebDriver listener is host-internal (`feature = "e2e"`).
     "desktop/src-tauri/src/main.rs",
 ];
 

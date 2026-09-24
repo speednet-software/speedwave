@@ -5,8 +5,6 @@ import { runPreflight } from './helpers/preflight';
 
 const SCREENSHOT_DIR = join(process.cwd(), 'screenshots');
 
-// Rigs split the run around factory-reset so engine-level bats suites get a live-project
-// window between the last non-destructive spec and 07-factory-reset.spec.ts.
 const FACTORY_RESET_SPEC = './specs/07-factory-reset.spec.ts';
 const ALL_SPECS = [
   './specs/01-app-lifecycle.spec.ts',
@@ -27,6 +25,8 @@ const ALL_SPECS = [
   './specs/17-logs-diagnostics.spec.ts',
   './specs/18-anthropic-oauth-login.spec.ts',
   './specs/19-dirty-state-self-heal.spec.ts',
+  './specs/20-slash-and-model-selector.spec.ts',
+  './specs/21-usage-popover.spec.ts',
   FACTORY_RESET_SPEC,
 ];
 
@@ -44,8 +44,6 @@ export const config = {
   maxInstances: 1,
   bail: 1,
 
-  // App embeds tauri-plugin-webdriver on port 4445 — no external tauri-driver needed.
-  // The app must be launched before wdio (Makefile / e2e-vm.sh handles this).
   capabilities: [{}],
 
   hostname: '127.0.0.1',
@@ -54,8 +52,6 @@ export const config = {
 
   framework: 'mocha',
   mochaOpts: {
-    // Default per-test timeout. Individual specs override with this.timeout().
-    // 45 min accommodates slow first-time builds on cold machines.
     timeout: 2_700_000,
     ui: 'bdd',
   },
@@ -64,8 +60,6 @@ export const config = {
 
   logLevel: 'warn',
 
-  // Fail fast on a broken external dependency (exhausted OpenRouter account, unreachable
-  // local LLM) — except 'reset-only', which runs only 07 and needs no LLM at all.
   onPrepare: async function () {
     if (process.env.SPW_E2E_SPEC_PHASE === 'reset-only') return;
     const failures = await runPreflight();

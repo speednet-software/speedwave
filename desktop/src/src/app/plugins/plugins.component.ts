@@ -358,7 +358,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
    */
   toolsLabelFor(plugin: PluginStatusEntry): string {
     if (!plugin.service_id) return '—';
-    // Placeholder; actual tool count reported per-worker.
     return '—';
   }
 
@@ -432,7 +431,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
    * button inside the overlay's error banner.
    */
   async retryInstall(): Promise<void> {
-    // Guard against concurrent runs during a failed event.
     if (this.installing || !this.currentZipPath) return;
     await this.runInstall(this.currentZipPath);
   }
@@ -443,7 +441,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
     this.success = '';
     this.installError.set(null);
     this.installing = true;
-    // Render empty steps; populated before first progress event.
     this.installSteps.set([]);
     this.cdr.markForCheck();
 
@@ -458,7 +455,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
     }
     this.installSteps.set(this.cloneSteps(summary));
 
-    // Register listener BEFORE invoke so no progress events are missed.
     this.unlistenInstall?.();
     this.unlistenInstall = await this.tauri.listen<PluginInstallProgress>(
       'plugin_install_status',
@@ -513,7 +509,6 @@ export class PluginsComponent implements OnInit, OnDestroy {
         this.setStepStatus(STEP_BUILDING, 'active', p.message);
         break;
       case 'done':
-        // Mark steps done; overlay closes after invoke resolves.
         this.installSteps.update((list) => list.map((s) => ({ ...s, status: 'done' as const })));
         break;
       case 'failed': {

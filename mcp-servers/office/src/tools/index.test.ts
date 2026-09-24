@@ -18,7 +18,6 @@ function fr(format: string) {
   };
 }
 
-// Mock every engine module the tools call.
 const eng = vi.hoisted(() => {
   const make = (impl: () => unknown) => vi.fn(async () => impl());
   const file = (format: string) => () => ({
@@ -203,7 +202,6 @@ describe('tool metadata', () => {
     expect(schema?.properties).toHaveProperty('flattened');
     expect(schema?.properties).toHaveProperty('fieldWarnings');
     expect(schema?.required).toContain('flattened');
-    // Composed from the shared fileResultSchema, not hand-copied: same base keys/required.
     for (const key of ['path', 'bytes', 'format', 'preview', 'truncated']) {
       expect(schema?.properties).toHaveProperty(key);
     }

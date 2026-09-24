@@ -28,7 +28,6 @@ mod tests {
     fn finds_file_in_first_matching_dir() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        // tool exists in `b` only
         let bin = b.path().join("fake-tool");
         let mut f = std::fs::File::create(&bin).unwrap();
         f.write_all(b"#!/bin/sh\n").unwrap();
