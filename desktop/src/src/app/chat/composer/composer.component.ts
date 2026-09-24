@@ -313,7 +313,7 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly streaming = input(false);
 
-  readonly sendBlocked = input(false);
+  readonly sendBlocked = input<() => boolean>(() => false);
 
   readonly queuedText = input('');
 
@@ -519,7 +519,7 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
   canSubmit(): boolean {
-    if (this.disabled() || this.sendBlocked()) return false;
+    if (this.disabled() || this.sendBlocked()()) return false;
     if (this.anyAttachmentPreprocessing()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
@@ -536,7 +536,7 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Placeholder for the current send state. */
   effectivePlaceholder(): string {
-    if (this.sendBlocked()) return 'starting session...';
+    if (this.sendBlocked()()) return 'starting session...';
     if (this.streaming()) return 'queue next message...';
     return this.placeholder();
   }
