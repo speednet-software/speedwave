@@ -1827,7 +1827,7 @@ describe('ChatSessionStore', () => {
       expect(store.pendingModelOverride()).toBeNull();
     });
 
-    it('a no-session Anthropic pick persists the pin and respawns without ever queuing (SPEED-544)', async () => {
+    it('a no-session Anthropic pick respawns this tab with the picked model without ever queuing (SPEED-544)', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -1842,8 +1842,13 @@ describe('ChatSessionStore', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(store.pendingModelOverride()).toBeNull();
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
       const startCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
-      expect(startCall?.[1]).toEqual({ project: 'test', tabId: store.tabId });
+      expect(startCall?.[1]).toEqual({
+        project: 'test',
+        tabId: store.tabId,
+        model: 'claude-haiku-4-5',
+      });
     });
 
     it('a reset during an in-flight resume discards its transcript and starts fresh', async () => {
@@ -2183,6 +2188,7 @@ describe('ChatSessionStore', () => {
           project: 'test',
           sessionId: LIVE,
           tabId: store.tabId,
+          model: null,
         });
         expect(store.deferredEffort()).toBeNull();
         expect(store.lastKnownSessionId).toBe(LIVE);
@@ -2531,7 +2537,7 @@ describe('ChatSessionStore', () => {
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
     });
 
-    it('picking the Default row clears the pin and switches the live session to the account default', async () => {
+    it('picking the Default row switches only this tab and never touches the project pin', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       store.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -2549,15 +2555,14 @@ describe('ChatSessionStore', () => {
       });
 
       const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
-      expect(commands).toContain('clear_model_pin');
+      expect(commands).not.toContain('clear_model_pin');
       expect(commands).not.toContain('set_model_pin');
-      expect(commands.indexOf('clear_model_pin')).toBeLessThan(commands.indexOf('send_message'));
       const sent = invokeSpy.mock.calls.find(([cmd]) => cmd === 'send_message');
-      expect(JSON.stringify(sent?.[1])).toContain('/model default');
-      expect(JSON.stringify(sent?.[1])).not.toContain('[1m]');
+      expect(JSON.stringify(sent?.[1])).toContain('/model claude-opus-5[1m]');
+      expect(store.tabModel()).toBe('claude-opus-5[1m]');
     });
 
-    it('picking the Default row mid-stream queues the default alias, never the 1M wire id', async () => {
+    it('picking the Default row mid-stream queues its wire id for this tab', async () => {
       store.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
@@ -2573,7 +2578,7 @@ describe('ChatSessionStore', () => {
         isDefault: true,
       });
 
-      expect(store.pendingModelOverride()).toBe('default');
+      expect(store.pendingModelOverride()).toBe('claude-opus-5[1m]');
     });
 
     it('a Default flag on a proxy-routed pick is ignored: the provider model is still written', async () => {
@@ -2592,10 +2597,53 @@ describe('ChatSessionStore', () => {
       expect(commands).not.toContain('clear_model_pin');
     });
 
-    it('a failed pin clear surfaces the error and never touches the live session', async () => {
+    it('applyDefaultModelSelection persists the pin for new tabs and never touches the live session', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      store.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      await store.applyDefaultModelSelection({
+        catalogId: 'claude-opus-5',
+        wireId: 'claude-opus-5[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
+      });
+
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: 'test',
+        model: 'claude-opus-5[1m]',
+      });
+      expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'send_message')).toBe(false);
+      expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'start_chat')).toBe(false);
+      expect(store.tabModel()).toBeNull();
+    });
+
+    it('applyDefaultModelSelection with the account-default row clears the pin instead', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await store.applyDefaultModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: true,
+      });
+
+      expect(invokeSpy).toHaveBeenCalledWith('clear_model_pin', { projectId: 'test' });
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
+    });
+
+    it('a failed default-pin write surfaces the error and never touches the live session', async () => {
       const original = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd, args) => {
-        if (cmd === 'clear_model_pin') throw new Error('malformed settings.json');
+        if (cmd === 'set_model_pin') throw new Error('unknown Anthropic model');
         return original(cmd, args);
       };
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -2606,15 +2654,15 @@ describe('ChatSessionStore', () => {
       await Promise.resolve();
       invokeSpy.mockClear();
 
-      await store.applyModelSelection({
+      await store.applyDefaultModelSelection({
         catalogId: 'claude-opus-5',
         wireId: 'claude-opus-5[1m]',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
-        isDefault: true,
+        isDefault: false,
       });
 
-      expect(store.modelSelectionError()).toBe('malformed settings.json');
+      expect(store.modelSelectionError()).toBe('unknown Anthropic model');
       expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'send_message')).toBe(false);
     });
 
@@ -3518,6 +3566,7 @@ describe('ChatSessionStore', () => {
         sessionId: '550e8400-e29b-41d4-a716-446655440000',
         userUuid: 'msg_user_1',
         tabId: store.tabId,
+        model: null,
       });
       expect(store.messages).toHaveLength(1);
       expect(store.messages[0].role).toBe('user');
@@ -4867,54 +4916,17 @@ describe('ChatSessionStore', () => {
       expect(store.modelSelectionError()).toContain('locked config');
     });
 
-    it('persists the model pin BEFORE sending the wire command for a live anthropic selection', async () => {
+    it('a live anthropic selection wires /model without any pin write and records the tab model', async () => {
       const anthropicModels = TestBed.inject(AnthropicModelsService);
       const setProviderModelSpy = vi.spyOn(anthropicModels, 'setProviderModel');
-      const calls: string[] = [];
-      let resolvePin!: () => void;
-      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
-        if (cmd === 'set_model_pin') {
-          return new Promise((r) => {
-            calls.push('set_model_pin-start');
-            resolvePin = () => {
-              calls.push('set_model_pin-resolved');
-              r(undefined);
-            };
-          });
-        }
-        return undefined;
-      });
-      vi.spyOn(store, 'sendMessage').mockImplementation(async () => {
-        calls.push('sendMessage');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const sent: string[] = [];
+      vi.spyOn(store, 'sendMessage').mockImplementation(async (input) => {
+        sent.push(String(input));
       });
       store.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-sonnet-5', session_id: 'sess-2' },
-      });
-
-      const pending = store.applyModelSelection({
-        catalogId: 'claude-opus-4-8',
-        wireId: 'claude-opus-4-8',
-        providerId: 'anthropic',
-        kind: 'anthropic_oauth',
-        isDefault: false,
-      });
-      expect(calls).toEqual(['set_model_pin-start']);
-      resolvePin();
-      await pending;
-      expect(calls).toEqual(['set_model_pin-start', 'set_model_pin-resolved', 'sendMessage']);
-      expect(setProviderModelSpy).not.toHaveBeenCalled();
-    });
-
-    it('blocks the wire and surfaces an error when the model pin write fails on a live session', async () => {
-      const sendMessageSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined);
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'set_model_pin') throw new Error('unknown Anthropic model');
-        return undefined;
-      };
-      store.handleStreamChunk({
-        chunk_type: 'SystemInit',
-        data: { model: 'claude-sonnet-5', session_id: 'sess-3' },
       });
 
       await store.applyModelSelection({
@@ -4925,11 +4937,14 @@ describe('ChatSessionStore', () => {
         isDefault: false,
       });
 
-      expect(sendMessageSpy).not.toHaveBeenCalled();
-      expect(store.modelSelectionError()).toContain('unknown Anthropic model');
+      expect(sent).toEqual(['/model claude-opus-4-8']);
+      expect(store.tabModel()).toBe('claude-opus-4-8');
+      expect(store.pickedModel()).toBe('claude-opus-4-8');
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
+      expect(setProviderModelSpy).not.toHaveBeenCalled();
     });
 
-    it('persists the model pin and sends nothing further when no session or project is active', async () => {
+    it('records the tab model and sends nothing further when no session or project is active', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       const sendMessageSpy = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined);
 
@@ -4941,16 +4956,14 @@ describe('ChatSessionStore', () => {
         isDefault: false,
       });
 
-      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
-        projectId: '',
-        model: 'claude-opus-4-8',
-      });
+      expect(store.tabModel()).toBe('claude-opus-4-8');
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
       expect(sendMessageSpy).not.toHaveBeenCalled();
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
       expect(store.pendingModelOverride()).toBeNull();
     });
 
-    it('an idle pre-first-turn anthropic pick persists the pin and respawns with no model argument at all', async () => {
+    it('an idle pre-first-turn anthropic pick respawns this tab with the picked model', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       projectState.activeProject.set('test');
@@ -4967,24 +4980,22 @@ describe('ChatSessionStore', () => {
       });
       await new Promise((r) => setTimeout(r, 0));
 
-      const pinCallIndex = invokeSpy.mock.calls.findIndex(([cmd]) => cmd === 'set_model_pin');
       const startCalls = invokeSpy.mock.calls
         .map((call, i) => ({ cmd: call[0], args: call[1], i }))
         .filter(({ cmd }) => cmd === 'start_chat');
-      expect(pinCallIndex).toBeGreaterThanOrEqual(0);
-      expect(invokeSpy.mock.calls[pinCallIndex][1]).toEqual({
-        projectId: 'test',
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
+      expect(startCalls.at(-1)?.args).toEqual({
+        project: 'test',
+        tabId: store.tabId,
         model: 'claude-sonnet-5',
       });
-      expect(startCalls.at(-1)?.i).toBeGreaterThan(pinCallIndex);
-      expect(startCalls.at(-1)?.args).toEqual({ project: 'test', tabId: store.tabId });
       expect(
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
       ).toHaveLength(0);
       expect(store.pendingModelOverride()).toBeNull();
     });
 
-    it('a still-session-less streaming pick persists the pin without respawning or queuing', async () => {
+    it('a still-session-less streaming pick records the tab model without respawning or queuing', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
       store.isStreaming = true;
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
@@ -4997,24 +5008,14 @@ describe('ChatSessionStore', () => {
         isDefault: false,
       });
 
-      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
-        projectId: 'test',
-        model: 'claude-sonnet-5',
-      });
+      expect(store.tabModel()).toBe('claude-sonnet-5');
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
       expect(store.pendingModelOverride()).toBeNull();
     });
 
-    it('blocks the respawn and surfaces an error when the model pin write fails with no live session', async () => {
-      const projectState = TestBed.inject(ProjectStateService);
-      await projectState.init();
-      projectState.activeProject.set('test');
-      await store.init();
-      await new Promise((r) => setTimeout(r, 0));
-      mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'set_model_pin') throw new Error('locked settings.json');
-        return undefined;
-      };
+    it('a later resume in this tab still carries the tab model override', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await store.applyModelSelection({
@@ -5024,12 +5025,18 @@ describe('ChatSessionStore', () => {
         kind: 'anthropic_oauth',
         isDefault: false,
       });
+      await store.resumeConversation('old-sess');
 
-      expect(store.modelSelectionError()).toContain('locked settings.json');
-      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      const resumeCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'resume_conversation');
+      expect(resumeCall?.[1]).toEqual({
+        project: 'test',
+        sessionId: 'old-sess',
+        tabId: store.tabId,
+        model: 'claude-sonnet-5',
+      });
     });
 
-    it('a mid-stream pick on a live session persists the pin immediately and wires it after the turn ends', async () => {
+    it('a mid-stream pick on a live session records the tab model immediately and wires it after the turn ends', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       store.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -5046,10 +5053,8 @@ describe('ChatSessionStore', () => {
         kind: 'anthropic_oauth',
         isDefault: false,
       });
-      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
-        projectId: expect.any(String),
-        model: 'claude-haiku-4-5',
-      });
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
+      expect(store.tabModel()).toBe('claude-haiku-4-5');
       let modelSend = invokeSpy.mock.calls.find(
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
       );

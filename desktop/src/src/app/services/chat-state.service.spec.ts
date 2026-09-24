@@ -169,7 +169,11 @@ describe('ChatStateService', () => {
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
 
-      expect(spy).toHaveBeenCalledWith('start_chat', { project: 'test', tabId: service.tabId });
+      expect(spy).toHaveBeenCalledWith('start_chat', {
+        project: 'test',
+        tabId: service.tabId,
+        model: null,
+      });
     });
 
     it('drops chat_stream chunks addressed to another tab', async () => {
@@ -296,6 +300,59 @@ describe('ChatStateService', () => {
   });
 
   describe('tab registry (SPEED-388 phase 2)', () => {
+    describe('per-tab model selection', () => {
+      it('a pick in one tab never leaks into a sibling tab or its spawn', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const store1 = service.tabs().get(tab1)!;
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await store1.applyModelSelection({
+          catalogId: 'claude-haiku-4-5',
+          wireId: 'claude-haiku-4-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+          isDefault: false,
+        });
+        const tab2 = await service.openTab();
+        await new Promise((r) => setTimeout(r, 0));
+        const store2 = service.tabs().get(tab2)!;
+
+        expect(store1.tabModel()).toBe('claude-haiku-4-5');
+        expect(store2.tabModel()).toBeNull();
+        expect(store2.pickedModel()).toBe('');
+        expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
+
+        const projectState = TestBed.inject(ProjectStateService);
+        projectState.activeProject.set('test');
+        projectState.status.set('ready');
+        invokeSpy.mockClear();
+        await store2.startChatSession();
+        const tab2Start = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
+        expect(tab2Start?.[1]).toEqual({ project: 'test', tabId: tab2, model: null });
+      });
+
+      it('the composer badge follows the active tab pick per tab', async () => {
+        await service.init();
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store1 = service.tabs().get(tab1)!;
+
+        await store1.applyModelSelection({
+          catalogId: 'claude-haiku-4-5',
+          wireId: 'claude-haiku-4-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+          isDefault: false,
+        });
+
+        service.activateTab(tab1);
+        expect(service.pickedModel()).toBe('claude-haiku-4-5');
+        service.activateTab(tab2);
+        expect(service.pickedModel()).toBe('');
+      });
+    });
+
     describe('demux', () => {
       it('routes a chat_stream chunk to the store matching its tab_id and drops unknown tabs', async () => {
         await service.init();

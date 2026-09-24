@@ -92,6 +92,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
   readonly restartConfirmOpen = signal(false);
+  readonly restartConfirmBody = signal('');
 
   @ViewChild('composer') private composer?: ComposerComponent;
   @ViewChild(ChatMessageListComponent) private messageList?: ChatMessageListComponent;
@@ -422,12 +423,16 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Restarts the current conversation — the header plus button and ⌘R both call this. While a
-   * turn streams, asks for confirmation first (the reset would discard the running response);
-   * idle, it resets immediately.
+   * Restarts the current conversation (⌘R). Asks for confirmation whenever the tab holds any
+   * conversation content or a streaming turn; only an empty tab resets without the dialog.
    */
   async newConversation(): Promise<void> {
-    if (this.chat.isStreaming) {
+    if (this.chat.isStreaming || this.chat.hasConversation()) {
+      this.restartConfirmBody.set(
+        this.chat.isStreaming
+          ? 'The response in progress will be discarded.'
+          : 'The current conversation will be discarded.'
+      );
       this.restartConfirmOpen.set(true);
       this.cdr.markForCheck();
       return;
@@ -435,13 +440,13 @@ export class ChatComponent implements OnInit, OnDestroy {
     await this.resetConversation();
   }
 
-  /** User confirmed restarting mid-stream: closes the dialog and performs the reset. */
+  /** User confirmed the restart: closes the dialog and performs the reset. */
   async onRestartConfirm(): Promise<void> {
     this.restartConfirmOpen.set(false);
     await this.resetConversation();
   }
 
-  /** User dismissed the mid-stream restart confirmation (Cancel, backdrop, or Esc): no reset. */
+  /** User dismissed the restart confirmation (Cancel, backdrop, or Esc): no reset. */
   onRestartCancel(): void {
     this.restartConfirmOpen.set(false);
     this.cdr.markForCheck();

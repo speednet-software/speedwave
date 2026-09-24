@@ -1342,6 +1342,44 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
+pub(crate) fn validate_launch_model(model: &str) -> Result<(), String> {
+    if model.is_empty() {
+        return Err("model id must not be empty".to_string());
+    }
+    if model.len() > 128 {
+        return Err("model id too long (max 128 chars)".to_string());
+    }
+    let base = model
+        .strip_suffix(speedwave_runtime::defaults::ONE_MILLION_SUFFIX)
+        .unwrap_or(model);
+    let alias = speedwave_runtime::defaults::CLAUDE_CODE_MODEL_ALIASES
+        .iter()
+        .any(|a| *a == base);
+    let claude_shaped = base.starts_with("claude-")
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+    if !alias && !claude_shaped {
+        return Err(format!("not an Anthropic model id or alias: {model}"));
+    }
+    Ok(())
+}
+
+fn launch_model_id(
+    user_config: &config::SpeedwaveUserConfig,
+    project_name: &str,
+    model_override: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    if let Some(model) = model_override {
+        validate_launch_model(model).map_err(|e| anyhow::anyhow!(e))?;
+        return Ok(Some(model.to_string()));
+    }
+    Ok(user_config
+        .find_project(project_name)
+        .and_then(|p| p.model_pin.clone())
+        .filter(|m| validate_launch_model(m).is_ok()))
+}
+
 pub fn build_claude_args(
     instance_id: &str,
     resume_session_id: Option<&str>,
@@ -1526,6 +1564,7 @@ impl ChatSession {
         instance_id: &str,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
+        model_override: Option<&str>,
     ) -> anyhow::Result<PreparedSpawn> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
@@ -1544,6 +1583,24 @@ impl ChatSession {
             flags.push("--effort".to_string());
             flags.push(level.clone());
         }
+        let is_anthropic = resolved
+            .llm
+            .active_provider()
+            .is_none_or(|entry| entry.kind.is_anthropic());
+        let launch_model = if is_anthropic {
+            launch_model_id(user_config, project_name, model_override)?
+        } else {
+            if let Some(model) = model_override {
+                log::info!(
+                    "ignoring the tab model override {model}: the active provider is not Anthropic"
+                );
+            }
+            None
+        };
+        if let Some(model) = &launch_model {
+            flags.push("--model".to_string());
+            flags.push(model.clone());
+        }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
@@ -1560,8 +1617,15 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
         allow_log_truncate: bool,
+        model_override: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.start_with_retry(app_handle, resume_session_id, None, allow_log_truncate)
+        self.start_with_retry(
+            app_handle,
+            resume_session_id,
+            None,
+            allow_log_truncate,
+            model_override,
+        )
     }
 
     pub fn start_with_retry(
@@ -1570,9 +1634,15 @@ impl ChatSession {
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
         allow_log_truncate: bool,
+        model_override: Option<&str>,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
         crate::pin_cmd::ensure_effort_pin_migrated_in(
+            speedwave_runtime::consts::data_dir(),
+            &self.project_name,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+        crate::pin_cmd::ensure_model_pin_migrated_in(
             speedwave_runtime::consts::data_dir(),
             &self.project_name,
         )
@@ -1592,6 +1662,7 @@ impl ChatSession {
             &instance_id,
             resume_session_id,
             resume_at_uuid,
+            model_override,
         )?;
 
         #[cfg(feature = "e2e")]
@@ -6273,7 +6344,8 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result = ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None);
+        let result =
+            ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -6293,6 +6365,8 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6304,6 +6378,7 @@ mod tests {
             &user_config,
             "inst",
             Some("../../../etc/passwd"),
+            None,
             None,
         );
         assert!(result.is_err());
@@ -6320,6 +6395,8 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6332,6 +6409,7 @@ mod tests {
             "inst",
             Some("550e8400-e29b-41d4-a716-446655440000"),
             Some("$(rm -rf /)"),
+            None,
         );
         assert!(result.is_err(), "shell-injection uuid must be rejected");
     }
@@ -6347,13 +6425,15 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
             ui: None,
             telemetry: None,
         };
-        let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
+        let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None);
         assert!(result.is_ok());
         let PreparedSpawn {
             args, container, ..
@@ -6375,13 +6455,15 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: Some("xhigh".to_string()),
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
             ui: None,
             telemetry: None,
         };
-        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None)
+        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None)
             .unwrap()
             .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
@@ -6390,7 +6472,7 @@ mod tests {
         assert_eq!(args[pos + 1], "xhigh");
 
         user_config.projects[0].effort_pin = Some("max".to_string());
-        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None)
+        let args = ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None)
             .unwrap()
             .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
@@ -6411,29 +6493,49 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
             ui: None,
             telemetry: None,
         };
-        let spawn =
-            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
-                .unwrap();
+        let spawn = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            Some(session_id),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!spawn.with_effort);
 
         user_config.projects[0].effort_pin = Some("low".to_string());
-        let spawn =
-            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
-                .unwrap();
+        let spawn = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            Some(session_id),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(spawn.with_effort);
         let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(spawn.args[pos + 1], "low");
 
         user_config.projects[0].effort_pin = Some("turbo".to_string());
-        let spawn =
-            ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
-                .unwrap();
+        let spawn = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            Some(session_id),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!spawn.with_effort, "an unknown pin is never launched");
         assert!(!spawn.args.contains(&"--effort".to_string()));
     }
@@ -6520,6 +6622,8 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6527,8 +6631,14 @@ mod tests {
             telemetry: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
+        let result = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "my-inst",
+            Some(session_id),
+            None,
+            None,
+        );
         assert!(result.is_ok());
         let args = result.unwrap().args;
         assert!(args.contains(&format!(
@@ -6551,6 +6661,8 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6559,8 +6671,14 @@ mod tests {
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, "inst", Some(session_id), Some(uuid));
+        let result = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            Some(session_id),
+            Some(uuid),
+            None,
+        );
         assert!(result.is_ok());
         let args = result.unwrap().args;
         assert!(args.contains(&"--resume-session-at".to_string()));
@@ -6577,6 +6695,8 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -6586,23 +6706,158 @@ mod tests {
     }
 
     #[test]
-    fn prepare_args_never_appends_a_model_flag_without_a_pin_file() {
+    fn prepare_args_appends_no_model_flag_without_a_pin_or_override() {
         let user_config = single_project_user_config();
-        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None, None)
             .unwrap()
             .args;
         assert!(!args.contains(&"--model".to_string()));
     }
 
     #[test]
-    fn prepare_args_never_appends_a_model_flag_even_with_a_model_pin_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
-        let user_config = single_project_user_config();
-        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
+    fn prepare_args_launches_the_model_pin_when_no_tab_override_exists() {
+        let mut user_config = single_project_user_config();
+        user_config.projects[0].model_pin = Some("claude-sonnet-5[1m]".to_string());
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None, None)
             .unwrap()
             .args;
-        assert!(!args.contains(&"--model".to_string()));
+        let count = args.iter().filter(|a| *a == "--model").count();
+        assert_eq!(count, 1, "exactly one --model flag, got: {args:?}");
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "claude-sonnet-5[1m]");
+    }
+
+    #[test]
+    fn prepare_args_tab_override_outranks_the_model_pin() {
+        let mut user_config = single_project_user_config();
+        user_config.projects[0].model_pin = Some("claude-haiku-4-5".to_string());
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            Some("claude-opus-4-8"),
+        )
+        .unwrap()
+        .args;
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "claude-opus-4-8");
+        assert_eq!(args.iter().filter(|a| *a == "--model").count(), 1);
+    }
+
+    #[test]
+    fn prepare_args_tab_override_applies_on_a_resume_spawn() {
+        let user_config = single_project_user_config();
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            None,
+            Some("claude-sonnet-5"),
+        )
+        .unwrap()
+        .args;
+        assert!(args.contains(&"--resume".to_string()));
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "claude-sonnet-5");
+    }
+
+    #[test]
+    fn prepare_args_rejects_a_malformed_tab_override() {
+        let user_config = single_project_user_config();
+        for bad in ["gpt-4o", "local/qwen3", "claude x", "claude-$(rm)", ""] {
+            let result =
+                ChatSession::prepare_args("proj", &user_config, "inst", None, None, Some(bad));
+            assert!(result.is_err(), "override {bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn prepare_args_skips_an_invalid_model_pin() {
+        let mut user_config = single_project_user_config();
+        user_config.projects[0].model_pin = Some("local/qwen3".to_string());
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None, None)
+            .unwrap()
+            .args;
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "a foreign pin is never launched"
+        );
+    }
+
+    #[test]
+    fn prepare_args_ignores_a_tab_override_and_pin_for_a_routed_provider() {
+        let mut user_config = single_project_user_config();
+        user_config.projects[0].model_pin = Some("claude-sonnet-5".to_string());
+        user_config.projects[0].claude = Some(config::ClaudeOverrides {
+            env: None,
+            settings: None,
+            llm: Some(config::LlmConfig {
+                schema_version: Some(config::LLM_SCHEMA_VERSION),
+                providers: vec![config::LlmProviderEntry {
+                    id: "local".to_string(),
+                    kind: config::LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("llama-3.1-70b".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                }],
+                active: Some(config::LlmActive {
+                    provider_id: "local".to_string(),
+                    model: None,
+                }),
+                ..Default::default()
+            }),
+        });
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            Some("claude-opus-4-8"),
+        )
+        .unwrap()
+        .args;
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "routed spawns never take --model: {args:?}"
+        );
+    }
+
+    #[test]
+    fn validate_launch_model_accepts_wire_ids_and_aliases() {
+        for ok in [
+            "claude-sonnet-5",
+            "claude-sonnet-5[1m]",
+            "claude-opus-4-8[1m]",
+            "claude-mystery-9.5",
+            "opus",
+            "fable[1m]",
+            "default",
+        ] {
+            assert!(validate_launch_model(ok).is_ok(), "{ok} must pass");
+        }
+    }
+
+    #[test]
+    fn validate_launch_model_rejects_foreign_and_unsafe_ids() {
+        let too_long = format!("claude-{}", "a".repeat(130));
+        for bad in [
+            "",
+            "gpt-4o",
+            "local/qwen3",
+            "claude x",
+            "claude-$(rm -rf /)",
+            "claude-sonnet-5[2m]",
+            "claude-sonnet;5",
+            too_long.as_str(),
+        ] {
+            assert!(validate_launch_model(bad).is_err(), "{bad:?} must fail");
+        }
     }
 
     #[test]

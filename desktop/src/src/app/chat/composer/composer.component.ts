@@ -230,7 +230,9 @@ const PLAN_MODE_PREFIX =
             [streaming]="streaming()"
             [modelError]="modelError()"
             [sessionModel]="model()"
+            [pickedModel]="pickedModel()"
             (modelSelected)="modelSelected.emit($event)"
+            (defaultModelSelected)="defaultModelSelected.emit($event)"
             (effortSelected)="effortSelected.emit($event)"
           />
           @if (streaming()) {
@@ -319,6 +321,8 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly model = input('');
 
+  readonly pickedModel = input('');
+
   readonly projectId = input('');
 
   readonly modelError = input('');
@@ -346,6 +350,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly stopRequested = output<void>();
 
   readonly modelSelected = output<ModelSelection>();
+
+  readonly defaultModelSelected = output<ModelSelection>();
 
   readonly effortSelected = output<string>();
 

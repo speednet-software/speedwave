@@ -15,6 +15,7 @@ fn start_session_inner(
     project: &str,
     tab_id: &str,
     resume_session_id: Option<&str>,
+    model_override: Option<&str>,
     registry: SharedChatSessions,
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
@@ -69,7 +70,12 @@ fn start_session_inner(
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     let allow_log_truncate = !registry.other_entry_for_project(project, tab_id);
     let result = session
-        .start(app_handle, resume_session_id, allow_log_truncate)
+        .start(
+            app_handle,
+            resume_session_id,
+            allow_log_truncate,
+            model_override,
+        )
         .map_err(|e| e.to_string());
     log::info!("session.start result={result:?}");
     result
@@ -79,6 +85,7 @@ fn start_session_inner(
 pub(crate) async fn start_chat(
     project: String,
     tab_id: String,
+    model: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSessions>,
     oauth: tauri::State<'_, SharedOauth>,
@@ -89,7 +96,15 @@ pub(crate) async fn start_chat(
     let registry = state.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(&project, &tab_id, None, registry, oauth_arc, app_handle)
+        start_session_inner(
+            &project,
+            &tab_id,
+            None,
+            model.as_deref(),
+            registry,
+            oauth_arc,
+            app_handle,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -100,6 +115,7 @@ pub(crate) async fn resume_conversation(
     project: String,
     session_id: String,
     tab_id: String,
+    model: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSessions>,
     oauth: tauri::State<'_, SharedOauth>,
@@ -115,6 +131,7 @@ pub(crate) async fn resume_conversation(
             &project,
             &tab_id,
             Some(&session_id),
+            model.as_deref(),
             registry,
             oauth_arc,
             app_handle,
@@ -675,8 +692,8 @@ mod tests {
             .find("check_claude_auth")
             .expect("start_session_inner must call check_claude_auth");
         let start_pos = body
-            .find(".start(app_handle")
-            .expect("start_session_inner must call session.start(app_handle, ...)");
+            .find(".start(")
+            .expect("start_session_inner must call session.start(...)");
 
         assert!(
             auth_pos < start_pos,
@@ -766,8 +783,8 @@ mod tests {
             "start_session_inner must compute allow_log_truncate via other_entry_for_project",
         );
         let start_pos = body
-            .find(".start(app_handle")
-            .expect("start_session_inner must call session.start(app_handle, ...)");
+            .find(".start(")
+            .expect("start_session_inner must call session.start(...)");
 
         assert!(
             sibling_pos < start_pos,

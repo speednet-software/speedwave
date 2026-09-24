@@ -1159,6 +1159,7 @@ fn main() {
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
+            pin_cmd::get_model_pin,
             pin_cmd::set_model_pin,
             pin_cmd::clear_model_pin,
             model_picker::list_model_picker,

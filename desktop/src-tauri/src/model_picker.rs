@@ -223,7 +223,7 @@ pub(crate) fn normalize_pin_for_session(
 ) {
     let plan = plan_for(kind, info);
     let picker = info.and_then(|session| build_picker(session, plan));
-    match crate::claude_settings::normalize_model_pin(data_dir, project, |pin| {
+    match crate::pin_cmd::normalize_model_pin_in(data_dir, project, |pin| {
         if let Some(picker) = &picker {
             let id = canonical_anthropic_model_id(pin);
             picker
@@ -797,13 +797,35 @@ mod tests {
         }
     }
 
+    fn config_with_model_pin(data_dir: &std::path::Path, pin: &str) {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                model_pin: Some(pin.to_string()),
+                model_pin_migrated: true,
+            }],
+            ..Default::default()
+        };
+        config::save_user_config_to(&user_config, &data_dir.join("config.json")).unwrap();
+    }
+
+    fn config_model_pin(data_dir: &std::path::Path) -> Option<String> {
+        config::load_user_config_from(&data_dir.join("config.json"))
+            .unwrap()
+            .find_project("proj")
+            .and_then(|p| p.model_pin.clone())
+    }
+
     #[test]
-    fn normalize_pin_for_session_rewrites_the_settings_file() {
+    fn normalize_pin_for_session_rewrites_the_config_pin() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir =
-            speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("settings.json"), r#"{"model":"claude-opus-5"}"#).unwrap();
+        config_with_model_pin(tmp.path(), "claude-opus-5");
 
         let info = fixture_info("run_A");
         normalize_pin_for_session(
@@ -813,13 +835,13 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            crate::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            config_model_pin(tmp.path()).as_deref(),
             Some("claude-opus-5[1m]")
         );
 
         normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
         assert_eq!(
-            crate::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            config_model_pin(tmp.path()).as_deref(),
             Some("claude-opus-5[1m]"),
             "an unknown plan must not downgrade a plan-dependent pin"
         );
@@ -828,14 +850,7 @@ mod tests {
     #[test]
     fn normalize_pin_for_session_uses_the_reported_variant_not_a_synthetic_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir =
-            speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("settings.json"),
-            r#"{"model":"claude-sonnet-5[1m]"}"#,
-        )
-        .unwrap();
+        config_with_model_pin(tmp.path(), "claude-sonnet-5[1m]");
 
         let info = info_of(
             vec![listed("sonnet", Some("claude-sonnet-5"), "Sonnet")],
@@ -848,7 +863,7 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            crate::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            config_model_pin(tmp.path()).as_deref(),
             Some("claude-sonnet-5")
         );
     }
@@ -951,6 +966,8 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             ..Default::default()
         }

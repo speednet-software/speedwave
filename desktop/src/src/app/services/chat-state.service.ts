@@ -309,13 +309,25 @@ export class ChatStateService {
     this.activeStore().modelSelectionError()
   );
 
+  /** Catalog id of the active tab's last composer pick (optimistic badge source). */
+  readonly pickedModel: Signal<string> = computed(() => this.activeStore().pickedModel());
+
   /**
-   * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
-   * then applies it: wire switch, queued override, or an idle respawn that a routed pick precedes with a compose re-render.
+   * Applies a composer model pick to the ACTIVE TAB ONLY (SPEED-388): wire switch on a live
+   * session, queued while streaming, or an idle respawn carrying `--model`; routed picks keep
+   * the project-level config write-through plus the compose re-render.
    * @param sel - Selected model triad emitted by the model selector.
    */
   applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     return this.activeStore().applyModelSelection(sel);
+  }
+
+  /**
+   * Persists the project default model for new tabs; never touches any live session.
+   * @param sel - Selected model triad emitted by the model selector's Set-default action.
+   */
+  applyDefaultModelSelection(sel: ModelSelectionInput): Promise<void> {
+    return this.activeStore().applyDefaultModelSelection(sel);
   }
 
   /** Session cost/usage stats from the most recent result. */

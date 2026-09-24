@@ -712,11 +712,8 @@ describe('ChatComponent', () => {
   });
 
   describe('newConversation', () => {
-    it('resets all state and re-initialises when idle', async () => {
-      chatState._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [{ type: 'text', content: 'stream' }],
-      });
+    it('resets all state and re-initialises without a dialog when the tab is empty', async () => {
+      chatState._setState({ messages: [], currentBlocks: [] });
       chatState.isStreaming = false;
       uiState.toggleSidebar();
       uiState.toggleMemory();
@@ -729,6 +726,38 @@ describe('ChatComponent', () => {
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
       expect(component.restartConfirmOpen()).toBe(false);
+    });
+
+    it('shows the confirmation instead of resetting when idle with conversation content', async () => {
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+      });
+      chatState.isStreaming = false;
+
+      await component.newConversation();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(component.restartConfirmBody()).toBe('The current conversation will be discarded.');
+      expect(chatState.messages).toHaveLength(1);
+    });
+
+    it('confirming the idle-conversation dialog resets all state', async () => {
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+      });
+      chatState.isStreaming = false;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
+
+      await component.newConversation();
+      await component.onRestartConfirm();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toEqual([]);
+      expect(component.showHistory).toBe(false);
+      expect(component.showMemory).toBe(false);
     });
   });
 
@@ -764,7 +793,7 @@ describe('ChatComponent', () => {
       expect(spy).toHaveBeenCalledTimes(2);
     });
 
-    it('performs the same reset the plus button performs when idle (state cleared, drawers closed)', async () => {
+    it('⌘R on an idle conversation shows the dialog; confirming performs the plus-button reset', async () => {
       projectState.activeProject.set('test');
       projectState.status.set('ready');
       await component.ngOnInit();
@@ -772,7 +801,7 @@ describe('ChatComponent', () => {
 
       chatState._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [{ type: 'text', content: 'stream' }],
+        currentBlocks: [],
       });
       chatState.isStreaming = false;
       uiState.toggleSidebar();
@@ -781,6 +810,11 @@ describe('ChatComponent', () => {
       uiState.requestRestart();
       fixture.detectChanges();
       await fixture.whenStable();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(chatState.messages).toHaveLength(1);
+
+      await component.onRestartConfirm();
 
       expect(chatState.messages).toEqual([]);
       expect(chatState.isStreaming).toBe(false);
@@ -829,6 +863,7 @@ describe('ChatComponent', () => {
       expect(document.querySelector('[data-testid="modal-title"]')?.textContent?.trim()).toBe(
         'Restart conversation?'
       );
+      expect(component.restartConfirmBody()).toBe('The response in progress will be discarded.');
       expect(document.querySelector('[data-testid="restart-confirm-restart"]')).toBeTruthy();
       expect(document.querySelector('[data-testid="restart-confirm-cancel"]')).toBeTruthy();
     });
@@ -1453,6 +1488,32 @@ describe('ChatComponent', () => {
         wireId: 'claude-sonnet-5',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
+      });
+    });
+
+    it('forwards the composer defaultModelSelected event to ChatStateService.applyDefaultModelSelection', () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const applySpy = vi
+        .spyOn(fixture.componentInstance.chat, 'applyDefaultModelSelection')
+        .mockResolvedValue(undefined);
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+
+      composer.triggerEventHandler('defaultModelSelected', {
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
+      });
+
+      expect(applySpy).toHaveBeenCalledWith({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
       });
     });
   });

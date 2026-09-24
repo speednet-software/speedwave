@@ -37,6 +37,7 @@ impl std::error::Error for RetryError {}
 pub(crate) fn retry_last_turn_inner(
     session_id: &str,
     user_uuid: &str,
+    model: Option<&str>,
     driver: &mut dyn SessionDriver,
 ) -> Result<(), RetryError> {
     if validate_session_id(session_id).is_err() {
@@ -48,7 +49,7 @@ pub(crate) fn retry_last_turn_inner(
 
     driver.stop().map_err(RetryError::ResumeFailed)?;
     driver
-        .start_with_retry(session_id, user_uuid)
+        .start_with_retry(session_id, user_uuid, model)
         .map_err(RetryError::ResumeFailed)?;
     Ok(())
 }
@@ -56,7 +57,12 @@ pub(crate) fn retry_last_turn_inner(
 /// Driver abstraction over the session lifecycle, for tests.
 pub(crate) trait SessionDriver {
     fn stop(&mut self) -> Result<(), String>;
-    fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String>;
+    fn start_with_retry(
+        &mut self,
+        session_id: &str,
+        user_uuid: &str,
+        model: Option<&str>,
+    ) -> Result<(), String>;
 }
 
 /// Real driver backed by [`ChatSession`]. Swaps the session out of its tab's mutex so
@@ -90,7 +96,12 @@ impl SessionDriver for ChatSessionDriver<'_> {
         Ok(())
     }
 
-    fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String> {
+    fn start_with_retry(
+        &mut self,
+        session_id: &str,
+        user_uuid: &str,
+        model: Option<&str>,
+    ) -> Result<(), String> {
         let mut session = self
             .entry
             .session
@@ -105,6 +116,7 @@ impl SessionDriver for ChatSessionDriver<'_> {
                 Some(session_id),
                 Some(user_uuid),
                 allow_log_truncate,
+                model,
             )
             .map_err(|e| e.to_string())
     }
@@ -127,6 +139,7 @@ pub async fn retry_last_turn(
     tab_id: String,
     session_id: String,
     user_uuid: String,
+    model: Option<String>,
     app_handle: AppHandle,
     state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), RetryError> {
@@ -148,7 +161,7 @@ pub async fn retry_last_turn(
             registry,
             app_handle: &app_handle,
         };
-        retry_last_turn_inner(&session_id, &user_uuid, &mut driver)
+        retry_last_turn_inner(&session_id, &user_uuid, model.as_deref(), &mut driver)
     })
     .await
     .map_err(|e| RetryError::ResumeFailed(format!("join error: {e}")))?
@@ -163,7 +176,7 @@ mod tests {
     #[derive(Default)]
     struct MockDriver {
         stop_calls: u32,
-        start_calls: Vec<(String, String)>,
+        start_calls: Vec<(String, String, Option<String>)>,
         stop_err: Option<String>,
         start_err: Option<String>,
     }
@@ -176,9 +189,17 @@ mod tests {
                 None => Ok(()),
             }
         }
-        fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String> {
-            self.start_calls
-                .push((session_id.to_string(), user_uuid.to_string()));
+        fn start_with_retry(
+            &mut self,
+            session_id: &str,
+            user_uuid: &str,
+            model: Option<&str>,
+        ) -> Result<(), String> {
+            self.start_calls.push((
+                session_id.to_string(),
+                user_uuid.to_string(),
+                model.map(str::to_string),
+            ));
             match &self.start_err {
                 Some(e) => Err(e.clone()),
                 None => Ok(()),
@@ -192,19 +213,34 @@ mod tests {
     #[test]
     fn retry_happy_path_stops_then_starts_with_retry() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
         assert!(r.is_ok(), "expected Ok, got {r:?}");
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(
             drv.start_calls,
-            vec![(VALID_SESSION.to_string(), VALID_UUID.to_string())]
+            vec![(VALID_SESSION.to_string(), VALID_UUID.to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn retry_threads_the_tab_model_override_into_the_respawn() {
+        let mut drv = MockDriver::default();
+        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, Some("claude-opus-4-8"), &mut drv);
+        assert!(r.is_ok());
+        assert_eq!(
+            drv.start_calls,
+            vec![(
+                VALID_SESSION.to_string(),
+                VALID_UUID.to_string(),
+                Some("claude-opus-4-8".to_string()),
+            )]
         );
     }
 
     #[test]
     fn retry_with_invalid_session_returns_session_not_found() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner("not-a-uuid", VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner("not-a-uuid", VALID_UUID, None, &mut drv);
         assert_eq!(r, Err(RetryError::SessionNotFound));
         assert_eq!(
             drv.stop_calls, 0,
@@ -216,7 +252,7 @@ mod tests {
     #[test]
     fn retry_with_empty_session_returns_session_not_found() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner("", VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner("", VALID_UUID, None, &mut drv);
         assert_eq!(r, Err(RetryError::SessionNotFound));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -224,7 +260,7 @@ mod tests {
     #[test]
     fn retry_with_empty_uuid_returns_no_assistant_turn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, "", &mut drv);
+        let r = retry_last_turn_inner(VALID_SESSION, "", None, &mut drv);
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -232,7 +268,7 @@ mod tests {
     #[test]
     fn retry_with_malformed_uuid_returns_no_assistant_turn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, "foo; rm -rf /", &mut drv);
+        let r = retry_last_turn_inner(VALID_SESSION, "foo; rm -rf /", None, &mut drv);
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -243,7 +279,7 @@ mod tests {
             stop_err: Some("stop boom".to_string()),
             ..Default::default()
         };
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("stop boom")));
         assert_eq!(drv.stop_calls, 1);
         assert!(
@@ -258,7 +294,7 @@ mod tests {
             start_err: Some("nerdctl exec failed".to_string()),
             ..Default::default()
         };
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("nerdctl exec failed")));
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(drv.start_calls.len(), 1);
@@ -290,7 +326,7 @@ mod tests {
     #[test]
     fn retry_does_not_open_session_jsonl_in_mock_driver() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
         assert!(r.is_ok());
         assert_eq!(drv.stop_calls, 1);
     }

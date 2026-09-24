@@ -21,7 +21,7 @@
     kicker="⚠ restart conversation"
     kickerColor="amber"
     modalTitle="Restart conversation?"
-    body="The response in progress will be discarded."
+    [body]="restartConfirmBody()"
     primaryLabel="Restart"
     secondaryLabel="Cancel"
     testId="restart-confirm-overlay"
@@ -125,6 +125,7 @@
             [streaming]="chat.isStreamingFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
+            [pickedModel]="chat.pickedModel()"
             [projectId]="projectState.activeProject() ?? ''"
             [modelError]="chat.modelSelectionError()"
             [contextLabel]="composerContextLabel()"
@@ -137,6 +138,7 @@
             (draftApplied)="transcription.clearChatPromptDraft()"
             (stopRequested)="onStopClicked()"
             (modelSelected)="chat.applyModelSelection($event)"
+            (defaultModelSelected)="chat.applyDefaultModelSelection($event)"
             (effortSelected)="chat.applyEffortSelection($event)"
           />
           <app-session-stats

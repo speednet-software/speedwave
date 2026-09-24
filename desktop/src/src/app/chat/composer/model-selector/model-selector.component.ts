@@ -158,54 +158,71 @@ export interface ModelSelection {
               </div>
             } @else {
               @for (opt of filteredOptions(); track opt.id) {
-                <button
-                  type="button"
-                  [attr.data-testid]="'model-selector-option-' + opt.id"
-                  class="mono hover-bg flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
-                  [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
-                  (click)="select(opt)"
-                >
-                  <span class="flex min-w-0 items-start gap-2">
-                    @if (showEffortControl()) {
-                      <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
-                        @if (opt.id === activeOptionId()) {
-                          <span data-testid="model-selector-active-mark">&#x2713;</span>
-                        }
-                      </span>
-                    }
-                    <span class="flex min-w-0 flex-col gap-0.5">
-                      <span class="flex items-center gap-2">
-                        <span>{{ opt.label }}</span>
-                        @if (opt.isDefault) {
-                          <span
-                            data-testid="model-selector-default-badge"
-                            class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
-                            >Default</span
-                          >
-                        }
-                        @if (opt.requiresUsageCredits) {
-                          <span
-                            data-testid="model-selector-usage-credits-badge"
-                            class="rounded border border-amber-500/60 px-1 text-[9px] uppercase tracking-wide text-amber-300"
-                            >Usage credits</span
-                          >
-                        }
-                      </span>
-                      @if (opt.description) {
+                <div class="flex w-full items-stretch">
+                  <button
+                    type="button"
+                    [attr.data-testid]="'model-selector-option-' + opt.id"
+                    class="mono hover-bg flex min-w-0 flex-1 items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
+                    [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
+                    (click)="select(opt)"
+                  >
+                    <span class="flex min-w-0 items-start gap-2">
+                      @if (showEffortControl()) {
                         <span
-                          [attr.data-testid]="'model-selector-description-' + opt.id"
-                          class="whitespace-normal text-[10px] leading-tight text-[var(--ink-mute)]"
-                          >{{ opt.description }}</span
+                          class="inline-block w-3 shrink-0 text-[var(--teal)]"
+                          aria-hidden="true"
                         >
+                          @if (opt.id === activeOptionId()) {
+                            <span data-testid="model-selector-active-mark">&#x2713;</span>
+                          }
+                        </span>
                       }
+                      <span class="flex min-w-0 flex-col gap-0.5">
+                        <span class="flex items-center gap-2">
+                          <span>{{ opt.label }}</span>
+                          @if (isDefaultOption(opt)) {
+                            <span
+                              data-testid="model-selector-default-badge"
+                              class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
+                              >Default</span
+                            >
+                          }
+                          @if (opt.requiresUsageCredits) {
+                            <span
+                              data-testid="model-selector-usage-credits-badge"
+                              class="rounded border border-amber-500/60 px-1 text-[9px] uppercase tracking-wide text-amber-300"
+                              >Usage credits</span
+                            >
+                          }
+                        </span>
+                        @if (opt.description) {
+                          <span
+                            [attr.data-testid]="'model-selector-description-' + opt.id"
+                            class="whitespace-normal text-[10px] leading-tight text-[var(--ink-mute)]"
+                            >{{ opt.description }}</span
+                          >
+                        }
+                      </span>
                     </span>
-                  </span>
-                  @if (opt.promptPrice !== undefined) {
-                    <span class="text-[var(--ink-mute)]"
-                      >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
+                    @if (opt.promptPrice !== undefined) {
+                      <span class="text-[var(--ink-mute)]"
+                        >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
+                      >
+                    }
+                  </button>
+                  @if (showEffortControl() && !isDefaultOption(opt)) {
+                    <button
+                      type="button"
+                      [attr.data-testid]="'model-selector-make-default-' + opt.id"
+                      class="mono hover-bg shrink-0 px-2 text-[9px] uppercase tracking-wide text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                      appTooltip="Use this model for new tabs"
+                      placement="top"
+                      (click)="selectDefault(opt)"
                     >
+                      Set default
+                    </button>
                   }
-                </button>
+                </div>
               }
             }
           </div>
@@ -251,7 +268,11 @@ export class ModelSelectorComponent {
 
   readonly sessionModel = input('');
 
+  readonly pickedModel = input('');
+
   readonly modelSelected = output<ModelSelection>();
+
+  readonly defaultModelSelected = output<ModelSelection>();
 
   readonly effortSelected = output<string>();
 
@@ -271,7 +292,7 @@ export class ModelSelectorComponent {
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
 
-  private readonly lastPicked = signal('');
+  protected readonly projectPin = signal<string | null>(null);
 
   private readonly modelHint = signal('');
 
@@ -292,6 +313,22 @@ export class ModelSelectorComponent {
   });
 
   protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
+
+  protected readonly defaultOptionId = computed<string | null>(() => {
+    if (!this.showEffortControl()) return null;
+    const project = this.projectId();
+    const pin = this.projectPin();
+    if (pin) {
+      const row = this.picker.rowFor(project, pin);
+      if (row) return row.id;
+    }
+    return this.picker.picker(project)?.rows.find((r) => r.is_default)?.id ?? null;
+  });
+
+  protected isDefaultOption(opt: { id: string; isDefault: boolean }): boolean {
+    const id = this.defaultOptionId();
+    return id === null ? opt.isDefault : opt.id === id;
+  }
 
   private readonly activeRow = computed<ModelPickerRow | null>(() =>
     this.showEffortControl() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
@@ -374,16 +411,17 @@ export class ModelSelectorComponent {
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
     });
     effect(() => {
+      const id = this.projectId();
+      if (this.showEffortControl() && id) void this.loadProjectPin(id);
+    });
+    effect(() => {
       const live = this.sessionModel();
       const changed = live !== '' && live !== this.lastSessionModel;
       const ended = live === '' && this.lastSessionModel !== '';
       this.lastSessionModel = live;
       const id = this.projectId();
       if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
-      if (ended) {
-        this.lastPicked.set('');
-        if (id && !this.summary()?.model) void this.loadModelHint(id);
-      }
+      if (ended && id && !this.summary()?.model) void this.loadModelHint(id);
     });
     effect(() => {
       const err = this.modelError();
@@ -396,7 +434,7 @@ export class ModelSelectorComponent {
 
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
-    const picked = this.lastPicked();
+    const picked = this.pickedModel();
     if (picked) return picked;
     const live = this.sessionModel();
     if (live) return s ? normalizeObserved(live, s.provider_id) : live;
@@ -556,8 +594,25 @@ export class ModelSelectorComponent {
       kind: summary.kind,
       isDefault: opt.isDefault,
     });
-    this.lastPicked.set(opt.id);
     this.open.set(false);
+  }
+
+  /**
+   * Emits the Set-default action for a row: the project default model for new tabs.
+   * The account-default row clears the pin instead of setting one.
+   * @param opt - The row whose model becomes the project default.
+   */
+  protected selectDefault(opt: ModelOption): void {
+    const summary = this.summary();
+    if (!summary || !isAnthropicKind(summary.kind)) return;
+    this.defaultModelSelected.emit({
+      catalogId: opt.id,
+      wireId: opt.wireId,
+      providerId: summary.provider_id,
+      kind: summary.kind,
+      isDefault: opt.isDefault,
+    });
+    this.projectPin.set(opt.isDefault ? null : opt.wireId);
   }
 
   private async loadSummary(projectId: string): Promise<void> {
@@ -571,7 +626,6 @@ export class ModelSelectorComponent {
       if (this.projectId() !== projectId) return;
       this.summary.set(summary);
       this.summaryProjectId = projectId;
-      this.lastPicked.set('');
       if (!summary.model) {
         void this.loadModelHint(projectId);
       } else {
@@ -591,6 +645,17 @@ export class ModelSelectorComponent {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: get_model_hint failed: ${msg}`);
+    }
+  }
+
+  private async loadProjectPin(projectId: string): Promise<void> {
+    try {
+      const pin = await this.tauri.invoke<string | null>('get_model_pin', { projectId });
+      if (this.projectId() !== projectId) return;
+      this.projectPin.set(pin);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`model-selector: get_model_pin failed: ${msg}`);
     }
   }
 

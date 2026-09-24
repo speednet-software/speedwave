@@ -106,8 +106,6 @@ export interface ModelSelectionInput {
   isDefault: boolean;
 }
 
-const DEFAULT_MODEL_ALIAS = 'default';
-
 /**
  * Maximum parallel chat tabs. TS mirror of `speedwave_runtime::resources::MAX_CHAT_TABS`,
  * cross-read-tested by `max_chat_tabs_matches_ts_mirror`.
@@ -259,37 +257,40 @@ export class ChatSessionStore {
   private readonly _modelSelectionError = signal('');
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
+  private readonly _tabModel = signal<string | null>(null);
+  /** Anthropic wire id this tab's spawns launch with; null = the project default. */
+  readonly tabModel: Signal<string | null> = this._tabModel.asReadonly();
+
+  private readonly _pickedModel = signal('');
+  /** Catalog id of this tab's last composer pick (optimistic badge source). */
+  readonly pickedModel: Signal<string> = this._pickedModel.asReadonly();
+
   /**
-   * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
-   * then applies it: wire switch, queued override, or an idle respawn that a routed pick precedes with a compose re-render.
+   * Applies a composer model pick to THIS TAB ONLY (SPEED-388): a live session takes the
+   * wire `/model`, a mid-stream pick is queued, an idle tab respawns with `--model`.
+   * Anthropic picks persist nothing; routed picks keep the project-level write-through,
+   * because a routed model reaches Claude Code as container env shared by every tab.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     this._modelSelectionError.set('');
     const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
-    const clearsPin = isAnthropic && sel.isDefault;
-    const wireId = clearsPin ? DEFAULT_MODEL_ALIAS : sel.wireId;
-    try {
-      if (clearsPin) {
-        await this.deps.tauri.invoke('clear_model_pin', {
-          projectId: this.deps.projectState.activeProject() ?? '',
-        });
-      } else if (isAnthropic) {
-        await this.deps.tauri.invoke('set_model_pin', {
-          projectId: this.deps.projectState.activeProject() ?? '',
-          model: sel.wireId,
-        });
-      } else {
+    const wireId = sel.wireId;
+    if (isAnthropic) {
+      this._tabModel.set(wireId);
+    } else {
+      try {
         await this.deps.anthropicModels.setProviderModel(
           this.deps.projectState.activeProject() ?? '',
           sel.providerId,
           sel.catalogId
         );
+      } catch (e: unknown) {
+        this.reportSelectionFailure('model selection persist', e);
+        return;
       }
-    } catch (e: unknown) {
-      this.reportSelectionFailure('model selection persist', e);
-      return;
     }
+    this._pickedModel.set(sel.catalogId);
     if (this.hasLiveSession()) {
       if (this.isStreaming) this._pendingModelOverride.set(wireId);
       else await this.sendMessage(`/model ${wireId}`);
@@ -301,6 +302,31 @@ export class ChatSessionStore {
     this.resetForNewConversation();
     this.initialized = true;
     await this.startChatSession();
+  }
+
+  /**
+   * Persists the project default model for NEW tabs (config `model_pin`); never touches
+   * this tab's live session. Picking the account-default row clears the pin instead.
+   * @param sel - Selected model triad emitted by the model selector's Set-default action.
+   */
+  async applyDefaultModelSelection(sel: ModelSelectionInput): Promise<void> {
+    this._modelSelectionError.set('');
+    const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
+    if (!isAnthropic) return;
+    try {
+      if (sel.isDefault) {
+        await this.deps.tauri.invoke('clear_model_pin', {
+          projectId: this.deps.projectState.activeProject() ?? '',
+        });
+      } else {
+        await this.deps.tauri.invoke('set_model_pin', {
+          projectId: this.deps.projectState.activeProject() ?? '',
+          model: sel.wireId,
+        });
+      }
+    } catch (e: unknown) {
+      this.reportSelectionFailure('default model persist', e);
+    }
   }
 
   private chatIsOccupied(): boolean {
@@ -553,7 +579,7 @@ export class ChatSessionStore {
   );
 
   /**
-   * Test-only setter for private backing fields.
+   * Test-only setter for private backing fields; rebuilds the state tree so derived signals see it.
    * @param state - Partial state to merge into the store.
    * @internal
    */
@@ -569,6 +595,13 @@ export class ChatSessionStore {
     if (state.currentBlocks !== undefined) this._currentBlocks = state.currentBlocks;
     if (state.sessionStats !== undefined) this._sessionStats.set(state.sessionStats);
     if (state.pendingQueue !== undefined) this._pendingQueue = state.pendingQueue;
+    this.notifyChange();
+  }
+
+  private recordTypedModelCommand(text: string): void {
+    const match = /^\/model\s+(\S+)$/.exec(text.trim());
+    if (!match) return;
+    if (match[1].startsWith('claude-')) this._tabModel.set(match[1]);
   }
 
   private notifyChange(): void {
@@ -623,7 +656,11 @@ export class ChatSessionStore {
       this.deps.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
       try {
-        await this.deps.tauri.invoke('start_chat', { project, tabId: this.tabId });
+        await this.deps.tauri.invoke('start_chat', {
+          project,
+          tabId: this.tabId,
+          model: this._tabModel(),
+        });
         this.deps.log.debug('[chat-state] startChatSession: success');
         outcome = gen === this._sessionGeneration && !this._disposed ? 'started' : 'skipped';
       } catch (err) {
@@ -701,6 +738,7 @@ export class ChatSessionStore {
       displayBlocks.push({ type: 'image', media_type: att.mediaType, alt: att.filename });
     }
     const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
+    if (isControlSend) this.recordTypedModelCommand(chatInput.text);
     if (!isControlSend) {
       this._messages = [
         ...this._messages,
@@ -1402,6 +1440,7 @@ export class ChatSessionStore {
         sessionId,
         userUuid,
         tabId: this.tabId,
+        model: this._tabModel(),
       });
     } catch (err) {
       this.deps.log.error(`[chat-state] retryLastAssistant: invoke failed: ${String(err)}`);
@@ -1492,6 +1531,7 @@ export class ChatSessionStore {
         project,
         sessionId,
         tabId: this.tabId,
+        model: this._tabModel(),
       });
 
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
