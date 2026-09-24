@@ -46,6 +46,19 @@ fn settings_template_seeds_no_host_owned_key() {
 }
 
 #[test]
+fn settings_template_turns_claude_ai_sync_off() {
+    let template = template();
+    for key in ["syncClaudeAiSkills", "syncClaudeAiPlugins"] {
+        assert_eq!(
+            template.get(key),
+            Some(&serde_json::Value::Bool(false)),
+            "{key}: Claude Code honours only `false`, and the container must not pull skills or \
+             plugins enabled on claude.ai unless the user sets the key in its settings.json"
+        );
+    }
+}
+
+#[test]
 fn settings_template_still_carries_its_own_keys() {
     let template = template();
     assert_eq!(
