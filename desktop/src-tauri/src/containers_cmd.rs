@@ -880,16 +880,32 @@ pub async fn factory_reset(
     app.restart();
 }
 
+fn settings_project<'a>(
+    user_config: &'a config::SpeedwaveUserConfig,
+    requested: Option<&'a str>,
+) -> Option<&'a str> {
+    requested.or(user_config.active_project.as_deref())
+}
+
 #[tauri::command]
-pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let mut llm = user_config
-        .active_project_entry()
+pub fn get_llm_config(project: Option<String>) -> Result<LlmConfigResponse, String> {
+    get_llm_config_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+}
+
+fn get_llm_config_in(
+    data_dir: &std::path::Path,
+    project: Option<&str>,
+) -> Result<LlmConfigResponse, String> {
+    let user_config =
+        config::load_user_config_from(&data_dir.join("config.json")).map_err(|e| e.to_string())?;
+    let project = settings_project(&user_config, project);
+    let mut llm = project
+        .and_then(|name| user_config.find_project(name))
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.clone())
         .unwrap_or_default();
-    if let Some(active) = user_config.active_project.as_deref() {
-        llm.sync_has_api_key_from_disk_in(speedwave_runtime::consts::data_dir().as_path(), active);
+    if let Some(name) = project {
+        llm.sync_has_api_key_from_disk_in(data_dir, name);
     }
     let default_base_url = llm
         .provider
@@ -1223,17 +1239,24 @@ fn build_security_policy_response(
 }
 
 #[tauri::command]
-pub fn get_security_policy() -> Result<SecurityPolicyResponse, String> {
+pub fn get_security_policy(project: Option<String>) -> Result<SecurityPolicyResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let policy = user_config
-        .active_project_entry()
-        .and_then(|p| p.policy.clone());
+    let policy = stored_security_policy(&user_config, project.as_deref());
     let managed = speedwave_runtime::managed_config::load_managed_config()
         .map_err(|e| e.to_string())?
         .and_then(|m| m.pii_policy);
     let resolved =
         speedwave_runtime::pii_policy::resolve_pii_policy(policy.as_ref(), managed.as_ref())?;
     Ok(build_security_policy_response(&resolved, policy.as_ref()))
+}
+
+fn stored_security_policy(
+    user_config: &config::SpeedwaveUserConfig,
+    project: Option<&str>,
+) -> Option<config::PiiPolicyUserConfig> {
+    settings_project(user_config, project)
+        .and_then(|name| user_config.find_project(name))
+        .and_then(|p| p.policy.clone())
 }
 
 #[tauri::command]
@@ -1372,19 +1395,36 @@ fn build_pii_policy_user_config(
 }
 
 #[tauri::command]
-pub fn update_security_policy(update: SecurityPolicyUpdate) -> Result<(), String> {
-    config::with_config_lock(|| {
-        let policy = build_pii_policy_user_config(&update)?;
-        let mut user_config = config::load_user_config()?;
+pub fn update_security_policy(
+    update: SecurityPolicyUpdate,
+    project: Option<String>,
+) -> Result<(), String> {
+    update_security_policy_in(
+        speedwave_runtime::consts::data_dir(),
+        &update,
+        project.as_deref(),
+    )
+}
+
+fn update_security_policy_in(
+    data_dir: &std::path::Path,
+    update: &SecurityPolicyUpdate,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let policy = build_pii_policy_user_config(update)?;
+        let mut user_config = config::load_user_config_from(&config_path)?;
         let active = user_config
             .active_project
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        let project = user_config
+        ensure_saving_for_active_project(&active, project)?;
+        let entry = user_config
             .find_project_mut(&active)
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
-        project.policy = Some(policy);
-        config::save_user_config(&user_config)?;
+        entry.policy = Some(policy);
+        config::save_user_config_to(&user_config, &config_path)?;
         Ok(())
     })
     .map_err(|e| e.to_string())
@@ -1637,6 +1677,11 @@ async fn update_llm_config_in(
     mut update: LlmConfigUpdate,
 ) -> Result<(), String> {
     let config_path = data_dir.join("config.json");
+    let loaded = config::load_user_config_from(&config_path).ok();
+    if let Some(active) = loaded.as_ref().and_then(|c| c.active_project.as_deref()) {
+        ensure_saving_for_active_project(active, update.project.as_deref())
+            .map_err(|e| e.to_string())?;
+    }
     if config::is_local_provider(update.provider.as_deref()) {
         if let Some(url) = update.base_url.as_deref() {
             update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
@@ -1650,7 +1695,6 @@ async fn update_llm_config_in(
     }
     if let Some(ref mut providers) = validation_providers {
         canonicalize_provider_base_urls(providers);
-        let loaded = config::load_user_config_from(&config_path).ok();
         let stored_providers = loaded
             .as_ref()
             .and_then(|c| c.active_project_entry())
@@ -2012,21 +2056,30 @@ fn set_llm_provider_key_in(
 }
 
 #[tauri::command]
-pub fn clear_active_llm_provider() -> Result<(), String> {
+pub fn clear_active_llm_provider(project: Option<String>) -> Result<(), String> {
+    clear_active_llm_provider_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+}
+
+fn clear_active_llm_provider_in(
+    data_dir: &std::path::Path,
+    project: Option<&str>,
+) -> Result<(), String> {
     log::info!("clearing active LLM provider");
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let mut user_config = config::load_user_config_from(&config_path)?;
         let active = user_config
             .active_project
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        let project = user_config
+        ensure_saving_for_active_project(&active, project)?;
+        let entry = user_config
             .find_project_mut(&active)
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
-        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+        if let Some(llm) = entry.claude.as_mut().and_then(|c| c.llm.as_mut()) {
             llm.active = None;
         }
-        config::save_user_config(&user_config)?;
+        config::save_user_config_to(&user_config, &config_path)?;
         Ok(())
     })
     .map_err(|e: anyhow::Error| e.to_string())
@@ -2614,10 +2667,8 @@ mod tests {
         );
     }
 
-    fn seeded_config_tempdir_with_local_model(model: &str) -> tempfile::TempDir {
-        let mut cfg = make_config_with_active_project();
-        let project = cfg.find_project_mut("alpha").unwrap();
-        project.claude = Some(ClaudeOverrides {
+    fn claude_with_local_model(model: &str) -> ClaudeOverrides {
+        ClaudeOverrides {
             env: None,
             settings: None,
             llm: Some(LlmConfig {
@@ -2637,10 +2688,168 @@ mod tests {
                 }),
                 ..Default::default()
             }),
-        });
+        }
+    }
+
+    fn seeded_tempdir(cfg: &SpeedwaveUserConfig) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
-        config::save_user_config_to(&cfg, &tmp.path().join("config.json")).expect("seed config");
+        config::save_user_config_to(cfg, &tmp.path().join("config.json")).expect("seed config");
         tmp
+    }
+
+    fn seeded_config_tempdir_with_local_model(model: &str) -> tempfile::TempDir {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("alpha").unwrap().claude = Some(claude_with_local_model(model));
+        seeded_tempdir(&cfg)
+    }
+
+    fn two_local_projects_tempdir() -> tempfile::TempDir {
+        let mut cfg = make_config_with_active_project();
+        for (name, model) in [("alpha", "llama-alpha"), ("beta", "llama-beta")] {
+            cfg.find_project_mut(name).unwrap().claude = Some(claude_with_local_model(model));
+        }
+        seeded_tempdir(&cfg)
+    }
+
+    fn stored_llm(data_dir: &std::path::Path, project: &str) -> LlmConfig {
+        config::load_user_config_from(&data_dir.join("config.json"))
+            .unwrap()
+            .find_project(project)
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn the_llm_form_loads_the_project_it_was_built_for_not_the_active_one() {
+        let tmp = two_local_projects_tempdir();
+
+        let named = get_llm_config_in(tmp.path(), Some("beta")).unwrap();
+        let active = get_llm_config_in(tmp.path(), None).unwrap();
+
+        assert_eq!(named.llm.providers[0].model.as_deref(), Some("llama-beta"));
+        assert_eq!(
+            active.llm.providers[0].model.as_deref(),
+            Some("llama-alpha")
+        );
+    }
+
+    #[test]
+    fn the_llm_form_reads_key_presence_from_its_own_projects_tokens() {
+        let tmp = two_local_projects_tempdir();
+        speedwave_runtime::compose::write_llm_provider_key_in(tmp.path(), "beta", "local", "sk-b")
+            .unwrap();
+
+        let named = get_llm_config_in(tmp.path(), Some("beta")).unwrap();
+        let active = get_llm_config_in(tmp.path(), None).unwrap();
+
+        assert!(named.llm.providers[0].has_api_key);
+        assert!(!active.llm.providers[0].has_api_key);
+    }
+
+    #[test]
+    fn the_llm_form_of_a_project_missing_from_the_config_loads_empty() {
+        let tmp = two_local_projects_tempdir();
+
+        let missing = get_llm_config_in(tmp.path(), Some("gamma")).unwrap();
+
+        assert!(missing.llm.providers.is_empty());
+        assert!(missing.llm.active.is_none());
+    }
+
+    #[test]
+    fn the_security_section_loads_the_policy_of_its_own_project() {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
+            policies: vec!["strict".to_string()],
+            custom_policies: Vec::new(),
+        });
+
+        let named = stored_security_policy(&cfg, Some("beta")).unwrap();
+
+        assert_eq!(named.policies, vec!["strict".to_string()]);
+        assert!(stored_security_policy(&cfg, None).is_none());
+        assert!(stored_security_policy(&cfg, Some("gamma")).is_none());
+    }
+
+    fn strict_policy_update() -> SecurityPolicyUpdate {
+        SecurityPolicyUpdate {
+            policies: vec!["strict".to_string()],
+            custom_policies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_security_policy_save_for_the_project_a_switch_left_writes_nothing() {
+        let tmp = two_local_projects_tempdir();
+        let config_path = tmp.path().join("config.json");
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let err = update_security_policy_in(tmp.path(), &strict_policy_update(), Some("beta"))
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_security_policy_save_for_the_active_project_is_applied() {
+        let tmp = two_local_projects_tempdir();
+
+        update_security_policy_in(tmp.path(), &strict_policy_update(), Some("alpha")).unwrap();
+
+        let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        let policy = saved.find_project("alpha").unwrap().policy.clone().unwrap();
+        assert_eq!(policy.policies, vec!["strict".to_string()]);
+        assert!(saved.find_project("beta").unwrap().policy.is_none());
+    }
+
+    #[test]
+    fn a_logout_for_the_project_a_switch_left_keeps_the_active_projects_provider() {
+        let tmp = two_local_projects_tempdir();
+        let config_path = tmp.path().join("config.json");
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let err = clear_active_llm_provider_in(tmp.path(), Some("beta")).unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_logout_for_the_active_project_clears_only_its_provider() {
+        let tmp = two_local_projects_tempdir();
+
+        clear_active_llm_provider_in(tmp.path(), Some("alpha")).unwrap();
+
+        assert!(stored_llm(tmp.path(), "alpha").active.is_none());
+        assert!(stored_llm(tmp.path(), "beta").active.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_save_for_the_project_a_switch_left_probes_no_server() {
+        let mut server = mockito::Server::new_async().await;
+        let models = server
+            .mock("GET", "/v1/models")
+            .expect(0)
+            .create_async()
+            .await;
+        let tmp = seeded_tempdir(&make_config_with_active_project());
+        let mut update = local_update_for("beta");
+        update.api_key = None;
+        if let Some(providers) = update.providers.as_mut() {
+            providers[0].base_url = Some(server.url());
+            providers[0].model = None;
+        }
+        update.active = Some(speedwave_runtime::config::LlmActive {
+            provider_id: "local".to_string(),
+            model: None,
+        });
+
+        let err = update_llm_config_in(tmp.path(), update).await.unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        models.assert_async().await;
     }
 
     #[test]
@@ -3805,21 +4014,6 @@ mod tests {
             err.contains("ghost") && err.contains("not in the provider list"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn clear_active_llm_provider_sets_active_none_via_lock_and_save() {
-        let src = include_str!("containers_cmd.rs");
-        let start = src
-            .find("pub fn clear_active_llm_provider(")
-            .expect("clear_active_llm_provider command must exist");
-        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
-        assert!(body.contains("llm.active = None"), "must clear active");
-        assert!(
-            body.contains("with_config_lock"),
-            "must use the config lock"
-        );
-        assert!(body.contains("save_user_config"), "must persist");
     }
 
     #[tokio::test]

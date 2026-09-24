@@ -627,7 +627,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Reloads the Anthropic auth status whenever the active project changes. */
   constructor() {
     this.oauthWatcher.attach({
-      activeProject: () => this.formProject(),
+      activeProject: () => this.activeProject(),
       lastKnown: () => this.oauthSignIn(),
       shouldProbe: () => this.effectiveTarget() === 'anthropic',
       onLoginDetected: () => this.onOAuthDone(true),
@@ -674,14 +674,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Tears down the external-login watcher (poll + focus listener). */
   ngOnDestroy(): void {
-    this.destroyed = true;
     this.oauthWatcher.destroy();
-  }
-
-  private destroyed = false;
-
-  private formProject(): string | null {
-    return this.destroyed ? null : this.activeProject();
   }
 
   protected onBaseUrlInput(value: string): void {
@@ -932,7 +925,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         baseUrl: string;
         apiKey?: string | null;
         customHeaders?: string | null;
-      } = { provider, baseUrl: effectiveUrl };
+        project: string | null;
+      } = { provider, baseUrl: effectiveUrl, project: this.activeProject() };
       if (this.apiKeyTouched()) {
         args.apiKey = nullIfEmpty(this.apiKey());
       }
@@ -977,7 +971,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
       this.applyAuthStatusFor(project, status);
     } catch (e) {
-      if (this.formProject() === project && this.oauthSignIn() === 'pending') {
+      if (this.activeProject() === project && this.oauthSignIn() === 'pending') {
         this.oauthSignIn.set('none');
         this.log.debug(
           `loadAuthStatus: get_auth_status failed for ${project}: ${e instanceof Error ? e.message : String(e)}`
@@ -988,19 +982,18 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Applies a loaded/probed auth status to the tile, dropping it when `project`
-   * is no longer the active one (a late response for a project the user left).
+   * Applies a status fetched for the form's project to the tile, and to the app's project state only while the app is still settled on that project.
    * @param project - the project this status was fetched for
    * @param status - the backend auth-status payload
    */
   private applyAuthStatusFor(project: string, status: AuthStatusResponse): void {
-    if (this.formProject() !== project) return;
+    if (this.activeProject() !== project) return;
     this.apiKeyConfigured.set(status.api_key_configured);
     this.oauthAuthenticated.set(status.oauth_authenticated);
     this.oauthSignIn.set(
       status.oauth_sign_in ?? (status.oauth_authenticated ? 'verified' : 'none')
     );
-    this.projectState.applyAuthStatus(status);
+    if (this.projectState.isSettledOn(project)) this.projectState.applyAuthStatus(status);
   }
 
   /** Saves the Anthropic API key to the project's secrets directory. */
@@ -1075,8 +1068,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.loggingOut.set(true);
     try {
       await this.tauri.invoke<void>('anthropic_logout', { project });
-      await this.tauri.invoke<void>('clear_active_llm_provider');
-      this.projectState.forceUnconfigured();
+      await this.tauri.invoke<void>('clear_active_llm_provider', { project });
+      if (this.projectState.isSettledOn(project)) this.projectState.forceUnconfigured();
       await this.loadAuthStatus();
       this.oauthWatcher.startPoll();
     } catch (e) {
@@ -1361,7 +1354,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         });
       }
       await this.tauri.invoke('update_llm_config', { update });
-      if (this.destroyed) return;
 
       const savedLocal = update.providers.find((p) => p.id === 'local');
       this.loadedLocalEntry = savedLocal ? { ...savedLocal } : null;
@@ -1394,20 +1386,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       void this.chatState.refreshLlmConfigCache();
       this.providerChange.emit(provider);
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      const stackReady = this.projectState.status() === 'ready';
-      if (!forceRestart && activeKey === this.loadedActiveKey && project && stackReady) {
-        try {
-          await this.tauri.invoke('restart_llm_proxy', { project });
-        } catch (e: unknown) {
-          this.log.warn(
-            `restart_llm_proxy failed, falling back to full restart: ${
-              e instanceof Error ? e.message : String(e)
-            }`
-          );
-          this.projectState.requestRestart();
-        }
-      } else {
-        this.projectState.requestRestart();
+      if (this.projectState.isSettledOn(project)) {
+        await this.applySavedConfig(project, forceRestart || activeKey !== this.loadedActiveKey);
       }
       this.loadedActiveKey = activeKey;
       this.loadedFormSnapshot.set(this.computeFormSnapshot());
@@ -1416,16 +1396,35 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
-      if (!this.destroyed) this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.saving.set(false);
     this.cdr.markForCheck();
   }
 
+  private async applySavedConfig(project: string | null, needsFullRestart: boolean): Promise<void> {
+    if (needsFullRestart || !project || this.projectState.status() !== 'ready') {
+      this.projectState.requestRestart();
+      return;
+    }
+    try {
+      await this.tauri.invoke('restart_llm_proxy', { project });
+    } catch (e: unknown) {
+      this.log.warn(
+        `restart_llm_proxy failed, falling back to full restart: ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      );
+      if (this.projectState.isSettledOn(project)) this.projectState.requestRestart();
+    }
+  }
+
   private async loadConfig(): Promise<void> {
     this.testedLocalConnection = null;
     try {
-      const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
+      const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config', {
+        project: this.activeProject(),
+      });
       const persistedProvider = config.provider || 'anthropic';
       if (LEGACY_LOCAL_PROVIDERS.includes(persistedProvider)) {
         this.legacyMigrationProvider.set(persistedProvider);

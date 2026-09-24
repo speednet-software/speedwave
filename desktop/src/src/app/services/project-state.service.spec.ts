@@ -1606,6 +1606,32 @@ describe('ProjectStateService', () => {
     });
   });
 
+  describe('isSettledOn', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('is true for the active project while no switch runs', () => {
+      expect(service.activeProject()).toBe('test');
+      expect(service.isSettledOn('test')).toBe(true);
+    });
+
+    it('is false for any other project, and for none', () => {
+      expect(service.isSettledOn('other')).toBe(false);
+      expect(service.isSettledOn(null)).toBe(false);
+    });
+
+    it('is false for the active project from the moment a switch starts until it lands', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.activeProject()).toBe('test');
+      expect(service.isSettledOn('test')).toBe(false);
+      expect(service.isSettledOn('other')).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      expect(service.isSettledOn('test')).toBe(true);
+    });
+  });
+
   describe('restart state', () => {
     beforeEach(async () => {
       await service.init();

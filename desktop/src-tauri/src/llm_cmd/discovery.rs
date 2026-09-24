@@ -706,6 +706,19 @@ pub struct DiscoverLlmModelsArgs {
     pub api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub custom_headers: Option<Option<String>>,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+fn stored_credentials_owner(
+    args: &DiscoverLlmModelsArgs,
+    active: Option<String>,
+) -> Option<String> {
+    if speedwave_runtime::config::is_local_provider(Some(&args.provider)) {
+        args.project.clone().or(active)
+    } else {
+        None
+    }
 }
 
 pub(crate) async fn discover_llm_models_with_fallback(
@@ -765,10 +778,11 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
-    let bearer = resolve_transient_credential(args.api_key.as_ref(), active.as_deref(), "api_key");
+    let owner = stored_credentials_owner(&args, active);
+    let bearer = resolve_transient_credential(args.api_key.as_ref(), owner.as_deref(), "api_key");
     let headers = resolve_transient_credential(
         args.custom_headers.as_ref(),
-        active.as_deref(),
+        owner.as_deref(),
         "custom_headers",
     );
     discover_llm_models_with_fallback(
@@ -1863,6 +1877,40 @@ mod tests {
     fn resolve_credential_some_empty_string_means_no_auth() {
         let r = resolve_transient_credential(Some(&Some(String::new())), None, "api_key");
         assert_eq!(r, None, "Some(Some(\"\")) means no auth");
+    }
+
+    fn discover_args(provider: &str, project: Option<&str>) -> DiscoverLlmModelsArgs {
+        DiscoverLlmModelsArgs {
+            provider: provider.to_string(),
+            base_url: String::new(),
+            api_key: None,
+            custom_headers: None,
+            project: project.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_local_probe_falls_back_to_the_stored_credentials_of_the_forms_project() {
+        let active = || Some("alpha".to_string());
+
+        let named = stored_credentials_owner(&discover_args("local", Some("beta")), active());
+        let unnamed = stored_credentials_owner(&discover_args("local", None), active());
+
+        assert_eq!(named.as_deref(), Some("beta"));
+        assert_eq!(unnamed.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn a_remote_catalog_probe_never_carries_the_local_servers_stored_credentials() {
+        for provider in ["openrouter", "anthropic"] {
+            for project in [None, Some("alpha")] {
+                let owner = stored_credentials_owner(
+                    &discover_args(provider, project),
+                    Some("alpha".to_string()),
+                );
+                assert_eq!(owner, None, "{provider} {project:?}");
+            }
+        }
     }
 
     const OPENROUTER_CATALOG: &[u8] = br#"{"data":[

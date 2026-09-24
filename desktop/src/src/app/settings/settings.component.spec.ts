@@ -231,23 +231,39 @@ describe('SettingsComponent', () => {
     let backendProject = 'no-llm';
     let configLoads: string[] = [];
     let policyLoads: string[] = [];
+    let authCalls: string[] = [];
     let authStatus: (project: string) => Promise<unknown>;
     let updateLlmConfig: (update: Record<string, unknown>) => Promise<unknown>;
+    let updateSecurityPolicy: (project: unknown) => Promise<unknown>;
+    let restartLlmProxy: () => Promise<unknown>;
+
+    function refuseUnlessActive(project: unknown): void {
+      if (project != null && project !== backendProject) {
+        throw new Error(
+          `the active project is now '${backendProject}', not '${String(project)}'; nothing was saved`
+        );
+      }
+    }
 
     beforeEach(() => {
       backendProject = 'no-llm';
       configLoads = [];
       policyLoads = [];
+      authCalls = [];
       authStatus = async () => ({ api_key_configured: false, oauth_authenticated: false });
-      updateLlmConfig = async () => undefined;
+      updateLlmConfig = async (update) => refuseUnlessActive(update['project']);
+      updateSecurityPolicy = async (project) => refuseUnlessActive(project);
+      restartLlmProxy = async () => undefined;
       const base = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
         switch (cmd) {
-          case 'get_llm_config':
-            configLoads.push(backendProject);
-            return configs[backendProject];
+          case 'get_llm_config': {
+            const project = String(args?.['project'] ?? backendProject);
+            configLoads.push(project);
+            return configs[project];
+          }
           case 'get_security_policy':
-            policyLoads.push(backendProject);
+            policyLoads.push(String(args?.['project'] ?? backendProject));
             return emptyPolicy;
           case 'list_pii_rules':
           case 'list_security_policy_templates':
@@ -255,19 +271,40 @@ describe('SettingsComponent', () => {
           case 'discover_llm_models':
             return { models: [{ id: 'openai/gpt-4o-mini', context_length: 128000 }] };
           case 'get_auth_status':
+            authCalls.push(String(args?.['project']));
             return authStatus(String(args?.['project']));
           case 'update_llm_config':
             return updateLlmConfig(args?.['update'] as Record<string, unknown>);
+          case 'update_security_policy':
+            return updateSecurityPolicy(args?.['project']);
+          case 'restart_llm_proxy':
+            return restartLlmProxy();
           default:
             return base(cmd, args);
         }
       };
     });
 
-    async function settle(): Promise<void> {
-      fixture.detectChanges();
-      await fixture.whenStable();
+    async function settle(on: ComponentFixture<SettingsComponent> = fixture): Promise<void> {
+      on.detectChanges();
+      await on.whenStable();
       await new Promise((resolve) => setTimeout(resolve));
+    }
+
+    async function listenToSwitches(): Promise<void> {
+      await (
+        TestBed.inject(ProjectStateService) as unknown as { setupListeners(): Promise<void> }
+      ).setupListeners();
+    }
+
+    function startSwitch(to: string): void {
+      backendProject = to;
+      mockTauri.dispatchEvent('project_switch_started', { project: to });
+    }
+
+    function failSwitchBackTo(project: string): void {
+      backendProject = project;
+      mockTauri.dispatchEvent('project_switch_failed', { project, error: 'switch failed' });
     }
 
     async function showProject(project: string): Promise<LlmProviderComponent> {
@@ -277,14 +314,20 @@ describe('SettingsComponent', () => {
       return llmForm();
     }
 
-    function llmForm(): LlmProviderComponent {
-      return fixture.debugElement.query(By.directive(LlmProviderComponent))
+    function llmForm(on: ComponentFixture<SettingsComponent> = fixture): LlmProviderComponent {
+      return on.debugElement.query(By.directive(LlmProviderComponent))
         .componentInstance as LlmProviderComponent;
     }
 
     function securitySection(): SecuritySectionComponent {
       return fixture.debugElement.query(By.directive(SecuritySectionComponent))
         .componentInstance as SecuritySectionComponent;
+    }
+
+    function pending(): { promise: Promise<undefined>; resolve: () => void } {
+      let resolve: () => void = () => undefined;
+      const promise = new Promise<undefined>((done) => (resolve = () => done(undefined)));
+      return { promise, resolve };
     }
 
     it('loads the provider form of the project a switch lands on, keeping nothing from the one it left', async () => {
@@ -303,82 +346,160 @@ describe('SettingsComponent', () => {
       expect(openrouter?.keyTouched).toBe(false);
     });
 
-    it('keeps the form and its unsaved input when a switch fails back to the same project', async () => {
-      await (
-        TestBed.inject(ProjectStateService) as unknown as { setupListeners(): Promise<void> }
-      ).setupListeners();
+    it('keeps the form and its unsaved input through a switch that fails back to the same project', async () => {
+      await listenToSwitches();
+      const projectState = TestBed.inject(ProjectStateService);
       const before = await showProject('with-openrouter');
       before.onExtraKeyInput(before.extraProviders()[0], 'sk-or-still-editing');
 
-      mockTauri.dispatchEvent('project_switch_started', { project: 'no-llm' });
-      mockTauri.dispatchEvent('project_switch_failed', {
-        project: 'with-openrouter',
-        error: 'switch failed',
-      });
+      startSwitch('no-llm');
+      await settle();
+      expect(projectState.status()).toBe('switching');
+      failSwitchBackTo('with-openrouter');
       await settle();
 
-      const after = llmForm();
-      expect(after).toBe(before);
-      expect(after.extraProviders()[0].keyInput).toBe('sk-or-still-editing');
+      expect(projectState.status()).toBe('error');
+      expect(projectState.activeProject()).toBe('with-openrouter');
+      expect(llmForm()).toBe(before);
+      expect(before.extraProviders()[0].keyInput).toBe('sk-or-still-editing');
       expect(configLoads).toEqual(['with-openrouter']);
     });
 
-    it('drops a sign-in status that arrives after the form it was loaded for is gone', async () => {
-      let resolveLeft: (status: unknown) => void = () => undefined;
-      const leftStatus = { api_key_configured: true, oauth_authenticated: true };
+    it("loads a form opened during a switch for the project the app still shows, so a failed switch saves that project's providers", async () => {
+      await listenToSwitches();
+      await showProject('with-openrouter');
+      startSwitch('no-llm');
+      const reopened = TestBed.createComponent(SettingsComponent);
+      await settle(reopened);
+      failSwitchBackTo('with-openrouter');
+      await settle(reopened);
+      expect(configLoads).toEqual(['with-openrouter', 'with-openrouter']);
+      const sent: Record<string, unknown>[] = [];
+      updateLlmConfig = async (update) => {
+        refuseUnlessActive(update['project']);
+        sent.push(update);
+      };
+
+      await llmForm(reopened).saveConfig();
+
+      expect(sent.map((u) => u['project'])).toEqual(['with-openrouter']);
+      const saved = sent[0]['providers'] as { id: string; model: string | null }[];
+      expect(saved.find((p) => p.id === 'openrouter')?.model).toBe('openai/gpt-4o-mini');
+      reopened.destroy();
+    });
+
+    it('applies a sign-in status that lands after Settings is left while the app stays on its project', async () => {
+      const late = { api_key_configured: true, oauth_authenticated: true };
+      const status = pending();
+      authStatus = () => status.promise.then(() => late);
+      const applied = vi.spyOn(TestBed.inject(ProjectStateService), 'applyAuthStatus');
+      await showProject('no-llm');
+
+      fixture.destroy();
+      status.resolve();
+      await new Promise((resolve) => setTimeout(resolve));
+
+      expect(authCalls).toEqual(['no-llm']);
+      expect(applied).toHaveBeenCalledWith(late);
+    });
+
+    it('drops a sign-in status for the project a switch left', async () => {
+      const left = { api_key_configured: true, oauth_authenticated: true };
+      const status = pending();
       authStatus = (project) =>
         project === 'no-llm'
-          ? new Promise((resolve) => (resolveLeft = resolve))
+          ? status.promise.then(() => left)
           : Promise.resolve({ api_key_configured: false, oauth_authenticated: false });
-      const projectState = TestBed.inject(ProjectStateService);
-      const applied = vi.spyOn(projectState, 'applyAuthStatus');
+      const applied = vi.spyOn(TestBed.inject(ProjectStateService), 'applyAuthStatus');
 
       await showProject('no-llm');
       await showProject('with-openrouter');
-      resolveLeft(leftStatus);
+      status.resolve();
       await settle();
 
-      expect(applied).not.toHaveBeenCalledWith(leftStatus);
+      expect(authCalls).toEqual(['no-llm', 'with-openrouter']);
+      expect(applied).not.toHaveBeenCalledWith(left);
     });
 
-    it('lets a save still running when its form is replaced write nothing into the new project', async () => {
-      let rejectSave: (error: unknown) => void = () => undefined;
-      const sent: Record<string, unknown>[] = [];
-      updateLlmConfig = (update) => {
-        sent.push(update);
-        return new Promise((_, reject) => (rejectSave = reject));
+    it('shows that a save started before a switch saved nothing', async () => {
+      await listenToSwitches();
+      const sent: unknown[] = [];
+      updateLlmConfig = async (update) => {
+        sent.push(update['project']);
+        refuseUnlessActive(update['project']);
       };
-      const projectState = TestBed.inject(ProjectStateService);
-      const restart = vi.spyOn(projectState, 'requestRestart');
-      const before = await showProject('with-openrouter');
+      const form = await showProject('with-openrouter');
 
-      const saving = before.saveConfig();
-      await settle();
-      await showProject('no-llm');
-      rejectSave("the active project is now 'no-llm', not 'with-openrouter'; nothing was saved");
-      await saving;
+      startSwitch('no-llm');
+      await form.saveConfig();
       await settle();
 
-      expect(sent.map((u) => u['project'])).toEqual(['with-openrouter']);
-      expect(restart).not.toHaveBeenCalled();
-      expect(component.error).not.toContain('nothing was saved');
+      expect(sent).toEqual(['with-openrouter']);
+      expect(component.error).toContain('nothing was saved');
     });
 
-    it('lets a save that lands after its form is replaced request no restart of the new project', async () => {
-      let resolveSave: () => void = () => undefined;
-      updateLlmConfig = () =>
-        new Promise<undefined>((resolve) => (resolveSave = () => resolve(undefined)));
-      const projectState = TestBed.inject(ProjectStateService);
-      const restart = vi.spyOn(projectState, 'requestRestart');
+    it('still requests the restart of a save that lands after Settings is left', async () => {
+      const save = pending();
+      updateLlmConfig = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      const form = await showProject('with-openrouter');
+
+      const saving = form.saveConfig();
+      await settle();
+      fixture.destroy();
+      save.resolve();
+      await saving;
+
+      expect(restart).toHaveBeenCalledTimes(1);
+    });
+
+    it('requests no restart for a save that lands after a switch replaced its form', async () => {
+      const save = pending();
+      updateLlmConfig = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
       const before = await showProject('with-openrouter');
 
       const saving = before.saveConfig();
       await settle();
       await showProject('no-llm');
-      resolveSave();
+      save.resolve();
       await saving;
-      await settle();
 
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('requests no restart for a save that lands while a switch runs', async () => {
+      await listenToSwitches();
+      const save = pending();
+      updateLlmConfig = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      const form = await showProject('with-openrouter');
+
+      const saving = form.saveConfig();
+      await settle();
+      startSwitch('no-llm');
+      save.resolve();
+      await saving;
+
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('requests no restart when the proxy restart fails after a switch started', async () => {
+      await listenToSwitches();
+      const projectState = TestBed.inject(ProjectStateService);
+      const restart = vi.spyOn(projectState, 'requestRestart');
+      let proxyRestarts = 0;
+      restartLlmProxy = async () => {
+        proxyRestarts++;
+        startSwitch('no-llm');
+        throw new Error('proxy restart failed');
+      };
+      const form = await showProject('with-openrouter');
+      projectState.status.set('ready');
+
+      await form.saveConfig();
+
+      expect(proxyRestarts).toBe(1);
       expect(restart).not.toHaveBeenCalled();
     });
 
@@ -390,6 +511,41 @@ describe('SettingsComponent', () => {
 
       expect(securitySection()).not.toBe(before);
       expect(policyLoads).toEqual(['no-llm', 'with-openrouter']);
+    });
+
+    it('requests no restart for a security save that lands after a switch', async () => {
+      const save = pending();
+      const sent: unknown[] = [];
+      updateSecurityPolicy = (project) => {
+        sent.push(project);
+        return save.promise;
+      };
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      await showProject('with-openrouter');
+
+      const saving = securitySection().save();
+      await settle();
+      await showProject('no-llm');
+      save.resolve();
+      await saving;
+
+      expect(sent).toEqual(['with-openrouter']);
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('still requests the restart of a security save that lands after Settings is left', async () => {
+      const save = pending();
+      updateSecurityPolicy = () => save.promise;
+      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      await showProject('with-openrouter');
+
+      const saving = securitySection().save();
+      await settle();
+      fixture.destroy();
+      save.resolve();
+      await saving;
+
+      expect(restart).toHaveBeenCalledTimes(1);
     });
 
     it('recreates the forms without the dev-mode warning about a re-created collection', async () => {

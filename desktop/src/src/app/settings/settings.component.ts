@@ -195,7 +195,11 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         }
 
         @if (beta.enabled()) {
-          <app-security-section *appRecreateOn="activeProject()" (errorOccurred)="error = $event" />
+          <app-security-section
+            *appRecreateOn="activeProject()"
+            [project]="activeProject()"
+            (errorOccurred)="error = $event"
+          />
         }
 
         <app-update-section [activeProject]="activeProject()" (errorOccurred)="error = $event" />

@@ -484,6 +484,14 @@ export class ProjectStateService {
     this.notifyChange();
   }
 
+  /**
+   * True while `project` is the active project and no switch runs, so work finishing for it still applies.
+   * @param project - the project a late result or a save belongs to
+   */
+  isSettledOn(project: string | null): boolean {
+    return project === this.activeProject() && this.status() !== 'switching';
+  }
+
   /** Marks that pending changes require a container restart. */
   requestRestart(): void {
     if (this.status() === 'no_provider') {

@@ -361,18 +361,15 @@ describe('LlmProviderComponent', () => {
     expect(update['apiKeyEnv']).toBeUndefined();
   });
 
-  it('hot-reloads the proxy with the input-signal project, not projectState', async () => {
+  it('leaves the running stack alone when the app has left the project the form saved', async () => {
     fixture.componentRef.setInput('activeProject', 'proj-from-input');
     const projectState = TestBed.inject(ProjectStateService);
-    projectState.activeProject.set('wrong-project');
+    projectState.activeProject.set('other-project');
     projectState.status.set('ready');
-
-    let restartProject: unknown = null;
-    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === 'restart_llm_proxy') {
-        restartProject = args?.['project'];
-        return undefined;
-      }
+    const restart = vi.spyOn(projectState, 'requestRestart');
+    const calls: string[] = [];
+    mockTauri.invokeHandler = async (cmd: string) => {
+      calls.push(cmd);
       return undefined;
     };
 
@@ -386,8 +383,9 @@ describe('LlmProviderComponent', () => {
 
     await component.saveConfig();
 
-    expect(restartProject).toBe('proj-from-input');
-    expect(projectState.needsRestart).toBe(false);
+    expect(calls).toContain('update_llm_config');
+    expect(calls).not.toContain('restart_llm_proxy');
+    expect(restart).not.toHaveBeenCalled();
   });
 
   it('writes provider keys before the config and aborts the config on key failure', async () => {
@@ -893,12 +891,69 @@ describe('LlmProviderComponent', () => {
       return undefined;
     };
     fixture.componentRef.setInput('activeProject', 'proj');
+    TestBed.inject(ProjectStateService).activeProject.set('proj');
     const projectState = TestBed.inject(ProjectStateService);
     projectState.status.set('ready');
 
     await component.anthropicLogout('proj');
 
     expect(projectState.status()).toBe('no_provider');
+  });
+
+  it('logout clears the provider of the project it signed out', async () => {
+    const cleared: unknown[] = [];
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'clear_active_llm_provider') cleared.push(args?.['project']);
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, oauth_authenticated: false };
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+
+    await component.anthropicLogout('proj');
+
+    expect(cleared).toEqual(['proj']);
+  });
+
+  it('a logout finishing after the app left its project leaves the app status alone', async () => {
+    mockTauri.invokeHandler = async (cmd: string) =>
+      cmd === 'get_auth_status'
+        ? { api_key_configured: false, oauth_authenticated: false }
+        : undefined;
+    fixture.componentRef.setInput('activeProject', 'proj');
+    const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject.set('other-project');
+    projectState.status.set('ready');
+
+    await component.anthropicLogout('proj');
+
+    expect(projectState.status()).toBe('ready');
+  });
+
+  it('loads the config and tests the local server for the project it was built for', async () => {
+    const loads: unknown[] = [];
+    const probes: unknown[] = [];
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_llm_config') {
+        loads.push(args?.['project']);
+        return { provider: 'anthropic', model: null, base_url: null, default_base_url: null };
+      }
+      if (cmd === 'discover_llm_models') {
+        probes.push((args?.['args'] as Record<string, unknown>)['project']);
+        return { models: [{ id: 'llama3.3' }], messages_endpoint_ok: true };
+      }
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'proj');
+    component.ngOnInit();
+    await fixture.whenStable();
+    component.provider.set('local');
+    component.baseUrl.set('http://localhost:11434');
+
+    await component.discoverModels(false);
+
+    expect(new Set(loads)).toEqual(new Set(['proj']));
+    expect(probes).toEqual(['proj']);
   });
 
   it('onOAuthDone_success_selects_anthropic_and_saves', async () => {
@@ -946,6 +1001,7 @@ describe('LlmProviderComponent', () => {
       return prev(cmd, args);
     };
     fixture.componentRef.setInput('activeProject', 'proj');
+    TestBed.inject(ProjectStateService).activeProject.set('proj');
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
 
@@ -2613,6 +2669,7 @@ describe('LlmProviderComponent', () => {
     projectState.status.set('ready');
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
     fixture.componentRef.setInput('activeProject', 'proj');
+    TestBed.inject(ProjectStateService).activeProject.set('proj');
 
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
@@ -2656,6 +2713,7 @@ describe('LlmProviderComponent', () => {
     projectState.status.set('no_provider');
     const restartSpy = vi.spyOn(projectState, 'requestRestart');
     fixture.componentRef.setInput('activeProject', 'proj');
+    TestBed.inject(ProjectStateService).activeProject.set('proj');
 
     component.provider.set('anthropic');
     component.selectedTarget.set('anthropic');
@@ -2953,6 +3011,7 @@ describe('LlmProviderComponent', () => {
     const projectState = TestBed.inject(ProjectStateService);
     const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
     fixture.componentRef.setInput('activeProject', 'proj');
+    TestBed.inject(ProjectStateService).activeProject.set('proj');
     fixture.detectChanges();
     await flushMicrotasks();
 
@@ -3246,6 +3305,7 @@ describe('LlmProviderComponent', () => {
     fixture.componentRef.setInput('activeProject', 'proj');
     const watcher = fixture.debugElement.injector.get(OauthCompletionWatcher);
     const projectState = TestBed.inject(ProjectStateService);
+    projectState.activeProject.set('proj');
     const applySpy = vi.spyOn(projectState, 'applyAuthStatus');
     const status: AuthStatusResponse = {
       api_key_configured: false,
