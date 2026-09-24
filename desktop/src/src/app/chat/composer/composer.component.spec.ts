@@ -314,6 +314,20 @@ describe('ComposerComponent', () => {
       expect(textarea().getAttribute('placeholder')).toBe('queue next message...');
     });
 
+    it('sends when the block lifted after the last render', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('the start just ended');
+      fixture.detectChanges();
+
+      blocked.set(false);
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual(['the start just ended']);
+    });
+
     it('sends the kept text once the block lifts', () => {
       const emitted: string[] = [];
       component.submitted.subscribe((v) => emitted.push(v.payload));
