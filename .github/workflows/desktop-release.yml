@@ -237,6 +237,11 @@ jobs:
           account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
           certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
 
+      - name: Cache the Artifact Signing token (Windows)
+        if: matrix.platform == 'windows-latest' && vars.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: az account get-access-token --resource https://codesigning.azure.net --output none
+
       - name: Prepare desktop bundle
         uses: ./.github/actions/prepare-desktop-bundle
         with:
@@ -318,6 +323,11 @@ jobs:
           endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
           account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
           certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+
+      - name: Cache the Artifact Signing token (Windows)
+        if: matrix.os == 'windows-latest' && vars.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: az account get-access-token --resource https://codesigning.azure.net --output none
 
       - name: Sign CLI binary (windows)
         if: matrix.archive == 'zip'
