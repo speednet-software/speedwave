@@ -2480,6 +2480,37 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
+    fn the_rendered_claude_service_keeps_whole_mcp_descriptions() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut resolved = resolved_with_telemetry(None, None);
+        resolved.env = crate::defaults::base_env();
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "mcp-desc",
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        assert_eq!(
+            find_env_value(&env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").as_deref(),
+            Some("8192")
+        );
+        let hub_env = get_service_env_seq(&doc, "mcp-hub");
+        assert!(find_env_value(&hub_env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_with_routed_window_passes_security_check() {
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {

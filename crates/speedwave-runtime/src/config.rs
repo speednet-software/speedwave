@@ -2586,6 +2586,29 @@ mod tests {
     }
 
     #[test]
+    fn the_resolved_claude_env_carries_the_mcp_description_limit() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+
+        let (resolved, _) = resolve_project_config_in_with_managed(
+            data_dir.path(),
+            project_dir.path(),
+            &SpeedwaveUserConfig::default(),
+            "mcp-desc",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            resolved
+                .env
+                .get(defaults::MCP_DESCRIPTION_LENGTH_ENV)
+                .map(String::as_str),
+            Some(defaults::MCP_DESCRIPTION_MAX_LENGTH.to_string().as_str())
+        );
+    }
+
+    #[test]
     fn test_is_local_provider_matches_local_providers_const() {
         for name in LOCAL_PROVIDERS {
             assert!(

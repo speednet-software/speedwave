@@ -79,6 +79,7 @@ export { bootWorker } from './boot.js';
 export type { BootWorkerOptions, NotConfiguredPolicy } from './boot.js';
 
 export { TIMEOUTS } from './timeouts.js';
+export { MAX_META_TOOL_DESCRIPTION_LENGTH } from './tool-limits.js';
 
 export { ts } from './logger.js';
 export { sanitize } from './sanitizer.js';
