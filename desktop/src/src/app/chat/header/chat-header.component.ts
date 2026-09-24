@@ -61,7 +61,7 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
 
       <h1
         data-testid="chat-header-title"
-        class="view-title view-title-page truncate text-[var(--ink)]"
+        class="view-title view-title-page flex-shrink-0 truncate text-[var(--ink)]"
       >
         {{ viewTitle() }}
       </h1>
