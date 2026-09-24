@@ -849,7 +849,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       if (this.error()) {
         this.saveError.set(this.error());
       } else {
-        if (this.projectState.isSettledOn(project)) this.projectState.requestRestart();
+        this.projectState.requestRestartFor(project);
         this.saved.set(true);
         setTimeout(() => {
           this.saved.set(false);

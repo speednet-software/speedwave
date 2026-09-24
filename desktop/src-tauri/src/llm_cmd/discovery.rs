@@ -605,14 +605,35 @@ async fn discover_openrouter(
     parse_openrouter_models(&resp.body)
 }
 
+fn stored_credential(provider: &str, project: Option<&str>, file: &str) -> Option<String> {
+    stored_credential_in(
+        speedwave_runtime::consts::data_dir(),
+        provider,
+        project,
+        file,
+    )
+}
+
+fn stored_credential_in(
+    data_dir: &std::path::Path,
+    provider: &str,
+    project: Option<&str>,
+    file: &str,
+) -> Option<String> {
+    if !speedwave_runtime::config::is_local_provider(Some(provider)) {
+        return None;
+    }
+    project.and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt_in(data_dir, p, file))
+}
+
 fn resolve_transient_credential(
     field: Option<&Option<String>>,
-    active_project: Option<&str>,
+    provider: &str,
+    project: Option<&str>,
     file: &str,
 ) -> Option<String> {
     match field {
-        None => active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, file)),
+        None => stored_credential(provider, project, file),
         Some(None) => None,
         Some(Some(s)) if s.is_empty() => None,
         Some(Some(s)) => strip_bearer_prefix(s),
@@ -710,15 +731,8 @@ pub struct DiscoverLlmModelsArgs {
     pub project: Option<String>,
 }
 
-fn stored_credentials_owner(
-    args: &DiscoverLlmModelsArgs,
-    active: Option<String>,
-) -> Option<String> {
-    if speedwave_runtime::config::is_local_provider(Some(&args.provider)) {
-        args.project.clone().or(active)
-    } else {
-        None
-    }
+fn credential_project(args: &DiscoverLlmModelsArgs, active: Option<String>) -> Option<String> {
+    args.project.clone().or(active)
 }
 
 pub(crate) async fn discover_llm_models_with_fallback(
@@ -728,14 +742,12 @@ pub(crate) async fn discover_llm_models_with_fallback(
     custom_headers: Option<&str>,
     active_project: Option<&str>,
 ) -> Result<DiscoverResult, String> {
-    let bearer = api_key.and_then(strip_bearer_prefix).or_else(|| {
-        active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, "api_key"))
-    });
-    let headers = custom_headers.map(str::to_string).or_else(|| {
-        active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, "custom_headers"))
-    });
+    let bearer = api_key
+        .and_then(strip_bearer_prefix)
+        .or_else(|| stored_credential(provider, active_project, "api_key"));
+    let headers = custom_headers
+        .map(str::to_string)
+        .or_else(|| stored_credential(provider, active_project, "custom_headers"));
     let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
     let runtime = speedwave_runtime::runtime::detect_runtime();
     let vm_available = runtime.is_available();
@@ -778,11 +790,17 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
-    let owner = stored_credentials_owner(&args, active);
-    let bearer = resolve_transient_credential(args.api_key.as_ref(), owner.as_deref(), "api_key");
+    let project = credential_project(&args, active);
+    let bearer = resolve_transient_credential(
+        args.api_key.as_ref(),
+        &args.provider,
+        project.as_deref(),
+        "api_key",
+    );
     let headers = resolve_transient_credential(
         args.custom_headers.as_ref(),
-        owner.as_deref(),
+        &args.provider,
+        project.as_deref(),
         "custom_headers",
     );
     discover_llm_models_with_fallback(
@@ -1861,6 +1879,7 @@ mod tests {
     fn resolve_credential_some_some_strips_bearer_prefix() {
         let r = resolve_transient_credential(
             Some(&Some("Bearer sk-test".to_string())),
+            "local",
             None,
             "api_key",
         );
@@ -1869,13 +1888,13 @@ mod tests {
 
     #[test]
     fn resolve_credential_some_none_means_no_auth() {
-        let r = resolve_transient_credential(Some(&None), None, "api_key");
+        let r = resolve_transient_credential(Some(&None), "local", None, "api_key");
         assert_eq!(r, None, "Some(None) explicitly means no auth");
     }
 
     #[test]
     fn resolve_credential_some_empty_string_means_no_auth() {
-        let r = resolve_transient_credential(Some(&Some(String::new())), None, "api_key");
+        let r = resolve_transient_credential(Some(&Some(String::new())), "local", None, "api_key");
         assert_eq!(r, None, "Some(Some(\"\")) means no auth");
     }
 
@@ -1890,27 +1909,50 @@ mod tests {
     }
 
     #[test]
-    fn a_local_probe_falls_back_to_the_stored_credentials_of_the_forms_project() {
+    fn a_probe_reads_the_stored_credentials_of_the_forms_project_else_the_active_one() {
         let active = || Some("alpha".to_string());
 
-        let named = stored_credentials_owner(&discover_args("local", Some("beta")), active());
-        let unnamed = stored_credentials_owner(&discover_args("local", None), active());
+        let named = credential_project(&discover_args("local", Some("beta")), active());
+        let unnamed = credential_project(&discover_args("local", None), active());
 
         assert_eq!(named.as_deref(), Some("beta"));
         assert_eq!(unnamed.as_deref(), Some("alpha"));
     }
 
     #[test]
-    fn a_remote_catalog_probe_never_carries_the_local_servers_stored_credentials() {
-        for provider in ["openrouter", "anthropic"] {
-            for project in [None, Some("alpha")] {
-                let owner = stored_credentials_owner(
-                    &discover_args(provider, project),
-                    Some("alpha".to_string()),
+    fn only_a_local_provider_reads_the_stored_local_server_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (file, value) in [
+            ("api_key", "sk-local-server"),
+            ("custom_headers", "X-Team: a"),
+        ] {
+            let path =
+                speedwave_runtime::compose::tokens_path_in(tmp.path(), "alpha", "local-llm", file)
+                    .expect("token path");
+            std::fs::create_dir_all(path.parent().expect("token dir")).expect("create token dir");
+            std::fs::write(&path, format!("{value}\n")).expect("write token");
+        }
+
+        for (file, value) in [
+            ("api_key", "sk-local-server"),
+            ("custom_headers", "X-Team: a"),
+        ] {
+            assert_eq!(
+                stored_credential_in(tmp.path(), "local", Some("alpha"), file).as_deref(),
+                Some(value)
+            );
+            for provider in ["openrouter", "anthropic"] {
+                assert_eq!(
+                    stored_credential_in(tmp.path(), provider, Some("alpha"), file),
+                    None,
+                    "{provider} {file}"
                 );
-                assert_eq!(owner, None, "{provider} {project:?}");
             }
         }
+        assert_eq!(
+            stored_credential_in(tmp.path(), "local", None, "api_key"),
+            None
+        );
     }
 
     const OPENROUTER_CATALOG: &[u8] = br#"{"data":[

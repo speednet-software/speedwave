@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  DestroyRef,
   OnDestroy,
   OnInit,
   computed,
@@ -621,6 +622,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   readonly errorOccurred = output<string>();
 
   private cdr = inject(ChangeDetectorRef);
+  private destroyRef = inject(DestroyRef);
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
 
@@ -1384,11 +1386,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         );
       }
       void this.chatState.refreshLlmConfigCache();
-      this.providerChange.emit(provider);
+      if (!this.destroyRef.destroyed) this.providerChange.emit(provider);
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
-      if (this.projectState.isSettledOn(project)) {
-        await this.applySavedConfig(project, forceRestart || activeKey !== this.loadedActiveKey);
-      }
+      await this.applySavedConfig(project, forceRestart || activeKey !== this.loadedActiveKey);
       this.loadedActiveKey = activeKey;
       this.loadedFormSnapshot.set(this.computeFormSnapshot());
       setTimeout(() => {
@@ -1396,15 +1396,22 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      if (!this.destroyRef.destroyed) {
+        this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      }
     }
     this.saving.set(false);
     this.cdr.markForCheck();
   }
 
   private async applySavedConfig(project: string | null, needsFullRestart: boolean): Promise<void> {
-    if (needsFullRestart || !project || this.projectState.status() !== 'ready') {
-      this.projectState.requestRestart();
+    if (
+      needsFullRestart ||
+      !project ||
+      !this.projectState.isSettledOn(project) ||
+      this.projectState.status() !== 'ready'
+    ) {
+      this.projectState.requestRestartFor(project);
       return;
     }
     try {
@@ -1415,7 +1422,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
           e instanceof Error ? e.message : String(e)
         }`
       );
-      if (this.projectState.isSettledOn(project)) this.projectState.requestRestart();
+      this.projectState.requestRestartFor(project);
     }
   }
 

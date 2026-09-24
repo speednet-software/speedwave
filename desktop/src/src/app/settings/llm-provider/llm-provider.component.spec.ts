@@ -3206,6 +3206,7 @@ describe('LlmProviderComponent', () => {
 
     fixture.componentRef.setInput('activeProject', 'a');
     fixture.detectChanges();
+    projectState.activeProject.set('b');
     fixture.componentRef.setInput('activeProject', 'b');
     fixture.detectChanges();
 
@@ -3218,6 +3219,7 @@ describe('LlmProviderComponent', () => {
     });
     await flushMicrotasks();
     fixture.detectChanges();
+    expect(applySpy).toHaveBeenCalledTimes(1);
     applySpy.mockClear();
 
     projA.resolve({

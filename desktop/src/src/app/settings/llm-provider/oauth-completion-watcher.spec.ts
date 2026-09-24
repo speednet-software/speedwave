@@ -171,6 +171,21 @@ describe('OauthCompletionWatcher', () => {
     expect(verdicts()).toEqual([]);
   });
 
+  it('drops a probe that lands after the watcher was destroyed (no callback)', async () => {
+    const probe = createDeferred<Record<string, unknown>>();
+    mockTauri.invokeHandler = async () => probe.promise;
+    const { ctx, logins, verdicts } = makeContext();
+    watcher.attach(ctx);
+
+    const checking = watcher.checkNow();
+    watcher.destroy();
+    probe.resolve(authStatus(true));
+    await checking;
+
+    expect(logins()).toBe(0);
+    expect(verdicts()).toEqual([]);
+  });
+
   it('swallows a failing get_auth_status and stays usable (container not up yet)', async () => {
     let fail = true;
     mockTauri.invokeHandler = async () => {

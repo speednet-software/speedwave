@@ -1240,8 +1240,16 @@ fn build_security_policy_response(
 
 #[tauri::command]
 pub fn get_security_policy(project: Option<String>) -> Result<SecurityPolicyResponse, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let policy = stored_security_policy(&user_config, project.as_deref());
+    get_security_policy_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+}
+
+fn get_security_policy_in(
+    data_dir: &std::path::Path,
+    project: Option<&str>,
+) -> Result<SecurityPolicyResponse, String> {
+    let user_config =
+        config::load_user_config_from(&data_dir.join("config.json")).map_err(|e| e.to_string())?;
+    let policy = stored_security_policy(&user_config, project);
     let managed = speedwave_runtime::managed_config::load_managed_config()
         .map_err(|e| e.to_string())?
         .and_then(|m| m.pii_policy);
@@ -2068,14 +2076,12 @@ fn clear_active_llm_provider_in(
     let config_path = data_dir.join("config.json");
     config::with_config_lock_in(data_dir, || {
         let mut user_config = config::load_user_config_from(&config_path)?;
-        let active = user_config
-            .active_project
-            .clone()
+        let name = settings_project(&user_config, project)
+            .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        ensure_saving_for_active_project(&active, project)?;
         let entry = user_config
-            .find_project_mut(&active)
-            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+            .find_project_mut(&name)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", name))?;
         if let Some(llm) = entry.claude.as_mut().and_then(|c| c.llm.as_mut()) {
             llm.active = None;
         }
@@ -2085,9 +2091,26 @@ fn clear_active_llm_provider_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
+fn ensure_proxy_restart_for_active_project(
+    active: Option<&str>,
+    project: &str,
+) -> Result<(), String> {
+    match active {
+        Some(active) if active == project => Ok(()),
+        Some(active) => Err(format!(
+            "the active project is now '{active}', not '{project}'; its proxy was not restarted"
+        )),
+        None => Err("No active project".to_string()),
+    }
+}
+
 #[tauri::command]
 pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
     check_project(&project)?;
+    let active = config::load_user_config()
+        .map_err(|e| e.to_string())?
+        .active_project;
+    ensure_proxy_restart_for_active_project(active.as_deref(), &project)?;
     render_and_save_compose(&project)?;
     let rt = speedwave_runtime::runtime::detect_runtime();
     rt.compose_up_service(&project, "proxy")
@@ -2758,6 +2781,36 @@ mod tests {
     }
 
     #[test]
+    fn the_policy_getter_resolves_the_named_projects_policy() {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
+            policies: vec!["strict".to_string()],
+            custom_policies: Vec::new(),
+        });
+        let tmp = seeded_tempdir(&cfg);
+
+        let named = get_security_policy_in(tmp.path(), Some("beta")).unwrap();
+        let active = get_security_policy_in(tmp.path(), None).unwrap();
+
+        assert!(named.enabled_policies.contains(&"strict".to_string()));
+        assert!(!active.enabled_policies.contains(&"strict".to_string()));
+    }
+
+    #[test]
+    fn a_proxy_restart_is_only_for_the_active_project() {
+        assert_eq!(
+            ensure_proxy_restart_for_active_project(Some("alpha"), "alpha"),
+            Ok(())
+        );
+        let other = ensure_proxy_restart_for_active_project(Some("beta"), "alpha").unwrap_err();
+        assert!(
+            other.contains("'beta'") && other.contains("'alpha'"),
+            "{other}"
+        );
+        assert!(ensure_proxy_restart_for_active_project(None, "alpha").is_err());
+    }
+
+    #[test]
     fn the_security_section_loads_the_policy_of_its_own_project() {
         let mut cfg = make_config_with_active_project();
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
@@ -2805,14 +2858,24 @@ mod tests {
     }
 
     #[test]
-    fn a_logout_for_the_project_a_switch_left_keeps_the_active_projects_provider() {
+    fn a_logout_clears_the_provider_of_the_project_it_signed_out_whichever_is_active() {
+        let tmp = two_local_projects_tempdir();
+
+        clear_active_llm_provider_in(tmp.path(), Some("beta")).unwrap();
+
+        assert!(stored_llm(tmp.path(), "beta").active.is_none());
+        assert!(stored_llm(tmp.path(), "alpha").active.is_some());
+    }
+
+    #[test]
+    fn a_logout_for_a_project_missing_from_the_config_writes_nothing() {
         let tmp = two_local_projects_tempdir();
         let config_path = tmp.path().join("config.json");
         let before = std::fs::read_to_string(&config_path).unwrap();
 
-        let err = clear_active_llm_provider_in(tmp.path(), Some("beta")).unwrap_err();
+        let err = clear_active_llm_provider_in(tmp.path(), Some("gamma")).unwrap_err();
 
-        assert!(err.contains("not 'beta'"), "{err}");
+        assert!(err.contains("'gamma' not found"), "{err}");
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
     }
 

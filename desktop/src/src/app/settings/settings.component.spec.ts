@@ -11,6 +11,7 @@ import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService, THEME_IDS, THEME_MODES } from '../services/theme.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 function setupMockTauri(mockTauri: MockTauriService): void {
   mockTauri.invokeHandler = async (cmd: string) => {
@@ -324,12 +325,6 @@ describe('SettingsComponent', () => {
         .componentInstance as SecuritySectionComponent;
     }
 
-    function pending(): { promise: Promise<undefined>; resolve: () => void } {
-      let resolve: () => void = () => undefined;
-      const promise = new Promise<undefined>((done) => (resolve = () => done(undefined)));
-      return { promise, resolve };
-    }
-
     it('loads the provider form of the project a switch lands on, keeping nothing from the one it left', async () => {
       const before = await showProject('no-llm');
       before.onExtraKeyInput(before.extraProviders()[0], 'sk-or-typed-for-the-project-left');
@@ -390,7 +385,7 @@ describe('SettingsComponent', () => {
 
     it('applies a sign-in status that lands after Settings is left while the app stays on its project', async () => {
       const late = { api_key_configured: true, oauth_authenticated: true };
-      const status = pending();
+      const status = createDeferred();
       authStatus = () => status.promise.then(() => late);
       const applied = vi.spyOn(TestBed.inject(ProjectStateService), 'applyAuthStatus');
       await showProject('no-llm');
@@ -405,7 +400,7 @@ describe('SettingsComponent', () => {
 
     it('drops a sign-in status for the project a switch left', async () => {
       const left = { api_key_configured: true, oauth_authenticated: true };
-      const status = pending();
+      const status = createDeferred();
       authStatus = (project) =>
         project === 'no-llm'
           ? status.promise.then(() => left)
@@ -439,9 +434,10 @@ describe('SettingsComponent', () => {
     });
 
     it('still requests the restart of a save that lands after Settings is left', async () => {
-      const save = pending();
+      const save = createDeferred();
       updateLlmConfig = () => save.promise;
       const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      const warn = vi.spyOn(console, 'warn');
       const form = await showProject('with-openrouter');
 
       const saving = form.saveConfig();
@@ -451,10 +447,13 @@ describe('SettingsComponent', () => {
       await saving;
 
       expect(restart).toHaveBeenCalledTimes(1);
+      expect(
+        warn.mock.calls.filter((args) => args.some((a) => String(a).includes('NG0953')))
+      ).toEqual([]);
     });
 
     it('requests no restart for a save that lands after a switch replaced its form', async () => {
-      const save = pending();
+      const save = createDeferred();
       updateLlmConfig = () => save.promise;
       const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
       const before = await showProject('with-openrouter');
@@ -468,11 +467,13 @@ describe('SettingsComponent', () => {
       expect(restart).not.toHaveBeenCalled();
     });
 
-    it('requests no restart for a save that lands while a switch runs', async () => {
+    it('keeps the restart of a save that lands while a switch runs for a switch that fails back', async () => {
       await listenToSwitches();
-      const save = pending();
+      const save = createDeferred();
       updateLlmConfig = () => save.promise;
-      const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
+      const projectState = TestBed.inject(ProjectStateService);
+      const restart = vi.spyOn(projectState, 'requestRestart');
+      const owed = vi.spyOn(projectState, 'requestRestartFor');
       const form = await showProject('with-openrouter');
 
       const saving = form.saveConfig();
@@ -482,6 +483,7 @@ describe('SettingsComponent', () => {
       await saving;
 
       expect(restart).not.toHaveBeenCalled();
+      expect(owed).toHaveBeenCalledWith('with-openrouter');
     });
 
     it('requests no restart when the proxy restart fails after a switch started', async () => {
@@ -514,7 +516,7 @@ describe('SettingsComponent', () => {
     });
 
     it('requests no restart for a security save that lands after a switch', async () => {
-      const save = pending();
+      const save = createDeferred();
       const sent: unknown[] = [];
       updateSecurityPolicy = (project) => {
         sent.push(project);
@@ -534,7 +536,7 @@ describe('SettingsComponent', () => {
     });
 
     it('still requests the restart of a security save that lands after Settings is left', async () => {
-      const save = pending();
+      const save = createDeferred();
       updateSecurityPolicy = () => save.promise;
       const restart = vi.spyOn(TestBed.inject(ProjectStateService), 'requestRestart');
       await showProject('with-openrouter');
