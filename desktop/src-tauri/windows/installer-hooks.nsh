@@ -296,7 +296,7 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `  exit 12$\r$\n`
   FileWrite $0 `}$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `$trees = @('build-context', 'mcp-os', 'oauth', 'pii-ner', 'THIRD-PARTY-LICENSES', 'host_exec')$\r$\n`
+  FileWrite $0 `$$trees = @('build-context', 'mcp-os', 'oauth', 'pii-ner', 'THIRD-PARTY-LICENSES', 'host_exec')$\r$\n`
   FileWrite $0 `$$failed = 0$\r$\n`
   FileWrite $0 `foreach ($$tree in $$trees) {$\r$\n`
   FileWrite $0 `  $$path = [System.IO.Path]::Combine($$instDir, $$tree)$\r$\n`
