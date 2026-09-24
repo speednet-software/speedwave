@@ -2811,6 +2811,7 @@ mod tests {
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            ner: None,
         });
         let tmp = seeded_tempdir(&cfg);
 
@@ -2841,6 +2842,7 @@ mod tests {
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            ner: None,
         });
 
         let named = stored_security_policy(&cfg, Some("beta")).unwrap();
@@ -2854,6 +2856,7 @@ mod tests {
         SecurityPolicyUpdate {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            ner_enabled: false,
         }
     }
 
