@@ -197,7 +197,16 @@ EOF
     [ -n "$sign_line" ]
     [ -n "$pack_line" ]
     [ "$sign_line" -lt "$pack_line" ]
-    grep -qF 'sign-windows-binaries.ps1 "target\$env:TARGET\release\speedwave.exe"' "$WORKFLOW"
+    grep -qF 'sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\target\$env:TARGET\release\speedwave.exe"' "$WORKFLOW"
+}
+
+@test "every file the workflow hands to the signing script is a rooted path" {
+    grep -F 'sign-windows-binaries.ps1 "' "$WORKFLOW" > "$BATS_TEST_TMPDIR/calls"
+    [ -s "$BATS_TEST_TMPDIR/calls" ]
+    if grep -vF 'sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\' "$BATS_TEST_TMPDIR/calls"; then
+        echo "ERROR: Invoke-ArtifactSigning rejects a relative path ('is not rooted'); pass \$env:GITHUB_WORKSPACE\\..." >&2
+        return 1
+    fi
 }
 
 @test "no PFX-based Windows signing remains in the release workflow" {
