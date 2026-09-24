@@ -371,9 +371,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let cause = bound_for_log(&error_chain(&e), MAX_LOGGED_UPSTREAM_ERROR);
+            let cause = bound_for_log(&error_chain(&e.without_url()), MAX_LOGGED_UPSTREAM_ERROR);
             log::warn!(
-                "upstream request for model '{model}' via prefix '{}' to {} failed: {cause}",
+                "upstream request for model '{}' via prefix '{}' to {} failed: {cause}",
+                bound_for_log(&model, MAX_LOGGED_ERROR_MESSAGE),
                 route.prefix,
                 upstream_host(&route.base_url)
             );

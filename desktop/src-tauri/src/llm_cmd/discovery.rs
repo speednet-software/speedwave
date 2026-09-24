@@ -714,8 +714,8 @@ pub struct DiscoverLlmModelsArgs {
     pub custom_headers: Option<Option<String>>,
 }
 
-/// Discovers over the VM transport; when that fails, logs the VM error with its cause and
-/// retries over the host transport that `host` builds.
+/// Discovers over the VM transport; when that fails, logs the VM error with its cause at info
+/// (expected for a server on the host's loopback) and retries over the host transport.
 async fn discover_via_vm_then_host<H: ProbeTransport>(
     provider: &str,
     base_url: &str,
@@ -725,7 +725,7 @@ async fn discover_via_vm_then_host<H: ProbeTransport>(
     match do_discover_llm_models(provider, base_url, vm).await {
         Ok(result) => Ok(result),
         Err(vm_err) => {
-            log::warn!(
+            log::info!(
                 "VM probe for LLM model discovery failed, retrying via host transport: {vm_err}"
             );
             let host_transport = host()?;
@@ -2000,8 +2000,12 @@ mod tests {
         );
         let records = logger.take();
         assert!(
-            warns_contain(&records, "Could not resolve host: llm.example"),
-            "the VM error must be logged before the host retry; got: {records:?}"
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Info
+                    && msg.contains("retrying via host transport")
+                    && msg.contains("Could not resolve host: llm.example")
+            }),
+            "the VM error must be logged at info before the host retry; got: {records:?}"
         );
     }
 
@@ -2051,9 +2055,13 @@ mod tests {
             "the user-facing error keeps its shape: {err}"
         );
         let records = logger.take();
+        let address = format!("127.0.0.1:{port}");
         assert!(
-            warns_contain(&records, "os error"),
-            "the host probe log must name the refused connection; got: {records:?}"
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Warn && msg.contains(&address) && msg.contains("os error")
+            }),
+            "one host probe warning must name both the address and the refused connection; \
+             got: {records:?}"
         );
     }
 }

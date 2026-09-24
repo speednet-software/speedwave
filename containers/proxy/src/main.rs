@@ -875,6 +875,10 @@ mod tests {
             error.contains("os error"),
             "the 502 must carry the root cause, not only reqwest's top line: {error}"
         );
+        assert!(
+            !error.contains("http://") && !error.contains("/v1/messages"),
+            "the upstream URL stays out of the error, only its host is logged: {error}"
+        );
     }
 
     #[tokio::test]
