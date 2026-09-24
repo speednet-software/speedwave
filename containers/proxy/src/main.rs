@@ -502,15 +502,18 @@ mod tests {
         );
     }
 
-    /// Raw TCP upstream that reads one request, optionally answers with SSE headers only, then
-    /// stays silent like llama-server during prefill; the receiver fires when the proxy hangs up.
-    async fn spawn_silent_backend(
-        send_headers: bool,
-    ) -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<()>) {
+    struct SilentBackend {
+        addr: std::net::SocketAddr,
+        request_received: tokio::sync::oneshot::Receiver<()>,
+        closed: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    async fn spawn_silent_backend(send_headers: bool) -> SilentBackend {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let (received_tx, request_received) = tokio::sync::oneshot::channel();
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 4096];
@@ -522,6 +525,7 @@ mod tests {
                 }
                 received.extend_from_slice(&buf[..n]);
             }
+            let _ = received_tx.send(());
             if send_headers {
                 let headers = concat!(
                     "HTTP/1.1 200 OK\r\n",
@@ -540,12 +544,18 @@ mod tests {
             }
             let _ = closed_tx.send(());
         });
-        (addr, closed_rx)
+        SilentBackend {
+            addr,
+            request_received,
+            closed,
+        }
     }
 
-    /// Serves the proxy on a real socket, sends one routed request, waits for the response head
-    /// (or 300 ms when the upstream sends none), then drops the client connection.
-    async fn send_then_hang_up(upstream: std::net::SocketAddr, wait_for_head: bool) {
+    async fn send_then_hang_up(
+        upstream: std::net::SocketAddr,
+        request_received: tokio::sync::oneshot::Receiver<()>,
+        wait_for_head: bool,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let usage_dir = tempfile::tempdir().unwrap();
         let cfg = Arc::new(config_pointing_at(
@@ -581,17 +591,21 @@ mod tests {
                 String::from_utf8_lossy(&head)
             );
         } else {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let forwarded =
+                tokio::time::timeout(std::time::Duration::from_secs(10), request_received).await;
+            assert!(
+                matches!(forwarded, Ok(Ok(()))),
+                "the proxy never forwarded the request to the upstream"
+            );
         }
         drop(client);
     }
 
     #[tokio::test]
     async fn client_hang_up_after_the_response_head_closes_a_silent_upstream() {
-        let (upstream, upstream_closed) = spawn_silent_backend(true).await;
-        send_then_hang_up(upstream, true).await;
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(5), upstream_closed).await;
+        let backend = spawn_silent_backend(true).await;
+        send_then_hang_up(backend.addr, backend.request_received, true).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), backend.closed).await;
         assert!(
             matches!(outcome, Ok(Ok(()))),
             "the proxy must drop a silent upstream once its client is gone"
@@ -600,10 +614,9 @@ mod tests {
 
     #[tokio::test]
     async fn client_hang_up_before_the_response_head_closes_the_upstream() {
-        let (upstream, upstream_closed) = spawn_silent_backend(false).await;
-        send_then_hang_up(upstream, false).await;
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(5), upstream_closed).await;
+        let backend = spawn_silent_backend(false).await;
+        send_then_hang_up(backend.addr, backend.request_received, false).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), backend.closed).await;
         assert!(
             matches!(outcome, Ok(Ok(()))),
             "the proxy must drop the upstream request once its client is gone"
