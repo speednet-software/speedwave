@@ -5,6 +5,7 @@ import { By } from '@angular/platform-browser';
 import { RouterModule } from '@angular/router';
 import { SettingsComponent } from './settings.component';
 import { LlmProviderComponent } from './llm-provider/llm-provider.component';
+import { SecuritySectionComponent } from './security-section/security-section.component';
 import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -195,7 +196,7 @@ describe('SettingsComponent', () => {
     expect(llmProvider.componentInstance.activeProject()).toBe('other-project');
   });
 
-  describe('provider form across a project switch', () => {
+  describe('project-scoped sections across a project switch', () => {
     const configs: Record<string, unknown> = {
       'no-llm': {
         provider: 'anthropic',
@@ -205,7 +206,7 @@ describe('SettingsComponent', () => {
         providers: [],
       },
       'with-openrouter': {
-        provider: 'openrouter',
+        provider: 'anthropic',
         model: 'openai/gpt-4o-mini',
         base_url: null,
         default_base_url: null,
@@ -221,60 +222,185 @@ describe('SettingsComponent', () => {
         active: { provider_id: 'openrouter', model: 'openai/gpt-4o-mini' },
       },
     };
+    const emptyPolicy = {
+      enabled_policies: [],
+      forced_policies: [],
+      effective_rules: [],
+      custom_policies: [],
+    };
     let backendProject = 'no-llm';
     let configLoads: string[] = [];
+    let policyLoads: string[] = [];
+    let authStatus: (project: string) => Promise<unknown>;
+    let updateLlmConfig: (update: Record<string, unknown>) => Promise<unknown>;
 
     beforeEach(() => {
       backendProject = 'no-llm';
       configLoads = [];
+      policyLoads = [];
+      authStatus = async () => ({ api_key_configured: false, oauth_authenticated: false });
+      updateLlmConfig = async () => undefined;
       const base = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
-        if (cmd === 'get_llm_config') {
-          configLoads.push(backendProject);
-          return configs[backendProject];
+        switch (cmd) {
+          case 'get_llm_config':
+            configLoads.push(backendProject);
+            return configs[backendProject];
+          case 'get_security_policy':
+            policyLoads.push(backendProject);
+            return emptyPolicy;
+          case 'list_pii_rules':
+          case 'list_security_policy_templates':
+            return [];
+          case 'discover_llm_models':
+            return { models: [{ id: 'openai/gpt-4o-mini', context_length: 128000 }] };
+          case 'get_auth_status':
+            return authStatus(String(args?.['project']));
+          case 'update_llm_config':
+            return updateLlmConfig(args?.['update'] as Record<string, unknown>);
+          default:
+            return base(cmd, args);
         }
-        return base(cmd, args);
       };
     });
+
+    async function settle(): Promise<void> {
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((resolve) => setTimeout(resolve));
+    }
 
     async function showProject(project: string): Promise<LlmProviderComponent> {
       backendProject = project;
       TestBed.inject(ProjectStateService).activeProject.set(project);
-      fixture.detectChanges();
-      await fixture.whenStable();
-      await new Promise((resolve) => setTimeout(resolve));
+      await settle();
+      return llmForm();
+    }
+
+    function llmForm(): LlmProviderComponent {
       return fixture.debugElement.query(By.directive(LlmProviderComponent))
         .componentInstance as LlmProviderComponent;
     }
 
-    it('loads the form of the project a switch lands on, not the one it left', async () => {
+    function securitySection(): SecuritySectionComponent {
+      return fixture.debugElement.query(By.directive(SecuritySectionComponent))
+        .componentInstance as SecuritySectionComponent;
+    }
+
+    it('loads the provider form of the project a switch lands on, keeping nothing from the one it left', async () => {
       const before = await showProject('no-llm');
-      before.apiKey.set('typed-for-the-project-left');
+      before.onExtraKeyInput(before.extraProviders()[0], 'sk-or-typed-for-the-project-left');
 
       const after = await showProject('with-openrouter');
 
       expect(after).not.toBe(before);
       expect(configLoads).toEqual(['no-llm', 'with-openrouter']);
-      expect(after.apiKey()).toBe('');
       const openrouter = after.extraProviders().find((p) => p.id === 'openrouter');
       expect(openrouter?.model).toBe('openai/gpt-4o-mini');
       expect(openrouter?.hasKey).toBe(true);
       expect(openrouter?.contextTokens).toBe(128000);
+      expect(openrouter?.keyInput).toBe('');
+      expect(openrouter?.keyTouched).toBe(false);
     });
 
-    it('keeps the form and its unsaved input while the project stays the same', async () => {
+    it('keeps the form and its unsaved input when a switch fails back to the same project', async () => {
+      await (
+        TestBed.inject(ProjectStateService) as unknown as { setupListeners(): Promise<void> }
+      ).setupListeners();
       const before = await showProject('with-openrouter');
-      before.apiKey.set('still-editing');
+      before.onExtraKeyInput(before.extraProviders()[0], 'sk-or-still-editing');
 
-      TestBed.inject(ProjectStateService).status.set('auth_required');
-      fixture.detectChanges();
-      await fixture.whenStable();
+      mockTauri.dispatchEvent('project_switch_started', { project: 'no-llm' });
+      mockTauri.dispatchEvent('project_switch_failed', {
+        project: 'with-openrouter',
+        error: 'switch failed',
+      });
+      await settle();
 
-      const after = fixture.debugElement.query(By.directive(LlmProviderComponent))
-        .componentInstance as LlmProviderComponent;
+      const after = llmForm();
       expect(after).toBe(before);
-      expect(after.apiKey()).toBe('still-editing');
+      expect(after.extraProviders()[0].keyInput).toBe('sk-or-still-editing');
       expect(configLoads).toEqual(['with-openrouter']);
+    });
+
+    it('drops a sign-in status that arrives after the form it was loaded for is gone', async () => {
+      let resolveLeft: (status: unknown) => void = () => undefined;
+      const leftStatus = { api_key_configured: true, oauth_authenticated: true };
+      authStatus = (project) =>
+        project === 'no-llm'
+          ? new Promise((resolve) => (resolveLeft = resolve))
+          : Promise.resolve({ api_key_configured: false, oauth_authenticated: false });
+      const projectState = TestBed.inject(ProjectStateService);
+      const applied = vi.spyOn(projectState, 'applyAuthStatus');
+
+      await showProject('no-llm');
+      await showProject('with-openrouter');
+      resolveLeft(leftStatus);
+      await settle();
+
+      expect(applied).not.toHaveBeenCalledWith(leftStatus);
+    });
+
+    it('lets a save still running when its form is replaced write nothing into the new project', async () => {
+      let rejectSave: (error: unknown) => void = () => undefined;
+      const sent: Record<string, unknown>[] = [];
+      updateLlmConfig = (update) => {
+        sent.push(update);
+        return new Promise((_, reject) => (rejectSave = reject));
+      };
+      const projectState = TestBed.inject(ProjectStateService);
+      const restart = vi.spyOn(projectState, 'requestRestart');
+      const before = await showProject('with-openrouter');
+
+      const saving = before.saveConfig();
+      await settle();
+      await showProject('no-llm');
+      rejectSave("the active project is now 'no-llm', not 'with-openrouter'; nothing was saved");
+      await saving;
+      await settle();
+
+      expect(sent.map((u) => u['project'])).toEqual(['with-openrouter']);
+      expect(restart).not.toHaveBeenCalled();
+      expect(component.error).not.toContain('nothing was saved');
+    });
+
+    it('lets a save that lands after its form is replaced request no restart of the new project', async () => {
+      let resolveSave: () => void = () => undefined;
+      updateLlmConfig = () =>
+        new Promise<undefined>((resolve) => (resolveSave = () => resolve(undefined)));
+      const projectState = TestBed.inject(ProjectStateService);
+      const restart = vi.spyOn(projectState, 'requestRestart');
+      const before = await showProject('with-openrouter');
+
+      const saving = before.saveConfig();
+      await settle();
+      await showProject('no-llm');
+      resolveSave();
+      await saving;
+      await settle();
+
+      expect(restart).not.toHaveBeenCalled();
+    });
+
+    it('recreates the security section for the project a switch lands on', async () => {
+      await showProject('no-llm');
+      const before = securitySection();
+
+      await showProject('with-openrouter');
+
+      expect(securitySection()).not.toBe(before);
+      expect(policyLoads).toEqual(['no-llm', 'with-openrouter']);
+    });
+
+    it('recreates the forms without the dev-mode warning about a re-created collection', async () => {
+      const warn = vi.spyOn(console, 'warn');
+      await showProject('no-llm');
+      await showProject('with-openrouter');
+
+      const recreationWarnings = warn.mock.calls.filter((args) =>
+        args.some((a) => String(a).includes('NG0956'))
+      );
+      expect(recreationWarnings).toEqual([]);
     });
   });
 

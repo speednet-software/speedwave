@@ -1749,6 +1749,7 @@ async fn update_llm_config_in(
             .active_project
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        ensure_saving_for_active_project(&active, update.project.as_deref())?;
 
         let mut new_has_api_key = lookup_has_flag(&user_config, &active, |c| c.has_api_key);
         let mut new_has_custom_headers =
@@ -1928,55 +1929,83 @@ fn validate_provider_entries(
     Ok(())
 }
 
+fn ensure_saving_for_active_project(active: &str, expected: Option<&str>) -> anyhow::Result<()> {
+    match expected {
+        Some(project) if project != active => anyhow::bail!(
+            "the active project is now '{active}', not '{project}'; nothing was saved"
+        ),
+        _ => Ok(()),
+    }
+}
+
 #[tauri::command]
-pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
+pub fn set_llm_provider_key(
+    provider_id: String,
+    key: Option<String>,
+    project: Option<String>,
+) -> Result<(), String> {
+    set_llm_provider_key_in(
+        speedwave_runtime::consts::data_dir(),
+        &provider_id,
+        key.as_deref(),
+        project.as_deref(),
+    )
+}
+
+fn set_llm_provider_key_in(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    key: Option<&str>,
+    project: Option<&str>,
+) -> Result<(), String> {
     log::info!(
         "setting LLM provider key provider_id={provider_id} action={}",
-        if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+        if key.is_some_and(|k| !k.trim().is_empty()) {
             "write"
         } else {
             "delete"
         }
     );
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let mut user_config = config::load_user_config_from(&config_path)?;
         let active = user_config
             .active_project
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        let data_dir = speedwave_runtime::consts::data_dir();
+        ensure_saving_for_active_project(&active, project)?;
 
-        let has_key = match key.as_deref().map(str::trim) {
+        let has_key = match key.map(str::trim) {
             Some(value) if !value.is_empty() => {
                 speedwave_runtime::compose::write_llm_provider_key_in(
-                    data_dir.as_path(),
+                    data_dir,
                     &active,
-                    &provider_id,
+                    provider_id,
                     value,
                 )?;
                 true
             }
             _ => {
                 speedwave_runtime::compose::remove_llm_provider_key_in(
-                    data_dir.as_path(),
+                    data_dir,
                     &active,
-                    &provider_id,
+                    provider_id,
                 )?;
                 false
             }
         };
 
-        let project = user_config
+        let entry = user_config
             .find_project_mut(&active)
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
-        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
-            if let Some(entry) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
-                entry.has_api_key = has_key;
+        if let Some(llm) = entry.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            if let Some(provider) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
+                provider.has_api_key = has_key;
             } else {
                 log::warn!("provider '{provider_id}' not in config — has_api_key not updated");
             }
         }
-        config::save_user_config(&user_config)?;
+        config::save_user_config_to(&user_config, &config_path)?;
         Ok(())
     })
     .map_err(|e: anyhow::Error| e.to_string())
@@ -2612,6 +2641,121 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         config::save_user_config_to(&cfg, &tmp.path().join("config.json")).expect("seed config");
         tmp
+    }
+
+    #[test]
+    fn a_save_for_the_active_project_or_for_no_named_project_goes_through() {
+        assert!(ensure_saving_for_active_project("alpha", Some("alpha")).is_ok());
+        assert!(ensure_saving_for_active_project("alpha", None).is_ok());
+    }
+
+    #[test]
+    fn a_save_for_a_project_that_is_no_longer_active_is_refused() {
+        let err = ensure_saving_for_active_project("beta", Some("alpha"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'beta'") && err.contains("'alpha'"), "{err}");
+    }
+
+    fn local_update_for(project: &str) -> LlmConfigUpdate {
+        LlmConfigUpdate {
+            provider: Some("local".to_string()),
+            api_key: Some(Some("sk-typed-in-the-form".to_string())),
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some("http://localhost:11434".to_string()),
+                model: Some("llama-new".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: Some("llama-new".to_string()),
+            }),
+            project: Some(project.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_settings_save_for_the_project_a_switch_left_writes_nothing() {
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let config_path = tmp.path().join("config.json");
+        let before = std::fs::read_to_string(&config_path).expect("read seeded config");
+
+        let err = update_llm_config_in(tmp.path(), local_update_for("beta"))
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("reread config"),
+            before
+        );
+        assert!(
+            !tmp.path().join("tokens").exists(),
+            "the key typed in the form must not reach any project"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settings_save_for_the_active_project_is_applied() {
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+
+        update_llm_config_in(tmp.path(), local_update_for("alpha"))
+            .await
+            .unwrap();
+
+        let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        let llm = saved
+            .projects
+            .iter()
+            .find(|p| p.name == "alpha")
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .unwrap();
+        assert_eq!(llm.providers[0].model.as_deref(), Some("llama-new"));
+        assert!(tmp.path().join("tokens").join("alpha").exists());
+    }
+
+    #[test]
+    fn a_provider_key_for_the_project_a_switch_left_is_not_written() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+
+        let err = set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("beta"))
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        for project in ["alpha", "beta"] {
+            let path =
+                speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), project, "local")
+                    .unwrap();
+            assert!(!path.exists(), "{project} must not get the key");
+        }
+    }
+
+    #[test]
+    fn a_provider_key_for_the_active_project_is_written_and_flagged() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+
+        set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
+
+        let path =
+            speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
+                .unwrap();
+        assert!(path.exists());
+        let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        let local = saved
+            .projects
+            .iter()
+            .find(|p| p.name == "alpha")
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .and_then(|l| l.providers.iter().find(|e| e.id == "local"))
+            .unwrap();
+        assert!(local.has_api_key);
     }
 
     #[tokio::test]

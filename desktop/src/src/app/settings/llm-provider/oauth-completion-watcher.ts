@@ -51,6 +51,7 @@ export class OauthCompletionWatcher implements OnDestroy {
 
   /** (Re)starts the completion poll; self-expires after `MAX_TICKS`. */
   startPoll(): void {
+    if (this.destroyed) return;
     this.stopPoll();
     this.ticksLeft = OauthCompletionWatcher.MAX_TICKS;
     this.poll = setInterval(() => {

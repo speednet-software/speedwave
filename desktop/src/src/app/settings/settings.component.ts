@@ -21,6 +21,7 @@ import { TelemetrySectionComponent } from './telemetry-section/telemetry-section
 import { SecuritySectionComponent } from './security-section/security-section.component';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
+import { RecreateOnDirective } from '../shared/recreate-on.directive';
 
 /** One theme card in the Appearance accent grid; swatch reads live `--accent` via `data-theme`. */
 interface ThemeCard {
@@ -73,6 +74,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
     SecuritySectionComponent,
     UpdateSectionComponent,
     ProjectPillComponent,
+    RecreateOnDirective,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
@@ -114,13 +116,12 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           </div>
         }
 
-        @for (project of [activeProject()]; track project) {
-          <app-llm-provider
-            [activeProject]="project"
-            (providerChange)="llmProvider = $event"
-            (errorOccurred)="error = $event"
-          />
-        }
+        <app-llm-provider
+          *appRecreateOn="activeProject()"
+          [activeProject]="activeProject()"
+          (providerChange)="llmProvider = $event"
+          (errorOccurred)="error = $event"
+        />
 
         @if (beta.enabled()) {
           <app-transcription-section (errorOccurred)="error = $event" />
@@ -194,7 +195,7 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
         }
 
         @if (beta.enabled()) {
-          <app-security-section (errorOccurred)="error = $event" />
+          <app-security-section *appRecreateOn="activeProject()" (errorOccurred)="error = $event" />
         }
 
         <app-update-section [activeProject]="activeProject()" (errorOccurred)="error = $event" />

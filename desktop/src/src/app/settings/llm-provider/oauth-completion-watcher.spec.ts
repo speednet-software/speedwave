@@ -357,4 +357,13 @@ describe('OauthCompletionWatcher', () => {
 
     expect(watcher.isPolling()).toBe(false);
   });
+
+  it('starts no poll once destroyed (a logout finishing after its form is gone)', () => {
+    watcher.attach(makeContext().ctx);
+    watcher.destroy();
+
+    watcher.startPoll();
+
+    expect(watcher.isPolling()).toBe(false);
+  });
 });

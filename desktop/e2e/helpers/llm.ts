@@ -31,6 +31,23 @@ export async function openSettings(): Promise<void> {
   await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
 }
 
+export async function storedProviderModel(providerId: string): Promise<string | null> {
+  return browser.executeAsync((id: string, done: (model: string | null) => void) => {
+    (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string
+          ) => Promise<{ providers?: { id: string; model?: string | null }[] }>;
+        };
+      }
+    ).__TAURI_INTERNALS__
+      .invoke('get_llm_config')
+      .then((config) => done(config.providers?.find((p) => p.id === id)?.model ?? null))
+      .catch(() => done(null));
+  }, providerId);
+}
+
 export async function configureOpenRouter(apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
   await selectBtn.waitForExist({ timeout: 10_000 });

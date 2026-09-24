@@ -627,7 +627,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Reloads the Anthropic auth status whenever the active project changes. */
   constructor() {
     this.oauthWatcher.attach({
-      activeProject: () => this.activeProject(),
+      activeProject: () => this.formProject(),
       lastKnown: () => this.oauthSignIn(),
       shouldProbe: () => this.effectiveTarget() === 'anthropic',
       onLoginDetected: () => this.onOAuthDone(true),
@@ -674,7 +674,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Tears down the external-login watcher (poll + focus listener). */
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.oauthWatcher.destroy();
+  }
+
+  private destroyed = false;
+
+  private formProject(): string | null {
+    return this.destroyed ? null : this.activeProject();
   }
 
   protected onBaseUrlInput(value: string): void {
@@ -970,7 +977,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
       this.applyAuthStatusFor(project, status);
     } catch (e) {
-      if (this.activeProject() === project && this.oauthSignIn() === 'pending') {
+      if (this.formProject() === project && this.oauthSignIn() === 'pending') {
         this.oauthSignIn.set('none');
         this.log.debug(
           `loadAuthStatus: get_auth_status failed for ${project}: ${e instanceof Error ? e.message : String(e)}`
@@ -987,7 +994,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param status - the backend auth-status payload
    */
   private applyAuthStatusFor(project: string, status: AuthStatusResponse): void {
-    if (this.activeProject() !== project) return;
+    if (this.formProject() !== project) return;
     this.apiKeyConfigured.set(status.api_key_configured);
     this.oauthAuthenticated.set(status.oauth_authenticated);
     this.oauthSignIn.set(
@@ -1259,6 +1266,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param forceRestart - forces a full restart even if `active` is unchanged, so a running container can't stay routed to a stale provider
    */
   async saveConfig(forceRestart = false): Promise<void> {
+    const project = this.activeProject();
     const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
     if (provider !== 'anthropic' && !this.localModelSatisfied() && localIsActive) {
@@ -1316,7 +1324,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const active = this.buildActive();
       const effectiveBaseUrl =
         active.provider_id === 'local' ? this.baseUrl() || this.defaultBaseUrl() || null : null;
-      const project = this.activeProject();
       const anthropicHasApiKey = this.apiKeyConfigured();
       const activeIsRemote = this.extraProviders().some((p) => p.id === active.provider_id);
       const flatProvider = activeIsRemote ? active.provider_id : provider;
@@ -1329,6 +1336,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         custom_headers?: string | null;
         providers: LlmProviderEntry[];
         active: LlmActive;
+        project: string | null;
       } = {
         provider: flatProvider,
         model: active.model ?? null,
@@ -1336,6 +1344,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         context_tokens: this.resolveContextTokensForSave(),
         providers: this.buildProviderSet(anthropicHasApiKey),
         active,
+        project,
       };
       if (this.apiKeyTouched()) {
         update.api_key = nullIfEmpty(this.apiKey());
@@ -1348,9 +1357,11 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         await this.tauri.invoke('set_llm_provider_key', {
           providerId: extra.id,
           key: nullIfEmpty(extra.keyInput),
+          project,
         });
       }
       await this.tauri.invoke('update_llm_config', { update });
+      if (this.destroyed) return;
 
       const savedLocal = update.providers.find((p) => p.id === 'local');
       this.loadedLocalEntry = savedLocal ? { ...savedLocal } : null;
@@ -1405,7 +1416,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       }, 2000);
     } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+      if (!this.destroyed) this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.saving.set(false);
     this.cdr.markForCheck();

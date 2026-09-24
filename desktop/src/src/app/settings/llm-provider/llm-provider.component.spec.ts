@@ -2103,9 +2103,31 @@ describe('LlmProviderComponent', () => {
 
     await component.saveConfig();
 
-    expect(keyCalls).toEqual([{ providerId: 'openrouter', key: 'sk-or-v1-fresh' }]);
+    expect(keyCalls).toEqual([{ providerId: 'openrouter', key: 'sk-or-v1-fresh', project: null }]);
     const active = captured!['active'] as Record<string, unknown>;
     expect(active['provider_id']).toBe('anthropic');
+  });
+
+  it('names the project the form was loaded for in every save write', async () => {
+    const keyCalls: Array<Record<string, unknown>> = [];
+    let captured: Record<string, unknown> | null = null;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
+      if (cmd === 'set_llm_provider_key') keyCalls.push(args ?? {});
+      if (cmd === 'get_auth_status')
+        return { api_key_configured: false, provider_configured: true };
+      return undefined;
+    };
+    fixture.componentRef.setInput('activeProject', 'alpha');
+
+    component.provider.set('anthropic');
+    component.selectedTarget.set('anthropic');
+    component.toggleExtraExpanded(component.extraProviders()[0]);
+    component.onExtraKeyInput(component.extraProviders()[0], 'sk-or-v1-fresh');
+    await component.saveConfig();
+
+    expect(keyCalls.map((c) => c['project'])).toEqual(['alpha']);
+    expect(captured!['project']).toBe('alpha');
   });
 
   it('save sends the full v2 provider set and active selection', async () => {
@@ -2142,7 +2164,7 @@ describe('LlmProviderComponent', () => {
     expect(active['provider_id']).toBe('openrouter');
     expect(active['model']).toBe('qwen/qwen3-coder');
     expect(JSON.stringify(update)).not.toContain('sk-or-v1-test');
-    expect(keyCalls).toEqual([{ providerId: 'openrouter', key: 'sk-or-v1-test' }]);
+    expect(keyCalls).toEqual([{ providerId: 'openrouter', key: 'sk-or-v1-test', project: null }]);
   });
 
   it('openrouter rows fetch the tool-capable catalog but render no model selector', async () => {
