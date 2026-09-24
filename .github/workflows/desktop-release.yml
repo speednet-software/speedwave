@@ -334,7 +334,7 @@ jobs:
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
-        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\sign-windows-binaries.ps1 "target\$env:TARGET\release\speedwave.exe"
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\target\$env:TARGET\release\speedwave.exe"
 
       - name: Package CLI (unix)
         if: matrix.archive == 'tar.gz'
