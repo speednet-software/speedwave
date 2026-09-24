@@ -740,6 +740,29 @@ fn session_start_model(path: &Path) -> Option<String> {
     None
 }
 
+const COST_STATE_LINE: &str = "cost-state";
+
+fn note_cumulative_usage(
+    parsed: &serde_json::Value,
+    latest_cumulative: &mut Option<ResumeSnapshot>,
+    latest_model: &mut Option<String>,
+) {
+    if let Some(total) = crate::chat::extract_cumulative_usage(parsed) {
+        *latest_cumulative = Some(ResumeSnapshot {
+            input_tokens: total.input_tokens,
+            output_tokens: total.output_tokens,
+            cache_read_tokens: total.cache_read_tokens,
+            cache_write_tokens: total.cache_write_tokens,
+            ..ResumeSnapshot::default()
+        });
+    }
+    if let Some(model) =
+        crate::chat::dominant_model_by_output_tokens(parsed["modelUsage"].as_object())
+    {
+        *latest_model = Some(model);
+    }
+}
+
 fn compute_resume_snapshot_impl(
     data_dir: &Path,
     project: &str,
@@ -796,40 +819,21 @@ fn compute_resume_snapshot_impl(
                             .unwrap_or(0),
                     );
                 }
-                if let Some(model_usage) = parsed.get("modelUsage").and_then(|v| v.as_object()) {
-                    if !model_usage.is_empty() {
-                        let mut cumulative = ResumeSnapshot::default();
-                        let mut any_field = false;
-                        for stats in model_usage.values() {
-                            for (key, target) in [
-                                ("inputTokens", &mut cumulative.input_tokens),
-                                ("outputTokens", &mut cumulative.output_tokens),
-                                ("cacheReadInputTokens", &mut cumulative.cache_read_tokens),
-                                (
-                                    "cacheCreationInputTokens",
-                                    &mut cumulative.cache_write_tokens,
-                                ),
-                            ] {
-                                if let Some(n) = stats.get(key).and_then(serde_json::Value::as_u64)
-                                {
-                                    *target = target.saturating_add(n);
-                                    any_field = true;
-                                }
-                            }
-                        }
-                        if any_field {
-                            latest_cumulative = Some(cumulative);
-                        }
-                        if let Some((top_model, _)) = model_usage.iter().max_by_key(|(_, stats)| {
-                            stats
-                                .get("outputTokens")
-                                .and_then(serde_json::Value::as_u64)
-                                .unwrap_or(0)
-                        }) {
-                            latest_modelusage_model = Some(top_model.clone());
-                        }
-                    }
+                note_cumulative_usage(
+                    &parsed,
+                    &mut latest_cumulative,
+                    &mut latest_modelusage_model,
+                );
+            }
+            COST_STATE_LINE => {
+                if let Some(cost) = parsed["totalCostUSD"].as_f64() {
+                    latest_cost = Some(cost);
                 }
+                note_cumulative_usage(
+                    &parsed,
+                    &mut latest_cumulative,
+                    &mut latest_modelusage_model,
+                );
             }
             "system" => {
                 if parsed["subtype"].as_str() == Some("init") {
@@ -2630,6 +2634,177 @@ mod tests {
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].content, "I will read\n[Tool: Read]");
+    }
+
+    const RESUME_TRANSCRIPT: &str =
+        include_str!("../tests/fixtures/cc-2.1.282-resume-transcript.sanitized.jsonl");
+    const RESUME_TRANSCRIPT_AFTER: &str =
+        include_str!("../tests/fixtures/cc-2.1.282-resume-transcript-after.sanitized.jsonl");
+    const RESUME_STDOUT: &str =
+        include_str!("../tests/fixtures/cc-2.1.282-resume-stdout.sanitized.ndjson");
+    const RESUMED_SESSION: &str = "7f989b3d-8e7e-4691-ac93-c91c3bf281c2";
+
+    fn is_cost_state(line: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(line)
+            .is_ok_and(|l| l["type"].as_str() == Some(COST_STATE_LINE))
+    }
+
+    fn snapshot_of_capture(transcript: &str) -> ResumeSnapshot {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let lines: Vec<&str> = transcript.lines().collect();
+        write_session(&dir, RESUMED_SESSION, &lines);
+        compute_resume_snapshot_impl(tmp.path(), "proj", RESUMED_SESSION).unwrap()
+    }
+
+    #[test]
+    fn the_resume_captures_are_of_the_pinned_claude_code() {
+        let transcript_versions: std::collections::BTreeSet<String> = RESUME_TRANSCRIPT
+            .lines()
+            .chain(RESUME_TRANSCRIPT_AFTER.lines())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|l| l["version"].as_str().map(str::to_string))
+            .collect();
+        let init_version = RESUME_STDOUT
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|l| l["type"] == "system" && l["subtype"] == "init")
+            .and_then(|l| l["claude_code_version"].as_str().map(str::to_string));
+
+        let pinned = speedwave_runtime::defaults::CLAUDE_VERSION.to_string();
+        assert_eq!(
+            transcript_versions,
+            std::collections::BTreeSet::from([pinned.clone()]),
+            "re-capture the resume transcripts from the new Claude Code pin"
+        );
+        assert_eq!(init_version, Some(pinned));
+    }
+
+    #[test]
+    fn a_resumed_first_turn_is_charged_only_for_itself() {
+        let snapshot = snapshot_of_capture(RESUME_TRANSCRIPT);
+        let mut parser = crate::chat::StreamParser::new();
+        parser.restore_session_snapshot(
+            crate::chat::TurnUsage {
+                input_tokens: snapshot.input_tokens,
+                output_tokens: snapshot.output_tokens,
+                cache_read_tokens: snapshot.cache_read_tokens,
+                cache_write_tokens: snapshot.cache_write_tokens,
+            },
+            snapshot.total_cost,
+            snapshot.model,
+            snapshot.context_usage,
+        );
+
+        let results: Vec<crate::chat::StreamChunk> = RESUME_STDOUT
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .flat_map(|l| parser.parse_line(&l).0)
+            .filter(|c| matches!(c, crate::chat::StreamChunk::Result { .. }))
+            .collect();
+
+        let [crate::chat::StreamChunk::Result {
+            total_cost,
+            turn_cost,
+            turn_usage,
+            ..
+        }] = results.as_slice()
+        else {
+            panic!("the resumed turn must end in one result: {results:?}");
+        };
+        assert!((total_cost.unwrap() - 0.00267).abs() < 1e-12);
+        assert!(
+            (turn_cost.unwrap() - 0.00089).abs() < 1e-12,
+            "the first turn after a resume was charged {turn_cost:?}"
+        );
+        assert_eq!(
+            *turn_usage,
+            Some(crate::chat::TurnUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_tokens: 200,
+                cache_write_tokens: 50,
+            })
+        );
+    }
+
+    #[test]
+    fn the_resume_snapshot_starts_from_the_cost_state_claude_code_wrote_at_exit() {
+        let snapshot = snapshot_of_capture(RESUME_TRANSCRIPT);
+
+        assert!((snapshot.total_cost.unwrap() - 0.00178).abs() < 1e-12);
+        assert_eq!(snapshot.input_tokens, 200);
+        assert_eq!(snapshot.output_tokens, 20);
+        assert_eq!(snapshot.cache_read_tokens, 400);
+        assert_eq!(snapshot.cache_write_tokens, 100);
+        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn the_last_of_several_cost_state_lines_wins() {
+        assert_eq!(
+            RESUME_TRANSCRIPT_AFTER
+                .lines()
+                .filter(|l| is_cost_state(l))
+                .count(),
+            2
+        );
+
+        let snapshot = snapshot_of_capture(RESUME_TRANSCRIPT_AFTER);
+
+        assert!((snapshot.total_cost.unwrap() - 0.00267).abs() < 1e-12);
+        assert_eq!(snapshot.input_tokens, 300);
+        assert_eq!(snapshot.output_tokens, 30);
+        assert_eq!(snapshot.cache_read_tokens, 600);
+        assert_eq!(snapshot.cache_write_tokens, 150);
+    }
+
+    #[test]
+    fn a_transcript_without_cost_state_gives_the_snapshot_it_gave_before() {
+        let without: String = RESUME_TRANSCRIPT
+            .lines()
+            .filter(|l| !is_cost_state(l))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(without.len() < RESUME_TRANSCRIPT.len());
+
+        let snapshot = snapshot_of_capture(&without);
+
+        assert_eq!(snapshot.total_cost, None);
+        assert_eq!(snapshot.input_tokens, 0);
+        assert_eq!(snapshot.output_tokens, 0);
+        assert_eq!(snapshot.cache_read_tokens, 0);
+        assert_eq!(snapshot.cache_write_tokens, 0);
+        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_cost_state_and_a_result_line_are_read_in_file_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.05,"modelUsage":{"m":{"inputTokens":10,"outputTokens":5}}}"#,
+                r#"{"type":"cost-state","totalCostUSD":0.09,"modelUsage":{"m":{"inputTokens":12,"outputTokens":6,"cacheReadInputTokens":3,"cacheCreationInputTokens":1}}}"#,
+                r#"{"type":"cost-state","totalCostUSD":"not a number","modelUsage":{}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+
+        assert_eq!(snap.total_cost, Some(0.09));
+        assert_eq!(
+            (
+                snap.input_tokens,
+                snap.output_tokens,
+                snap.cache_read_tokens,
+                snap.cache_write_tokens
+            ),
+            (12, 6, 3, 1)
+        );
     }
 
     #[test]

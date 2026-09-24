@@ -1140,7 +1140,7 @@ fn compute_turn_usage_from_result(
     Some(delta)
 }
 
-fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
+pub(crate) fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     let model_usage = parsed["modelUsage"].as_object()?;
     if model_usage.is_empty() {
         return None;
@@ -1167,7 +1167,7 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     }
 }
 
-fn dominant_model_by_output_tokens(
+pub(crate) fn dominant_model_by_output_tokens(
     model_usage: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
     model_usage.and_then(|mu| {
