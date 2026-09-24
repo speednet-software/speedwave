@@ -101,6 +101,7 @@ pub const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str =
 /// Proxy URL with no listener (closed local port): short-lived Claude Code invocations get it as
 /// `https_proxy`/`HTTPS_PROXY` so a startup OAuth refresh cannot leave the container (ADR-052).
 pub const CLAUDE_OFFLINE_HTTPS_PROXY: &str = "http://127.0.0.1:1";
+pub(crate) const CLAUDE_OFFLINE_BASE_URL: &str = CLAUDE_OFFLINE_HTTPS_PROXY;
 
 /// Upper bound for one in-container exec probe (`true`, `claude auth status`): a stalled container
 /// runtime surfaces as an error instead of freezing the caller (measured stalls: ~10 min).
