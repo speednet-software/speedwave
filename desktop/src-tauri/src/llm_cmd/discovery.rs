@@ -548,6 +548,12 @@ fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>,
                     .get("max_context_length")
                     .and_then(|n| n.as_u64())
                     .and_then(non_zero_u32)
+            })
+            .or_else(|| {
+                entry
+                    .get("max_input_tokens")
+                    .and_then(|n| n.as_u64())
+                    .and_then(non_zero_u32)
             });
         out.push(DiscoveredModel {
             id,
@@ -1565,6 +1571,32 @@ mod tests {
         let out = parse_openai_models_with_context(body).unwrap();
         assert_eq!(out[0].context_tokens, Some(32_768));
         assert_eq!(out[1].context_tokens, Some(131_072));
+    }
+
+    #[test]
+    fn parse_openai_models_with_context_extracts_litellm_shape() {
+        let body = br#"{"data":[
+            {"id":"gemma-4-26b-a4b","object":"model","max_input_tokens":262144,"max_output_tokens":32768},
+            {"id":"small-model","object":"model","max_input_tokens":32768,"max_output_tokens":8192},
+            {"id":"qwen3-coder-30b","object":"model"},
+            {"id":"zero-window","object":"model","max_input_tokens":0}
+        ]}"#;
+        let out = parse_openai_models_with_context(body).unwrap();
+        assert_eq!(out[0].context_tokens, Some(262_144));
+        assert_eq!(out[1].context_tokens, Some(32_768));
+        assert_eq!(out[2].context_tokens, None);
+        assert_eq!(out[3].context_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_models_with_context_prefers_the_server_context_over_litellm_model_info() {
+        let body = br#"{"data":[
+            {"id":"llama","meta":{"n_ctx_train":8192},"max_input_tokens":262144},
+            {"id":"qwen","max_context_length":32768,"max_input_tokens":262144}
+        ]}"#;
+        let out = parse_openai_models_with_context(body).unwrap();
+        assert_eq!(out[0].context_tokens, Some(8192));
+        assert_eq!(out[1].context_tokens, Some(32_768));
     }
 
     #[test]

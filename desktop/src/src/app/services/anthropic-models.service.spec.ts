@@ -304,11 +304,12 @@ describe('AnthropicModelsService', () => {
         }
         return undefined;
       };
-      await service.setProviderModel('alpha', 'openrouter', 'anthropic/claude-opus-4-8');
+      await service.setProviderModel('alpha', 'openrouter', 'anthropic/claude-opus-4-8', 200_000);
       expect(received).toEqual({
         projectId: 'alpha',
         providerId: 'openrouter',
         model: 'anthropic/claude-opus-4-8',
+        contextTokens: 200_000,
       });
     });
 
@@ -317,7 +318,7 @@ describe('AnthropicModelsService', () => {
         throw new Error("'anthropic' is Anthropic - model changes are session-only");
       };
       await expect(
-        service.setProviderModel('alpha', 'anthropic', 'claude-opus-4-8')
+        service.setProviderModel('alpha', 'anthropic', 'claude-opus-4-8', null)
       ).rejects.toThrow('session-only');
     });
   });

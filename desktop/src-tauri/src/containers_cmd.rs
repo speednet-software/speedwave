@@ -1431,6 +1431,7 @@ fn apply_set_provider_model(
     project_id: &str,
     provider_id: &str,
     model: &str,
+    context_tokens: Option<u32>,
 ) -> anyhow::Result<()> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -1454,6 +1455,10 @@ fn apply_set_provider_model(
             "'{provider_id}' is Anthropic - model changes are session-only via /model, not saved"
         ));
     }
+    let window = context_tokens.filter(|&n| n > 0);
+    if window.is_some() || entry.model.as_deref() != Some(trimmed) {
+        entry.context_tokens = window;
+    }
     entry.model = Some(trimmed.to_string());
     if llm
         .active
@@ -1472,12 +1477,14 @@ pub fn set_provider_model(
     project_id: String,
     provider_id: String,
     model: String,
+    context_tokens: Option<u32>,
 ) -> Result<(), String> {
     set_provider_model_in(
         speedwave_runtime::consts::data_dir(),
         project_id,
         provider_id,
         model,
+        context_tokens,
     )
 }
 
@@ -1486,12 +1493,21 @@ fn set_provider_model_in(
     project_id: String,
     provider_id: String,
     model: String,
+    context_tokens: Option<u32>,
 ) -> Result<(), String> {
-    log::info!("setting provider model project_id={project_id} provider_id={provider_id}");
+    log::info!(
+        "setting provider model project_id={project_id} provider_id={provider_id} context_tokens={context_tokens:?}"
+    );
     config::with_config_lock_in(data_dir, || {
         let config_path = data_dir.join("config.json");
         let mut user_config = config::load_user_config_from(&config_path)?;
-        apply_set_provider_model(&mut user_config, &project_id, &provider_id, &model)?;
+        apply_set_provider_model(
+            &mut user_config,
+            &project_id,
+            &provider_id,
+            &model,
+            context_tokens,
+        )?;
         if let Some(llm) = user_config
             .find_project_mut(&project_id)
             .and_then(|p| p.claude.as_mut())
@@ -1507,7 +1523,11 @@ fn set_provider_model_in(
 
 #[async_trait::async_trait]
 pub(crate) trait ModelAutoDefaultProbe: Send + Sync {
-    async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String>;
+    async fn first_local_model(
+        &self,
+        entry_id: &str,
+        base_url: &str,
+    ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String>;
 }
 
 struct LiveModelAutoDefaultProbe<'a> {
@@ -1518,7 +1538,11 @@ struct LiveModelAutoDefaultProbe<'a> {
 
 #[async_trait::async_trait]
 impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
-    async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String> {
+    async fn first_local_model(
+        &self,
+        entry_id: &str,
+        base_url: &str,
+    ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String> {
         let result = crate::llm_cmd::discovery::discover_llm_models_with_fallback(
             entry_id,
             base_url,
@@ -1531,7 +1555,6 @@ impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
             .models
             .into_iter()
             .next()
-            .map(|m| m.id)
             .ok_or_else(|| "empty".to_string())
     }
 }
@@ -1549,14 +1572,16 @@ fn preserve_stored_entry_models(
     stored: &[speedwave_runtime::config::LlmProviderEntry],
 ) {
     for entry in incoming.iter_mut() {
-        if entry.model.is_some() {
+        let Some(prior) = stored.iter().find(|p| p.id == entry.id) else {
+            continue;
+        };
+        if entry.model.is_none() {
+            entry.model = prior.model.clone();
+        } else if entry.model != prior.model {
             continue;
         }
-        if let Some(prior) = stored.iter().find(|p| p.id == entry.id) {
-            entry.model = prior.model.clone();
-            if entry.context_tokens.is_none() {
-                entry.context_tokens = prior.context_tokens;
-            }
+        if entry.context_tokens.is_none() {
+            entry.context_tokens = prior.context_tokens;
         }
     }
 }
@@ -1582,7 +1607,12 @@ async fn apply_model_auto_defaults(
             LlmProviderKind::Local => {
                 let base_url = entry.base_url.clone().unwrap_or_default();
                 match probe.first_local_model(&entry.id, &base_url).await {
-                    Ok(model) => entry.model = Some(model),
+                    Ok(model) => {
+                        entry.model = Some(model.id);
+                        if entry.context_tokens.is_none() {
+                            entry.context_tokens = model.context_tokens;
+                        }
+                    }
                     Err(e) => {
                         return Err(format!(
                             "{} - could not auto-select a model: {e}",
@@ -1612,7 +1642,7 @@ async fn update_llm_config_in(
             update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
         }
     }
-    let mut auto_default_candidates: std::collections::HashMap<String, String> =
+    let mut auto_default_candidates: std::collections::HashMap<String, (String, Option<u32>)> =
         std::collections::HashMap::new();
     let mut validation_providers = update.providers.clone();
     if let Some(ref mut providers) = update.providers {
@@ -1638,7 +1668,8 @@ async fn update_llm_config_in(
         apply_model_auto_defaults(providers, &probe).await?;
         for entry in providers.iter() {
             if let Some(model) = entry.model.as_deref() {
-                auto_default_candidates.insert(entry.id.clone(), model.to_string());
+                auto_default_candidates
+                    .insert(entry.id.clone(), (model.to_string(), entry.context_tokens));
             }
         }
     }
@@ -1756,8 +1787,11 @@ async fn update_llm_config_in(
                 preserve_stored_entry_models(&mut providers, &stored.providers);
                 for entry in &mut providers {
                     if entry.model.is_none() {
-                        if let Some(model) = auto_default_candidates.get(&entry.id) {
+                        if let Some((model, window)) = auto_default_candidates.get(&entry.id) {
                             entry.model = Some(model.clone());
+                            if entry.context_tokens.is_none() {
+                                entry.context_tokens = *window;
+                            }
                         }
                     }
                 }
@@ -2580,6 +2614,61 @@ mod tests {
         tmp
     }
 
+    #[tokio::test]
+    async fn a_settings_save_that_auto_selects_a_local_model_saves_its_window() {
+        let mut litellm = mockito::Server::new_async().await;
+        let _models = litellm
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[{"id":"gemma-4-26b-a4b","object":"model","max_input_tokens":262144}]}"#,
+            )
+            .create_async()
+            .await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().to_path_buf();
+        config::save_user_config_to(
+            &cfg_with_providers("local", None, Vec::new()),
+            &data_dir.join("config.json"),
+        )
+        .expect("seed config");
+        let update = LlmConfigUpdate {
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some(litellm.url()),
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+
+        update_llm_config_in(&data_dir, update)
+            .await
+            .expect("the save must succeed");
+
+        let saved = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        let entry = &saved
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .providers[0];
+        assert_eq!(entry.model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(entry.context_tokens, Some(262_144));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_llm_config_in_reconciles_models_under_the_lock_not_a_pre_lock_snapshot() {
         let tmp = seeded_config_tempdir_with_local_model("llama-old");
@@ -2779,8 +2868,14 @@ mod tests {
             Some("anthropic/claude-sonnet-4-6"),
             vec![v2_entry("openrouter", K::OpenRouter, None)],
         );
-        apply_set_provider_model(&mut cfg, "alpha", "openrouter", "anthropic/claude-opus-4-8")
-            .unwrap();
+        apply_set_provider_model(
+            &mut cfg,
+            "alpha",
+            "openrouter",
+            "anthropic/claude-opus-4-8",
+            None,
+        )
+        .unwrap();
         let llm = cfg
             .find_project_mut("alpha")
             .unwrap()
@@ -2807,7 +2902,8 @@ mod tests {
             None,
             vec![v2_entry("openrouter", K::OpenRouter, None)],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "ghost", "some-model").unwrap_err();
+        let err =
+            apply_set_provider_model(&mut cfg, "alpha", "ghost", "some-model", None).unwrap_err();
         assert!(err.to_string().contains("ghost"), "got: {err}");
     }
 
@@ -2819,7 +2915,7 @@ mod tests {
             None,
             vec![v2_entry("anthropic", K::AnthropicOauth, None)],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "claude-opus-4-8")
+        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "claude-opus-4-8", None)
             .unwrap_err();
         assert!(err.to_string().contains("session-only"), "got: {err}");
     }
@@ -2832,7 +2928,7 @@ mod tests {
             None,
             vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   ").unwrap_err();
+        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   ", None).unwrap_err();
         assert!(err.to_string().contains("model"), "got: {err}");
     }
 
@@ -2844,8 +2940,8 @@ mod tests {
             None,
             vec![v2_entry("anthropic", K::AnthropicOauth, None)],
         );
-        let err =
-            apply_set_provider_model(&mut cfg, "alpha", "anthropic", "openrouter/x").unwrap_err();
+        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "openrouter/x", None)
+            .unwrap_err();
         assert!(err.to_string().contains("session-only"), "got: {err}");
     }
 
@@ -2860,7 +2956,7 @@ mod tests {
                 v2_entry("local", K::Local, Some("http://127.0.0.1:11434")),
             ],
         );
-        apply_set_provider_model(&mut cfg, "alpha", "local", "llama3.3").unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "llama3.3", None).unwrap();
         let llm = cfg
             .find_project_mut("alpha")
             .unwrap()
@@ -2894,8 +2990,8 @@ mod tests {
             Some("llama3.3"),
             vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
         );
-        apply_set_provider_model(&mut cfg, "alpha", "local", "mixtral").unwrap();
-        apply_set_provider_model(&mut cfg, "alpha", "local", "llama4").unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "mixtral", None).unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "llama4", None).unwrap();
         let llm = cfg
             .find_project_mut("alpha")
             .unwrap()
@@ -2966,6 +3062,7 @@ mod tests {
             "alpha".to_string(),
             "local".to_string(),
             "llama-new".to_string(),
+            None,
         )
         .expect("set_provider_model_in must succeed");
 
@@ -3019,6 +3116,7 @@ mod tests {
             "alpha".to_string(),
             "local".to_string(),
             "llama-new".to_string(),
+            None,
         )
         .expect("set_provider_model_in must succeed");
 
@@ -3053,7 +3151,8 @@ mod tests {
             None,
             vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   \t  ").unwrap_err();
+        let err =
+            apply_set_provider_model(&mut cfg, "alpha", "local", "   \t  ", None).unwrap_err();
         assert!(err.to_string().contains("model"), "got: {err}");
     }
 
@@ -3255,14 +3354,33 @@ mod tests {
             &self,
             _entry_id: &str,
             _base_url: &str,
-        ) -> Result<String, String> {
+        ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String> {
             match &self.0 {
                 Ok(models) => models
                     .first()
-                    .map(|m| m.to_string())
+                    .map(|m| crate::llm_cmd::discovery::DiscoveredModel {
+                        id: m.to_string(),
+                        context_tokens: None,
+                    })
                     .ok_or_else(|| "empty".to_string()),
                 Err(e) => Err(e.to_string()),
             }
+        }
+    }
+
+    struct WindowProbe(u32);
+
+    #[async_trait::async_trait]
+    impl ModelAutoDefaultProbe for WindowProbe {
+        async fn first_local_model(
+            &self,
+            _entry_id: &str,
+            _base_url: &str,
+        ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String> {
+            Ok(crate::llm_cmd::discovery::DiscoveredModel {
+                id: "gemma-4-26b-a4b".to_string(),
+                context_tokens: Some(self.0),
+            })
         }
     }
 
@@ -3294,7 +3412,10 @@ mod tests {
             transient_custom_headers: None,
         };
         assert_eq!(
-            with_key.first_local_model("local", &keyed.url()).await,
+            with_key
+                .first_local_model("local", &keyed.url())
+                .await
+                .map(|m| m.id),
             Ok("first-model".to_string())
         );
 
@@ -3342,6 +3463,143 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(providers[0].model.as_deref(), Some("llama-3.3-70b"));
+    }
+
+    #[tokio::test]
+    async fn an_auto_selected_local_model_brings_its_window() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut unknown = vec![v2_entry("local", K::Local, Some("https://litellm.example"))];
+        apply_model_auto_defaults(&mut unknown, &WindowProbe(262_144))
+            .await
+            .unwrap();
+        assert_eq!(unknown[0].model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(unknown[0].context_tokens, Some(262_144));
+
+        let mut set_by_hand = vec![v2_entry("local", K::Local, Some("https://litellm.example"))];
+        set_by_hand[0].context_tokens = Some(32_768);
+        apply_model_auto_defaults(&mut set_by_hand, &WindowProbe(262_144))
+            .await
+            .unwrap();
+        assert_eq!(set_by_hand[0].context_tokens, Some(32_768));
+    }
+
+    fn local_entry_with(
+        model: &str,
+        window: Option<u32>,
+    ) -> speedwave_runtime::config::LlmProviderEntry {
+        let mut entry = v2_entry(
+            "local",
+            speedwave_runtime::config::LlmProviderKind::Local,
+            Some("https://litellm.example"),
+        );
+        entry.model = Some(model.to_string());
+        entry.context_tokens = window;
+        entry
+    }
+
+    fn local_window(cfg: &SpeedwaveUserConfig) -> Option<u32> {
+        cfg.find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .providers[0]
+            .context_tokens
+    }
+
+    #[test]
+    fn a_settings_save_of_the_stored_model_keeps_its_window() {
+        let stored = vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))];
+
+        let mut same_model = vec![local_entry_with("gemma-4-26b-a4b", None)];
+        preserve_stored_entry_models(&mut same_model, &stored);
+        assert_eq!(same_model[0].context_tokens, Some(262_144));
+
+        let mut other_model = vec![local_entry_with("qwen3.8-27b", None)];
+        preserve_stored_entry_models(&mut other_model, &stored);
+        assert_eq!(other_model[0].model.as_deref(), Some("qwen3.8-27b"));
+        assert_eq!(other_model[0].context_tokens, None);
+
+        let mut no_model = vec![v2_entry(
+            "local",
+            speedwave_runtime::config::LlmProviderKind::Local,
+            Some("https://litellm.example"),
+        )];
+        preserve_stored_entry_models(&mut no_model, &stored);
+        assert_eq!(no_model[0].model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(no_model[0].context_tokens, Some(262_144));
+    }
+
+    #[test]
+    fn a_picked_model_saves_its_window() {
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("qwen3.8-27b"),
+            vec![local_entry_with("qwen3.8-27b", None)],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "gemma-4-26b-a4b", Some(262_144))
+            .unwrap();
+        assert_eq!(local_window(&cfg), Some(262_144));
+    }
+
+    #[test]
+    fn a_picked_model_without_a_known_window_drops_the_previous_models_window() {
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("gemma-4-26b-a4b"),
+            vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "qwen3-coder-30b", None).unwrap();
+        assert_eq!(local_window(&cfg), None);
+
+        let mut zero = cfg_with_providers(
+            "local",
+            Some("gemma-4-26b-a4b"),
+            vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))],
+        );
+        apply_set_provider_model(&mut zero, "alpha", "local", "qwen3-coder-30b", Some(0)).unwrap();
+        assert_eq!(local_window(&zero), None, "a zero window reads as unknown");
+    }
+
+    #[test]
+    fn re_picking_the_same_model_without_a_window_keeps_its_window() {
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("gemma-4-26b-a4b"),
+            vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "gemma-4-26b-a4b", None).unwrap();
+        assert_eq!(local_window(&cfg), Some(262_144));
+    }
+
+    #[test]
+    fn a_picked_window_reaches_the_saved_config_and_the_active_legacy_field() {
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let data_dir = tmp.path().to_path_buf();
+        set_provider_model_in(
+            &data_dir,
+            "alpha".to_string(),
+            "local".to_string(),
+            "gemma-4-26b-a4b".to_string(),
+            Some(262_144),
+        )
+        .expect("set_provider_model_in must succeed");
+        let saved = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        let llm = saved
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        let entry = llm.providers.iter().find(|p| p.id == "local").unwrap();
+        assert_eq!(entry.context_tokens, Some(262_144));
+        assert_eq!(llm.context_tokens, Some(262_144));
     }
 
     #[tokio::test]

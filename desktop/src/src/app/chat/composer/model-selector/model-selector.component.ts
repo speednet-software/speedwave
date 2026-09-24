@@ -44,6 +44,7 @@ export interface ModelSelection {
   providerId: string;
   kind: string;
   isDefault: boolean;
+  contextTokens: number | null;
 }
 
 /**
@@ -555,6 +556,7 @@ export class ModelSelectorComponent {
       providerId: summary.provider_id,
       kind: summary.kind,
       isDefault: opt.isDefault,
+      contextTokens: opt.contextTokens,
     });
     this.lastPicked.set(opt.id);
     this.open.set(false);
