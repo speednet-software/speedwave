@@ -402,6 +402,52 @@ pub(crate) fn clear_anthropic_models(llm: &mut LlmConfig) -> bool {
     changed
 }
 
+fn anthropic_model_to_carry(llm: &LlmConfig) -> Option<String> {
+    let active = llm
+        .active_provider()
+        .filter(|entry| entry.kind.is_anthropic())
+        .and_then(|_| llm.effective_active_model());
+    active.or_else(|| {
+        llm.providers
+            .iter()
+            .filter(|entry| entry.kind.is_anthropic())
+            .find_map(|entry| {
+                entry
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+            })
+            .map(str::to_string)
+    })
+}
+
+fn carry_anthropic_model_to_pin(data_dir: &Path, project: &str, llm: &LlmConfig) -> bool {
+    let Some(model) = anthropic_model_to_carry(llm) else {
+        return true;
+    };
+    if !defaults::is_selectable_anthropic_model_id(&model) {
+        log::warn!(
+            "llm config: dropping the Anthropic model {model} of project {project}: not a selectable Claude model id"
+        );
+        return true;
+    }
+    match crate::claude_settings::set_model_pin(data_dir, project, &model, &[]) {
+        Ok(()) => {
+            log::info!(
+                "llm config: moved the Anthropic model {model} of project {project} to its settings.json model pin"
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "llm config: keeping the Anthropic model {model} of project {project} in config.json, its settings.json pin could not be written: {e}"
+            );
+            false
+        }
+    }
+}
+
 /// Downgrade story (one release): derive the legacy flat fields from the
 /// active v2 entry so an older Speedwave reading this config keeps working.
 pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
@@ -1855,7 +1901,9 @@ pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
             if has_llm {
                 if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
                     changed |= migrate_llm(llm, evidence);
-                    changed |= clear_anthropic_models(llm);
+                    if carry_anthropic_model_to_pin(data_dir, &project.name, llm) {
+                        changed |= clear_anthropic_models(llm);
+                    }
                 }
             } else if evidence != AnthropicEvidence::None {
                 let mut llm = LlmConfig::default();
@@ -4059,6 +4107,193 @@ mod tests {
             .unwrap();
         assert_eq!(llm.providers[0].model, None);
         assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    fn write_user_config_json(dir: &Path, llm: serde_json::Value) -> std::path::PathBuf {
+        let config_path = dir.join("config.json");
+        let config = serde_json::json!({
+            "projects": [{ "name": "proj", "dir": "/x", "claude": { "llm": llm } }]
+        });
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        config_path
+    }
+
+    fn healed_llm(config_path: &Path) -> LlmConfig {
+        load_user_config_from(config_path).unwrap().projects[0]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .clone()
+            .unwrap()
+    }
+
+    fn project_settings_path(dir: &Path) -> std::path::PathBuf {
+        crate::claude_home::claude_config_dir(dir, "proj").join("settings.json")
+    }
+
+    fn anthropic_llm_with_model(model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "anthropic",
+            "model": model,
+            "context_tokens": 1_000_000,
+            "schema_version": LLM_SCHEMA_VERSION,
+            "providers": [
+                {
+                    "id": "anthropic",
+                    "kind": "anthropic_oauth",
+                    "model": model,
+                    "context_tokens": 1_000_000,
+                    "has_api_key": false,
+                    "has_custom_headers": false
+                },
+                {
+                    "id": "local",
+                    "kind": "local",
+                    "base_url": "https://llm.example/",
+                    "model": "gemma-4-26b-a4b",
+                    "has_api_key": true,
+                    "has_custom_headers": false
+                }
+            ],
+            "active": { "provider_id": "anthropic", "model": model }
+        })
+    }
+
+    #[test]
+    fn heal_moves_the_anthropic_model_of_a_0_18_config_into_the_settings_json_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(
+            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
+            Some("claude-fable-5")
+        );
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+        assert_eq!(llm.model, None);
+        assert_eq!(llm.providers[1].model.as_deref(), Some("gemma-4-26b-a4b"));
+
+        let config_after_first = std::fs::read_to_string(&config_path).unwrap();
+        let settings_after_first =
+            std::fs::read_to_string(project_settings_path(dir.path())).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(
+            config_after_first,
+            std::fs::read_to_string(&config_path).unwrap()
+        );
+        assert_eq!(
+            settings_after_first,
+            std::fs::read_to_string(project_settings_path(dir.path())).unwrap()
+        );
+    }
+
+    #[test]
+    fn heal_overwrites_an_older_pin_with_the_model_0_18_sessions_ran_on_and_keeps_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-sonnet-4-6"));
+        let settings = project_settings_path(dir.path());
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"model":"claude-opus-5","hooks":{"PreToolUse":[]}}"#,
+        )
+        .unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"model":"claude-sonnet-4-6","hooks":{"PreToolUse":[]}})
+        );
+        assert_eq!(healed_llm(&config_path).providers[0].model, None);
+    }
+
+    #[test]
+    fn heal_carries_the_model_of_an_inactive_anthropic_entry_and_leaves_the_active_local_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = anthropic_llm_with_model(" claude-opus-4-8 ");
+        llm["provider"] = serde_json::json!("local");
+        llm["model"] = serde_json::json!("gemma-4-26b-a4b");
+        llm["active"] = serde_json::json!({ "provider_id": "local", "model": "gemma-4-26b-a4b" });
+        let config_path = write_user_config_json(dir.path(), llm);
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(
+            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
+            Some("claude-opus-4-8")
+        );
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("gemma-4-26b-a4b")
+        );
+    }
+
+    #[test]
+    fn heal_drops_an_anthropic_model_the_pin_cannot_hold_without_writing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-mystery-9"));
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert!(!project_settings_path(dir.path()).exists());
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    #[test]
+    fn heal_without_an_anthropic_model_writes_no_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = anthropic_llm_with_model("claude-fable-5");
+        llm["model"] = serde_json::Value::Null;
+        llm["providers"][0]["model"] = serde_json::Value::Null;
+        llm["active"]["model"] = serde_json::Value::Null;
+        write_user_config_json(dir.path(), llm);
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert!(!crate::claude_home::claude_home_dir(dir.path(), "proj").exists());
+    }
+
+    #[test]
+    fn heal_keeps_the_anthropic_model_in_config_until_the_pin_can_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
+        let settings = project_settings_path(dir.path());
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "not json").unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json");
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(
+            llm.active.as_ref().unwrap().model.as_deref(),
+            Some("claude-fable-5")
+        );
+
+        std::fs::write(&settings, "{}").unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(
+            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
+            Some("claude-fable-5")
+        );
+        assert_eq!(healed_llm(&config_path).providers[0].model, None);
     }
 
     #[test]

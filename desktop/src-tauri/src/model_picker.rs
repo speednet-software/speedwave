@@ -223,7 +223,7 @@ pub(crate) fn normalize_pin_for_session(
 ) {
     let plan = plan_for(kind, info);
     let picker = info.and_then(|session| build_picker(session, plan));
-    match crate::claude_settings::normalize_model_pin(data_dir, project, |pin| {
+    match speedwave_runtime::claude_settings::normalize_model_pin(data_dir, project, |pin| {
         if let Some(picker) = &picker {
             let id = canonical_anthropic_model_id(pin);
             picker
@@ -813,13 +813,13 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            crate::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            speedwave_runtime::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-opus-5[1m]")
         );
 
         normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
         assert_eq!(
-            crate::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            speedwave_runtime::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-opus-5[1m]"),
             "an unknown plan must not downgrade a plan-dependent pin"
         );
@@ -848,7 +848,7 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            crate::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            speedwave_runtime::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-sonnet-5")
         );
     }

@@ -1,7 +1,11 @@
+//! The keys of a project's Claude Code `settings.json` that Speedwave owns: the model pin and
+//! the legacy `effortLevel` takeover; every write is locked, atomic and keeps the other keys.
+
 use std::path::Path;
 
-use speedwave_runtime::fs_perms;
+use crate::fs_perms;
 
+/// The `model` pin of the project's `settings.json`, or `None` when unset or unreadable.
 pub fn get_model_pin(data_dir: &Path, project: &str) -> Option<String> {
     read_settings_string_key(data_dir, project, "model")
 }
@@ -15,6 +19,7 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
     value.get(key)?.as_str().map(str::to_string)
 }
 
+/// Removes the legacy `effortLevel` key and returns its string value, if any.
 pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     let path = settings_path(data_dir, project);
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
@@ -41,6 +46,7 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
 
 const MODEL_KEY: &str = "model";
 
+/// Writes `model` as the pin: a Claude id the live session listed, else a selectable catalog id.
 pub fn set_model_pin(
     data_dir: &Path,
     project: &str,
@@ -48,7 +54,7 @@ pub fn set_model_pin(
     listed_by_claude_code: &[String],
 ) -> Result<(), String> {
     let listed = model.starts_with("claude-") && listed_by_claude_code.iter().any(|m| m == model);
-    if !listed && !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
+    if !listed && !crate::defaults::is_selectable_anthropic_model_id(model) {
         return Err(format!("unknown Anthropic model: {model}"));
     }
     let path = settings_path(data_dir, project);
@@ -65,6 +71,7 @@ pub fn set_model_pin(
     .map(|_| ())
 }
 
+/// Removes the `model` pin; a missing file or key is not an error.
 pub fn clear_model_pin(data_dir: &Path, project: &str) -> Result<(), String> {
     edit_settings(data_dir, project, false, |obj| {
         obj.remove(MODEL_KEY).is_some()
@@ -72,6 +79,7 @@ pub fn clear_model_pin(data_dir: &Path, project: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Rewrites the pin to what `normalized` returns for it and yields the new value, if any.
 pub fn normalize_model_pin(
     data_dir: &Path,
     project: &str,
@@ -128,11 +136,11 @@ fn edit_settings(
 }
 
 fn settings_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
-    speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join("settings.json")
+    crate::claude_home::claude_config_dir(data_dir, project).join("settings.json")
 }
 
 fn settings_lock_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
-    speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join(".settings.json.lock")
+    crate::claude_home::claude_config_dir(data_dir, project).join(".settings.json.lock")
 }
 
 #[cfg(test)]

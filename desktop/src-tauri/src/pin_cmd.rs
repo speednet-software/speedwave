@@ -26,7 +26,7 @@ pub(crate) fn ensure_effort_pin_migrated_in(
         else {
             return Ok(());
         };
-        let legacy = match crate::claude_settings::take_legacy_effort_pin(data_dir, project_name) {
+        let legacy = match speedwave_runtime::claude_settings::take_legacy_effort_pin(data_dir, project_name) {
             Ok(legacy) => legacy,
             Err(e) => {
                 log::warn!("legacy effort pin migration skipped for {project_name}: {e}");
@@ -102,7 +102,7 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
 }
 
 fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
-    let pin = crate::claude_settings::get_model_pin(data_dir, project)
+    let pin = speedwave_runtime::claude_settings::get_model_pin(data_dir, project)
         .map(|pin| speedwave_runtime::defaults::resolve_model_alias(&pin))
         .filter(|model| model.starts_with("claude-"));
     pin.or_else(|| {
@@ -126,7 +126,7 @@ fn set_model_pin_inner(
     session_arc: &SharedChatSession,
 ) -> Result<(), String> {
     let project_name = resolve_project_name(project_id)?;
-    crate::claude_settings::set_model_pin(
+    speedwave_runtime::claude_settings::set_model_pin(
         speedwave_runtime::consts::data_dir(),
         &project_name,
         model,
@@ -146,7 +146,10 @@ pub(crate) fn set_model_pin(
 #[tauri::command]
 pub(crate) fn clear_model_pin(project_id: String) -> Result<(), String> {
     let project_name = resolve_project_name(&project_id)?;
-    crate::claude_settings::clear_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
+    speedwave_runtime::claude_settings::clear_model_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+    )
 }
 
 #[cfg(test)]

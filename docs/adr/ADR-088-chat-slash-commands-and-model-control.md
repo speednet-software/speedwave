@@ -741,6 +741,34 @@ plan"[^1]) and HAIKU keeps the undated catalog id. The non-Anthropic
 routed-alias remap in `compose/llm.rs` is unchanged and still covers all four
 aliases.
 
+**Amendment (2026-09-24: the self-heal carries a stored model into the pin
+before clearing it).** Decision 7 was written while an Anthropic pick was
+session-scoped, so clearing the stored value lost nothing. Since SPEED-539
+the pick has a persistent home, the `settings.json` `model` key, but the
+one-time self-heal (`config.rs::heal_llm_config_in`) still only cleared the
+stored model. The 0.18.1 renderer injected that model as `ANTHROPIC_MODEL`
+and 0.18.1 had no `settings.json` pin, so an upgrade to 0.19.0 reset every
+project whose Anthropic model had been chosen in Settings to the account
+default, with no warning and no copy of the old value. Seen on a real
+upgrade: a project on `claude-fable-5` came back on `claude-opus-5[1m]`.
+The self-heal now moves the model into the pin before it clears the config
+(`config.rs::carry_anthropic_model_to_pin`). It writes through
+`claude_settings::set_model_pin`, which moved from the Desktop crate to
+`speedwave-runtime` because the CLI runs the same heal. The carried value is
+the active Anthropic entry's model, else the model an inactive Anthropic
+entry kept for a later switch back. It overwrites an existing pin: in 0.18.1
+`ANTHROPIC_MODEL` outranked a `settings.json` model, so the stored value is
+the model those sessions actually ran on. A value `set_model_pin` rejects (not
+a catalog id, bare or with a permitted `[1m]`) is dropped with a warning, as
+before. When the pin write fails (a malformed `settings.json`, for example),
+the stored model stays for the next start instead of being cleared. The
+renderer ignores an Anthropic model, so the value that stays behind has no
+effect until it is carried. A carried model that Claude Code no longer lists,
+such as `claude-fable-5`, still runs, because Claude Code honors the pin; the
+picker shows no row for it (ADR-089, SPEED-663 amendment). Configs that
+0.19.0 already healed no longer hold the value, so this change cannot restore
+their pick. Guards: the `heal_*` tests in `config.rs`.
+
 ### 8. Auto-default rules for fresh non-Anthropic setups
 
 To keep the "model required for non-Anthropic providers" invariant from
