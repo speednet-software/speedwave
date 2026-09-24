@@ -1293,6 +1293,33 @@ fn send_soft_impose(
     }
 }
 
+pub(crate) struct ModelSwitch {
+    control: ControlChannel,
+    stdin: Arc<Mutex<std::process::ChildStdin>>,
+    settled: ModelSettled,
+}
+
+impl ModelSwitch {
+    pub(crate) fn apply(&self, model: &str) -> Result<(), control_channel::ControlError> {
+        send_model_pick(&self.stdin, &self.control, &self.settled, model)?
+            .wait(control_channel::SET_MODEL_TIMEOUT)
+            .map(|_| ())
+    }
+}
+
+fn send_model_pick(
+    stdin: &Mutex<impl Write>,
+    control: &ControlChannel,
+    settled: &ModelSettled,
+    model: &str,
+) -> Result<control_channel::PendingControl, control_channel::ControlError> {
+    let mut handle = stdin
+        .lock()
+        .map_err(|e| control_channel::ControlError::Write(format!("stdin lock poisoned: {e}")))?;
+    settled.settle();
+    control.send_set_model(&mut *handle, model)
+}
+
 fn report_soft_impose(pending: control_channel::PendingControl, model: &str) {
     match pending.wait(control_channel::SET_MODEL_TIMEOUT) {
         Ok(_) => log::info!("Claude Code switched the session to {model}"),
@@ -1561,6 +1588,18 @@ impl ChatSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no active session"))?;
         Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
+    }
+
+    pub(crate) fn model_switch(&self) -> anyhow::Result<ModelSwitch> {
+        let stdin = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        Ok(ModelSwitch {
+            control: self.control.clone(),
+            stdin: stdin.clone(),
+            settled: self.model_settled.clone(),
+        })
     }
 
     pub(crate) fn takes_wire_effort(&mut self) -> bool {
@@ -4101,6 +4140,186 @@ mod tests {
         assert!(control.pending_ids().is_empty());
     }
 
+    #[test]
+    fn a_first_matching_init_then_a_mismatch_sends_one_set_model() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+
+        let first = soft_impose_step(
+            &init_with_model("local/llama-3.1-70b"),
+            &init_chunk("local/llama-3.1-70b"),
+            &local_llama(),
+            &settled,
+            &control,
+            &stdin,
+        );
+        let later = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &init_chunk("wrong-observed-model"),
+            &local_llama(),
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(first.is_none());
+        assert_eq!(
+            later.map(|(_, model)| model).as_deref(),
+            Some("local/llama-3.1-70b")
+        );
+        assert_eq!(written_lines(&stdin).len(), 1);
+    }
+
+    #[test]
+    fn the_soft_impose_report_ends_on_the_answer_and_on_the_session_end() {
+        let control = ControlChannel::default();
+        let answered = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        let id = control.pending_ids().pop().expect("a waiter");
+        control.route_response(&serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        }));
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.fail_all();
+        let started = std::time::Instant::now();
+
+        report_soft_impose(answered, "local/llama-3.1-70b");
+        report_soft_impose(orphaned, "local/llama-3.1-70b");
+
+        assert!(
+            started.elapsed() < control_channel::SET_MODEL_TIMEOUT / 2,
+            "neither report waited for the timeout"
+        );
+    }
+
+    #[test]
+    fn a_model_pick_is_sent_every_time_and_settles_the_session() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+
+        let first = send_model_pick(&stdin, &control, &settled, "claude-haiku-4-5");
+        let second = send_model_pick(&stdin, &control, &settled, "default");
+
+        assert!(first.is_ok() && second.is_ok());
+        assert!(settled.is_settled(), "no soft-impose follows a pick");
+        let models: Vec<serde_json::Value> = written_lines(&stdin)
+            .iter()
+            .map(|l| l["request"]["model"].clone())
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                serde_json::json!("claude-haiku-4-5"),
+                serde_json::json!("default")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_soft_impose_after_a_model_pick_sends_nothing() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        send_model_pick(&stdin, &control, &settled, ROUTED_PICK).expect("written");
+
+        let after = soft_impose_step(
+            &init_with_model(ENV_MODEL),
+            &init_chunk(ENV_MODEL),
+            &openrouter_mini(),
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(after.is_none());
+        assert_eq!(written_lines(&stdin).len(), 1);
+    }
+
+    #[test]
+    fn a_model_pick_on_a_live_session_settles_it_and_resolves_on_the_answer() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        let control = session.control.clone();
+        let switch = session.model_switch().expect("a live session");
+        let answerer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(id) = control.pending_ids().pop() {
+                    return control.route_response(&serde_json::json!({
+                        "type": "control_response",
+                        "response": { "subtype": "success", "request_id": id },
+                    }));
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the pick never registered a waiter"
+                );
+                std::thread::yield_now();
+            }
+        });
+
+        let applied = switch.apply("claude-haiku-4-5");
+
+        assert_eq!(applied, Ok(()));
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_that_cannot_reach_the_process_reports_the_write_failure() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_broken_pipe();
+        let switch = session.model_switch().expect("a session with a pipe");
+
+        let err = switch
+            .apply("claude-haiku-4-5")
+            .expect_err("the pipe is closed");
+
+        assert!(
+            matches!(err, control_channel::ControlError::Write(_)),
+            "{err}"
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_session_without_a_process_has_no_model_switch() {
+        assert!(ChatSession::new("proj").model_switch().is_err());
+    }
+
+    #[test]
+    fn a_typed_model_pick_settles_under_the_stdin_lock_before_it_is_written() {
+        let source = include_str!("chat.rs");
+        let body_of = |signature: &str, end: &str| -> String {
+            let start = source.find(signature).expect("function exists");
+            let body = &source[start..];
+            body[..body.find(end).expect("end marker")]
+                .split_whitespace()
+                .collect()
+        };
+        let send = body_of("fn send_message_with_emit(", "fn set_test_stdin_sink(");
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("the send path must use `{needle}`"))
+        };
+        let locked = at(&send, "letmutstdin=shared.lock()");
+        let settled = at(&send, "self.model_settled.settle();");
+        let written = at(&send, "writeln!(stdin,\"{}\",serialized)?;");
+        assert!(locked < settled && settled < written);
+
+        let drain = body_of("fn write_and_emit_drained_message(", "#[cfg(test)]");
+        let locked = at(&drain, "matchstdin.lock(){Ok(muthandle)=>{");
+        let settled = at(&drain, "settled.settle();");
+        let written = at(&drain, "writeln!(handle,\"{}\",payload)");
+        assert!(locked < settled && settled < written);
+    }
+
     const ROUTED_PICK: &str = "openrouter/openai/gpt-4o-mini";
     const ENV_MODEL: &str = "openrouter/anthropic/claude-sonnet-5";
 
@@ -4145,6 +4364,8 @@ mod tests {
         include_str!("../tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson");
     const MID_TURN_COMMAND_CAPTURE: &str =
         include_str!("../tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson");
+    const MODEL_PICKS_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.267-model-picks.sanitized.ndjson");
 
     fn capture_lines(capture: &str) -> Vec<serde_json::Value> {
         capture
@@ -4163,7 +4384,11 @@ mod tests {
 
     #[test]
     fn the_soft_impose_captures_are_of_the_pinned_claude_code() {
-        for capture in [SOFT_IMPOSE_CAPTURE, MID_TURN_COMMAND_CAPTURE] {
+        for capture in [
+            SOFT_IMPOSE_CAPTURE,
+            MID_TURN_COMMAND_CAPTURE,
+            MODEL_PICKS_CAPTURE,
+        ] {
             let versions: Vec<String> = capture_lines(capture)
                 .iter()
                 .filter(|l| l["type"] == "system" && l["subtype"] == "init")
@@ -4178,6 +4403,64 @@ mod tests {
                 speedwave_runtime::defaults::CLAUDE_VERSION
             );
         }
+    }
+
+    #[test]
+    fn set_model_switches_to_an_anthropic_id_and_back_to_the_account_default() {
+        let lines = capture_lines(MODEL_PICKS_CAPTURE);
+        let answers: Vec<&str> = lines
+            .iter()
+            .filter(|l| l["type"] == "control_response")
+            .map(|l| l["response"]["subtype"].as_str().unwrap())
+            .collect();
+        let confirmations: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l["message"]["content"].as_str())
+            .collect();
+
+        assert_eq!(answers, vec!["success", "success"]);
+        assert_eq!(
+            confirmations,
+            vec![
+                "<local-command-stdout>Set model to `claude-haiku-4-5`</local-command-stdout>",
+                "<local-command-stdout>Set model to `claude-opus-5[1m]`</local-command-stdout>",
+            ]
+        );
+        assert_eq!(
+            init_models(&lines)[..3],
+            ["claude-opus-5[1m]", "claude-haiku-4-5", "claude-opus-5[1m]"]
+        );
+    }
+
+    #[test]
+    fn a_typed_model_command_answers_as_an_input_of_its_own() {
+        let lines = capture_lines(MODEL_PICKS_CAPTURE);
+        let tail: Vec<String> = lines
+            .iter()
+            .filter(|l| l["type"] != "stream_event" && l["subtype"] != "status")
+            .rev()
+            .take(3)
+            .map(|l| match l["type"].as_str().unwrap() {
+                "assistant" => format!("assistant {}", l["message"]["model"].as_str().unwrap()),
+                "result" => format!("result {}", l["num_turns"]),
+                other => format!("{other} {}", l["subtype"].as_str().unwrap_or("")),
+            })
+            .collect();
+        let mut parser = StreamParser::new();
+        let turn_ends = lines
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count();
+
+        assert_eq!(
+            tail,
+            vec!["result 0", "assistant <synthetic>", "system init"]
+        );
+        assert_eq!(
+            turn_ends, 4,
+            "the typed command's answer is a turn end in the chat, the two switches are not"
+        );
     }
 
     #[test]
@@ -4203,6 +4486,7 @@ mod tests {
         let mut emitted: Vec<StreamChunk> = Vec::new();
         let mut sent = Vec::new();
         let mut routed_answers = 0;
+        let mut confirmations = 0;
 
         for mut parsed in capture_lines(SOFT_IMPOSE_CAPTURE) {
             if parsed["type"] == "control_response" {
@@ -4213,6 +4497,13 @@ mod tests {
                 continue;
             }
             let (chunks, _log) = parser.parse_line(&parsed);
+            if parsed["message"]["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("<local-command-stdout>"))
+            {
+                confirmations += 1;
+                assert!(chunks.is_empty(), "{chunks:?}");
+            }
             if let Some(step) = soft_impose_step(&parsed, &chunks, &cfg, &settled, &control, &stdin)
             {
                 sent.push(step);
@@ -4221,6 +4512,7 @@ mod tests {
         }
 
         assert_eq!(sent.len(), 1, "one set_model, at the first init");
+        assert_eq!(confirmations, 1, "the confirmation line makes no chunk");
         let (pending, model) = sent.remove(0);
         assert_eq!(model, ROUTED_PICK);
         assert_eq!(routed_answers, 1);

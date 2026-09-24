@@ -545,6 +545,7 @@ mod tests {
         ] {
             assert!(q.timeout() > Duration::ZERO, "{q:?}");
         }
+        assert!(SET_MODEL_TIMEOUT > Duration::ZERO);
     }
 
     #[test]

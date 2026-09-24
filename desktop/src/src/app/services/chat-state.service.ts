@@ -166,7 +166,7 @@ export class ChatStateService {
     const model = this._pendingModelOverride();
     if (model) {
       this._pendingModelOverride.set(null);
-      void this.sendMessage(`/model ${model}`);
+      void this.switchLiveModel(model);
       return;
     }
     const effort = this._pendingEffortOverride();
@@ -286,7 +286,7 @@ export class ChatStateService {
       if (this.isStreaming || this.sessionStartInFlightFromState()) {
         this._pendingModelOverride.set(wireId);
       } else {
-        await this.sendMessage(`/model ${wireId}`);
+        await this.switchLiveModel(wireId);
       }
       return;
     }
@@ -312,6 +312,35 @@ export class ChatStateService {
     return (
       project === this.projectState.activeProject() && this.projectState.status() !== 'switching'
     );
+  }
+
+  private async switchLiveModel(wireId: string): Promise<void> {
+    const generation = this._sessionGeneration;
+    try {
+      await this.tauri.invoke('switch_chat_model', {
+        project: this.projectState.activeProject() ?? '',
+        model: wireId,
+      });
+    } catch (e: unknown) {
+      this.reportSelectionFailure('model switch', e);
+      return;
+    }
+    if (generation !== this._sessionGeneration) return;
+    this.appendControlChip('model', wireId);
+    this.notifyChange();
+  }
+
+  private appendControlChip(command: string, argument: string, uuid?: string | null): void {
+    if (command === 'model' && this.usesAnthropic()) this.forgetContextWindow();
+    this._messages = [
+      ...this._messages,
+      {
+        role: 'user',
+        blocks: [{ type: 'chip', command, argument }],
+        timestamp: Date.now(),
+        ...(uuid ? { uuid, uuid_status: 'Committed' as const } : {}),
+      },
+    ];
   }
 
   private reportSelectionFailure(what: string, cause: unknown): void {
@@ -1019,16 +1048,7 @@ export class ChatStateService {
 
       case 'ControlChip': {
         const { command, argument, uuid } = chunk.data;
-        if (command === 'model' && this.usesAnthropic()) this.forgetContextWindow();
-        this._messages = [
-          ...this._messages,
-          {
-            role: 'user',
-            blocks: [{ type: 'chip', command, argument }],
-            timestamp: Date.now(),
-            ...(uuid ? { uuid, uuid_status: 'Committed' as const } : {}),
-          },
-        ];
+        this.appendControlChip(command, argument, uuid);
         break;
       }
 
