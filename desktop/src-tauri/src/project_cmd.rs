@@ -72,7 +72,7 @@ pub(crate) async fn switch_project(
     use tauri::Manager;
     let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
     let oauth_for_teardown = oauth_arc.clone();
-    let switch_result = tokio::task::spawn_blocking(move || {
+    let switch_task = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::failed(e, None);
         }
@@ -98,9 +98,13 @@ pub(crate) async fn switch_project(
             })
             .map_err(|e| e.to_string())
         })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    });
+    let switch_result = containers_cmd::finish_switch_task(
+        switch_task,
+        &name,
+        containers_cmd::teardown_new_project,
+    )
+    .await;
 
     let pending_teardown = match switch_result {
         SwitchResult::Failed {
@@ -120,7 +124,7 @@ pub(crate) async fn switch_project(
     let rebind_result: Result<(), String> =
         tokio::task::spawn_blocking(move || rebind_chat(&rebind_name, &rebind_app, &rebind_state))
             .await
-            .map_err(|e| e.to_string())?;
+            .unwrap_or_else(|je| Err(format!("join error: {je}")));
 
     if let Err(e) = rebind_result {
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
@@ -357,6 +361,34 @@ mod tests {
         assert!(PROJECT_TRANSITION_LOCK.try_lock().is_err());
         drop(guard);
         assert!(PROJECT_TRANSITION_LOCK.try_lock().is_ok());
+    }
+
+    #[test]
+    fn a_started_switch_ends_only_through_its_success_or_failure_event() {
+        for (source, signature) in [
+            (
+                include_str!("project_cmd.rs"),
+                "pub(crate) async fn switch_project(",
+            ),
+            (
+                include_str!("containers_cmd.rs"),
+                "pub async fn add_project(",
+            ),
+        ] {
+            let body = &source[source.find(signature).expect(signature)..];
+            let body = &body[..body.find("\n}\n").expect("function end")];
+            let started = &body[body
+                .find("\"project_switch_started\"")
+                .expect("switch start event")..];
+            assert!(
+                !started.contains(".map_err(|e| e.to_string())?"),
+                "{signature} returns without project_switch_failed after the switch started"
+            );
+            assert!(
+                started.contains("finish_switch_task(") && started.contains("teardown_new_project"),
+                "{signature} must tear the new project down when its switch task does not finish"
+            );
+        }
     }
 
     #[test]

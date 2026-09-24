@@ -40,6 +40,18 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
 }
 
 #[cfg(any(target_os = "windows", test))]
+const WSL_NO_DISTRIBUTIONS_CODE: &str = "WSL_E_DEFAULT_DISTRO_NOT_FOUND";
+
+#[cfg(any(target_os = "windows", test))]
+const WSL_NO_DISTRIBUTIONS_MESSAGE: &str = "has no installed distributions";
+
+#[cfg(any(target_os = "windows", test))]
+fn lists_no_distributions(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains(WSL_NO_DISTRIBUTIONS_CODE) || msg.contains(WSL_NO_DISTRIBUTIONS_MESSAGE)
+}
+
+#[cfg(any(target_os = "windows", test))]
 pub struct WslRuntime {
     runner: Box<dyn CommandRunner>,
     retry_delay: std::time::Duration,
@@ -93,6 +105,14 @@ impl WslRuntime {
         &self.distro_name
     }
 
+    fn list_distributions(&self) -> anyhow::Result<Vec<u8>> {
+        self.runner.run_raw_stdout_bounded(
+            "wsl.exe",
+            &["--list", "--quiet"],
+            consts::VM_LIST_TIMEOUT,
+        )
+    }
+
     /// Runs `argv` via `sh -c` with POSIX quoting: wsl.exe re-parses the post-`--` line via the
     /// default shell, so bare splicing breaks on %USERPROFILE% metachars (`'`, `(`, `$`, backtick).
     fn run_in_distro(&self, argv: &[&str], root: bool) -> anyhow::Result<String> {
@@ -105,10 +125,10 @@ impl WslRuntime {
         self.runner.run("wsl.exe", &full)
     }
 
-    /// Flushes the stale CNI iptables chains / bridges named in `err`, as root in the
+    /// Flushes the stale CNI iptables chains / bridges in `targets`, as root in the
     /// distro. Best-effort; see [`super::cni_cleanup_command`].
-    fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
-        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(err)], true)
+    fn cleanup_stale_cni(&self, targets: &super::CniTargets) -> anyhow::Result<()> {
+        self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(targets)], true)
             .map(|_| ())
     }
 
@@ -131,16 +151,20 @@ impl WslRuntime {
         self.run_in_distro(&["sh", "-c", &cmd], true).map(|_| ())
     }
 
-    /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
-    /// collisions, dead name-store reservations): clean + retry once per class.
-    fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
-    where
-        U: Fn() -> anyhow::Result<()>,
-    {
+    fn up_with_heal(
+        &self,
+        project: &str,
+        compose_file: &str,
+        mode: super::UpMode<'_>,
+    ) -> anyhow::Result<()> {
+        let up_argv = super::compose_up_argv(compose_file, project, mode);
+        let rejoin_argv =
+            super::compose_up_argv(compose_file, project, mode.after_task_collision());
         super::with_engine_state_heal(
             project,
-            up,
-            |e| self.cleanup_stale_cni(e),
+            || self.run_bounded_up(&up_argv),
+            || self.run_bounded_up(&rejoin_argv),
+            |targets| self.cleanup_stale_cni(targets),
             |e| self.cleanup_stale_name_store(e, project),
         )
     }
@@ -176,6 +200,13 @@ impl WslRuntime {
         }
         let _ = run_root("chown", &["chown", "-R", &uidgid, &path]);
         let _ = run_root("chmod", &["chmod", "-R", "u+rwX", &path]);
+    }
+
+    fn run_bounded_up(&self, up_argv: &[String]) -> anyhow::Result<()> {
+        let args: Vec<&str> = up_argv.iter().map(String::as_str).collect();
+        self.run_in_distro(&args, false)
+            .map(|_| ())
+            .map_err(super::explain_compose_up_deadline)
     }
 
     /// Sets retry delay and restart ready delay to zero for tests to avoid sleeping.
@@ -412,24 +443,7 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up = || {
-            self.run_in_distro(
-                &[
-                    "nerdctl",
-                    "compose",
-                    "-f",
-                    &compose_file,
-                    "-p",
-                    project,
-                    "up",
-                    "-d",
-                    "--remove-orphans",
-                ],
-                false,
-            )
-            .map(|_| ())
-        };
-        let result = self.up_with_heal(project, up);
+        let result = self.up_with_heal(project, &compose_file, super::UpMode::Diverged);
         self.ensure_claude_home_writable(project);
         result
     }
@@ -556,8 +570,7 @@ impl ContainerRuntime for WslRuntime {
 
     fn is_available(&self) -> bool {
         let distro = self.distro();
-        self.runner
-            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
+        self.list_distributions()
             .map(|raw| {
                 let output = decode_wsl_output(&raw);
                 output
@@ -628,25 +641,7 @@ impl ContainerRuntime for WslRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up = || {
-            self.run_in_distro(
-                &[
-                    "nerdctl",
-                    "compose",
-                    "-f",
-                    &compose_file,
-                    "-p",
-                    project,
-                    "up",
-                    "-d",
-                    "--force-recreate",
-                    "--remove-orphans",
-                ],
-                false,
-            )
-            .map(|_| ())
-        };
-        let result = self.up_with_heal(project, up);
+        let result = self.up_with_heal(project, &compose_file, super::UpMode::All);
         self.ensure_claude_home_writable(project);
         result
     }
@@ -655,25 +650,7 @@ impl ContainerRuntime for WslRuntime {
         super::validate_builtin_service_name(service)?;
         let compose_file = wsl_compose_file_path(project)?;
         self.ensure_claude_home_writable(project);
-        let up = || {
-            self.run_in_distro(
-                &[
-                    "nerdctl",
-                    "compose",
-                    "-f",
-                    &compose_file,
-                    "-p",
-                    project,
-                    "up",
-                    "-d",
-                    "--force-recreate",
-                    service,
-                ],
-                false,
-            )
-            .map(|_| ())
-        };
-        let result = self.up_with_heal(project, up);
+        let result = self.up_with_heal(project, &compose_file, super::UpMode::Service(service));
         self.ensure_claude_home_writable(project);
         result
     }
@@ -700,11 +677,11 @@ impl ContainerRuntime for WslRuntime {
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
         let distro = self.distro();
-        let result = self.runner.run(
+        super::image_inspect_verdict(self.runner.run_bounded(
             "wsl.exe",
             &["-d", distro, "--", "nerdctl", "image", "inspect", tag],
-        );
-        Ok(result.is_ok())
+            consts::CONTAINER_EXEC_PROBE_TIMEOUT,
+        ))
     }
 
     fn system_prune(&self) -> anyhow::Result<()> {
@@ -820,9 +797,12 @@ impl ContainerRuntime for WslRuntime {
         use std::time::Duration;
         let distro = self.distro();
 
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let wsl = format!("{system_root}\\System32\\wsl.exe");
-        let wsl = wsl.as_str();
+        #[cfg(target_os = "windows")]
+        let wsl_path = crate::binary::system32_dir().join("wsl.exe");
+        #[cfg(not(target_os = "windows"))]
+        let wsl_path = std::path::PathBuf::from("wsl.exe");
+        let wsl = wsl_path.to_string_lossy();
+        let wsl = wsl.as_ref();
 
         if let Err(e) =
             self.runner
@@ -863,19 +843,23 @@ impl WslRuntime {
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
         let violations = crate::os_prereqs::check_os_prereqs();
         if let Some(v) = violations.first() {
+            if v.rule == crate::os_prereqs::PrereqRule::WslUnresponsive {
+                return Err(super::VmStatusUnreadable::error(v.to_string()));
+            }
             anyhow::bail!("{v}");
         }
 
         let distro = self.distro();
-        let raw = self
-            .runner
-            .run_raw_stdout("wsl.exe", &["--list", "--quiet"])
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                    distro
-                )
-            })?;
+        let raw = match self.list_distributions() {
+            Ok(raw) => raw,
+            Err(e) if lists_no_distributions(&e) => Vec::new(),
+            Err(e) => {
+                return Err(super::VmStatusUnreadable::error(format!(
+                    "Cannot list WSL2 distributions to find '{distro}': {e}. If WSL2 is not \
+                     installed, run the Speedwave.app setup wizard."
+                )));
+            }
+        };
 
         let output = decode_wsl_output(&raw);
         let distro_exists = output
@@ -883,10 +867,9 @@ impl WslRuntime {
             .any(|line| line.trim().trim_matches('\0') == distro);
 
         if !distro_exists {
-            anyhow::bail!(
-                "WSL2 distribution '{}' not found. Run Speedwave.app setup wizard to import it.",
-                distro
-            );
+            return Err(super::VmNotFound::error(format!(
+                "WSL2 distribution '{distro}' not found. Run Speedwave.app setup wizard to import it."
+            )));
         }
 
         crate::provision::ensure_windows_invariants();
@@ -1011,8 +994,58 @@ mod tests {
         assert!(err.contains("setup wizard"));
     }
 
-    /// On Windows, `os_prereqs::check_os_prereqs()` catches missing WSL. On macOS/Linux
-    /// (dev/CI), prereqs return empty so `ensure_ready()` proceeds to the distro list check.
+    #[test]
+    fn ensure_ready_bails_on_an_os_prereq_violation_before_touching_the_distro() {
+        let _pin =
+            crate::os_prereqs::PinnedPrereqs::pin(vec![crate::os_prereqs::PrereqViolation {
+                rule: crate::os_prereqs::PrereqRule::WslNotAvailable,
+                message: "wsl.exe --status reports that WSL2 cannot start on this machine"
+                    .to_string(),
+                remediation: consts::WSL_NOT_AVAILABLE_MSG,
+            }]);
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err().to_string();
+        assert!(
+            err.contains("cannot start") && err.contains("dism.exe"),
+            "a prereq violation must surface with its remediation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_reads_an_unresponsive_wsl_as_an_unreadable_state() {
+        let _pin =
+            crate::os_prereqs::PinnedPrereqs::pin(vec![crate::os_prereqs::PrereqViolation {
+                rule: crate::os_prereqs::PrereqRule::WslUnresponsive,
+                message: "wsl.exe --status did not answer: child process timed out after 10s"
+                    .to_string(),
+                remediation: consts::WSL_UNRESPONSIVE_MSG,
+            }]);
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Speedwave\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a wedged WSL must be retried like an unreadable VM, not reported as missing, got: {err}"
+        );
+        assert!(err.to_string().contains("did not answer"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_ready_proceeds_when_no_prereq_violation_is_pinned() {
+        let rt = WslRuntime::with_runner(Box::new(
+            MockRunner::new().with_response("wsl.exe --list --quiet", "Ubuntu\n"),
+        ));
+        let err = rt.ensure_ready().unwrap_err().to_string();
+        assert!(
+            err.contains("setup wizard"),
+            "no violation must fall through to the distro list check, got: {err}"
+        );
+    }
+
     #[test]
     fn test_ensure_ready_wsl_not_installed() {
         let runner = MockRunner::new().with_error("wsl.exe --list --quiet", "not found");
@@ -1031,6 +1064,102 @@ mod tests {
                 "error should mention distro on non-Windows, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn ensure_ready_reports_a_missing_distro_when_wsl_lists_no_distributions() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Windows Subsystem for Linux has no installed distributions.\n\
+             Error code: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "wsl.exe answered that no distribution exists, got: {err}"
+        );
+        assert!(err.downcast_ref::<crate::runtime::VmNotFound>().is_some());
+    }
+
+    #[test]
+    fn ensure_ready_reads_the_no_distributions_code_in_any_display_language() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Podsystem Windows dla systemu Linux nie ma zainstalowanych \
+             dystrybucji.\nKod błędu: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "the error code, not the localized sentence, decides, got: {err}"
+        );
+    }
+
+    #[test]
+    fn every_distro_list_read_is_bounded_by_the_vm_list_timeout() {
+        struct ListRecorder {
+            bounded: std::sync::Arc<std::sync::Mutex<Vec<(String, std::time::Duration)>>>,
+        }
+        impl CommandRunner for ListRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                if key.contains("--list") {
+                    anyhow::bail!("an unbounded read ran: {key}");
+                }
+                Ok(String::new())
+            }
+            fn run_raw_stdout_bounded(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<Vec<u8>> {
+                let key = format!("{} {}", cmd, args.join(" "));
+                self.bounded.lock().unwrap().push((key, timeout));
+                Ok(format!("{}\n", consts::wsl_distro_name()).into_bytes())
+            }
+        }
+        let bounded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = WslRuntime::with_runner(Box::new(ListRecorder {
+            bounded: bounded.clone(),
+        }));
+        assert!(rt.is_available());
+        rt.ensure_ready().unwrap();
+        let reads = bounded.lock().unwrap().clone();
+        assert_eq!(
+            reads,
+            vec![
+                (
+                    "wsl.exe --list --quiet".to_string(),
+                    consts::VM_LIST_TIMEOUT
+                ),
+                (
+                    "wsl.exe --list --quiet".to_string(),
+                    consts::VM_LIST_TIMEOUT
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_ready_reports_an_unreadable_distro_list_instead_of_a_missing_distro() {
+        let runner = MockRunner::new().with_error(
+            "wsl.exe --list --quiet",
+            "wsl.exe failed: Catastrophic failure\nError code: Wsl/Service/E_UNEXPECTED",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.ensure_ready().unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a failed distro list must stay distinguishable from a missing distro, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Wsl/Service/E_UNEXPECTED"),
+            "the wsl.exe failure must reach the caller, got: {err}"
+        );
     }
 
     #[test]
@@ -1309,29 +1438,94 @@ mod tests {
         assert!(rt.compose_down("wsl-cleanup-test").is_ok());
     }
 
-    #[test]
-    fn test_compose_up_recreate_includes_force_recreate() {
-        let compose_file = wsl_compose_file_path("acme").unwrap();
-        let remote = crate::runtime::shell_quote_argv(&[
+    fn bounded_up_key(project: &str, flags: &[&str]) -> String {
+        let compose_file = wsl_compose_file_path(project).unwrap();
+        let limit = crate::runtime::COMPOSE_UP_TIMEOUT_SECS.to_string();
+        let mut argv = vec![
+            "timeout",
+            "--signal=KILL",
+            "--verbose",
+            limit.as_str(),
             "nerdctl",
             "compose",
             "-f",
             &compose_file,
             "-p",
-            "acme",
+            project,
             "up",
             "-d",
-            "--force-recreate",
-            "--remove-orphans",
-        ]);
-        let expected_key = format!(
+        ];
+        argv.extend_from_slice(flags);
+        format!(
             "wsl.exe -d {} -- sh -c {}",
             consts::wsl_distro_name(),
-            remote
-        );
-        let runner = MockRunner::new().with_response(&expected_key, "");
+            crate::runtime::shell_quote_argv(&argv)
+        )
+    }
+
+    #[test]
+    fn every_compose_up_runs_nerdctl_under_the_up_deadline() {
+        let runner = MockRunner::new()
+            .with_response(&bounded_up_key("acme", &["--remove-orphans"]), "")
+            .with_response(
+                &bounded_up_key("acme", &["--force-recreate", "--remove-orphans"]),
+                "",
+            )
+            .with_response(&bounded_up_key("acme", &["--force-recreate", "proxy"]), "");
         let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.compose_up("acme").is_ok());
         assert!(rt.compose_up_recreate("acme").is_ok());
+        assert!(rt.compose_up_service("acme", "proxy").is_ok());
+    }
+
+    #[test]
+    fn compose_up_names_the_deadline_when_timeout_stops_nerdctl() {
+        let runner = MockRunner::new().with_error(
+            &bounded_up_key("acme", &["--remove-orphans"]),
+            "wsl.exe failed: timeout: sending signal KILL to command \u{2018}nerdctl\u{2019}",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let msg = rt
+            .compose_up("acme")
+            .expect_err("a stopped up must fail")
+            .to_string();
+        assert!(
+            msg.contains(&format!(
+                "did not finish within {}s",
+                crate::runtime::COMPOSE_UP_TIMEOUT_SECS
+            )),
+            "got: {msg}"
+        );
+        assert!(msg.contains("sending signal KILL"), "raw cause kept: {msg}");
+    }
+
+    #[test]
+    fn compose_up_service_rejoins_a_raced_proxy_without_recreating_it_again() {
+        let runner = MockRunner::new()
+            .with_error(
+                &bounded_up_key("acme", &["--force-recreate", "proxy"]),
+                "wsl.exe failed: level=fatal msg=\"1 errors:\\ntask \
+                 1d5a4194220fe7d0373e802431ebc3fb00fcd05d62508bfbeeca837658cf00bd: \
+                 already exists\"",
+            )
+            .with_response(&bounded_up_key("acme", &["proxy"]), "");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        rt.compose_up_service("acme", "proxy")
+            .expect("the rejoin finds the proxy the restart monitor started");
+    }
+
+    #[test]
+    fn compose_up_does_not_blame_the_deadline_for_a_forwarded_term() {
+        let raw = "wsl.exe failed: timeout: sending signal TERM to command \u{2018}nerdctl\u{2019}";
+        let runner =
+            MockRunner::new().with_error(&bounded_up_key("acme", &["--remove-orphans"]), raw);
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let msg = rt
+            .compose_up("acme")
+            .expect_err("an interrupted up must fail")
+            .to_string();
+        assert!(!msg.contains("did not finish within"), "got: {msg}");
+        assert!(msg.contains("sending signal TERM"), "raw cause kept: {msg}");
     }
 
     #[test]
@@ -1942,14 +2136,45 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("prune failed"));
     }
 
+    struct ArcRunner(std::sync::Arc<crate::runtime::test_support::SequentialMockRunner>);
+
+    impl CommandRunner for ArcRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            self.0.run(cmd, args)
+        }
+        fn run_with_timeout(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<()> {
+            self.0.run_with_timeout(cmd, args, timeout)
+        }
+    }
+
+    fn remove_images_commands(
+        tags: &[String],
+        force: bool,
+        rmi: anyhow::Result<String>,
+    ) -> Vec<String> {
+        let runner = std::sync::Arc::new(crate::runtime::test_support::SequentialMockRunner::new(
+            vec![rmi],
+        ));
+        let rt = WslRuntime::with_runner(Box::new(ArcRunner(runner.clone())));
+        assert!(
+            rt.remove_images(tags, force).is_ok(),
+            "remove_images only warns on a failed rmi"
+        );
+        let calls = runner.calls.lock().unwrap();
+        calls
+            .iter()
+            .map(|(cmd, args, _)| format!("{cmd} {}", args.join(" ")))
+            .collect()
+    }
+
     #[test]
     fn test_remove_images_empty_tags_is_noop() {
-        let runner = MockRunner::new();
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(
-            rt.remove_images(&[], false).is_ok(),
-            "empty tags should return Ok without calling runner"
-        );
+        assert!(remove_images_commands(&[], false, Ok(String::new())).is_empty());
     }
 
     #[test]
@@ -1958,37 +2183,110 @@ mod tests {
             "speedwave-claude:abc123".to_string(),
             "speedwave-mcp-hub:abc123".to_string(),
         ];
-        let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
-            "",
+        assert_eq!(
+            remove_images_commands(&tags, false, Ok(String::new())),
+            vec![format!(
+                "wsl.exe -d {} -- nerdctl rmi speedwave-claude:abc123 speedwave-mcp-hub:abc123",
+                consts::wsl_distro_name()
+            )]
         );
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, false).is_ok());
     }
 
     #[test]
     fn test_remove_images_error_is_warn_only() {
         let tags = vec!["speedwave-claude:abc123".to_string()];
-        let runner = MockRunner::new().with_error(
-            "wsl.exe -d Speedwave -- nerdctl rmi speedwave-claude:abc123",
-            "no such image",
-        );
-        let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(
-            rt.remove_images(&tags, false).is_ok(),
-            "rmi failure should not propagate"
+        assert_eq!(
+            remove_images_commands(&tags, false, Err(anyhow::anyhow!("no such image"))),
+            vec![format!(
+                "wsl.exe -d {} -- nerdctl rmi speedwave-claude:abc123",
+                consts::wsl_distro_name()
+            )],
+            "the rmi must run even though its failure is only a warning"
         );
     }
 
     #[test]
     fn test_remove_images_force_passes_force_flag() {
         let tags = vec!["speedwave-mcp-example:1.0.0".to_string()];
-        let runner = MockRunner::new().with_response(
-            "wsl.exe -d Speedwave -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
-            "",
+        assert_eq!(
+            remove_images_commands(&tags, true, Ok(String::new())),
+            vec![format!(
+                "wsl.exe -d {} -- nerdctl rmi --force speedwave-mcp-example:1.0.0",
+                consts::wsl_distro_name()
+            )]
+        );
+    }
+
+    fn image_inspect_key() -> String {
+        format!(
+            "wsl.exe -d {} -- nerdctl image inspect speedwave-claude:abc123",
+            consts::wsl_distro_name()
+        )
+    }
+
+    #[test]
+    fn image_exists_is_true_for_a_tag_nerdctl_inspects() {
+        let runner = MockRunner::new().with_response(&image_inspect_key(), "[{}]");
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_is_false_when_nerdctl_answers_no_such_image() {
+        let runner = MockRunner::new().with_error(
+            &image_inspect_key(),
+            "wsl.exe failed: time=\"2026-09-23T12:15:48+02:00\" level=fatal \
+             msg=\"1 errors:\\nno such image: speedwave-claude:abc123\"",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
-        assert!(rt.remove_images(&tags, true).is_ok());
+        assert!(!rt.image_exists("speedwave-claude:abc123").unwrap());
+    }
+
+    #[test]
+    fn image_exists_bounds_the_probe_by_the_exec_probe_timeout() {
+        struct BoundedProbeRecorder {
+            timeouts: std::sync::Arc<std::sync::Mutex<Vec<std::time::Duration>>>,
+        }
+        impl CommandRunner for BoundedProbeRecorder {
+            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+                anyhow::bail!(
+                    "the image probe must go through run_bounded, got run: {cmd} {}",
+                    args.join(" ")
+                )
+            }
+            fn run_bounded(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                timeout: std::time::Duration,
+            ) -> anyhow::Result<String> {
+                self.timeouts.lock().unwrap().push(timeout);
+                Ok("[{}]".to_string())
+            }
+        }
+        let timeouts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = WslRuntime::with_runner(Box::new(BoundedProbeRecorder {
+            timeouts: timeouts.clone(),
+        }));
+        assert!(rt.image_exists("speedwave-claude:abc123").unwrap());
+        assert_eq!(
+            *timeouts.lock().unwrap(),
+            vec![consts::CONTAINER_EXEC_PROBE_TIMEOUT]
+        );
+    }
+
+    #[test]
+    fn image_exists_surfaces_a_wsl_transport_failure_instead_of_an_absent_image() {
+        let runner = MockRunner::new().with_error(
+            &image_inspect_key(),
+            "wsl.exe failed: Catastrophic failure\nError code: Wsl/Service/E_UNEXPECTED",
+        );
+        let rt = WslRuntime::with_runner(Box::new(runner));
+        let err = rt.image_exists("speedwave-claude:abc123").unwrap_err();
+        assert!(
+            err.to_string().contains("Wsl/Service/E_UNEXPECTED"),
+            "the engine error must reach the caller, got: {err}"
+        );
     }
 
     #[test]
@@ -2494,22 +2792,6 @@ mod tests {
         use super::*;
         use crate::runtime::test_support::SequentialMockRunner;
         use std::sync::Arc;
-        use std::time::Duration;
-
-        struct ArcRunner(Arc<SequentialMockRunner>);
-        impl crate::runtime::CommandRunner for ArcRunner {
-            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-                self.0.run(cmd, args)
-            }
-            fn run_with_timeout(
-                &self,
-                cmd: &str,
-                args: &[&str],
-                timeout: Duration,
-            ) -> anyhow::Result<()> {
-                self.0.run_with_timeout(cmd, args, timeout)
-            }
-        }
 
         /// Engine-side claude-home path exactly as the runtime derives it.
         fn engine_home(project: &str) -> String {
@@ -2685,12 +2967,20 @@ mod tests {
             assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
         }
 
+        fn stale_chain_up_failure(chain: &str) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!(
+                "running [/usr/sbin/iptables -t nat -N {chain} --wait]: iptables: Chain already exists"
+            ))
+        }
+
         #[test]
         fn compose_up_self_heals_stale_cni_and_retries_to_success() {
+            const PROXY_CHAIN: &str = "CNI-d3c42d65590ae0cf2c72261f";
+            const CLAUDE_CHAIN: &str = "CNI-1be9c452999fb96d888571d2";
             let mut responses = owned_pass();
-            responses.push(Err(anyhow::anyhow!(
-                "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
-            )));
+            responses.push(stale_chain_up_failure(PROXY_CHAIN));
+            responses.push(Ok("".into()));
+            responses.push(stale_chain_up_failure(CLAUDE_CHAIN));
             responses.push(Ok("".into()));
             responses.push(Ok("".into()));
             responses.extend(owned_pass());
@@ -2700,21 +2990,38 @@ mod tests {
                 WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
             assert!(
                 rt.compose_up("acme").is_ok(),
-                "stale-CNI up must self-heal and retry to success"
+                "each stale chain a retry uncovers must be healed"
             );
             let calls = mock_clone.calls.lock().unwrap();
             assert_eq!(
                 calls.len(),
-                7,
-                "2 pre + up(fail) + cleanup + up(retry) + 2 post"
+                9,
+                "2 pre + up(fail) + cleanup + up(fail) + cleanup + up + 2 post"
             );
-            assert!(calls[2].1.last().unwrap().contains(" up "), "first up");
-            assert!(
-                calls[3].1.last().unwrap().contains("base64 -d | sh"),
-                "cleanup must run between the failed up and the retry: {:?}",
-                calls[3].1
-            );
-            assert!(calls[4].1.last().unwrap().contains(" up "), "retry up");
+            let last = |i: usize| calls[i].1.last().unwrap().clone();
+            for i in [2, 4, 6] {
+                assert!(last(i).contains(" up "), "up at {i}: {:?}", calls[i].1);
+            }
+            for (i, own, other) in [
+                (3, PROXY_CHAIN, CLAUDE_CHAIN),
+                (5, CLAUDE_CHAIN, PROXY_CHAIN),
+            ] {
+                assert!(
+                    calls[i].1.contains(&"root".to_string()),
+                    "cleanup {i} runs as root between the failed up and its retry: {:?}",
+                    calls[i].1
+                );
+                let argv = shlex::split(&last(i)).unwrap();
+                let script = crate::runtime::test_support::decode_payload(&argv[2]);
+                assert!(
+                    script.contains(&format!("iptables -t nat -X {own}")),
+                    "cleanup {i} flushes the chain its own failure named: {script}"
+                );
+                assert!(
+                    !script.contains(other),
+                    "cleanup {i} leaves the other chain alone: {script}"
+                );
+            }
         }
 
         fn name_store_conflict_msg() -> String {
@@ -2811,21 +3118,6 @@ mod tests {
         use crate::runtime::test_support::SequentialMockRunner;
         use std::sync::Arc;
         use std::time::Duration;
-
-        struct ArcRunner(Arc<SequentialMockRunner>);
-        impl crate::runtime::CommandRunner for ArcRunner {
-            fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-                self.0.run(cmd, args)
-            }
-            fn run_with_timeout(
-                &self,
-                cmd: &str,
-                args: &[&str],
-                timeout: Duration,
-            ) -> anyhow::Result<()> {
-                self.0.run_with_timeout(cmd, args, timeout)
-            }
-        }
 
         #[test]
         fn reset_vm_happy_path() {

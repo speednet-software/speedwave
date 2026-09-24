@@ -4,6 +4,7 @@
 DEPS_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-windows-build-deps.sh"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
 RESOLVER_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/cargo-target-dir.sh"
+MAKEFILE="$BATS_TEST_DIRNAME/../../Makefile"
 
 setup() {
     WORK="$(mktemp -d "${BATS_TEST_TMPDIR}/deps.XXXXXX")"
@@ -111,4 +112,24 @@ run_probe() {
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"too deep"* ]]
+}
+
+wasm_pack_block() {
+    awk '/wasm-pack not found, installing/,/^\tfi; \\$/' "$MAKEFILE"
+}
+
+@test "the wasm-pack block ends at its own closing fi" {
+    [ "$(wasm_pack_block | tail -n 1)" = "$(printf '\tfi; \\')" ]
+}
+
+@test "setup-dev falls back to cargo when the npm wasm-pack install does not yield a binary" {
+    wasm_pack_block | grep -q 'cargo install wasm-pack'
+}
+
+@test "setup-dev verifies wasm-pack is runnable rather than trusting npm's exit code" {
+    wasm_pack_block | grep -q 'npm install -g wasm-pack.*command -v wasm-pack'
+}
+
+@test "a failed wasm-pack install still sets FAIL" {
+    wasm_pack_block | grep -q 'FAIL=1'
 }

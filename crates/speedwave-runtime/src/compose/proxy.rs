@@ -93,7 +93,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
 }
 
 /// [`render_proxy_config_with`] plus the optional `ner` section pointing the proxy at the
-/// live host-side detector (ADR-090).
+/// live host-side detector (ADR-091).
 pub(crate) fn render_proxy_config_full(
     llm: &LlmConfig,
     caller_token: Option<&str>,

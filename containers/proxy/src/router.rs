@@ -61,7 +61,7 @@ pub struct Config {
     pub pii: std::sync::Arc<crate::pii::PiiEngineState>,
     #[serde(skip, default = "resolve_audit_dir")]
     pub audit_dir: Option<PathBuf>,
-    /// Host-side NER detector (ADR-090); present only when the renderer saw a live detector.
+    /// Host-side NER detector (ADR-091); present only when the renderer saw a live detector.
     #[serde(skip)]
     pub ner: Option<std::sync::Arc<crate::ner::NerClient>>,
 }

@@ -17,89 +17,101 @@ const DENYLIST: string[] = [
 /** Validates paths against traversal, absolute paths, null bytes, and URL-encoded attacks. */
 export class PathValidator {
   /**
-   * Validate SharePoint path: rejects traversal, absolute paths, null bytes, URL-encoded input.
+   * Validate SharePoint path: rejects traversal, absolute paths, colons, null bytes, invalid URL
+   * encoding, and URL encoding nested more than five levels deep.
    * @param pathStr - path to validate
    * @returns true if the path is safe, false otherwise
    */
   validatePath(pathStr: string): boolean {
     if (!pathStr || typeof pathStr !== 'string') {
-      console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+      return this.blockPath({
         attemptedPath: pathStr,
         attackType: 'invalid_path_type',
         reason: 'Path is empty or not a string',
       });
-      return false;
     }
 
     const pathsToCheck = [pathStr];
     let current = pathStr;
     const maxIterations = 5;
 
-    for (let i = 0; i < maxIterations; i++) {
+    for (let i = 0; i <= maxIterations; i++) {
       try {
         const decoded = decodeURIComponent(current);
         if (decoded === current) break;
+        if (i === maxIterations) {
+          return this.blockPath({
+            attemptedPath: pathStr,
+            attackType: 'excessive_url_encoding',
+            reason: `Path is URL-encoded more than ${maxIterations} times`,
+          });
+        }
         pathsToCheck.push(decoded);
         current = decoded;
       } catch {
-        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+        return this.blockPath({
           attemptedPath: pathStr,
           attackType: 'invalid_url_encoding',
           reason: 'Path contains invalid URL encoding',
         });
-        return false;
       }
     }
 
     for (const p of pathsToCheck) {
+      const decodedPath = p !== pathStr ? p : undefined;
       if (p.includes('../') || p.includes('..\\')) {
-        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+        return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath: p !== pathStr ? p : undefined,
+          decodedPath,
           attackType: 'path_traversal',
           reason: 'Path contains traversal sequence (../ or ..\\)',
         });
-        return false;
       }
       if (/(^|[/\\])\.\.([/\\]|$)/.test(p)) {
-        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+        return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath: p !== pathStr ? p : undefined,
+          decodedPath,
           attackType: 'path_traversal',
           reason: 'Path contains directory traversal pattern (..)',
         });
-        return false;
       }
       if (p.startsWith('/') || p.startsWith('\\')) {
-        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+        return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath: p !== pathStr ? p : undefined,
+          decodedPath,
           attackType: 'absolute_path',
           reason: 'Absolute paths are not allowed',
         });
-        return false;
       }
-      if (/^[A-Za-z]:/.test(p)) {
-        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+      if (p.includes(':')) {
+        return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath: p !== pathStr ? p : undefined,
-          attackType: 'absolute_path',
-          reason: 'Windows drive-letter paths are not allowed',
+          decodedPath,
+          attackType: 'invalid_character',
+          reason: 'Path contains a colon (drive letter or Graph path syntax)',
         });
-        return false;
       }
       if (p.indexOf('\0') !== -1) {
-        console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, {
+        return this.blockPath({
           attemptedPath: pathStr,
-          decodedPath: p !== pathStr ? p : undefined,
+          decodedPath,
           attackType: 'null_byte_injection',
           reason: 'Path contains null byte character',
         });
-        return false;
       }
     }
 
     return true;
+  }
+
+  private blockPath(details: {
+    attemptedPath: string;
+    decodedPath?: string;
+    attackType: string;
+    reason: string;
+  }): false {
+    console.warn(`${ts()} 🔒 Security: Path validation blocked potential attack:`, details);
+    return false;
   }
 
   /**

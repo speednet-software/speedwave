@@ -1,3 +1,5 @@
+import { RESTART_WAIT_MS } from './shell';
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -27,6 +29,23 @@ export async function openSettings(): Promise<void> {
   await nav.waitForExist({ timeout: 15_000 });
   await nav.click();
   await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
+}
+
+export async function storedProviderModel(providerId: string): Promise<string | null> {
+  return browser.executeAsync((id: string, done: (model: string | null) => void) => {
+    (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string
+          ) => Promise<{ providers?: { id: string; model?: string | null }[] }>;
+        };
+      }
+    ).__TAURI_INTERNALS__
+      .invoke('get_llm_config')
+      .then((config) => done(config.providers?.find((p) => p.id === id)?.model ?? null))
+      .catch(() => done(null));
+  }, providerId);
 }
 
 export async function configureOpenRouter(apiKey: string): Promise<void> {
@@ -106,6 +125,23 @@ export async function pickComposerModel(catalogId: string): Promise<void> {
   });
 }
 
+export async function useCheapOpenRouterModel(): Promise<void> {
+  const model = requireOpenrouterModel();
+  await pickComposerModel(model);
+  const overlay = await $('[data-testid="restart-overlay"]');
+  await overlay.waitForExist({ timeout: 15_000 }).catch(() => undefined);
+  await overlay.waitForExist({
+    timeout: RESTART_WAIT_MS,
+    reverse: true,
+    timeoutMsg: `restart-overlay still visible after ${RESTART_WAIT_MS}ms: the re-render for ${model} never finished`,
+  });
+  await browser.waitUntil(
+    async () =>
+      (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() === model,
+    { timeout: 30_000, timeoutMsg: `composer-model-badge never settled on ${model}` }
+  );
+}
+
 export async function saveProvider(): Promise<void> {
   const saveBtn = await $('[data-testid="settings-llm-save"]');
   await browser.waitUntil(async () => await saveBtn.isEnabled(), {
@@ -154,7 +190,7 @@ export async function sendMessageNoWait(text: string): Promise<void> {
 
   const sendBtn = await $('[data-testid="chat-send"]');
   await browser.waitUntil(async () => await sendBtn.isEnabled(), {
-    timeout: 10_000,
+    timeout: 60_000,
     timeoutMsg: 'chat-send never became enabled',
   });
   await sendBtn.click();
@@ -321,6 +357,10 @@ export async function waitForConversationLoaded(min = 1, timeoutMs = 30_000): Pr
 export async function openHistory(): Promise<void> {
   await (await $('[data-testid="chat-header-history"]')).click();
   await $('[data-testid="conversations-sidebar"]').waitForExist({ timeout: 10_000 });
+  await $('[data-testid="conversations-sidebar-row"]').waitForExist({
+    timeout: 15_000,
+    timeoutMsg: 'the history sidebar listed no conversation',
+  });
 }
 
 export async function resumeNewestConversation(): Promise<void> {

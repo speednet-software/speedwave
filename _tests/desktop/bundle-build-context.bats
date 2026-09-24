@@ -92,6 +92,24 @@ teardown() {
     [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
 }
 
+@test "bundle script lists every file each build-context tree ships, once staging is complete" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    local tree list
+    for tree in containers mcp-servers; do
+        list="$DEST/build-context/$tree/.speedwave-shipped-files"
+        [ -s "$list" ]
+        diff -u \
+            <(cd "$DEST/build-context/$tree" && find . \( -type f -o -type l \) ! -path ./.speedwave-shipped-files |
+                sed 's#^\./##' | LC_ALL=C sort) \
+            "$list"
+    done
+    [ "$(grep -cx 'hub/src/index.ts' "$DEST/build-context/mcp-servers/.speedwave-shipped-files")" -eq 1 ]
+    [ "$(grep -cx '.dockerignore' "$DEST/build-context/containers/.speedwave-shipped-files")" -eq 1 ]
+    [ "$(grep -c 'speedwave-shipped-files' "$DEST/build-context/containers/.speedwave-shipped-files")" -eq 0 ]
+    [ "$(find "$DEST/build-context" -maxdepth 1 -name '.*.speedwave-shipped-files' | wc -l)" -eq 0 ]
+}
+
 @test "bundle script copies Containerfile.claude" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -137,23 +155,40 @@ teardown() {
     fi
 }
 
-@test "bundle script excludes host build outputs from containers/ at copy time (target, dist, node_modules)" {
+@test "bundle script excludes host build outputs from containers/ at copy time, at any depth (target, dist, node_modules)" {
     local copy="$DEST/containers-src"
     stage_tracked_copy "$REAL_CONTAINERS" "$copy"
-    local marker="$copy/.bats-prune-check"
-    mkdir -p "$marker/target" "$marker/dist" "$marker/node_modules"
-    echo x > "$marker/target/blob"
-    echo x > "$marker/dist/blob"
-    echo x > "$marker/node_modules/blob"
-    echo x > "$marker/keep.txt"
-    [ "$(find "$marker" -type f | wc -l)" -eq 4 ]
+    local marker="$copy/.bats-prune-check" base out blob
+    for base in "$marker" "$marker/nested/deeper"; do
+        mkdir -p "$base/src"
+        echo x > "$base/src/keep.txt"
+        for out in target dist node_modules; do
+            blob="$base/$out/sub/blob"
+            mkdir -p "${blob%/*}"
+            echo x > "$blob"
+            chmod 000 "$blob"
+            [ ! -r "$blob" ]
+        done
+    done
+    mkdir -p "$marker/distribution" "$marker/links" "$marker/upper/Target/sub" "$DEST/cargo-cache"
+    echo x > "$marker/upper/Target/sub/blob"
+    chmod 000 "$marker/upper/Target/sub/blob"
+    [ ! -r "$marker/upper/Target/sub/blob" ]
+    echo x > "$marker/distribution/keep.txt"
+    echo x > "$marker/nested/dist"
+    echo x > "$DEST/cargo-cache/blob"
+    ln -s "$DEST/cargo-cache" "$marker/links/target"
+    [ "$(find "$marker" -type f -name blob | wc -l)" -eq 7 ]
+    [ -L "$marker/links/target" ]
 
     BUNDLE_CONTAINERS_DIR="$copy" run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [ -f "$DEST/build-context/containers/.bats-prune-check/keep.txt" ]
-    [ ! -d "$DEST/build-context/containers/.bats-prune-check/target" ]
-    [ ! -d "$DEST/build-context/containers/.bats-prune-check/dist" ]
-    [ ! -d "$DEST/build-context/containers/.bats-prune-check/node_modules" ]
+    local staged="$DEST/build-context/containers/.bats-prune-check"
+    [ -f "$staged/src/keep.txt" ]
+    [ -f "$staged/nested/deeper/src/keep.txt" ]
+    [ -f "$staged/distribution/keep.txt" ]
+    [ -f "$staged/nested/dist" ]
+    [ -z "$(find "$DEST/build-context/containers" \( -type d -o -type l \) \( -iname target -o -iname dist -o -iname node_modules \))" ]
 }
 
 @test "bundle script never enumerates containers/proxy/target: an unreadable transient rustc deps file cannot break the copy" {
@@ -547,10 +582,53 @@ EOF
     done
 }
 
-@test "bundle-build-context.ps1 checks LASTEXITCODE after every npm call" {
+@test "bundle-build-context.ps1 fails the run after every native call that exits non-zero" {
     local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
-    [ "$(grep -cE '^[[:space:]]*npm ' "$ps1")" -gt 0 ]
-    run awk '/^[[:space:]]*npm / { call = $0; if ((getline following) <= 0 || following !~ /\$LASTEXITCODE -ne 0/) print call }' "$ps1"
+    run awk '
+        function command_word(line) {
+            sub(/^[[:space:]]+/, "", line)
+            sub(/^\$[A-Za-z0-9_:]+[[:space:]]*=[[:space:]]*/, "", line)
+            sub(/^&[[:space:]]*/, "", line)
+            split(line, parts, /[[:space:]]+/)
+            return parts[1]
+        }
+        function fails_run(line) { return line ~ /(^|[^A-Za-z])(throw|exit)([^A-Za-z]|$)/ }
+        function close_check(line) {
+            depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+            if (depth > 0) return
+            depth = 0
+            if (!exits) print "check never fails the run: " check
+        }
+        depth > 0 {
+            if (fails_run($0)) exits = 1
+            close_check($0)
+            next
+        }
+        pending != "" {
+            call = pending
+            pending = ""
+            if ($0 !~ /\$LASTEXITCODE -ne 0/) {
+                print "unchecked: " call
+            } else {
+                check = $0
+                exits = fails_run($0)
+                close_check($0)
+                next
+            }
+        }
+        {
+            word = command_word($0)
+            if (word ~ /^[A-Za-z][A-Za-z0-9._]*$/ && tolower(word) !~ /^(if|elseif|else|foreach|for|while|do|until|switch|function|filter|param|begin|process|end|try|catch|finally|trap|return|exit|throw|break|continue|class|enum|using|data|hidden|static|in)$/) {
+                calls++
+                if (word == "npm") npm++
+                pending = $0
+            }
+        }
+        END {
+            if (pending != "") print "unchecked: " pending
+            if (npm == 0) print "vacuous: no npm call parsed"
+        }
+    ' "$ps1"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

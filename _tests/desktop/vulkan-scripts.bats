@@ -179,3 +179,42 @@ budget_rig() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"too deep"* ]]
 }
+
+@test "check-vulkan-path-budget labels the failure as the desktop build dir by default" {
+    local deep="$WORK/d/$(printf 'q%.0s' {1..120})/crate"
+    mkdir -p "$deep"
+    CARGO_TARGET_DIR="$deep/target" run bash "$BUDGET_SCRIPT" "$deep"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"desktop build dir is too deep"* ]]
+}
+
+@test "check-vulkan-path-budget reports the caller's label for another workspace" {
+    local deep="$WORK/d/$(printf 'q%.0s' {1..120})/crate"
+    mkdir -p "$deep"
+    CARGO_TARGET_DIR="$deep/target" run bash "$BUDGET_SCRIPT" "$deep" "root workspace build dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"root workspace build dir is too deep"* ]]
+    [[ "$output" != *"desktop build dir"* ]]
+}
+
+@test "the budget failure names CARGO_TARGET_DIR as the escape" {
+    local deep="$WORK/d/$(printf 'q%.0s' {1..120})/crate"
+    mkdir -p "$deep"
+    CARGO_TARGET_DIR="$deep/target" run bash "$BUDGET_SCRIPT" "$deep" "root workspace build dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"CARGO_TARGET_DIR"* ]]
+}
+
+@test "the budget gate measures the target dir, not the crate dir" {
+    local deep="$WORK/d/$(printf 'q%.0s' {1..120})/crate"
+    mkdir -p "$deep"
+    CARGO_TARGET_DIR="$deep/target" run bash "$BUDGET_SCRIPT" "$deep" "root workspace build dir"
+    [[ "$output" == *"target"* ]]
+}
+
+@test "test-transcription gates the root workspace on the path budget on Windows" {
+    local recipe
+    recipe="$(awk '/^test-transcription:/,/^$/' "$BATS_TEST_DIRNAME/../../Makefile")"
+    echo "$recipe" | grep -q 'check-vulkan-path-budget.sh "$(CURDIR)"'
+    echo "$recipe" | grep -q 'Windows_NT'
+}

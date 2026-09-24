@@ -60,7 +60,7 @@ pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 
 /// Single-file lock of the host-side PII NER detector (Desktop in-process HTTP service);
-/// the proxy renderer reads `{pid, port, authToken}` from it (ADR-090).
+/// the proxy renderer reads `{pid, port, authToken}` from it (ADR-091).
 pub const PII_NER_LOCK_FILE: &str = "pii-ner.lock.json";
 /// Persistent bearer secret of the PII NER detector (0600); stable across restarts so a
 /// rendered `proxy.json` only changes when the port does.
@@ -111,6 +111,7 @@ pub const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str =
 /// Proxy URL with no listener (closed local port): short-lived Claude Code invocations get it as
 /// `https_proxy`/`HTTPS_PROXY` so a startup OAuth refresh cannot leave the container (ADR-052).
 pub const CLAUDE_OFFLINE_HTTPS_PROXY: &str = "http://127.0.0.1:1";
+pub(crate) const CLAUDE_OFFLINE_BASE_URL: &str = CLAUDE_OFFLINE_HTTPS_PROXY;
 
 /// Upper bound for one in-container exec probe (`true`, `claude auth status`): a stalled container
 /// runtime surfaces as an error instead of freezing the caller (measured stalls: ~10 min).
@@ -124,8 +125,8 @@ pub const CONTAINER_PATH: &str = "/home/speedwave/.local/bin:/usr/local/bin:/usr
 /// `extra_hosts` (static + dynamic per-service, ADR-062). See CLAUDE.md SSOT row.
 pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 
-/// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
-/// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
+/// IP of the macOS host as seen from the Lima VZ VM and its nerdctl containers: the gateway of
+/// Lima's user-mode network on eth0 (192.168.5.0/24), static, not DHCP. vzNAT is lima0.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
 
 /// Guest-local gateway IP for the WSL2 mirrored-mode host relay (ADR-080): a `socat`
@@ -289,6 +290,10 @@ pub const WSL_NOT_AVAILABLE_MSG: &str = "Enable required Windows features:\n\n\
        - Check 'Virtual Machine Platform'\n\n\
     Then restart your computer and run Speedwave again.";
 
+/// Remediation for a `wsl.exe --status` that ran but did not answer (`PrereqRule::WslUnresponsive`).
+pub const WSL_UNRESPONSIVE_MSG: &str = "WSL did not respond. Run `wsl --shutdown` in a terminal, \
+     or restart Windows, then try again.";
+
 /// Non-blocking warning when nested virtualization is detected (e.g. WSL2 inside VMware).
 /// Used by `os_prereqs::check_os_warnings()`.
 pub const NESTED_VIRT_WARNING_MSG: &str = "\
@@ -380,7 +385,23 @@ pub const LIMA_VM_STOP_TIMEOUT_SECS: u64 = 30;
 /// in `Stopping` state to finish. Used by `ensure_ready_inner`.
 pub const LIMA_VM_STOP_POLL_DELAY_SECS: u64 = 3;
 
-const _: () = assert!(LIMA_VM_STOP_TIMEOUT_SECS < EXIT_CLEANUP_TIMEOUT_SECS);
+/// Upper bound for one VM-list read by the runtimes (`limactl list`, `wsl.exe --list`); a read
+/// that outlives it is a failed read, which `ensure_ready` reports as `VmStatusUnreadable`.
+pub const VM_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub(crate) const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+const _: () = assert!(
+    VM_LIST_TIMEOUT.as_secs() + LIMA_VM_STOP_TIMEOUT_SECS + 3 * PIPE_DRAIN_GRACE.as_secs()
+        < EXIT_CLEANUP_TIMEOUT_SECS
+);
+
+/// Seconds a readiness check keeps re-running `ensure_ready` after the engine first fails to answer;
+/// twice the VM stop wait, since a Lima VM reports Running until its guest has stopped.
+pub const ENGINE_UNREACHABLE_WINDOW_SECS: u64 = 2 * LIMA_VM_STOP_TIMEOUT_SECS;
+
+/// Delay in seconds between those `ensure_ready` re-runs.
+pub const ENGINE_UNREACHABLE_POLL_DELAY_SECS: u64 = LIMA_VM_STOP_POLL_DELAY_SECS;
 
 /// Physical storage tier per auth field (ADR-060).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1008,10 +1029,12 @@ pub fn mcp_os_log_path() -> std::path::PathBuf {
     data_dir().join(MCP_OS_LOG_FILE)
 }
 
+pub(crate) const CLAUDE_COMPOSE_SERVICE: &str = "claude";
+
 /// Built-in services defined in containers/compose.template.yml.
 /// Used by security checks and image build lists.
 pub const BUILT_IN_SERVICES: &[&str] = &[
-    "claude",
+    CLAUDE_COMPOSE_SERVICE,
     "proxy",
     "mcp-hub",
     "mcp-slack",

@@ -4,7 +4,37 @@ import XCTest
 @testable import calendar_cli
 
 final class CalendarTests: XCTestCase {
+    private let warsaw = TimeZone(identifier: "Europe/Warsaw")!
+    private let newYork = TimeZone(identifier: "America/New_York")!
 
+    func testEventDateBareDayIsLocalMidnightNotUTCMidnight() throws {
+        let inNewYork = try eventDate(from: "2026-06-15", timeZone: newYork)
+        XCTAssertEqual(iso8601String(from: inNewYork, timeZone: newYork), "2026-06-15T00:00:00-04:00")
+        let inWarsaw = try eventDate(from: "2026-06-15", timeZone: warsaw)
+        XCTAssertEqual(iso8601String(from: inWarsaw, timeZone: warsaw), "2026-06-15T00:00:00+02:00")
+    }
+
+    func testEventDateWithoutOffsetIsLocalTime() throws {
+        let inNewYork = try eventDate(from: "2026-06-15T09:30:00", timeZone: newYork)
+        XCTAssertEqual(iso8601String(from: inNewYork, timeZone: newYork), "2026-06-15T09:30:00-04:00")
+        let inWarsaw = try eventDate(from: "2026-06-15T09:30:00", timeZone: warsaw)
+        XCTAssertEqual(iso8601String(from: inWarsaw, timeZone: warsaw), "2026-06-15T09:30:00+02:00")
+    }
+
+    func testEventDateWithOffsetKeepsTheInstantInEveryZone() throws {
+        let utc = try XCTUnwrap(parseISO8601("2026-06-15T07:00:00Z"))
+        XCTAssertEqual(try eventDate(from: "2026-06-15T09:00:00+02:00", timeZone: newYork), utc)
+        XCTAssertEqual(try eventDate(from: "2026-06-15T07:00:00Z", timeZone: warsaw), utc)
+    }
+
+    func testEventDateRejectsInvalidInputWithInvalidDate() {
+        for input in ["tomorrow", "2026-02-30", "2026-6-1", "2026-06-15 09:30:00"] {
+            XCTAssertThrowsError(try eventDate(from: input, timeZone: newYork), input) { error in
+                guard case CLIError.invalidDate(let value) = error else { return XCTFail("unexpected \(error)") }
+                XCTAssertEqual(value, input)
+            }
+        }
+    }
 
     func testCalendarTypeStrings() {
         XCTAssertEqual(calendarTypeString(.local), "local")
@@ -15,37 +45,69 @@ final class CalendarTests: XCTestCase {
     }
 
 
-    func testCreateEventRequiredFields() {
-        let params: [String: Any] = ["summary": "Meeting"]
-        XCTAssertNil(params["start"])
-        XCTAssertNil(params["end"])
+    private func withDefaultTimeZone(_ zone: TimeZone, _ body: () throws -> Void) rethrows {
+        let saved = NSTimeZone.default
+        NSTimeZone.default = zone
+        defer { NSTimeZone.default = saved }
+        try body()
     }
 
-    func testCreateEventAllFields() {
+    func testCreateEventWithoutStartIsAMissingField() {
+        XCTAssertThrowsError(try createEvent(store: EKEventStore(), params: ["summary": "Meeting"])) { error in
+            guard case CLIError.missingField("start") = error else { return XCTFail("unexpected \(error)") }
+        }
+    }
+
+    func testApplyEventFieldsSetsEveryGivenField() throws {
+        let event = EKEvent(eventStore: EKEventStore())
         let params: [String: Any] = [
             "summary": "Team Standup",
-            "start": "2025-03-01T09:00:00Z",
-            "end": "2025-03-01T09:30:00Z",
-            "calendar_id": "Work",
+            "start": "2026-03-02T09:00:00Z",
+            "end": "2026-03-02T09:30:00Z",
             "location": "Room 42",
             "description": "Discuss sprint progress",
             "all_day": false,
         ]
-        XCTAssertEqual(params["summary"] as? String, "Team Standup")
-        XCTAssertEqual(params["calendar_id"] as? String, "Work")
-        XCTAssertEqual(params["description"] as? String, "Discuss sprint progress")
-        XCTAssertNotNil(parseISO8601(params["start"] as! String))
-        XCTAssertNotNil(parseISO8601(params["end"] as! String))
+        try applyEventFields(params, to: event)
+        XCTAssertEqual(event.title, "Team Standup")
+        XCTAssertEqual(event.startDate, parseISO8601("2026-03-02T09:00:00Z"))
+        XCTAssertEqual(event.endDate, parseISO8601("2026-03-02T09:30:00Z"))
+        XCTAssertEqual(event.location, "Room 42")
+        XCTAssertEqual(event.notes, "Discuss sprint progress")
+        XCTAssertFalse(event.isAllDay)
     }
 
-    func testUpdateEventPartialParams() {
-        let params: [String: Any] = [
-            "id": "event-123",
-            "summary": "Updated Title",
+    func testApplyEventFieldsWithOnlySummaryKeepsTheRest() throws {
+        let event = EKEvent(eventStore: EKEventStore())
+        let initial: [String: Any] = [
+            "summary": "Before", "start": "2026-03-02T09:00:00Z", "end": "2026-03-02T09:30:00Z", "location": "Room 42",
         ]
-        XCTAssertNotNil(params["id"])
-        XCTAssertNotNil(params["summary"])
-        XCTAssertNil(params["start"])  
+        try applyEventFields(initial, to: event)
+        try applyEventFields(["id": "evt-1", "summary": "Updated Title"], to: event)
+        XCTAssertEqual(event.title, "Updated Title")
+        XCTAssertEqual(event.startDate, parseISO8601("2026-03-02T09:00:00Z"))
+        XCTAssertEqual(event.endDate, parseISO8601("2026-03-02T09:30:00Z"))
+        XCTAssertEqual(event.location, "Room 42")
+    }
+
+    func testApplyEventFieldsBareDayAllDayEventIsThatSingleDayInEveryZone() throws {
+        for (zone, offset) in [(newYork, "-04:00"), (warsaw, "+02:00")] {
+            try withDefaultTimeZone(zone) {
+                let event = EKEvent(eventStore: EKEventStore())
+                let params: [String: Any] = ["summary": "Offsite", "start": "2026-06-15", "end": "2026-06-16", "all_day": true]
+                try applyEventFields(params, to: event, timeZone: zone)
+                XCTAssertTrue(event.isAllDay)
+                XCTAssertEqual(iso8601String(from: event.startDate, timeZone: zone), "2026-06-15T00:00:00\(offset)", zone.identifier)
+                XCTAssertEqual(iso8601String(from: event.endDate, timeZone: zone), "2026-06-15T23:59:59\(offset)", zone.identifier)
+            }
+        }
+    }
+
+    func testApplyEventFieldsRejectsAnInvalidDate() {
+        let event = EKEvent(eventStore: EKEventStore())
+        XCTAssertThrowsError(try applyEventFields(["end": "2026-02-30"], to: event)) { error in
+            guard case CLIError.invalidDate("2026-02-30") = error else { return XCTFail("unexpected \(error)") }
+        }
     }
 
     func testDeleteEventRequiresId() {

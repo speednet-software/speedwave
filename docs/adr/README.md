@@ -94,9 +94,10 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-085](ADR-085-windows-vulkan-transcription.md)                     | Windows Vulkan backend for whisper transcription: runtime GPU-class probe, bundled loader, pinned SDK                       | Accepted                                                |
 | [ADR-086](ADR-086-windows-code-signing-azure-artifact-signing.md)      | Windows code signing via Azure Artifact Signing: OIDC login, in-build `signCommand`, bundled-resource pass                  | Accepted                                                |
 | [ADR-087](ADR-087-vendored-pocock-skills.md)                           | Vendored Matt Pocock skills as `speedwave-*` core skills; `superpowers` retired from the bundled plugin set                 | Accepted                                                |
-| [ADR-088](ADR-088-chat-slash-commands-and-model-control.md)            | Chat UI Slash-Command Allowlist and Composer Model/Effort Control                                                           | Accepted                                                |
-| [ADR-089](ADR-089-pii-ner-redact-model-in-burn.md)                     | Neural PII detection: Redact model converted at build time and ported to burn (wgpu GPU, CPU fallback)                     | Accepted                                                |
-| [ADR-090](ADR-090-host-side-pii-ner-detector-for-the-proxy.md)         | Host-side PII NER detector served from the Desktop process; proxy seals its spans with the existing engine                 | Accepted                                                |
+| [ADR-088](ADR-088-chat-slash-commands-and-model-control.md)            | Chat UI Slash-Command Allowlist and Composer Model/Effort Control                                                           | Accepted (model sources amended by ADR-089)             |
+| [ADR-089](ADR-089-claude-code-control-channel-as-source-of-truth.md)   | Claude Code's control channel as the source of truth for Anthropic models, context and plan limits                          | Accepted                                                |
+| [ADR-090](ADR-090-pii-ner-redact-model-in-burn.md)                     | Neural PII detection: Redact model converted at build time and ported to burn (wgpu GPU, CPU fallback)                      | Accepted                                                |
+| [ADR-091](ADR-091-host-side-pii-ner-detector-for-the-proxy.md)         | Host-side PII NER detector served from the Desktop process; proxy seals its spans with the existing engine                  | Accepted                                                |
 
 ## Creating a New ADR
 

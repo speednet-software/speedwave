@@ -51,8 +51,7 @@ pub(crate) fn apply_plugins_from_verified(
 
         plugin::validate_manifest(manifest, plugin_dir)?;
 
-        let plugin_key = service_id.unwrap_or(slug);
-        if !integrations.is_plugin_enabled(plugin_key) {
+        if !integrations.is_plugin_enabled(manifest.config_key()) {
             continue;
         }
 

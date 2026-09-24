@@ -52,7 +52,6 @@ provision:
   - mode: boot
     script: |
       #!/bin/sh
-      # Make eth0 (vzNAT) the preferred default route, not lima0 (usernet).
       set -eu
       mkdir -p /etc/netplan
       cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'
@@ -336,7 +335,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
     let status_str = String::from_utf8_lossy(&info_output.stdout);
 
     if !status_str.trim().eq_ignore_ascii_case("running") {
-        use crate::runtime::CommandRunner as _;
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
             "starting Lima VM '{}' — a one-time download of container tooling \
@@ -344,14 +342,22 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
             consts::lima_vm_name(),
             timeout.as_secs()
         );
-        crate::runtime::RealRunner
-            .run_with_timeout("limactl", &["start", consts::lima_vm_name()], timeout)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "limactl start failed: {e}. {}",
-                    consts::LIMA_START_PROVISION_HINT
-                )
-            })?;
+        let started = crate::runtime::lima::start_vm_unless_torn_down(
+            &crate::runtime::RealRunner,
+            &crate::runtime::lima::VM_START_GATE,
+            consts::lima_vm_name(),
+            timeout,
+            crate::runtime::engine_teardown_started,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "limactl start failed: {e}. {}",
+                consts::LIMA_START_PROVISION_HINT
+            )
+        })?;
+        if !started {
+            return Err(anyhow::Error::new(crate::runtime::EngineTearingDown));
+        }
     }
 
     let mut ready = false;
@@ -442,9 +448,13 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> anyho
 pub fn init_vm_windows() -> anyhow::Result<()> {
     use crate::runtime::decode_wsl_output;
 
-    let violations = crate::os_prereqs::check_os_prereqs();
-    if !violations.is_empty() {
-        attempt_wsl_install()?;
+    match wsl_setup_action(
+        &crate::os_prereqs::check_os_prereqs(),
+        crate::os_prereqs::windows_servicing_state(),
+    ) {
+        WslSetupAction::Proceed => {}
+        WslSetupAction::Install => attempt_wsl_install()?,
+        WslSetupAction::Report(diagnosis) => anyhow::bail!("{diagnosis}"),
     }
 
     if let Err(e) = ensure_wslconfig_vpn_compat() {
@@ -556,11 +566,7 @@ fn heal_wslconfig_dacl(path: &std::path::Path) {
     if !path.exists() {
         return;
     }
-    let icacls = std::path::PathBuf::from(
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows")),
-    )
-    .join("System32")
-    .join("icacls.exe");
+    let icacls = crate::binary::system32_dir().join("icacls.exe");
     match crate::binary::system_command(&icacls.to_string_lossy())
         .args([path.as_os_str(), std::ffi::OsStr::new("/reset")])
         .output()
@@ -711,6 +717,42 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
         .join("ext4.vhdx")
 }
 
+/// Elevated WSL2 install. `-PassThru` plus `exit $p.ExitCode` is load-bearing: without it
+/// PowerShell reports only that the elevated process launched, so a failed install reads as success.
+#[cfg(any(target_os = "windows", test))]
+const WSL_INSTALL_PS_COMMAND: &str = "$p = Start-Process wsl.exe -ArgumentList \
+     '--install','--no-distribution' -Verb RunAs -Wait -PassThru; exit $p.ExitCode";
+
+/// What `init_vm_windows` should do about the OS prerequisite verdict.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WslSetupAction {
+    /// No blocking violation — continue provisioning.
+    Proceed,
+    /// `wsl.exe` is missing or failed outright; the elevated installer can fix it.
+    Install,
+    /// WSL2 is present but cannot start; report the diagnosis instead of reinstalling.
+    Report(String),
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn wsl_setup_action(
+    violations: &[crate::os_prereqs::PrereqViolation],
+    servicing: crate::os_prereqs::ServicingState,
+) -> WslSetupAction {
+    let Some(v) = violations.first() else {
+        return WslSetupAction::Proceed;
+    };
+    if servicing == crate::os_prereqs::ServicingState::TransactionStuck {
+        return WslSetupAction::Report(v.to_string());
+    }
+    match v.rule {
+        crate::os_prereqs::PrereqRule::WslCannotStart
+        | crate::os_prereqs::PrereqRule::WslUnresponsive => WslSetupAction::Report(v.to_string()),
+        crate::os_prereqs::PrereqRule::WslNotAvailable => WslSetupAction::Install,
+    }
+}
+
 /// Maps the elevated-install PowerShell outcome to the bail message for `attempt_wsl_install`,
 /// reporting a spawn/timeout distinctly from a genuine failed/cancelled install.
 #[cfg(any(target_os = "windows", test))]
@@ -741,10 +783,7 @@ fn wsl_install_outcome_message(result: &anyhow::Result<std::process::ExitStatus>
 #[cfg(target_os = "windows")]
 fn attempt_wsl_install() -> anyhow::Result<()> {
     let result = crate::binary::run_powershell(
-        &[
-            "-Command",
-            "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
-        ],
+        &["-Command", WSL_INSTALL_PS_COMMAND],
         std::time::Duration::from_secs(900),
     );
     Err(wsl_install_outcome_message(&result))
@@ -1660,8 +1699,6 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Provision script demotes lima0 (usernet) below eth0 (vzNAT) for VPN
-    /// reach. See lima-vm/lima#2984.
     #[test]
     fn lima_config_includes_vpn_aware_provision_script() {
         let yaml = lima_config();
@@ -1675,7 +1712,7 @@ mod tests {
         );
         assert!(
             yaml.contains("99-speedwave-prefer-vznat.yaml"),
-            "provision must drop in a netplan file that demotes lima0 and promotes eth0 (vzNAT)"
+            "provision must drop in a netplan file that demotes lima0 (vzNAT) and promotes eth0 (usernet)"
         );
         assert!(
             yaml.contains("use-routes: false"),
@@ -1930,6 +1967,30 @@ mod tests {
         assert!(
             body.contains("LIMA_START_PROVISION_HINT"),
             "start failure must carry the download cause + remedy hint"
+        );
+    }
+
+    #[test]
+    fn init_vm_macos_starts_the_vm_through_the_engine_teardown_gate() {
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn init_vm_macos")
+            .expect("init_vm_macos must exist");
+        let tail = &src[start + 1..];
+        let body = &src[start..start + 1 + tail.find("\npub fn ").unwrap_or(tail.len())];
+        let call = body
+            .split("start_vm_unless_torn_down(")
+            .nth(1)
+            .expect("the provisioning start must be one app exit or factory reset can cut short");
+        let args = &call[..call.find(".map_err(").expect("the start error is mapped")];
+        assert!(
+            args.contains("&crate::runtime::lima::VM_START_GATE")
+                && args.contains("crate::runtime::engine_teardown_started"),
+            "the provisioning start must share the process-wide gate and teardown flag, got: {args}"
+        );
+        assert!(
+            !body.contains(".run_with_timeout(\"limactl\", &[\"start\""),
+            "a bare limactl start would outlive the app and boot the VM after exit"
         );
     }
 
@@ -2562,6 +2623,129 @@ mod tests {
             let result = verify_sha256_ps(&path, "0".repeat(64).as_str())
                 .expect("PowerShell reporting a missing file is not a spawn/timeout error");
             assert!(!result);
+        }
+    }
+
+    mod wsl_setup_action_tests {
+        use super::super::{wsl_setup_action, WslSetupAction, WSL_INSTALL_PS_COMMAND};
+        use crate::os_prereqs::{PrereqRule, PrereqViolation, ServicingState};
+
+        fn violation(rule: PrereqRule) -> PrereqViolation {
+            PrereqViolation {
+                rule,
+                message: "diagnosis body".to_string(),
+                remediation: "remediation body",
+            }
+        }
+
+        #[test]
+        fn no_violation_proceeds() {
+            assert_eq!(
+                wsl_setup_action(&[], ServicingState::Clean),
+                WslSetupAction::Proceed
+            );
+        }
+
+        #[test]
+        fn a_stuck_servicing_store_never_proceeds_on_its_own() {
+            assert_eq!(
+                wsl_setup_action(&[], ServicingState::TransactionStuck),
+                WslSetupAction::Proceed,
+                "a healthy WSL must not be blocked by an unrelated servicing flag"
+            );
+        }
+
+        #[test]
+        fn missing_wsl_runs_the_installer() {
+            assert_eq!(
+                wsl_setup_action(
+                    &[violation(PrereqRule::WslNotAvailable)],
+                    ServicingState::Clean
+                ),
+                WslSetupAction::Install
+            );
+        }
+
+        #[test]
+        fn an_unresponsive_wsl_is_reported_instead_of_reinstalled() {
+            match wsl_setup_action(
+                &[violation(PrereqRule::WslUnresponsive)],
+                ServicingState::Clean,
+            ) {
+                WslSetupAction::Report(msg) => assert!(
+                    msg.contains("diagnosis body"),
+                    "the diagnosis must reach the user: {msg}"
+                ),
+                other => panic!(
+                    "WSL that ran but did not answer is installed, so an elevated install \
+                     cannot help, got {other:?}"
+                ),
+            }
+        }
+
+        #[test]
+        fn a_pending_reboot_still_lets_the_installer_run() {
+            assert_eq!(
+                wsl_setup_action(
+                    &[violation(PrereqRule::WslNotAvailable)],
+                    ServicingState::RebootPending
+                ),
+                WslSetupAction::Install,
+                "a queued restart applies staged work, so the install can still land"
+            );
+        }
+
+        #[test]
+        fn a_stuck_transaction_blocks_a_futile_elevated_install() {
+            let action = wsl_setup_action(
+                &[violation(PrereqRule::WslNotAvailable)],
+                ServicingState::TransactionStuck,
+            );
+            match action {
+                WslSetupAction::Report(msg) => assert!(
+                    msg.contains("diagnosis body"),
+                    "the diagnosis must reach the user: {msg}"
+                ),
+                other => panic!(
+                    "a stuck servicing store cannot land a feature install, so prompting for \
+                     UAC is pure waste, got {other:?}"
+                ),
+            }
+        }
+
+        #[test]
+        fn wsl_that_cannot_start_is_reported_not_reinstalled() {
+            let action = wsl_setup_action(
+                &[violation(PrereqRule::WslCannotStart)],
+                ServicingState::Clean,
+            );
+            match action {
+                WslSetupAction::Report(msg) => assert!(
+                    msg.contains("diagnosis body") && msg.contains("remediation body"),
+                    "the diagnosis must reach the user instead of being discarded: {msg}"
+                ),
+                other => panic!("re-running the installer cannot fix this state, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn install_command_propagates_the_child_exit_code() {
+            assert!(
+                WSL_INSTALL_PS_COMMAND.contains("-PassThru")
+                    && WSL_INSTALL_PS_COMMAND.contains("exit $p.ExitCode"),
+                "without -PassThru plus an explicit exit, PowerShell reports only that the \
+                 elevated process launched and a failed install reads as success: \
+                 {WSL_INSTALL_PS_COMMAND}"
+            );
+        }
+
+        #[test]
+        fn install_command_still_targets_wsl_install_no_distribution() {
+            assert!(
+                WSL_INSTALL_PS_COMMAND.contains("'--install','--no-distribution'")
+                    && WSL_INSTALL_PS_COMMAND.contains("-Verb RunAs"),
+                "the elevated install must keep its arguments: {WSL_INSTALL_PS_COMMAND}"
+            );
         }
     }
 

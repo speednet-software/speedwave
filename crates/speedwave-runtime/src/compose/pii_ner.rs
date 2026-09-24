@@ -1,4 +1,4 @@
-//! Host-side PII NER detector wiring (ADR-090): reads the Desktop service lock and renders
+//! Host-side PII NER detector wiring (ADR-091): reads the Desktop service lock and renders
 //! the `ner` section of `proxy.json`, so the proxy can ask the host for entity spans.
 
 use std::path::Path;

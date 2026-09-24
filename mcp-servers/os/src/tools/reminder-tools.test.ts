@@ -483,6 +483,25 @@ describe('reminder-tools', () => {
       }
     });
 
+    it('createReminder and updateReminder examples teach local due dates, never UTC', () => {
+      const localDueDate = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/;
+      const tools = createReminderTools().filter((t) =>
+        ['createReminder', 'updateReminder'].includes(t.tool.name)
+      );
+      const dueDates = tools.flatMap((t) => [
+        ...(t.tool.inputExamples ?? [])
+          .map((e) => e.input.due_date)
+          .filter((d): d is string => typeof d === 'string'),
+        ...[...(t.tool.example ?? '').matchAll(/due_date: "([^"]*)"/g)].map((m) => m[1]),
+      ]);
+
+      expect(dueDates).toContain('2026-01-15T10:00:00');
+      expect(dueDates.length).toBeGreaterThanOrEqual(4);
+      for (const dueDate of dueDates) {
+        expect(dueDate).toMatch(localDueDate);
+      }
+    });
+
     it('all tools have handlers', () => {
       const tools = createReminderTools();
       for (const t of tools) {

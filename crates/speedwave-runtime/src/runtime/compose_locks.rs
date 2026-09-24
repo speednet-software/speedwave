@@ -76,6 +76,11 @@ where
 }
 
 #[cfg(test)]
+pub(crate) fn remove_project_lock_dir_for_test(project: &str) {
+    let _ = std::fs::remove_dir_all(crate::consts::data_dir().join("compose").join(project));
+}
+
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     reason = "test code: panics on failure are the expected fixture behavior"

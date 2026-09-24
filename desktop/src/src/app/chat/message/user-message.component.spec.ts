@@ -134,6 +134,6 @@ describe('UserMessageComponent', () => {
 
     const chip = fixture.nativeElement.querySelector('[data-testid="control-chip"]');
     expect(chip).not.toBeNull();
-    expect(chip?.textContent?.trim()).toBe('model -> claude-sonnet-5');
+    expect(chip?.textContent?.trim()).toBe('model -> sonnet-5');
   });
 });

@@ -1,8 +1,8 @@
-# ADR-090: Host-Side PII NER Detector Serving the Proxy
+# ADR-091: Host-Side PII NER Detector Serving the Proxy
 
 > **Status:** Accepted
 > **Date:** 2026-09-15
-> **Context:** ADR-089 gives Speedwave a neural PII detector in pure Rust. It has to run where a GPU is reachable (the host), while PII tokenization has to stay where the per-project AES-SIV key lives (the proxy container, ADR-073). This ADR records how the two meet without moving the key or widening the container's mounts.
+> **Context:** ADR-090 gives Speedwave a neural PII detector in pure Rust. It has to run where a GPU is reachable (the host), while PII tokenization has to stay where the per-project AES-SIV key lives (the proxy container, ADR-073). This ADR records how the two meet without moving the key or widening the container's mounts.
 
 ## Decision
 

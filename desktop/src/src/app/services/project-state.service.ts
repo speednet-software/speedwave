@@ -50,6 +50,9 @@ export type AuthReadiness = 'no_provider' | 'ready' | 'auth_required';
 /** Claude Code's sign-in verdict (Rust `OauthSignIn`, snake_case wire values). */
 export type OauthSignIn = 'verified' | 'saved_unverified' | 'none';
 
+/** What a `restartContainers` call did, for a caller that depends on the re-rendered compose. */
+export type RestartOutcome = 'restarted' | 'skipped' | 'failed';
+
 /** Backend response from the `get_auth_status` Tauri command. */
 export interface AuthStatusResponse {
   /** Backend-derived discriminant (SSOT: Rust `AuthReadiness::derive`). */
@@ -92,9 +95,11 @@ export class ProjectStateService {
   error = '';
   needsRestart = false;
   restarting = false;
+  restartInFlight: Promise<void> | null = null;
   restartError = '';
   /** Restart requested while status was pre-ready; surfaced once we settle. */
   private pendingRestartOnSettle = false;
+  private restartOwedTo: string | null = null;
 
   /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
@@ -433,12 +438,14 @@ export class ProjectStateService {
     }
     if (this.status() === 'ready' || this.status() === next) return;
     this.status.set(next);
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
   /** Force-sets status to no_provider, skipping the never-downgrade guard. */
   forceUnconfigured(): void {
     this.status.set('no_provider');
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
@@ -477,7 +484,32 @@ export class ProjectStateService {
       this.status.set('ready');
       this.error = '';
     }
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
+  }
+
+  /**
+   * True while `project` is the active project and no switch runs, so work finishing for it still applies.
+   * @param project - the project a late result or a save belongs to
+   */
+  isSettledOn(project: string | null): boolean {
+    return project === this.activeProject() && this.status() !== 'switching';
+  }
+
+  /**
+   * Requests the restart a save of `project` needs, now while the app is settled on it, or once a switch away from it fails back to it.
+   * @param project - the project whose saved settings its running containers do not have yet
+   */
+  requestRestartFor(project: string | null): void {
+    if (this.isSettledOn(project)) {
+      this.requestRestart();
+    } else if (
+      project !== null &&
+      this.status() === 'switching' &&
+      project === this.activeProject()
+    ) {
+      this.restartOwedTo = project;
+    }
   }
 
   /** Marks that pending changes require a container restart. */
@@ -519,15 +551,34 @@ export class ProjectStateService {
     };
   }
 
-  /** Restarts integration containers; backend rebuilds missing worker images. */
-  async restartContainers(): Promise<void> {
-    if (!this.activeProject() || this.restarting) return;
+  /**
+   * Restarts integration containers; backend rebuilds missing worker images.
+   * @returns `skipped` when it never ran (no project, one already in flight, so `restartError` still belongs to an older attempt), else whether it succeeded.
+   */
+  async restartContainers(): Promise<RestartOutcome> {
+    if (!this.activeProject() || this.restarting) return 'skipped';
     const project = this.activeProject();
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
     this.notifyChange();
+    const run = this.runRestart(project, justEnabled);
+    const done = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.restartInFlight = done;
+    try {
+      return await run;
+    } finally {
+      if (this.restartInFlight === done) this.restartInFlight = null;
+    }
+  }
 
+  private async runRestart(
+    project: string | null,
+    justEnabled: string | null
+  ): Promise<RestartOutcome> {
     let restartedOk = false;
     try {
       await this.notifyRestartBegin();
@@ -554,6 +605,7 @@ export class ProjectStateService {
       this.notifySettled();
       this.notifyRestartComplete();
     }
+    return restartedOk ? 'restarted' : 'failed';
   }
 
   /** Dismisses the restart overlay without restarting. */
@@ -599,6 +651,9 @@ export class ProjectStateService {
         this.errorKind = undefined;
         this.failureProvider = undefined;
         this.failureProjectDir = undefined;
+        if (this.needsRestart || this.pendingRestartOnSettle) {
+          this.restartOwedTo = this.activeProject();
+        }
         this.needsRestart = false;
         this.pendingRestartOnSettle = false;
         this.restarting = false;
@@ -609,6 +664,7 @@ export class ProjectStateService {
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
         this.activeProject.set(event.payload.project);
         this.targetProject = null;
+        this.restartOwedTo = null;
         this.error = '';
         void this.resolveSwitchSucceededStatus();
         void this.refreshProjectList();
@@ -617,6 +673,8 @@ export class ProjectStateService {
       await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
         this.activeProject.set(event.payload.project);
         this.targetProject = null;
+        if (this.restartOwedTo === event.payload.project) this.pendingRestartOnSettle = true;
+        this.restartOwedTo = null;
         this.status.set('error');
         this.error = event.payload.error;
         this.errorKind = event.payload.error_kind;
@@ -633,6 +691,7 @@ export class ProjectStateService {
           this.status() === 'starting' ||
           this.status() === 'checking' ||
           this.status() === 'system_check' ||
+          this.status() === 'check_failed' ||
           this.status() === 'loading' ||
           this.status() === 'auth_required'
         ) {

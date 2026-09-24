@@ -9,15 +9,16 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $instDir = if ($InstDir) { $InstDir } else { $env:SPW_INSTDIR }
-if (-not $instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }
+if (-not $instDir) { [Console]::Error.WriteLine('SPW_INSTDIR not set'); exit 2 }
 $dataDir = if ($DataDir) { $DataDir } else { $env:SPW_DATA_DIR }
-if (-not $dataDir) { Write-Error 'SPW_DATA_DIR not set'; exit 2 }
+if (-not $dataDir) { [Console]::Error.WriteLine('SPW_DATA_DIR not set'); exit 2 }
 
-$instDir = $instDir.TrimEnd('\')
-$dataDir = $dataDir.TrimEnd('\')
+$separators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+$dataDir = $dataDir.TrimEnd($separators)
 
-$nodePrefix = $instDir + '\nodejs\'
-$desktopExe = $instDir + '\Speedwave.exe'
+$nodePrefix = [System.IO.Path]::Combine($instDir, 'nodejs') + [System.IO.Path]::DirectorySeparatorChar
+$nodeExe = [System.IO.Path]::Combine($instDir, 'nodejs', 'node.exe')
+$desktopExe = [System.IO.Path]::Combine($instDir, 'speedwave-desktop.exe')
 
 $instance = (Split-Path $dataDir -Leaf) -replace '^\.+', ''
 if ($instance -eq 'speedwave') {
@@ -25,7 +26,7 @@ if ($instance -eq 'speedwave') {
 } else {
   $cliName = 'speedwave-' + ($instance -replace '^speedwave-', '') + '.exe'
 }
-$cliExe = $dataDir + '\bin\' + $cliName
+$cliExe = [System.IO.Path]::Combine($dataDir, 'bin', $cliName)
 
 $includeWorkers = ($Mode -eq 'full')
 
@@ -43,12 +44,12 @@ try {
     Stop-Process -Id $v.ProcessId -Force -ErrorAction SilentlyContinue
   }
 } catch {
-  Write-Error ('sweep enumeration failed: ' + $_)
+  [Console]::Error.WriteLine('sweep enumeration failed: ' + $_)
   exit 3
 }
 
 if ($includeWorkers) {
-  $targets = @($desktopExe, $nodePrefix + 'node.exe', $cliExe)
+  $targets = @($desktopExe, $nodeExe, $cliExe)
 } else {
   $targets = @($cliExe)
 }
@@ -67,5 +68,5 @@ for ($i = 0; $i -lt 20; $i++) {
   if (-not $locked) { Write-Output 'all targets unlocked'; exit 0 }
   Start-Sleep -Milliseconds 1000
 }
-Write-Error 'targets still locked after 20 s'
+[Console]::Error.WriteLine('targets still locked after 20 s')
 exit 4

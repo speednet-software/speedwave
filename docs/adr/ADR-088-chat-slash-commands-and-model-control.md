@@ -266,6 +266,148 @@ so the shape rule stays the single SSOT: `/clear`, an argument-less `/model`
 (the picker) and multi-word arguments remain dropped, previews and unread
 counts still exclude the rebuilt line, and the live path is untouched.
 
+**Amendment (SPEED-657, 2026-09-21: a routed pick with no live session
+re-renders the compose, the only carrier the next spawn reads).** For local
+and OpenRouter providers the picked model reaches Claude Code exclusively as
+container environment burned in at compose render (`ANTHROPIC_MODEL` plus the
+`ANTHROPIC_DEFAULT_*` family, `crates/speedwave-runtime/src/compose/llm.rs`),
+and per the SPEED-544 amendment above the session spawn carries no `--model`
+at all. The config write-through therefore reached nothing already running:
+the idle-respawn branch of `ChatStateService.applyModelSelection` was gated on
+the provider being Anthropic, so a pick made before the first turn (the
+session id exists only once the first stream chunk arrives) persisted to
+`config.json` while the running container kept the previously rendered model,
+and the turn failed against a model the badge no longer showed. Soft-impose
+does not cover this case: it fires on the `system/init` line
+(`chat.rs::soft_impose_step`), which arrives inside the first turn, so its
+repair lands no earlier than the second one - the field-tested first-turn gap
+recorded in the first amendment above (badge `claude-fable-5`, first reply
+`claude-opus-4-8`), which the Anthropic side closed with the `settings.json`
+pin. The routed branch now applies the pick the way Settings
+has applied one since `model` became part of `computeActiveKey`
+(`desktop/src/src/app/settings/llm-provider/llm-provider.component.ts`):
+`ProjectStateService.restartContainers()` (`restart_integration_containers`,
+which re-renders the compose and recreates the containers), followed by the
+same idle respawn. A restart that fails, and one already in flight, both
+surface in the composer with no respawn behind them, so the silent no-op
+cannot return through a second entry point - `restartContainers` reports
+which of the three outcomes it reached, so a restart it never started is not
+read back through the `restartError` of an older one. A failed restart
+additionally raises the standing restart prompt (`requestRestart`), because
+the config write commits first and the badge is read back from it, so the one
+state where a saved model outlives the container it never reached must stay
+visible and one click from being retried. A live session still takes the
+wire `/model` (the proxy routes on the id prefix,
+`containers/proxy/src/router.rs`) and a mid-stream pick still defers its
+override; neither restarts a container.
+
+**Amendment (SPEED-669, 2026-09-24: the pick also stores the model's context
+window).** `set_provider_model` no longer mutates only `providers[].model`: it
+also takes the picked row's discovered window and writes it to the same
+entry's `context_tokens`. A known window is stored; a pick of a different
+model whose window is unknown clears the stored one, since it belonged to the
+previous model; re-picking the same model without a window keeps it. The
+window reaches Claude Code the way the model does, as container environment
+(`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `crates/speedwave-runtime/src/compose/llm.rs`),
+so a pick with no live session applies it through the re-render above, while
+a live-session wire `/model` leaves the running container on the previous
+window until its next render.
+
+**Amendment (SPEED-696, 2026-09-24: a model switch on a live session is a
+`set_model` control request, not a `/model` input).** Speedwave writes two
+switches into a live chat process: the soft-impose above and the composer
+pick of decision 3. Both wrote `/model <id>` to Claude Code's stdin as a user
+input. That had three defects, found on the e2e rig and confirmed with the
+pinned 2.1.267 binary driven against a stub API:
+
+1. **A `/model` written while a turn uses a tool never runs.** Claude Code
+   does not run the queued input as a command.
+   - `desktop/src-tauri/tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson`
+     holds the stdout of a run that wrote it at the first `init` of such a
+     turn; the input itself is not part of the file. No command answer
+     follows, and both `init` lines, the later turn's included, report the
+     old model.
+   - A composer pick deferred to a turn end landed in the same place when the
+     backend had already started a queued message at that turn end
+     (`chat.rs::drain_queued_message`).
+2. **An executed `/model` answers as an input of its own.**
+   - `desktop/src-tauri/tests/fixtures/cc-2.1.267-model-picks.sanitized.ndjson`
+     ends with one typed into an idle session. The answer is an `init`, a
+     `<synthetic>` "Set model to `Haiku 4.5` for this session only" and a
+     `result` with `num_turns: 0`. The confirmation names the model's family,
+     not the id that was written.
+   - The stdout reader emitted that `result` like any turn end. A message the
+     user sent before it arrived had its turn ended by it, and the chat
+     listener (`chat-state.service.ts::setupStreamListener`) then dropped that
+     turn's answer. This failed spec 13 on the macOS rig.
+3. **The soft-impose could switch a user's pick back.** The decision compared
+   the observed model with the configuration read at spawn. Claude Code emits
+   `system/init` for every input it starts, a local command included, so a
+   composer pick made after the spawn was switched back at the next input.
+
+Writing the soft-impose only when a turn ends fixes the first defect but not
+the second: behind a message sent right after Stop, or queued before the
+command, the command still runs as an input the chat does not expect, and a
+later Stop can interrupt it instead of the user's turn.
+
+Both switches are now `set_model`, the control request behind the Agent
+SDK's `Query.setModel()`. The SDK types describe the method as changing "the
+model used for subsequent responses", and the request type says that an
+omitted, null or `default` model "resets to the session default model"[^7].
+
+- **The soft-impose.** On the first `system/init` whose model differs from
+  the configured wire id, the reader sends it once per session
+  (`chat.rs::soft_impose_step`). A rejected or unanswered request is logged,
+  and the session stays on the model from the container environment.
+- **A composer pick on a live session.** It goes through
+  `chat_session_cmd.rs::switch_chat_model`, which sends the request and waits
+  for the answer without holding the session mutex (`chat.rs::ModelSwitch`).
+  Angular adds the `/model` chip once Claude Code confirms
+  (`chat-state.service.ts::switchLiveModel`), and no turn starts in the chat.
+  A pick made while a turn streams or a session starts is still deferred to
+  the turn end or the start's completion. It then applies to whatever turn
+  Claude Code is running, from its next model request. The default row sends
+  `set_model` with `default`: in the capture Claude Code confirms the account
+  default (`claude-opus-5[1m]` in the stub run), and the next `init` reports
+  it.
+- **What Claude Code does with it.** Claude Code handles a control request
+  outside its input queue. The capture
+  `desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`
+  sends it at the first `init` of a tool-using turn:
+  - the answer arrives before the turn's next model response;
+  - the request after the tool result already goes to the new model, and the
+    next `init` reports it;
+  - no `init`, `<synthetic>` line or `result` belongs to the switch;
+  - the only other line is a `user` line whose content is a
+    `<local-command-stdout>` string, and the stream parser makes no chunk of
+    it.
+
+  Nothing is withheld from the chat, and the switch does not interact with
+  Stop or with queued messages.
+
+- **The transcript.** Claude Code records the switch the way it records an
+  executed `/model`: a caveat, `<command-name>/model</command-name>` with its
+  arguments, and the confirmation. These entries follow the turn that was
+  running. A conversation rebuilt from history therefore shows the `/model`
+  chip between those turns
+  (`history.rs::a_set_model_switch_is_rebuilt_as_a_model_chip_between_the_turns`,
+  which uses the captured entries).
+- **Settling.** A pick settles the session's model (`ModelSettled`), as does a
+  `/model` the user types, which still goes to Claude Code as an input. Both
+  settle it under the stdin lock, and the soft-impose checks and settles it
+  under the same lock before it writes, so a pick written first always wins.
+- **ADR-089 decision 1.** It said proxy-routed providers send no control
+  request. Besides `interrupt` on Stop, they now send this one. `set_model`
+  changes the session and asks Claude Code for no data, so the reason routed
+  sessions send no query does not apply (see the ADR-089 amendment of the
+  same date).
+
+The first-turn gap recorded above now covers only the model requests Claude
+Code sends before it applies the switch: at least the first request of the
+first turn. The three captures are pinned to the Claude Code version.
+`the_soft_impose_captures_are_of_the_pinned_claude_code` fails on a bump until
+they are re-captured.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
@@ -361,6 +503,138 @@ switched to a hold model before its first effort pick. Both idle-respawn paths
 (model and effort) claim `initialized` like `startNewConversation`, so a remounted
 chat view cannot start a second session over the respawned one.
 
+**Amendment (SPEED-664, 2026-09-22: the bundled settings template stops seeding
+`effortLevel`, and the migration removes the key whether or not a pin exists).**
+Two defects kept a second effort store alive on disk, and only together do they
+explain the observation that opened the ticket: on a dev instance every project's
+`settings.json` carried `effortLevel` `high` regardless of its pin, one of them
+next to an `effort_pin` of `low`.
+
+The first is the bundled template `containers/claude-resources/settings.json`,
+which has shipped `"effortLevel": "high"` since the statusline change (#430),
+predating this decision's SPEED-538 amendment. `containers/entrypoint.sh` merges
+the template under the container's own file (`Object.assign({}, tmpl, cur)`) and
+rewrites it whenever a template key is missing from it, pinned by the entrypoint
+test "merges new template keys into existing settings.json without overwriting
+user values". So the template re-seeded the key at every container start, and
+Claude Code read `high` for any project without a pin, silently overriding the
+SPEED-538 rule that an unpinned project gets the model's own default effort
+(`high` everywhere except Opus 4.7's `xhigh`, `defaults::ANTHROPIC_MODELS`). The
+template no longer carries the key; `tests/claude_settings_template_guard.rs`
+fails if it, or a `model` default, comes back.
+
+The second is the takeover gate: `pin_cmd::ensure_effort_pin_migrated_in`
+returned before `take_legacy_effort_pin` whenever the project already had an
+`effort_pin`, so the removal half could never run for exactly the projects where
+the two values could disagree. No Desktop chat session reads the stale key,
+because every Desktop spawn passes `--effort <pin>`, but a spawn path that drops
+the flag would apply the file's level under a composer showing the pin, and one
+such path exists today: the CLI, below. The migration now strips the key on every
+run for a registered project and adopts its value only when the project has no
+pin; with a pin the value is discarded, never reconciled, because the composer
+writes the pin before the wire `/effort`
+(`ChatStateService.applyEffortSelection`) and so the pin is never older than a
+value Speedwave caused. Unregistered projects and an unreadable file are left
+alone as before.
+
+**Both halves are Desktop-only, and the CLI is out of scope of this decision.**
+`--effort <pin>` is pushed in `chat.rs::prepare_args` and the migration lives in
+`desktop/src-tauri/src/pin_cmd.rs`; `crates/speedwave-cli` depends only on
+`speedwave-runtime`, so `crates/speedwave-cli/src/main.rs` spawns Claude Code with
+`config::resolve_project_config`'s flags alone, which never carry `--effort`. A
+CLI session therefore gets Claude Code's own default effort, or whatever
+`effortLevel` the user set interactively in a CLI session, which Claude Code
+persists to the settings file[^1] and honours on the next one. That is coherent
+for a CLI-only project, which has no composer and no pin the user could have set.
+It is incoherent for a project used from both surfaces: the CLI ignores the
+Desktop pin, and a level set from the CLI sits in the file until Desktop next
+opens that project, which then adopts it when there is no pin or discards it when
+there is. Carrying the pin into the CLI spawn means lifting both halves into
+`speedwave-runtime`; it is not done here and is tracked separately.
+
+Three residuals inside Desktop. An `effortLevel` written while a session runs
+survives until the next spawn or `get_effort_pin` of that project. On an existing
+install the template's `high` is still in the file at upgrade time, so the first
+migration run for a project that has no pin adopts it as one: that preserves the
+level the user experiences today, at the cost of recording a template default as
+an explicit pick and of holding Opus 4.7 at `high` instead of its `xhigh`
+default.
+
+The third is the write itself. `take_legacy_effort_pin` is a read-modify-write of
+the whole file behind Speedwave's `.settings.json.lock`, which Claude Code does
+not take, so a Claude Code write landing between the read and the rename is lost,
+and not only for `effortLevel`. This is the hazard `set_model_pin`,
+`clear_model_pin` and `normalize_model_pin` already carry on the same file; the
+migration widens it only as far as its writes go, and those are bounded: the
+function returns before writing when the key is absent, so once the template stops
+seeding it and one pass has stripped it, every later call is a locked read.
+
+**Amendment (SPEED-650, 2026-09-22: a pick in a process that holds its launch
+effort is deferred to the next session, with an explicit restart).** This closes
+the gap the 2026-09-15 amendment accepted, the second of the two outcomes the
+ticket allowed. Each spawn records whether `prepare_args` passed `--effort`
+(`desktop/src-tauri/src/chat.rs`, `PreparedSpawn::with_effort`, stored on the
+`ChatSession`), and `ChatSession::takes_wire_effort` is true only for a live
+process that launched with it.
+`desktop/src-tauri/src/chat_session_cmd.rs::get_chat_takes_wire_effort` takes the
+start lock (`START_SERIALIZE`) and then the session lock, so a start through
+`start_session_inner`, including the window where it has swapped in an empty
+session and stops the old process, is waited out and never read as a hold. A retry
+(`retry_cmd.rs`) does not take the start lock, but it streams, so the frontend
+queues a pick until it ends. Before wiring a composer pick into a live conversation,
+`ChatStateService.applyEffortToConversation`
+(`desktop/src/src/app/services/chat-state.service.ts`) asks. A process that takes
+the wire gets the wire `/effort`, as before. For any other process, and for a
+failed check, the pin is saved and the chat shows "Effort <Level> applies from the
+next session" with a Restart now action (`ChatStateService.restartForDeferredEffort`).
+The action resumes the conversation through `resumeConversation`, so the new
+process launches with `--resume <session>` and `--effort <pin>`, and it names the
+cost: restarting stops the session's background tasks.
+
+Why no automatic respawn. A first version respawned the process in place without
+asking, and two local reviews found that design racy by nature. A retry
+(`retry_cmd.rs`) and a project rebind (`project_cmd::rebind_chat`) replace the
+session without the start lock. A non-terminal `Error` chunk ends the frontend's
+streaming state while Claude Code keeps working on the turn. A restart that fails
+after the process was stopped leaves the next send to open a fresh conversation.
+Above all, it stops what a Claude Code process keeps between turns (background
+Bash tasks, monitors, subagents) whenever the user moves a slider. A restart the
+user asks for keeps that cost visible and reuses the existing resume path.
+
+Timing. A pick is queued and applied at the next turn end while a turn streams or
+a session starts or resumes, and a pick made during a resume is applied as soon as
+the resume completes. Each pick carries a sequence number, so only the latest one
+is wired or shown. A turn end without a session id holds the pick until one
+arrives. A turn that ends in an API error (an `is_error` result) now releases
+pending picks as a `Result` does: the backend marks that `Error` chunk `turn_ended`
+(`chat.rs::StreamChunk::Error`) and the frontend flushes the pending model and
+effort picks on it. Every other `Error` chunk (a system message that can arrive
+mid-turn, a stream that ended) leaves the picks queued.
+
+The condition is the launch flag, not the model. The hold is per model (the 2.1.267
+re-verification above: Opus 4.8 and Fable 5, not Fable 5.1 or Sonnet 5), but a
+model list would drift with every Claude Code bump, and a session can switch
+models on the wire after it spawned; the flag is a fact Speedwave decided itself.
+The cost is one notice the first time an unpinned project changes effort
+mid-conversation, also on a model without the hold. No Speedwave code path clears
+an effort pin (`desktop/src-tauri/src/pin_cmd.rs` only sets one or adopts a legacy
+`effortLevel`), so every later spawn of the project carries `--effort` and the
+notice does not return. Not measured: whether a process launched with `--effort`
+on one model keeps accepting a wire `/effort` after a wire `/model` switch to a
+hold model; the probes above do not cover a model switched to after launch. The
+model-config page[^1] no longer describes the hold at the time of this amendment.
+If a later Claude Code pin drops it, the notice stays truthful (the session keeps
+its level until it restarts) and is merely no longer needed.
+
+Two residuals predate this change and are not fixed by it. The frontend ends its
+streaming state on every `Error` chunk, including a system message that can arrive
+mid-turn, so for the rest of such a turn a pick is wired instead of queued and
+Restart now is enabled. And Restart now inherits the failure mode of every resume:
+when the new process fails to start after the old one was stopped, the next send
+recovers with a fresh `start_chat`, not a resume, under the old history. The notice
+itself is cleared by every spawn the frontend starts (a start, a resume, a retry,
+and the send recovery), since each of those launches with the pin.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the
@@ -445,6 +719,28 @@ once a pin exists it outranks both the organization default and the
 account-type default at every subsequent spawn, exactly as the precedence
 order already stated in this decision predicts.
 
+**Amendment (SPEED-648: the `opus` alias is no longer pinned for Anthropic
+kinds).** `defaults.rs::anthropic_default_models_env` pinned
+`ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5[1m]` next to the SONNET and
+HAIKU pins. That pin is plan-dependent: Claude Code's model configuration
+page lists Opus with 1M context as "Included with subscription" on Max, Team
+and Enterprise, as "Requires usage credits" on Pro, and as "Full access" on
+API and pay-as-you-go, and states that with the `[1m]` suffix "the 1M context
+window applies to all usage of the pinned alias, including the plan-mode Opus
+phase of `opusplan` and subagents whose `model` frontmatter names the
+alias"[^1]. On a Pro account the pin therefore forced every `opus` alias
+resolution onto a window that needs usage credits. A capture of the pinned
+Claude Code 2.1.267 on a Max account
+(`desktop/src-tauri/tests/fixtures/cc-2.1.267-control-responses.sanitized.json`,
+`run_A` with the pins, `run_B` without) shows what the pins change: without
+them `default` still resolves to `claude-opus-5[1m]`, `opus` and `sonnet`
+resolve to the bare 200k ids, and `haiku` resolves to the dated
+`claude-haiku-4-5-20251001`. The OPUS entry is removed; SONNET keeps `[1m]`
+(the same page states that Sonnet 5 needs "no usage credits required on any
+plan"[^1]) and HAIKU keeps the undated catalog id. The non-Anthropic
+routed-alias remap in `compose/llm.rs` is unchanged and still covers all four
+aliases.
+
 ### 8. Auto-default rules for fresh non-Anthropic setups
 
 To keep the "model required for non-Anthropic providers" invariant from
@@ -525,10 +821,12 @@ its outcome; it never skips the gate or silently does nothing.
   the composer picker, but a manually typed `/model <full-legacy-id>` still
   reaches Claude Code unmodified, which errors account-appropriately if the
   id is truly gone.
-- Sonnet 5's introductory API pricing of $2/$10 per million input/output
-  tokens is in effect through August 31, 2026, after which standard pricing
-  of $3/$15 per million tokens takes effect[^4] - a pricing bump is
-  scheduled in the catalog around that date.
+- Sonnet 5 costs $2/$10 per million input/output tokens. That price was
+  announced at launch as introductory pricing through August 31, 2026;
+  Anthropic's pricing page now states that it "is now the standard price"
+  and that the increase to $3/$15 per million tokens scheduled for
+  September 1, 2026 "will not occur"[^4], so the catalog's
+  `SONNET_5_PRICING` needs no change.
 - Whether access to a specific current-generation model name is ever
   plan-exclusive on a claude.ai subscription is **not fully verified** by
   this ADR: Anthropic's feature-availability documentation lists
@@ -541,6 +839,32 @@ its outcome; it never skips the gate or silently does nothing.
   therefore does not pre-filter its catalog by plan; Claude Code's own
   account-aware `/model` is the runtime authority and surfaces an explicit
   error or fallback if a selection is genuinely unavailable to the account.
+
+**Amendment (SPEED-641, ADR-089: `[1m]` handling, plan awareness and the
+legacy rows).** Three statements of this section no longer describe the
+product; they stay above as the record of what was known when this ADR was
+written, and ADR-089 carries the current decision. First, the `[1m]` bullet
+describes the Anthropic API, not a Speedwave session: a capture of the
+pinned Claude Code 2.1.267
+(`desktop/src-tauri/tests/fixtures/cc-2.1.267-control-responses.sanitized.json`)
+shows every bare id, Sonnet 5 and the Fable models included, running with a
+200k window and only `<id>[1m]` running with 1M. Every session routes
+through the per-project proxy, and the model configuration page documents
+that case for Sonnet 5: with `ANTHROPIC_BASE_URL` pointing at an LLM gateway
+"Claude Code can't verify 1M support"[^1] and budgets the window at 200K;
+the capture shows the same for every other model. The catalog no longer
+exposes a `[1m]` variant as a separate picker entry: the composer
+shows one row per model and `defaults.rs::anthropic_wire_model_id` picks the
+bare or the `[1m]` id from the catalog's `one_million_context` attribute and
+the account's plan, and no user-visible string carries `[1m]` or `(1M)`.
+Second, the composer is now plan-aware in two ways: for Anthropic providers
+its rows come from the model list Claude Code reports for the signed-in
+account over the `initialize` control request, with the static catalog as
+the fallback, and the 1M window is chosen by plan as above. Claude Code's
+`/model` stays the runtime authority for a selection the account cannot
+use. Third, the `selectable` field is gone: the legacy entries are appended
+to the composer picker after the rows Claude Code lists, so a past model
+stays selectable without typing its id.
 
 ## Consequences
 
@@ -568,8 +892,10 @@ its outcome; it never skips the gate or silently does nothing.
 
 [^3]: Anthropic API model deprecations page - status table showing `claude-opus-4-6`, `claude-opus-4-7`, and `claude-sonnet-4-6` as Active with no retirement date, and `claude-opus-4-1-20250805` as Deprecated with retirement date August 5, 2026. https://platform.claude.com/docs/en/about-claude/model-deprecations
 
-[^4]: Anthropic API pricing page - Claude Sonnet 5 introductory pricing ($2/$10 per MTok through August 31, 2026) and standard pricing ($3/$15 per MTok) thereafter. https://platform.claude.com/docs/en/about-claude/pricing
+[^4]: Anthropic API pricing page - Claude Sonnet 5 at $2/$10 per MTok, announced as introductory pricing through August 31, 2026 and since confirmed as the standard price; the previously scheduled increase to $3/$15 per MTok on September 1, 2026 will not occur. https://platform.claude.com/docs/en/about-claude/pricing
 
 [^5]: Claude Code settings - the `model` key's "Any file" scope, "Set the key in the tool that generates the file" guidance for a pick that must survive when Claude Code itself cannot persist it, and the account-type default model table ("Max, Team Premium, Enterprise, and Anthropic API: defaults to Opus 5"; "Pro and Team Standard: defaults to Sonnet 5"; "Before v2.1.219, `default` resolved to Opus 4.8"). https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
 
 [^6]: Claude Code settings - "Claude Code reads some keys only once, at session start, so an edit to one of them doesn't reach the running session," naming `model` among them; `/model` in `-p` mode "applies to the current session only and isn't saved as your default." https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
+
+[^7]: `@anthropic-ai/claude-agent-sdk` 0.3.267, the SDK release for Claude Code 2.1.267: `Query.setModel(model?)` "Change the model used for subsequent responses. Only available in streaming input mode", and `SDKControlSetModelRequest` (`subtype: 'set_model'`), whose `model` field reads "Omitted, null, or 'default' resets to the session default model". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts

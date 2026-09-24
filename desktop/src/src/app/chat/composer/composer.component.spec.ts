@@ -261,6 +261,89 @@ describe('ComposerComponent', () => {
     });
   });
 
+  describe('send blocked while a session starts', () => {
+    it('keeps the text and emits nothing on Enter', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue('wait for the session');
+      fixture.detectChanges();
+
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual([]);
+      expect(component.text.value).toBe('wait for the session');
+    });
+
+    it('refuses a submit when a start began after the last render', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(false);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('typed before the start');
+      fixture.detectChanges();
+
+      blocked.set(true);
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual([]);
+      expect(component.text.value).toBe('typed before the start');
+    });
+
+    it('disables the send button but leaves the field editable', () => {
+      fixture.componentRef.setInput('sendBlocked', () => true);
+      component.text.setValue('ready');
+      fixture.detectChanges();
+
+      expect(sendButton().hasAttribute('disabled')).toBe(true);
+      expect(textarea().hasAttribute('disabled')).toBe(false);
+    });
+
+    it('tells the user the session is starting, ahead of the queue hint', () => {
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('starting session...');
+
+      blocked.set(false);
+      fixture.detectChanges();
+      expect(textarea().getAttribute('placeholder')).toBe('queue next message...');
+    });
+
+    it('sends when the block lifted after the last render', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('the start just ended');
+      fixture.detectChanges();
+
+      blocked.set(false);
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual(['the start just ended']);
+    });
+
+    it('sends the kept text once the block lifts', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      const blocked = signal(true);
+      fixture.componentRef.setInput('sendBlocked', blocked);
+      component.text.setValue('now it goes');
+      fixture.detectChanges();
+
+      blocked.set(false);
+      fixture.detectChanges();
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+
+      expect(emitted).toEqual(['now it goes']);
+    });
+  });
+
   describe('slash menu trigger', () => {
     function dispatchInputAt(value: string, caretPos: number): void {
       const ta = textarea();
@@ -293,6 +376,26 @@ describe('ComposerComponent', () => {
       dispatchInputAt('/rev', 4);
       expect(component.slashOpen()).toBe(true);
       expect(component.slashQuery()).toBe('rev');
+    });
+
+    it('runs discovery on open when no commands are cached', () => {
+      const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+      const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
+      projectState.activeProject.set('acme');
+      slash.commands.set([]);
+      slash.source.set('Unavailable');
+      dispatchInputAt('/', 1);
+      expect(slash.refresh).toHaveBeenCalledWith('acme');
+    });
+
+    it('does not re-run discovery on open while commands are cached', () => {
+      const projectState = TestBed.inject(ProjectStateService) as unknown as ProjectStateStub;
+      const slash = TestBed.inject(SlashService) as unknown as SlashServiceStub;
+      projectState.activeProject.set('acme');
+      slash.commands.set([{ name: 'speedwave-tdd' }]);
+      slash.source.set('Init');
+      dispatchInputAt('/', 1);
+      expect(slash.refresh).not.toHaveBeenCalled();
     });
 
     it('opens the slash popover when the slash toolbar button is clicked and inserts `/`', async () => {

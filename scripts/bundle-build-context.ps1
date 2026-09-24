@@ -79,8 +79,9 @@ function Copy-Tree {
     param([string]$src, [string]$destDir)
     New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     foreach ($item in Get-ChildItem -LiteralPath $src -Force) {
+        $isLink = [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        if (($item.PSIsContainer -or $isLink) -and $item.Name -in 'target', 'dist', 'node_modules') { continue }
         if ($item.PSIsContainer) {
-            if ($item.Name -in 'target', 'dist', 'node_modules') { continue }
             Copy-Tree $item.FullName (Join-Path $destDir $item.Name)
         } else {
             Copy-Item -LiteralPath $item.FullName -Destination $destDir
@@ -143,6 +144,16 @@ foreach ($svc in $services) {
             Copy-Item "$svcSrc\$f" "$svcDest\"
         }
     }
+}
+
+foreach ($staged in @("$dest\build-context\containers", "$dest\build-context\mcp-servers")) {
+    $treeDir = (Resolve-Path -LiteralPath $staged).ProviderPath
+    [string[]]$shipped = @(Get-ChildItem -LiteralPath $treeDir -Recurse -Force |
+        Where-Object { -not $_.PSIsContainer } |
+        ForEach-Object { $_.FullName.Substring($treeDir.Length + 1).Replace('\', '/') } |
+        Where-Object { $_ -ne '.speedwave-shipped-files' })
+    [Array]::Sort($shipped, [System.StringComparer]::Ordinal)
+    [System.IO.File]::WriteAllText((Join-Path $treeDir '.speedwave-shipped-files'), (($shipped -join "`n") + "`n"), $utf8NoBom)
 }
 
 

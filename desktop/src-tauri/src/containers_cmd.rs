@@ -3,8 +3,8 @@ use speedwave_runtime::config;
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{
-    check_project, AnthropicModelWire, CustomPolicyDto, LlmConfigResponse, LlmConfigUpdate,
-    PiiRuleInfo, SecurityPolicyResponse, SecurityPolicyTemplateInfo, SecurityPolicyUpdate,
+    check_project, CustomPolicyDto, LlmConfigResponse, LlmConfigUpdate, PiiRuleInfo,
+    SecurityPolicyResponse, SecurityPolicyTemplateInfo, SecurityPolicyUpdate,
     TelemetryConfigResponse, TelemetryConfigUpdate, TelemetryLocks,
 };
 
@@ -106,6 +106,30 @@ impl SwitchResult {
                 .map(|cleanup| speedwave_runtime::log_sanitizer::sanitize(&cleanup)),
         }
     }
+}
+
+pub(crate) async fn finish_switch_task(
+    task: tokio::task::JoinHandle<SwitchResult>,
+    new_project: &str,
+    teardown: impl FnOnce(String) -> Option<String> + Send + 'static,
+) -> SwitchResult {
+    let join_error = match task.await {
+        Ok(result) => return result,
+        Err(join_error) => join_error,
+    };
+    log::error!("project switch task did not finish: {join_error}");
+    let project = new_project.to_string();
+    let cleanup_error = tokio::task::spawn_blocking(move || teardown(project))
+        .await
+        .unwrap_or_else(|je| Some(format!("teardown of '{new_project}' did not finish: {je}")));
+    SwitchResult::failed(
+        format!("Project switch did not finish: {join_error}"),
+        cleanup_error,
+    )
+}
+
+pub(crate) fn teardown_new_project(project: String) -> Option<String> {
+    teardown_only(&project, &speedwave_runtime::runtime::detect_runtime())
 }
 
 pub(crate) fn teardown_only(
@@ -495,7 +519,7 @@ pub async fn add_project(
 
     let prev_clone = previous.clone();
     let new_clone = name.clone();
-    let switch_result = tokio::task::spawn_blocking(move || {
+    let switch_task = tokio::task::spawn_blocking(move || {
         if let Err(e) = ensure_images_ready() {
             return SwitchResult::failed(e, None);
         }
@@ -516,9 +540,8 @@ pub async fn add_project(
                 speedwave_runtime::build::user_facing_engine_error(&e)
             })
         })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    });
+    let switch_result = finish_switch_task(switch_task, &name, teardown_new_project).await;
 
     let pending_teardown = match switch_result {
         SwitchResult::Failed {
@@ -532,7 +555,15 @@ pub async fn add_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
+    let rebind_name = name.clone();
+    let rebind_app = app.clone();
+    let rebind_state = chat_state.inner().clone();
+    let rebind_result = tokio::task::spawn_blocking(move || {
+        crate::rebind_chat(&rebind_name, &rebind_app, &rebind_state)
+    })
+    .await
+    .unwrap_or_else(|je| Err(format!("join error: {je}")));
+    if let Err(e) = rebind_result {
         log::warn!("rebind_chat failed after adding project: {e}");
     }
 
@@ -670,6 +701,12 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("checking whether containers are running for project={project}");
+        if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT) {
+            log::warn!(
+                "container engine check still running after {}s, reading the engine as it is",
+                RECONCILE_WAIT_TIMEOUT.as_secs()
+            );
+        }
         let rt = speedwave_runtime::runtime::detect_runtime();
         if !rt.is_available() {
             log::warn!("runtime not available");
@@ -786,6 +823,7 @@ pub async fn factory_reset(
     oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
+    speedwave_runtime::runtime::begin_engine_teardown();
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -820,7 +858,7 @@ pub async fn factory_reset(
         drop(guard.take());
     }
 
-    let result = tokio::task::spawn_blocking(|| {
+    let wipe = tokio::task::spawn_blocking(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             drain_pending_teardowns();
@@ -830,30 +868,44 @@ pub async fn factory_reset(
             log::warn!("background teardown drain did not finish within 30s, continuing with wipe");
         }
         log::info!("starting factory reset wipe");
-        setup_wizard::factory_reset().map_err(|e| {
-            log::error!("factory reset failed: {e}");
-            e.to_string()
-        })
+        setup_wizard::factory_reset()
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await;
 
-    if let Err(ref e) = result {
-        log::error!("factory reset wipe failed ({e}), restarting to recover");
+    match wipe {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error!("factory reset wipe failed ({e:#}), restarting to recover"),
+        Err(e) => log::error!("factory reset wipe did not finish ({e}), restarting to recover"),
     }
     app.restart();
 }
 
+fn settings_project<'a>(
+    user_config: &'a config::SpeedwaveUserConfig,
+    requested: Option<&'a str>,
+) -> Option<&'a str> {
+    requested.or(user_config.active_project.as_deref())
+}
+
 #[tauri::command]
-pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let mut llm = user_config
-        .active_project_entry()
+pub fn get_llm_config(project: Option<String>) -> Result<LlmConfigResponse, String> {
+    get_llm_config_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+}
+
+fn get_llm_config_in(
+    data_dir: &std::path::Path,
+    project: Option<&str>,
+) -> Result<LlmConfigResponse, String> {
+    let user_config =
+        config::load_user_config_from(&data_dir.join("config.json")).map_err(|e| e.to_string())?;
+    let project = settings_project(&user_config, project);
+    let mut llm = project
+        .and_then(|name| user_config.find_project(name))
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.clone())
         .unwrap_or_default();
-    if let Some(active) = user_config.active_project.as_deref() {
-        llm.sync_has_api_key_from_disk_in(speedwave_runtime::consts::data_dir().as_path(), active);
+    if let Some(name) = project {
+        llm.sync_has_api_key_from_disk_in(data_dir, name);
     }
     let default_base_url = llm
         .provider
@@ -881,7 +933,7 @@ pub struct ActiveProviderSummary {
     pub base_url: Option<String>,
 }
 
-fn active_provider_summary_from(
+pub(crate) fn active_provider_summary_from(
     user_config: &config::SpeedwaveUserConfig,
     project: &str,
 ) -> Result<ActiveProviderSummary, String> {
@@ -921,14 +973,8 @@ pub fn get_openrouter_default_model() -> &'static str {
 }
 
 #[tauri::command]
-pub fn list_anthropic_models() -> Vec<AnthropicModelWire> {
+pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::AnthropicModelInfo] {
     speedwave_runtime::defaults::ANTHROPIC_MODELS
-        .iter()
-        .map(|info| AnthropicModelWire {
-            info: info.clone(),
-            has_1m: info.has_1m(),
-        })
-        .collect()
 }
 
 fn build_telemetry_response(
@@ -1196,11 +1242,17 @@ fn build_security_policy_response(
 }
 
 #[tauri::command]
-pub fn get_security_policy() -> Result<SecurityPolicyResponse, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    let policy = user_config
-        .active_project_entry()
-        .and_then(|p| p.policy.clone());
+pub fn get_security_policy(project: Option<String>) -> Result<SecurityPolicyResponse, String> {
+    get_security_policy_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+}
+
+fn get_security_policy_in(
+    data_dir: &std::path::Path,
+    project: Option<&str>,
+) -> Result<SecurityPolicyResponse, String> {
+    let user_config =
+        config::load_user_config_from(&data_dir.join("config.json")).map_err(|e| e.to_string())?;
+    let policy = stored_security_policy(&user_config, project);
     let managed = speedwave_runtime::managed_config::load_managed_config()
         .map_err(|e| e.to_string())?
         .and_then(|m| m.pii_policy);
@@ -1220,6 +1272,15 @@ pub fn get_security_policy() -> Result<SecurityPolicyResponse, String> {
         policy.as_ref(),
         ner,
     ))
+}
+
+fn stored_security_policy(
+    user_config: &config::SpeedwaveUserConfig,
+    project: Option<&str>,
+) -> Option<config::PiiPolicyUserConfig> {
+    settings_project(user_config, project)
+        .and_then(|name| user_config.find_project(name))
+        .and_then(|p| p.policy.clone())
 }
 
 #[tauri::command]
@@ -1361,23 +1422,14 @@ fn build_pii_policy_user_config(
 #[tauri::command]
 pub fn update_security_policy(
     update: SecurityPolicyUpdate,
+    project: Option<String>,
     pii_ner: tauri::State<'_, crate::pii_ner_service::SharedPiiNer>,
 ) -> Result<(), String> {
-    let saved = config::with_config_lock(|| {
-        let policy = build_pii_policy_user_config(&update)?;
-        let mut user_config = config::load_user_config()?;
-        let active = user_config
-            .active_project
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        let project = user_config
-            .find_project_mut(&active)
-            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
-        project.policy = Some(policy);
-        config::save_user_config(&user_config)?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string());
+    let saved = update_security_policy_in(
+        speedwave_runtime::consts::data_dir(),
+        &update,
+        project.as_deref(),
+    );
     if saved.is_ok() {
         crate::pii_ner_service::apply_desired_state(
             &pii_ner,
@@ -1385,6 +1437,30 @@ pub fn update_security_policy(
         );
     }
     saved
+}
+
+fn update_security_policy_in(
+    data_dir: &std::path::Path,
+    update: &SecurityPolicyUpdate,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let policy = build_pii_policy_user_config(update)?;
+        let mut user_config = config::load_user_config_from(&config_path)?;
+        let active = user_config
+            .active_project
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        ensure_saving_for_active_project(&active, project)?;
+        let entry = user_config
+            .find_project_mut(&active)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
+        entry.policy = Some(policy);
+        config::save_user_config_to(&user_config, &config_path)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn apply_llm_config(
@@ -1428,6 +1504,7 @@ fn apply_set_provider_model(
     project_id: &str,
     provider_id: &str,
     model: &str,
+    context_tokens: Option<u32>,
 ) -> anyhow::Result<()> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -1451,6 +1528,10 @@ fn apply_set_provider_model(
             "'{provider_id}' is Anthropic - model changes are session-only via /model, not saved"
         ));
     }
+    let window = context_tokens.filter(|&n| n > 0);
+    if window.is_some() || entry.model.as_deref() != Some(trimmed) {
+        entry.context_tokens = window;
+    }
     entry.model = Some(trimmed.to_string());
     if llm
         .active
@@ -1469,12 +1550,14 @@ pub fn set_provider_model(
     project_id: String,
     provider_id: String,
     model: String,
+    context_tokens: Option<u32>,
 ) -> Result<(), String> {
     set_provider_model_in(
         speedwave_runtime::consts::data_dir(),
         project_id,
         provider_id,
         model,
+        context_tokens,
     )
 }
 
@@ -1483,12 +1566,21 @@ fn set_provider_model_in(
     project_id: String,
     provider_id: String,
     model: String,
+    context_tokens: Option<u32>,
 ) -> Result<(), String> {
-    log::info!("setting provider model project_id={project_id} provider_id={provider_id}");
+    log::info!(
+        "setting provider model project_id={project_id} provider_id={provider_id} context_tokens={context_tokens:?}"
+    );
     config::with_config_lock_in(data_dir, || {
         let config_path = data_dir.join("config.json");
         let mut user_config = config::load_user_config_from(&config_path)?;
-        apply_set_provider_model(&mut user_config, &project_id, &provider_id, &model)?;
+        apply_set_provider_model(
+            &mut user_config,
+            &project_id,
+            &provider_id,
+            &model,
+            context_tokens,
+        )?;
         if let Some(llm) = user_config
             .find_project_mut(&project_id)
             .and_then(|p| p.claude.as_mut())
@@ -1504,7 +1596,11 @@ fn set_provider_model_in(
 
 #[async_trait::async_trait]
 pub(crate) trait ModelAutoDefaultProbe: Send + Sync {
-    async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String>;
+    async fn first_local_model(
+        &self,
+        entry_id: &str,
+        base_url: &str,
+    ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String>;
 }
 
 struct LiveModelAutoDefaultProbe<'a> {
@@ -1515,7 +1611,11 @@ struct LiveModelAutoDefaultProbe<'a> {
 
 #[async_trait::async_trait]
 impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
-    async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String> {
+    async fn first_local_model(
+        &self,
+        entry_id: &str,
+        base_url: &str,
+    ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String> {
         let result = crate::llm_cmd::discovery::discover_llm_models_with_fallback(
             entry_id,
             base_url,
@@ -1528,7 +1628,6 @@ impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
             .models
             .into_iter()
             .next()
-            .map(|m| m.id)
             .ok_or_else(|| "empty".to_string())
     }
 }
@@ -1546,14 +1645,16 @@ fn preserve_stored_entry_models(
     stored: &[speedwave_runtime::config::LlmProviderEntry],
 ) {
     for entry in incoming.iter_mut() {
-        if entry.model.is_some() {
+        let Some(prior) = stored.iter().find(|p| p.id == entry.id) else {
+            continue;
+        };
+        if entry.model.is_none() {
+            entry.model = prior.model.clone();
+        } else if entry.model != prior.model {
             continue;
         }
-        if let Some(prior) = stored.iter().find(|p| p.id == entry.id) {
-            entry.model = prior.model.clone();
-            if entry.context_tokens.is_none() {
-                entry.context_tokens = prior.context_tokens;
-            }
+        if entry.context_tokens.is_none() {
+            entry.context_tokens = prior.context_tokens;
         }
     }
 }
@@ -1579,7 +1680,12 @@ async fn apply_model_auto_defaults(
             LlmProviderKind::Local => {
                 let base_url = entry.base_url.clone().unwrap_or_default();
                 match probe.first_local_model(&entry.id, &base_url).await {
-                    Ok(model) => entry.model = Some(model),
+                    Ok(model) => {
+                        entry.model = Some(model.id);
+                        if entry.context_tokens.is_none() {
+                            entry.context_tokens = model.context_tokens;
+                        }
+                    }
                     Err(e) => {
                         return Err(format!(
                             "{} - could not auto-select a model: {e}",
@@ -1604,12 +1710,17 @@ async fn update_llm_config_in(
     mut update: LlmConfigUpdate,
 ) -> Result<(), String> {
     let config_path = data_dir.join("config.json");
+    let loaded = config::load_user_config_from(&config_path).ok();
+    if let Some(active) = loaded.as_ref().and_then(|c| c.active_project.as_deref()) {
+        ensure_saving_for_active_project(active, update.project.as_deref())
+            .map_err(|e| e.to_string())?;
+    }
     if config::is_local_provider(update.provider.as_deref()) {
         if let Some(url) = update.base_url.as_deref() {
             update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
         }
     }
-    let mut auto_default_candidates: std::collections::HashMap<String, String> =
+    let mut auto_default_candidates: std::collections::HashMap<String, (String, Option<u32>)> =
         std::collections::HashMap::new();
     let mut validation_providers = update.providers.clone();
     if let Some(ref mut providers) = update.providers {
@@ -1617,7 +1728,6 @@ async fn update_llm_config_in(
     }
     if let Some(ref mut providers) = validation_providers {
         canonicalize_provider_base_urls(providers);
-        let loaded = config::load_user_config_from(&config_path).ok();
         let stored_providers = loaded
             .as_ref()
             .and_then(|c| c.active_project_entry())
@@ -1635,7 +1745,8 @@ async fn update_llm_config_in(
         apply_model_auto_defaults(providers, &probe).await?;
         for entry in providers.iter() {
             if let Some(model) = entry.model.as_deref() {
-                auto_default_candidates.insert(entry.id.clone(), model.to_string());
+                auto_default_candidates
+                    .insert(entry.id.clone(), (model.to_string(), entry.context_tokens));
             }
         }
     }
@@ -1715,6 +1826,7 @@ async fn update_llm_config_in(
             .active_project
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
+        ensure_saving_for_active_project(&active, update.project.as_deref())?;
 
         let mut new_has_api_key = lookup_has_flag(&user_config, &active, |c| c.has_api_key);
         let mut new_has_custom_headers =
@@ -1753,8 +1865,11 @@ async fn update_llm_config_in(
                 preserve_stored_entry_models(&mut providers, &stored.providers);
                 for entry in &mut providers {
                     if entry.model.is_none() {
-                        if let Some(model) = auto_default_candidates.get(&entry.id) {
+                        if let Some((model, window)) = auto_default_candidates.get(&entry.id) {
                             entry.model = Some(model.clone());
+                            if entry.context_tokens.is_none() {
+                                entry.context_tokens = *window;
+                            }
                         }
                     }
                 }
@@ -1891,84 +2006,136 @@ fn validate_provider_entries(
     Ok(())
 }
 
+fn ensure_saving_for_active_project(active: &str, expected: Option<&str>) -> anyhow::Result<()> {
+    match expected {
+        Some(project) if project != active => anyhow::bail!(
+            "the active project is now '{active}', not '{project}'; nothing was saved"
+        ),
+        _ => Ok(()),
+    }
+}
+
 #[tauri::command]
-pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
+pub fn set_llm_provider_key(
+    provider_id: String,
+    key: Option<String>,
+    project: Option<String>,
+) -> Result<(), String> {
+    set_llm_provider_key_in(
+        speedwave_runtime::consts::data_dir(),
+        &provider_id,
+        key.as_deref(),
+        project.as_deref(),
+    )
+}
+
+fn set_llm_provider_key_in(
+    data_dir: &std::path::Path,
+    provider_id: &str,
+    key: Option<&str>,
+    project: Option<&str>,
+) -> Result<(), String> {
     log::info!(
         "setting LLM provider key provider_id={provider_id} action={}",
-        if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+        if key.is_some_and(|k| !k.trim().is_empty()) {
             "write"
         } else {
             "delete"
         }
     );
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let mut user_config = config::load_user_config_from(&config_path)?;
         let active = user_config
             .active_project
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        let data_dir = speedwave_runtime::consts::data_dir();
+        ensure_saving_for_active_project(&active, project)?;
 
-        let has_key = match key.as_deref().map(str::trim) {
+        let has_key = match key.map(str::trim) {
             Some(value) if !value.is_empty() => {
                 speedwave_runtime::compose::write_llm_provider_key_in(
-                    data_dir.as_path(),
+                    data_dir,
                     &active,
-                    &provider_id,
+                    provider_id,
                     value,
                 )?;
                 true
             }
             _ => {
                 speedwave_runtime::compose::remove_llm_provider_key_in(
-                    data_dir.as_path(),
+                    data_dir,
                     &active,
-                    &provider_id,
+                    provider_id,
                 )?;
                 false
             }
         };
 
-        let project = user_config
+        let entry = user_config
             .find_project_mut(&active)
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
-        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
-            if let Some(entry) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
-                entry.has_api_key = has_key;
+        if let Some(llm) = entry.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+            if let Some(provider) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
+                provider.has_api_key = has_key;
             } else {
                 log::warn!("provider '{provider_id}' not in config — has_api_key not updated");
             }
         }
-        config::save_user_config(&user_config)?;
+        config::save_user_config_to(&user_config, &config_path)?;
         Ok(())
     })
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
 #[tauri::command]
-pub fn clear_active_llm_provider() -> Result<(), String> {
+pub fn clear_active_llm_provider(project: Option<String>) -> Result<(), String> {
+    clear_active_llm_provider_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+}
+
+fn clear_active_llm_provider_in(
+    data_dir: &std::path::Path,
+    project: Option<&str>,
+) -> Result<(), String> {
     log::info!("clearing active LLM provider");
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
-        let active = user_config
-            .active_project
-            .clone()
+    let config_path = data_dir.join("config.json");
+    config::with_config_lock_in(data_dir, || {
+        let mut user_config = config::load_user_config_from(&config_path)?;
+        let name = settings_project(&user_config, project)
+            .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
-        let project = user_config
-            .find_project_mut(&active)
-            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", active))?;
-        if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
+        let entry = user_config
+            .find_project_mut(&name)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found in config", name))?;
+        if let Some(llm) = entry.claude.as_mut().and_then(|c| c.llm.as_mut()) {
             llm.active = None;
         }
-        config::save_user_config(&user_config)?;
+        config::save_user_config_to(&user_config, &config_path)?;
         Ok(())
     })
     .map_err(|e: anyhow::Error| e.to_string())
+}
+
+fn ensure_proxy_restart_for_active_project(
+    active: Option<&str>,
+    project: &str,
+) -> Result<(), String> {
+    match active {
+        Some(active) if active == project => Ok(()),
+        Some(active) => Err(format!(
+            "the active project is now '{active}', not '{project}'; its proxy was not restarted"
+        )),
+        None => Err("No active project".to_string()),
+    }
 }
 
 #[tauri::command]
 pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
     check_project(&project)?;
+    let active = config::load_user_config()
+        .map_err(|e| e.to_string())?
+        .active_project;
+    ensure_proxy_restart_for_active_project(active.as_deref(), &project)?;
     render_and_save_compose(&project)?;
     let rt = speedwave_runtime::runtime::detect_runtime();
     rt.compose_up_service(&project, "proxy")
@@ -2084,6 +2251,93 @@ mod tests {
     use crate::types::{CustomPolicyDtoInput, SecurityPolicyCustomPatternInput};
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
 
+    fn recording_teardown(
+        result: Option<String>,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl FnOnce(String) -> Option<String> + Send + 'static,
+    ) {
+        let torn_down = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = torn_down.clone();
+        (torn_down, move |project| {
+            record.lock().unwrap().push(project);
+            result
+        })
+    }
+
+    #[tokio::test]
+    async fn a_switch_task_that_panics_tears_the_new_project_down_and_fails() {
+        let (torn_down, teardown) = recording_teardown(None);
+        let task =
+            tokio::task::spawn_blocking(|| -> SwitchResult { panic!("the switch step panicked") });
+        match finish_switch_task(task, "beta", teardown).await {
+            SwitchResult::Failed {
+                error,
+                cleanup_error,
+            } => {
+                assert!(
+                    error.starts_with("Project switch did not finish"),
+                    "{error}"
+                );
+                assert_eq!(cleanup_error, None);
+            }
+            SwitchResult::Succeeded { .. } => {
+                panic!("a panicked switch must not read as a finished one")
+            }
+        }
+        assert_eq!(*torn_down.lock().unwrap(), vec!["beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_teardown_after_a_panicked_switch_is_reported() {
+        let (_, teardown) = recording_teardown(Some("teardown of 'beta' failed: boom".to_string()));
+        let task =
+            tokio::task::spawn_blocking(|| -> SwitchResult { panic!("the switch step panicked") });
+        let SwitchResult::Failed { cleanup_error, .. } =
+            finish_switch_task(task, "beta", teardown).await
+        else {
+            panic!("a panicked switch must fail");
+        };
+        assert_eq!(
+            cleanup_error.as_deref(),
+            Some("teardown of 'beta' failed: boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_switch_task_keeps_its_result_without_a_teardown() {
+        let (torn_down, teardown) = recording_teardown(None);
+        let task = tokio::task::spawn_blocking(|| SwitchResult::Succeeded {
+            teardown: Some("alpha".to_string()),
+        });
+        let SwitchResult::Succeeded { teardown: previous } =
+            finish_switch_task(task, "beta", teardown).await
+        else {
+            panic!("a finished switch must keep its result");
+        };
+        assert_eq!(previous.as_deref(), Some("alpha"));
+        assert!(torn_down.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_project_rebinds_the_chat_on_a_blocking_thread() {
+        let source = include_str!("containers_cmd.rs");
+        let body = &source[source
+            .find("pub async fn add_project(")
+            .expect("add_project must exist")..];
+        let body = &body[..body.find("\n}\n").expect("function end")];
+        let rebind = body
+            .find("crate::rebind_chat(")
+            .expect("add_project must rebind the chat");
+        let spawn = body[..rebind]
+            .rfind("spawn_blocking(")
+            .expect("the rebind must run on a blocking thread");
+        assert!(
+            !body[spawn..rebind].contains(';'),
+            "the rebind must be the body of its spawn_blocking closure"
+        );
+    }
+
     #[test]
     fn start_container_errors_route_through_the_owning_helper() {
         let source = include_str!("containers_cmd.rs");
@@ -2103,33 +2357,21 @@ mod tests {
     }
 
     #[test]
-    fn list_anthropic_models_carries_has_1m_from_pricing() {
+    fn list_anthropic_models_serves_the_whole_catalog_without_a_1m_row_flag() {
         let models = list_anthropic_models();
-        let fable = models
-            .iter()
-            .find(|m| m.info.id == "claude-fable-5")
-            .expect("claude-fable-5 must be in the catalog");
-        assert_eq!(fable.info.context_tokens, 1_000_000);
-        assert!(fable.has_1m, "claude-fable-5 must serialize has_1m=true");
+        assert_eq!(models, speedwave_runtime::defaults::ANTHROPIC_MODELS);
 
-        let haiku = models
-            .iter()
-            .find(|m| m.info.id == "claude-haiku-4-5")
-            .expect("claude-haiku-4-5 must be in the catalog");
-        assert_eq!(haiku.info.context_tokens, 200_000);
-        assert!(
-            !haiku.has_1m,
-            "an unpriced 200k model must serialize has_1m=false"
-        );
-
-        let json = serde_json::to_value(&models).expect("catalog must serialize");
+        let json = serde_json::to_value(models).expect("catalog must serialize");
         let fable_json = json
             .as_array()
             .unwrap()
             .iter()
             .find(|v| v["id"] == "claude-fable-5")
             .expect("claude-fable-5 must be present in the JSON payload");
-        assert_eq!(fable_json["has_1m"], serde_json::json!(true));
+        assert_eq!(fable_json["family"], "Fable 5");
+        assert_eq!(fable_json["one_million_context"], "every_plan");
+        assert!(fable_json.get("has_1m").is_none());
+        assert!(fable_json.get("selectable").is_none());
     }
 
     fn make_config_with_active_project() -> SpeedwaveUserConfig {
@@ -2473,10 +2715,8 @@ mod tests {
         );
     }
 
-    fn seeded_config_tempdir_with_local_model(model: &str) -> tempfile::TempDir {
-        let mut cfg = make_config_with_active_project();
-        let project = cfg.find_project_mut("alpha").unwrap();
-        project.claude = Some(ClaudeOverrides {
+    fn claude_with_local_model(model: &str) -> ClaudeOverrides {
+        ClaudeOverrides {
             env: None,
             settings: None,
             llm: Some(LlmConfig {
@@ -2496,10 +2736,378 @@ mod tests {
                 }),
                 ..Default::default()
             }),
-        });
+        }
+    }
+
+    fn seeded_tempdir(cfg: &SpeedwaveUserConfig) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
-        config::save_user_config_to(&cfg, &tmp.path().join("config.json")).expect("seed config");
+        config::save_user_config_to(cfg, &tmp.path().join("config.json")).expect("seed config");
         tmp
+    }
+
+    fn seeded_config_tempdir_with_local_model(model: &str) -> tempfile::TempDir {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("alpha").unwrap().claude = Some(claude_with_local_model(model));
+        seeded_tempdir(&cfg)
+    }
+
+    fn two_local_projects_tempdir() -> tempfile::TempDir {
+        let mut cfg = make_config_with_active_project();
+        for (name, model) in [("alpha", "llama-alpha"), ("beta", "llama-beta")] {
+            cfg.find_project_mut(name).unwrap().claude = Some(claude_with_local_model(model));
+        }
+        seeded_tempdir(&cfg)
+    }
+
+    fn stored_llm(data_dir: &std::path::Path, project: &str) -> LlmConfig {
+        config::load_user_config_from(&data_dir.join("config.json"))
+            .unwrap()
+            .find_project(project)
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn the_llm_form_loads_the_project_it_was_built_for_not_the_active_one() {
+        let tmp = two_local_projects_tempdir();
+
+        let named = get_llm_config_in(tmp.path(), Some("beta")).unwrap();
+        let active = get_llm_config_in(tmp.path(), None).unwrap();
+
+        assert_eq!(named.llm.providers[0].model.as_deref(), Some("llama-beta"));
+        assert_eq!(
+            active.llm.providers[0].model.as_deref(),
+            Some("llama-alpha")
+        );
+    }
+
+    #[test]
+    fn the_llm_form_reads_key_presence_from_its_own_projects_tokens() {
+        let tmp = two_local_projects_tempdir();
+        speedwave_runtime::compose::write_llm_provider_key_in(tmp.path(), "beta", "local", "sk-b")
+            .unwrap();
+
+        let named = get_llm_config_in(tmp.path(), Some("beta")).unwrap();
+        let active = get_llm_config_in(tmp.path(), None).unwrap();
+
+        assert!(named.llm.providers[0].has_api_key);
+        assert!(!active.llm.providers[0].has_api_key);
+    }
+
+    #[test]
+    fn the_llm_form_of_a_project_missing_from_the_config_loads_empty() {
+        let tmp = two_local_projects_tempdir();
+
+        let missing = get_llm_config_in(tmp.path(), Some("gamma")).unwrap();
+
+        assert!(missing.llm.providers.is_empty());
+        assert!(missing.llm.active.is_none());
+    }
+
+    #[test]
+    fn the_policy_getter_resolves_the_named_projects_policy() {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
+            policies: vec!["strict".to_string()],
+            custom_policies: Vec::new(),
+        });
+        let tmp = seeded_tempdir(&cfg);
+
+        let named = get_security_policy_in(tmp.path(), Some("beta")).unwrap();
+        let active = get_security_policy_in(tmp.path(), None).unwrap();
+
+        assert!(named.enabled_policies.contains(&"strict".to_string()));
+        assert!(!active.enabled_policies.contains(&"strict".to_string()));
+    }
+
+    #[test]
+    fn a_proxy_restart_is_only_for_the_active_project() {
+        assert_eq!(
+            ensure_proxy_restart_for_active_project(Some("alpha"), "alpha"),
+            Ok(())
+        );
+        let other = ensure_proxy_restart_for_active_project(Some("beta"), "alpha").unwrap_err();
+        assert!(
+            other.contains("'beta'") && other.contains("'alpha'"),
+            "{other}"
+        );
+        assert!(ensure_proxy_restart_for_active_project(None, "alpha").is_err());
+    }
+
+    #[test]
+    fn the_security_section_loads_the_policy_of_its_own_project() {
+        let mut cfg = make_config_with_active_project();
+        cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
+            policies: vec!["strict".to_string()],
+            custom_policies: Vec::new(),
+        });
+
+        let named = stored_security_policy(&cfg, Some("beta")).unwrap();
+
+        assert_eq!(named.policies, vec!["strict".to_string()]);
+        assert!(stored_security_policy(&cfg, None).is_none());
+        assert!(stored_security_policy(&cfg, Some("gamma")).is_none());
+    }
+
+    fn strict_policy_update() -> SecurityPolicyUpdate {
+        SecurityPolicyUpdate {
+            policies: vec!["strict".to_string()],
+            custom_policies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_security_policy_save_for_the_project_a_switch_left_writes_nothing() {
+        let tmp = two_local_projects_tempdir();
+        let config_path = tmp.path().join("config.json");
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let err = update_security_policy_in(tmp.path(), &strict_policy_update(), Some("beta"))
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_security_policy_save_for_the_active_project_is_applied() {
+        let tmp = two_local_projects_tempdir();
+
+        update_security_policy_in(tmp.path(), &strict_policy_update(), Some("alpha")).unwrap();
+
+        let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        let policy = saved.find_project("alpha").unwrap().policy.clone().unwrap();
+        assert_eq!(policy.policies, vec!["strict".to_string()]);
+        assert!(saved.find_project("beta").unwrap().policy.is_none());
+    }
+
+    #[test]
+    fn a_logout_clears_the_provider_of_the_project_it_signed_out_whichever_is_active() {
+        let tmp = two_local_projects_tempdir();
+
+        clear_active_llm_provider_in(tmp.path(), Some("beta")).unwrap();
+
+        assert!(stored_llm(tmp.path(), "beta").active.is_none());
+        assert!(stored_llm(tmp.path(), "alpha").active.is_some());
+    }
+
+    #[test]
+    fn a_logout_for_a_project_missing_from_the_config_writes_nothing() {
+        let tmp = two_local_projects_tempdir();
+        let config_path = tmp.path().join("config.json");
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let err = clear_active_llm_provider_in(tmp.path(), Some("gamma")).unwrap_err();
+
+        assert!(err.contains("'gamma' not found"), "{err}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_logout_for_the_active_project_clears_only_its_provider() {
+        let tmp = two_local_projects_tempdir();
+
+        clear_active_llm_provider_in(tmp.path(), Some("alpha")).unwrap();
+
+        assert!(stored_llm(tmp.path(), "alpha").active.is_none());
+        assert!(stored_llm(tmp.path(), "beta").active.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_save_for_the_project_a_switch_left_probes_no_server() {
+        let mut server = mockito::Server::new_async().await;
+        let models = server
+            .mock("GET", "/v1/models")
+            .expect(0)
+            .create_async()
+            .await;
+        let tmp = seeded_tempdir(&make_config_with_active_project());
+        let mut update = local_update_for("beta");
+        update.api_key = None;
+        if let Some(providers) = update.providers.as_mut() {
+            providers[0].base_url = Some(server.url());
+            providers[0].model = None;
+        }
+        update.active = Some(speedwave_runtime::config::LlmActive {
+            provider_id: "local".to_string(),
+            model: None,
+        });
+
+        let err = update_llm_config_in(tmp.path(), update).await.unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        models.assert_async().await;
+    }
+
+    #[test]
+    fn a_save_for_the_active_project_or_for_no_named_project_goes_through() {
+        assert!(ensure_saving_for_active_project("alpha", Some("alpha")).is_ok());
+        assert!(ensure_saving_for_active_project("alpha", None).is_ok());
+    }
+
+    #[test]
+    fn a_save_for_a_project_that_is_no_longer_active_is_refused() {
+        let err = ensure_saving_for_active_project("beta", Some("alpha"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'beta'") && err.contains("'alpha'"), "{err}");
+    }
+
+    fn local_update_for(project: &str) -> LlmConfigUpdate {
+        LlmConfigUpdate {
+            provider: Some("local".to_string()),
+            api_key: Some(Some("sk-typed-in-the-form".to_string())),
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some("http://localhost:11434".to_string()),
+                model: Some("llama-new".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: Some("llama-new".to_string()),
+            }),
+            project: Some(project.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_settings_save_for_the_project_a_switch_left_writes_nothing() {
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let config_path = tmp.path().join("config.json");
+        let before = std::fs::read_to_string(&config_path).expect("read seeded config");
+
+        let err = update_llm_config_in(tmp.path(), local_update_for("beta"))
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("reread config"),
+            before
+        );
+        assert!(
+            !tmp.path().join("tokens").exists(),
+            "the key typed in the form must not reach any project"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settings_save_for_the_active_project_is_applied() {
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+
+        update_llm_config_in(tmp.path(), local_update_for("alpha"))
+            .await
+            .unwrap();
+
+        let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        let llm = saved
+            .projects
+            .iter()
+            .find(|p| p.name == "alpha")
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .unwrap();
+        assert_eq!(llm.providers[0].model.as_deref(), Some("llama-new"));
+        assert!(tmp.path().join("tokens").join("alpha").exists());
+    }
+
+    #[test]
+    fn a_provider_key_for_the_project_a_switch_left_is_not_written() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+
+        let err = set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("beta"))
+            .unwrap_err();
+
+        assert!(err.contains("not 'beta'"), "{err}");
+        for project in ["alpha", "beta"] {
+            let path =
+                speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), project, "local")
+                    .unwrap();
+            assert!(!path.exists(), "{project} must not get the key");
+        }
+    }
+
+    #[test]
+    fn a_provider_key_for_the_active_project_is_written_and_flagged() {
+        let tmp = seeded_config_tempdir_with_local_model("llama");
+
+        set_llm_provider_key_in(tmp.path(), "local", Some("sk-local"), Some("alpha")).unwrap();
+
+        let path =
+            speedwave_runtime::compose::llm_provider_key_path_in(tmp.path(), "alpha", "local")
+                .unwrap();
+        assert!(path.exists());
+        let saved = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        let local = saved
+            .projects
+            .iter()
+            .find(|p| p.name == "alpha")
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .and_then(|l| l.providers.iter().find(|e| e.id == "local"))
+            .unwrap();
+        assert!(local.has_api_key);
+    }
+
+    #[tokio::test]
+    async fn a_settings_save_that_auto_selects_a_local_model_saves_its_window() {
+        let mut litellm = mockito::Server::new_async().await;
+        let _models = litellm
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[{"id":"gemma-4-26b-a4b","object":"model","max_input_tokens":262144}]}"#,
+            )
+            .create_async()
+            .await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().to_path_buf();
+        config::save_user_config_to(
+            &cfg_with_providers("local", None, Vec::new()),
+            &data_dir.join("config.json"),
+        )
+        .expect("seed config");
+        let update = LlmConfigUpdate {
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some(litellm.url()),
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+
+        update_llm_config_in(&data_dir, update)
+            .await
+            .expect("the save must succeed");
+
+        let saved = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        let entry = &saved
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .providers[0];
+        assert_eq!(entry.model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(entry.context_tokens, Some(262_144));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2701,8 +3309,14 @@ mod tests {
             Some("anthropic/claude-sonnet-4-6"),
             vec![v2_entry("openrouter", K::OpenRouter, None)],
         );
-        apply_set_provider_model(&mut cfg, "alpha", "openrouter", "anthropic/claude-opus-4-8")
-            .unwrap();
+        apply_set_provider_model(
+            &mut cfg,
+            "alpha",
+            "openrouter",
+            "anthropic/claude-opus-4-8",
+            None,
+        )
+        .unwrap();
         let llm = cfg
             .find_project_mut("alpha")
             .unwrap()
@@ -2729,7 +3343,8 @@ mod tests {
             None,
             vec![v2_entry("openrouter", K::OpenRouter, None)],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "ghost", "some-model").unwrap_err();
+        let err =
+            apply_set_provider_model(&mut cfg, "alpha", "ghost", "some-model", None).unwrap_err();
         assert!(err.to_string().contains("ghost"), "got: {err}");
     }
 
@@ -2741,7 +3356,7 @@ mod tests {
             None,
             vec![v2_entry("anthropic", K::AnthropicOauth, None)],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "claude-opus-4-8")
+        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "claude-opus-4-8", None)
             .unwrap_err();
         assert!(err.to_string().contains("session-only"), "got: {err}");
     }
@@ -2754,7 +3369,7 @@ mod tests {
             None,
             vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   ").unwrap_err();
+        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   ", None).unwrap_err();
         assert!(err.to_string().contains("model"), "got: {err}");
     }
 
@@ -2766,8 +3381,8 @@ mod tests {
             None,
             vec![v2_entry("anthropic", K::AnthropicOauth, None)],
         );
-        let err =
-            apply_set_provider_model(&mut cfg, "alpha", "anthropic", "openrouter/x").unwrap_err();
+        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "openrouter/x", None)
+            .unwrap_err();
         assert!(err.to_string().contains("session-only"), "got: {err}");
     }
 
@@ -2782,7 +3397,7 @@ mod tests {
                 v2_entry("local", K::Local, Some("http://127.0.0.1:11434")),
             ],
         );
-        apply_set_provider_model(&mut cfg, "alpha", "local", "llama3.3").unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "llama3.3", None).unwrap();
         let llm = cfg
             .find_project_mut("alpha")
             .unwrap()
@@ -2816,8 +3431,8 @@ mod tests {
             Some("llama3.3"),
             vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
         );
-        apply_set_provider_model(&mut cfg, "alpha", "local", "mixtral").unwrap();
-        apply_set_provider_model(&mut cfg, "alpha", "local", "llama4").unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "mixtral", None).unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "llama4", None).unwrap();
         let llm = cfg
             .find_project_mut("alpha")
             .unwrap()
@@ -2888,6 +3503,7 @@ mod tests {
             "alpha".to_string(),
             "local".to_string(),
             "llama-new".to_string(),
+            None,
         )
         .expect("set_provider_model_in must succeed");
 
@@ -2941,6 +3557,7 @@ mod tests {
             "alpha".to_string(),
             "local".to_string(),
             "llama-new".to_string(),
+            None,
         )
         .expect("set_provider_model_in must succeed");
 
@@ -2975,7 +3592,8 @@ mod tests {
             None,
             vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
         );
-        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   \t  ").unwrap_err();
+        let err =
+            apply_set_provider_model(&mut cfg, "alpha", "local", "   \t  ", None).unwrap_err();
         assert!(err.to_string().contains("model"), "got: {err}");
     }
 
@@ -3177,14 +3795,33 @@ mod tests {
             &self,
             _entry_id: &str,
             _base_url: &str,
-        ) -> Result<String, String> {
+        ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String> {
             match &self.0 {
                 Ok(models) => models
                     .first()
-                    .map(|m| m.to_string())
+                    .map(|m| crate::llm_cmd::discovery::DiscoveredModel {
+                        id: m.to_string(),
+                        context_tokens: None,
+                    })
                     .ok_or_else(|| "empty".to_string()),
                 Err(e) => Err(e.to_string()),
             }
+        }
+    }
+
+    struct WindowProbe(u32);
+
+    #[async_trait::async_trait]
+    impl ModelAutoDefaultProbe for WindowProbe {
+        async fn first_local_model(
+            &self,
+            _entry_id: &str,
+            _base_url: &str,
+        ) -> Result<crate::llm_cmd::discovery::DiscoveredModel, String> {
+            Ok(crate::llm_cmd::discovery::DiscoveredModel {
+                id: "gemma-4-26b-a4b".to_string(),
+                context_tokens: Some(self.0),
+            })
         }
     }
 
@@ -3216,7 +3853,10 @@ mod tests {
             transient_custom_headers: None,
         };
         assert_eq!(
-            with_key.first_local_model("local", &keyed.url()).await,
+            with_key
+                .first_local_model("local", &keyed.url())
+                .await
+                .map(|m| m.id),
             Ok("first-model".to_string())
         );
 
@@ -3264,6 +3904,143 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(providers[0].model.as_deref(), Some("llama-3.3-70b"));
+    }
+
+    #[tokio::test]
+    async fn an_auto_selected_local_model_brings_its_window() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut unknown = vec![v2_entry("local", K::Local, Some("https://litellm.example"))];
+        apply_model_auto_defaults(&mut unknown, &WindowProbe(262_144))
+            .await
+            .unwrap();
+        assert_eq!(unknown[0].model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(unknown[0].context_tokens, Some(262_144));
+
+        let mut set_by_hand = vec![v2_entry("local", K::Local, Some("https://litellm.example"))];
+        set_by_hand[0].context_tokens = Some(32_768);
+        apply_model_auto_defaults(&mut set_by_hand, &WindowProbe(262_144))
+            .await
+            .unwrap();
+        assert_eq!(set_by_hand[0].context_tokens, Some(32_768));
+    }
+
+    fn local_entry_with(
+        model: &str,
+        window: Option<u32>,
+    ) -> speedwave_runtime::config::LlmProviderEntry {
+        let mut entry = v2_entry(
+            "local",
+            speedwave_runtime::config::LlmProviderKind::Local,
+            Some("https://litellm.example"),
+        );
+        entry.model = Some(model.to_string());
+        entry.context_tokens = window;
+        entry
+    }
+
+    fn local_window(cfg: &SpeedwaveUserConfig) -> Option<u32> {
+        cfg.find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap()
+            .providers[0]
+            .context_tokens
+    }
+
+    #[test]
+    fn a_settings_save_of_the_stored_model_keeps_its_window() {
+        let stored = vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))];
+
+        let mut same_model = vec![local_entry_with("gemma-4-26b-a4b", None)];
+        preserve_stored_entry_models(&mut same_model, &stored);
+        assert_eq!(same_model[0].context_tokens, Some(262_144));
+
+        let mut other_model = vec![local_entry_with("qwen3.8-27b", None)];
+        preserve_stored_entry_models(&mut other_model, &stored);
+        assert_eq!(other_model[0].model.as_deref(), Some("qwen3.8-27b"));
+        assert_eq!(other_model[0].context_tokens, None);
+
+        let mut no_model = vec![v2_entry(
+            "local",
+            speedwave_runtime::config::LlmProviderKind::Local,
+            Some("https://litellm.example"),
+        )];
+        preserve_stored_entry_models(&mut no_model, &stored);
+        assert_eq!(no_model[0].model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(no_model[0].context_tokens, Some(262_144));
+    }
+
+    #[test]
+    fn a_picked_model_saves_its_window() {
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("qwen3.8-27b"),
+            vec![local_entry_with("qwen3.8-27b", None)],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "gemma-4-26b-a4b", Some(262_144))
+            .unwrap();
+        assert_eq!(local_window(&cfg), Some(262_144));
+    }
+
+    #[test]
+    fn a_picked_model_without_a_known_window_drops_the_previous_models_window() {
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("gemma-4-26b-a4b"),
+            vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "qwen3-coder-30b", None).unwrap();
+        assert_eq!(local_window(&cfg), None);
+
+        let mut zero = cfg_with_providers(
+            "local",
+            Some("gemma-4-26b-a4b"),
+            vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))],
+        );
+        apply_set_provider_model(&mut zero, "alpha", "local", "qwen3-coder-30b", Some(0)).unwrap();
+        assert_eq!(local_window(&zero), None, "a zero window reads as unknown");
+    }
+
+    #[test]
+    fn re_picking_the_same_model_without_a_window_keeps_its_window() {
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("gemma-4-26b-a4b"),
+            vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "gemma-4-26b-a4b", None).unwrap();
+        assert_eq!(local_window(&cfg), Some(262_144));
+    }
+
+    #[test]
+    fn a_picked_window_reaches_the_saved_config_and_the_active_legacy_field() {
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let data_dir = tmp.path().to_path_buf();
+        set_provider_model_in(
+            &data_dir,
+            "alpha".to_string(),
+            "local".to_string(),
+            "gemma-4-26b-a4b".to_string(),
+            Some(262_144),
+        )
+        .expect("set_provider_model_in must succeed");
+        let saved = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
+        let llm = saved
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        let entry = llm.providers.iter().find(|p| p.id == "local").unwrap();
+        assert_eq!(entry.context_tokens, Some(262_144));
+        assert_eq!(llm.context_tokens, Some(262_144));
     }
 
     #[tokio::test]
@@ -3325,21 +4102,6 @@ mod tests {
             err.contains("ghost") && err.contains("not in the provider list"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn clear_active_llm_provider_sets_active_none_via_lock_and_save() {
-        let src = include_str!("containers_cmd.rs");
-        let start = src
-            .find("pub fn clear_active_llm_provider(")
-            .expect("clear_active_llm_provider command must exist");
-        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
-        assert!(body.contains("llm.active = None"), "must clear active");
-        assert!(
-            body.contains("with_config_lock"),
-            "must use the config lock"
-        );
-        assert!(body.contains("save_user_config"), "must persist");
     }
 
     #[tokio::test]
@@ -4098,12 +4860,16 @@ mod tests {
     }
 
     #[test]
-    fn build_script_requires_complete_context_for_hash_root() {
+    fn build_script_hashes_the_staged_context_through_the_ssot_resolver() {
         let source = include_str!("../build.rs");
         assert!(
-            source.contains("flat_map(|img| img.hash_inputs.iter())")
-                && source.contains("all(|input| build_context.join(input).exists())"),
-            "partial/stubbed build-context must fall back to the repo root"
+            source.contains("bundle::hash_inputs_resolvable(&build_context)"),
+            "the hash root must be decided by bundle::hash_inputs_resolvable"
+        );
+        assert!(
+            !source.contains(".join(input).exists()"),
+            "a direct-path existence check misses the vendored containers/ layout and hashes \
+             the repo root while the image builds from the staged tree"
         );
     }
 
@@ -4632,6 +5398,87 @@ mod tests {
         assert!(
             ensure_pos < up_pos,
             "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    #[test]
+    fn factory_reset_marks_the_engine_teardown_before_stopping_anything() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
+        let teardown = fn_body
+            .find("speedwave_runtime::runtime::begin_engine_teardown()")
+            .expect("factory_reset must keep the runtime from starting the VM again");
+        let first_stop = fn_body
+            .find("WATCHDOG_STOP")
+            .expect("factory_reset stops the watchdogs");
+        assert!(
+            teardown < first_stop,
+            "a startup image check must not restart the VM a factory reset deletes"
+        );
+    }
+
+    #[test]
+    fn factory_reset_restarts_even_when_the_wipe_task_does_not_finish() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn factory_reset(");
+        let wipe = fn_body
+            .find("spawn_blocking(")
+            .expect("factory_reset wipes on a blocking task");
+        let after_wipe = &fn_body[wipe..];
+        for exit in [")?", "return"] {
+            assert!(
+                !after_wipe.contains(exit),
+                "a process that stopped its workers and may not start its VM again must restart, \
+                 never return and keep running (`{exit}`)"
+            );
+        }
+        assert!(
+            after_wipe
+                .trim_end()
+                .trim_end_matches('}')
+                .trim_end()
+                .ends_with("app.restart();"),
+            "every outcome of the wipe must end in the restart"
+        );
+    }
+
+    #[test]
+    fn check_containers_running_answers_from_the_engine_once_the_wait_runs_out() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+        let wait = fn_body
+            .split("if !crate::reconcile::wait_for_image_check(RECONCILE_WAIT_TIMEOUT) {")
+            .nth(1)
+            .expect("check_containers_running must branch on the wait running out");
+        let ran_out = &wait[..wait.find("\n        }\n").expect("the branch must end")];
+        assert!(ran_out.contains("log::warn!("));
+        for exit in ["return", "Err(", "?;"] {
+            assert!(
+                !ran_out.contains(exit),
+                "a first VM start may provision for as long as the wait lasts, so running out of \
+                 it must not end the container check (`{exit}`)"
+            );
+        }
+    }
+
+    #[test]
+    fn check_containers_running_waits_for_the_engine_check_before_asking_the_engine() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_body = extract_fn_body_braced(source, "pub async fn check_containers_running(");
+
+        let wait_pos = fn_body
+            .find("wait_for_image_check(")
+            .expect("check_containers_running must wait for the startup engine check");
+        let probe_pos = fn_body
+            .find("is_available()")
+            .expect("check_containers_running must probe the runtime");
+        let ps_pos = fn_body
+            .find("compose_ps(")
+            .expect("check_containers_running must list the project's containers");
+        assert!(
+            wait_pos < probe_pos && wait_pos < ps_pos,
+            "the engine check must settle before the runtime is probed, or a VM that still reports \
+             Running while it shuts down fails the check"
         );
     }
 

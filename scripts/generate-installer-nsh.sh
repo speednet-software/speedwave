@@ -19,8 +19,7 @@ fi
 
 emit_materialize_macro() {
   local name="$1"
-  local ext="${2:-ps1}"
-  local file="${name}.${ext}"
+  local file="${name}.ps1"
   local upper
   upper="$(echo "$name" | tr '[:lower:]-' '[:upper:]_')"
   local src="$WIN_DIR/${file}"
@@ -77,7 +76,7 @@ trap 'rm -f "$EMBED"' EXIT
   echo ""
   emit_materialize_macro firewall
   echo ""
-  emit_materialize_macro run-hidden vbs
+  emit_materialize_macro reset
 } > "$EMBED"
 
 awk -v marker="$MARKER" -v embed_file="$EMBED" '

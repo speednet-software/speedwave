@@ -1,4 +1,4 @@
-//! Client of the host-side PII NER detector (ADR-090): one POST per request carrying every
+//! Client of the host-side PII NER detector (ADR-091): one POST per request carrying every
 //! scanned string leaf, byte-offset spans back. Any failure degrades to `Unavailable`.
 
 use std::collections::hash_map::RandomState;

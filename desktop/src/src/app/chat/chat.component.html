@@ -56,9 +56,29 @@
       />
       <div class="shrink-0 border-t border-[var(--line)] bg-[var(--bg-2)] px-4 pb-3 pt-3 md:px-6">
         <div class="relative mx-auto max-w-3xl">
+          @if (deferredEffortLabel()) {
+            <div
+              class="mono mb-2 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
+              data-testid="effort-deferred-notice"
+              role="status"
+            >
+              Effort {{ deferredEffortLabel() }} applies from the next session: this one keeps its
+              current effort. Restarting applies it now and stops this session's background tasks.
+              <button
+                type="button"
+                class="mono ml-2 underline disabled:opacity-50"
+                data-testid="effort-deferred-restart"
+                [disabled]="!!chat.newConversationBlockedReason()"
+                (click)="chat.restartForDeferredEffort()"
+              >
+                Restart now
+              </button>
+            </div>
+          }
           <app-composer
             #composer
             [streaming]="chat.isStreamingFromState()"
+            [sendBlocked]="chat.sessionStartInFlightFromState"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [projectId]="projectState.activeProject() ?? ''"
@@ -75,7 +95,14 @@
             (modelSelected)="chat.applyModelSelection($event)"
             (effortSelected)="chat.applyEffortSelection($event)"
           />
-          <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />
+          <app-session-stats
+            [stats]="chat.sessionStatsFromState()"
+            [branch]="gitBranch()"
+            [limits]="planLimits()"
+            [limitSignal]="planLimitSignal()"
+            [now]="usageClock()"
+            (usageOpened)="onUsageOpened()"
+          />
         </div>
       </div>
     </div>

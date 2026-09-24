@@ -1,4 +1,4 @@
-# ADR-089: Neural PII Detection with the Redact Model Ported to burn
+# ADR-090: Neural PII Detection with the Redact Model Ported to burn
 
 > **Status:** Accepted
 > **Date:** 2026-09-15
@@ -46,7 +46,7 @@ Redact is distributed under the Desert Ant Labs Source-Available License 1.0[^10
 
 ## Consequences
 
-- The Desktop build grows by burn, cubecl and wgpu, and by about 25 MB of model artifact; the proxy image is unchanged (it only calls the host, ADR-090). Root `make check-clippy` compiles `speedwave-pii-ner`.
+- The Desktop build grows by burn, cubecl and wgpu, and by about 25 MB of model artifact; the proxy image is unchanged (it only calls the host, ADR-091). Root `make check-clippy` compiles `speedwave-pii-ner`.
 - Python 3 (standard library) becomes a build prerequisite for the Desktop bundle on both platforms; the CI bundle action runs the converter before `verify-bundled-assets`.
 - A new Redact release means: update `pins.json`, rerun the converter, regenerate fixtures, re-check the two graph invariants (the converter fails loudly if the export layout changed), and bump `SOURCE_TFLITE_SHA256`.
 - CI runners have no GPU: the wgpu path is exercised only by the bench on developer machines.

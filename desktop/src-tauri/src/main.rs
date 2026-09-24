@@ -13,6 +13,7 @@ mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
+mod control_channel;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
@@ -33,6 +34,7 @@ mod llm_cmd;
 mod logging_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
+mod model_picker;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -642,35 +644,32 @@ fn format_audit_failure_message(failures: &[(String, String)]) -> String {
     body
 }
 
-fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
-        #[expect(
-            clippy::print_stderr,
-            reason = "panic-hook stderr fallback (logging.md)"
-        )]
-        {
-            eprintln!("PANIC: {sanitized} (log sink also panicked)");
-        }
-    }
+#[cfg(any(not(debug_assertions), test))]
+fn write_panic_line(out: &mut dyn std::io::Write, sanitized: &str) {
+    let _ = writeln!(out, "PANIC: {sanitized}");
+}
+
+fn line_output<W, F>(open: F) -> tauri_plugin_log::fern::Output
+where
+    W: std::io::Write,
+    F: Fn() -> W + Send + Sync + 'static,
+{
+    tauri_plugin_log::fern::Output::call(move |record| {
+        let _ = writeln!(open(), "{}", record.args());
+    })
 }
 
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let sanitized = speedwave_runtime::log_sanitizer::sanitize(&format!("{info}"));
-        log_panic_with_fallback(&sanitized, || log::error!("PANIC: {sanitized}"));
+        log::error!("PANIC: {sanitized}");
         #[cfg(debug_assertions)]
         default_hook(info);
         #[cfg(not(debug_assertions))]
         {
             let _ = &default_hook;
-            #[expect(
-                clippy::print_stderr,
-                reason = "panic-hook stderr fallback (logging.md)"
-            )]
-            {
-                eprintln!("PANIC: {sanitized}");
-            }
+            write_panic_line(&mut std::io::stderr(), &sanitized);
         }
     }));
 
@@ -787,7 +786,10 @@ fn main() {
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
             tauri_plugin_log::Builder::new()
                 .targets([
-                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::Dispatch(
+                        tauri_plugin_log::fern::Dispatch::new()
+                            .chain(line_output(std::io::stdout)),
+                    )),
                     Target::new(TargetKind::LogDir {
                         file_name: Some("speedwave-desktop".into()),
                     }),
@@ -943,6 +945,7 @@ fn main() {
 
             // Post-setup migrations, off the main thread.
             if setup_started {
+                reconcile::mark_image_check_pending();
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     let migrations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1175,6 +1178,8 @@ fn main() {
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
             pin_cmd::set_model_pin,
+            pin_cmd::clear_model_pin,
+            model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,
@@ -1200,6 +1205,11 @@ fn main() {
             paste_cmd::save_pasted_image,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
+            chat_session_cmd::get_chat_session_info,
+            chat_session_cmd::get_chat_takes_wire_effort,
+            chat_session_cmd::switch_chat_model,
+            chat_session_cmd::get_plan_usage,
+            chat_session_cmd::get_context_usage,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
@@ -1407,16 +1417,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn log_panic_with_fallback_runs_log_fn_when_it_succeeds() {
-        let ran = std::cell::Cell::new(false);
-        log_panic_with_fallback("msg", || ran.set(true));
-        assert!(ran.get(), "log_fn must run on the happy path");
+    struct ClosedPipe;
+
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn log_through(output: tauri_plugin_log::fern::Output, message: &str) {
+        let (_, logger) = tauri_plugin_log::fern::Dispatch::new()
+            .format(|out, message, record| {
+                out.finish(format_args!("[{}] {message}", record.level()))
+            })
+            .chain(output)
+            .into_log();
+        logger.log(
+            &log::Record::builder()
+                .args(format_args!("{message}"))
+                .level(log::Level::Error)
+                .target("speedwave_desktop")
+                .build(),
+        );
     }
 
     #[test]
-    fn log_panic_with_fallback_survives_a_panicking_log_fn() {
-        log_panic_with_fallback("msg", || panic!("simulated log sink panic"));
+    fn line_output_writes_the_formatted_line() {
+        let buf = SharedBuf::default();
+        let sink = buf.clone();
+        log_through(line_output(move || sink.clone()), "stdout mirror");
+        let written = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(written, "[ERROR] stdout mirror\n");
+    }
+
+    #[test]
+    fn line_output_ignores_a_closed_pipe() {
+        log_through(line_output(|| ClosedPipe), "written after the pipe closed");
+    }
+
+    #[test]
+    fn line_output_writes_an_empty_message_as_a_bare_line() {
+        let buf = SharedBuf::default();
+        let sink = buf.clone();
+        log_through(line_output(move || sink.clone()), "");
+        let written = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(written, "[ERROR] \n");
+    }
+
+    #[test]
+    fn panic_line_is_written_to_a_healthy_stream() {
+        let mut out = Vec::new();
+        write_panic_line(&mut out, "worker panicked");
+        assert_eq!(String::from_utf8(out).unwrap(), "PANIC: worker panicked\n");
+    }
+
+    #[test]
+    fn panic_line_ignores_a_closed_stream() {
+        write_panic_line(&mut ClosedPipe, "worker panicked");
     }
 
     #[test]

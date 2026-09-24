@@ -697,6 +697,23 @@ describe('ProjectStateService', () => {
       }
     });
 
+    it('keeps the blocking system check page when a reconcile failure arrives', async () => {
+      await service.init();
+      service.status.set('check_failed');
+      service.error = 'System check failed: WSL2 is not available';
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'done',
+        in_progress: false,
+        last_error: 'Container engine did not answer the image check',
+        pending_running_projects: [],
+        applied_bundle_id: 'bundle',
+      });
+
+      expect(service.status()).toBe('check_failed');
+      expect(service.error).toBe('System check failed: WSL2 is not available');
+    });
+
     it('ignores reconcile events during switching', async () => {
       await service.init();
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
@@ -1589,6 +1606,196 @@ describe('ProjectStateService', () => {
     });
   });
 
+  describe('isSettledOn', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('is true for the active project while no switch runs', () => {
+      expect(service.activeProject()).toBe('test');
+      expect(service.isSettledOn('test')).toBe(true);
+    });
+
+    it('is false for any other project, and for none', () => {
+      expect(service.isSettledOn('other')).toBe(false);
+      expect(service.isSettledOn(null)).toBe(false);
+    });
+
+    it('is false for the active project from the moment a switch starts until it lands', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.activeProject()).toBe('test');
+      expect(service.isSettledOn('test')).toBe(false);
+      expect(service.isSettledOn('other')).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      expect(service.isSettledOn('test')).toBe(true);
+    });
+
+    it('is false after a switch lands until its status is resolved', async () => {
+      const auth = createDeferred<unknown>();
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_auth_status' ? auth.promise : undefined;
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+
+      expect(service.activeProject()).toBe('other');
+      expect(service.isSettledOn('other')).toBe(false);
+
+      auth.resolve({
+        api_key_configured: false,
+        oauth_authenticated: true,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.isSettledOn('other')).toBe(true);
+    });
+  });
+
+  describe('requestRestartFor', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('flags the restart at once while the app is settled on the project', () => {
+      service.status.set('ready');
+
+      service.requestRestartFor('test');
+
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('drops a request for a project the app is not on', () => {
+      service.status.set('ready');
+
+      service.requestRestartFor('other');
+
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('surfaces a restart owed by a save that lands during a switch once the switch fails back', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.retry();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('forgets a restart owed to the project a switch left, also when a later switch fails back to it', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'test' });
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'third' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('keeps a restart requested before a switch that fails back', async () => {
+      service.status.set('ready');
+      service.requestRestart();
+      expect(service.needsRestart).toBe(true);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.needsRestart).toBe(false);
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.retry();
+
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when its error is dismissed', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      expect(service.status()).toBe('error');
+
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when the dismiss cannot check the containers', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') throw new Error('timeout');
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('holds a restart owed across a failed switch while a dismiss finds the containers down', async () => {
+      let running = false;
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'check_containers_running' ? running : undefined;
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      await service.dismissError();
+      expect(service.status()).toBe('error');
+      expect(service.needsRestart).toBe(false);
+
+      running = true;
+      await service.dismissError();
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when a sign-in check finds the project signed out', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+
+      expect(service.status()).toBe('auth_required');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('drops a restart owed across a failed switch once a logout leaves the project without a provider', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      service.forceUnconfigured();
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: true,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
+  });
+
   describe('restart state', () => {
     beforeEach(async () => {
       await service.init();
@@ -1717,11 +1924,99 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      await service.restartContainers();
+      const outcome = await service.restartContainers();
 
+      expect(outcome).toBe('failed');
       expect(service.restartError).toBe('compose failed');
       expect(service.restarting).toBe(false);
       expect(service.needsRestart).toBe(true);
+    });
+
+    it('restartInFlight exists only while a restart runs and settles after its complete listeners', async () => {
+      const order: string[] = [];
+      service.onRestartComplete(() => order.push('complete'));
+      const pendingRestart = createDeferred();
+      mockTauri.invokeHandler = (cmd: string) => {
+        if (cmd === 'restart_integration_containers') return pendingRestart.promise;
+        return Promise.resolve(undefined);
+      };
+      expect(service.restartInFlight).toBeNull();
+
+      const promise = service.restartContainers();
+      const inFlight = service.restartInFlight;
+      expect(inFlight).not.toBeNull();
+      void inFlight?.then(() => order.push('settled'));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(order).toEqual([]);
+
+      pendingRestart.resolve();
+      await promise;
+      await inFlight;
+
+      expect(order).toEqual(['complete', 'settled']);
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('restartInFlight settles when the restart fails', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+
+      const promise = service.restartContainers();
+      const inFlight = service.restartInFlight;
+
+      await expect(promise).resolves.toBe('failed');
+      await expect(inFlight).resolves.toBeUndefined();
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('a restart ending after a project switch let a newer one start leaves the newer handle', async () => {
+      const first = createDeferred();
+      const second = createDeferred();
+      const pending = [first, second];
+      mockTauri.invokeHandler = (cmd: string) => {
+        const next = cmd === 'restart_integration_containers' ? pending.shift() : undefined;
+        return next ? next.promise : Promise.resolve(undefined);
+      };
+
+      const older = service.restartContainers();
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      const newer = service.restartContainers();
+      const newerHandle = service.restartInFlight;
+      await new Promise((r) => setTimeout(r, 0));
+      first.resolve();
+      await older;
+
+      expect(newerHandle).not.toBeNull();
+      expect(service.restartInFlight).toBe(newerHandle);
+
+      second.resolve();
+      await newer;
+
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('restartInFlight stays null for a restart that never started', async () => {
+      service.restarting = true;
+
+      await expect(service.restartContainers()).resolves.toBe('skipped');
+
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('restartContainers separates a restart it ran from one it never started', async () => {
+      service.requestRestart();
+
+      await expect(service.restartContainers()).resolves.toBe('restarted');
+
+      service.restarting = true;
+      await expect(service.restartContainers()).resolves.toBe('skipped');
+
+      service.restarting = false;
+      service.activeProject.set(null);
+      await expect(service.restartContainers()).resolves.toBe('skipped');
     });
 
     it('restartContainers recovers after previous failure', async () => {

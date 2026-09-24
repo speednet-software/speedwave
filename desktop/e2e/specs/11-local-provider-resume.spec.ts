@@ -1,5 +1,5 @@
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { confirmRestartAndWait } from '../helpers/shell';
+import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import {
   openSettings,
   openChat,
@@ -15,11 +15,14 @@ import {
   startNewConversation,
   requireLocalLlm,
   requireOpenrouterKey,
+  requireOpenrouterModel,
+  useCheapOpenRouterModel,
+  storedProviderModel,
   isUnpriced,
   modelRowsUnpriced,
 } from '../helpers/llm';
 import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
-import { localLlmUnreachable } from '../helpers/preflight';
+import { localModelUnavailable } from '../helpers/preflight';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
@@ -30,11 +33,11 @@ describe('Local Provider + Resume', function () {
       await switchToProject(E2E_PROJECT_NAME);
     }
     expect(await activeProjectSlug()).toBe(E2E_PROJECT_NAME);
-    if (localLlmUnreachable()) this.skip();
+    if (localModelUnavailable()) this.skip();
   });
 
   it('switches the provider to the local server (full restart)', async function () {
-    this.timeout(240_000);
+    this.timeout(RESTART_WAIT_MS + 60_000);
     const local = requireLocalLlm();
     await openSettings();
     await configureLocalProvider(local.baseUrl, local.apiKey);
@@ -76,11 +79,13 @@ describe('Local Provider + Resume', function () {
   });
 
   it('switches back to OpenRouter (provider change works both ways)', async function () {
-    this.timeout(240_000);
+    this.timeout(2 * RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
+    expect(await storedProviderModel('openrouter')).toBe(requireOpenrouterModel());
     await confirmRestartAndWait();
     await openChat();
+    await useCheapOpenRouterModel();
     await sendMessageAndWait('Reply with the single word: ok.');
     expect((await lastAssistantText()).toLowerCase()).toContain('ok');
   });

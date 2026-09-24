@@ -503,6 +503,127 @@ mod tests {
         );
     }
 
+    struct SilentBackend {
+        addr: std::net::SocketAddr,
+        request_received: tokio::sync::oneshot::Receiver<()>,
+        closed: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    async fn spawn_silent_backend(send_headers: bool) -> SilentBackend {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (received_tx, request_received) = tokio::sync::oneshot::channel();
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut received = Vec::new();
+            while !received.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+            }
+            let _ = received_tx.send(());
+            if send_headers {
+                let headers = concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: text/event-stream\r\n",
+                    "Transfer-Encoding: chunked\r\n",
+                    "\r\n",
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        SilentBackend {
+            addr,
+            request_received,
+            closed,
+        }
+    }
+
+    async fn send_then_hang_up(
+        upstream: std::net::SocketAddr,
+        request_received: tokio::sync::oneshot::Receiver<()>,
+        wait_for_head: bool,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let usage_dir = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(config_pointing_at(
+            &upstream,
+            usage_dir.path().join("usage.jsonl"),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, build_router(cfg)).await.unwrap();
+        });
+
+        let body =
+            r#"{"model":"local/x","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: proxy\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut client = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        if wait_for_head {
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = client.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0, "proxy closed before sending the response head");
+                head.extend_from_slice(&buf[..n]);
+            }
+            assert!(
+                head.starts_with(b"HTTP/1.1 200"),
+                "{}",
+                String::from_utf8_lossy(&head)
+            );
+        } else {
+            let forwarded =
+                tokio::time::timeout(std::time::Duration::from_secs(10), request_received).await;
+            assert!(
+                matches!(forwarded, Ok(Ok(()))),
+                "the proxy never forwarded the request to the upstream"
+            );
+        }
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn client_hang_up_after_the_response_head_closes_a_silent_upstream() {
+        let backend = spawn_silent_backend(true).await;
+        send_then_hang_up(backend.addr, backend.request_received, true).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), backend.closed).await;
+        assert!(
+            matches!(outcome, Ok(Ok(()))),
+            "the proxy must drop a silent upstream once its client is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_hang_up_before_the_response_head_closes_the_upstream() {
+        let backend = spawn_silent_backend(false).await;
+        send_then_hang_up(backend.addr, backend.request_received, false).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), backend.closed).await;
+        assert!(
+            matches!(outcome, Ok(Ok(()))),
+            "the proxy must drop the upstream request once its client is gone"
+        );
+    }
+
     #[tokio::test]
     async fn v1_rejected_without_caller_token_when_configured() {
         let cfg = Arc::new(Config {
@@ -720,6 +841,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v1_messages_answers_a_routed_system_turn_with_the_rejection_token_and_never_calls_upstream(
+    ) {
+        use crate::router::{Auth, BareAuth, Route};
+        let usage_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.routes.push(Route {
+            prefix: "my-or".to_string(),
+            base_url: format!("http://{addr}"),
+            auth: Auth::Bare(BareAuth::None),
+            provider_kind: "openrouter".to_string(),
+            provider_id: "my-or".to_string(),
+        });
+        cfg.audit_dir = Some(audit_dir.path().to_path_buf());
+        let app = build_router(Arc::new(cfg));
+
+        for model in ["local/qwen3.8-27b", "my-or/anthropic/claude-sonnet-5"] {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "system", "content": [{"type": "text", "text": "mail bob@example.com"}]}
+                ]
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 400, "{model}");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["type"], "error", "{model}");
+            assert_eq!(parsed["error"]["type"], "invalid_request_error", "{model}");
+            assert_eq!(
+                parsed["error"]["message"], "capability_rejected: mid_conv_system",
+                "{model}: Claude Code matches the whole message exactly"
+            );
+        }
+        assert!(
+            captured.lock().await.is_empty(),
+            "a rejected system turn must never reach the upstream"
+        );
+        assert_eq!(
+            std::fs::read_dir(audit_dir.path()).unwrap().count(),
+            0,
+            "a request answered locally leaves no PII audit entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_messages_forwards_an_anthropic_system_turn_unchanged() {
+        use crate::router::{Auth, BareAuth, Route};
+        let usage_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.routes.push(Route {
+            prefix: "anthropic".to_string(),
+            base_url: format!("http://{addr}"),
+            auth: Auth::Bare(BareAuth::Passthrough),
+            provider_kind: "anthropic_oauth".to_string(),
+            provider_id: "anthropic".to_string(),
+        });
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"},{"role":"system","content":"reminder"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let body_sent = captured.lock().await.clone();
+        let parsed: serde_json::Value = serde_json::from_slice(&body_sent).unwrap();
+        assert_eq!(parsed["messages"][1]["role"], "system");
+        assert_eq!(parsed["messages"][1]["content"], "reminder");
+    }
+
+    #[tokio::test]
     async fn v1_messages_rejects_with_5xx_when_pii_engine_failed_and_never_calls_upstream() {
         let usage_dir = tempfile::tempdir().unwrap();
         let (addr, captured) = spawn_capturing_backend().await;
@@ -745,6 +964,42 @@ mod tests {
         assert!(
             captured.lock().await.is_empty(),
             "engine failure must never reach the upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_upstream_answers_502_naming_the_connection_cause() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = listener.local_addr().unwrap();
+        drop(listener);
+        let cfg = Arc::new(config_pointing_at(
+            &closed,
+            usage_dir.path().join("usage.jsonl"),
+        ));
+        let resp = build_router(cfg)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = parsed["error"].as_str().unwrap();
+        assert!(error.starts_with("upstream error: "), "{error}");
+        assert!(
+            error.contains("os error"),
+            "the 502 must carry the root cause, not only reqwest's top line: {error}"
+        );
+        assert!(
+            !error.contains("http://") && !error.contains("/v1/messages"),
+            "the upstream URL stays out of the error, only its host is logged: {error}"
         );
     }
 

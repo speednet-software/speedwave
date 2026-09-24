@@ -16,6 +16,8 @@ const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 
+const FRONTMATTER_READ_LIMIT: u64 = 64 * 1024;
+
 /// Indicates whether the discovery result came from Claude Code itself
 /// (`Init`) or discovery could not run (`Unavailable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +81,8 @@ pub struct ProjectHandle {
     pub name: String,
     /// Absolute path to the project root, used to locate `<dir>/.claude/`.
     pub dir: PathBuf,
+    /// Config keys of the plugins enabled for the project, whose resources the container links.
+    pub enabled_plugins: Vec<String>,
 }
 
 impl ProjectHandle {
@@ -87,7 +91,14 @@ impl ProjectHandle {
         Self {
             name: name.into(),
             dir: dir.into(),
+            enabled_plugins: Vec::new(),
         }
+    }
+
+    /// Sets the enabled plugin keys (`ResolvedIntegrationsConfig::enabled_plugin_service_ids`).
+    pub fn with_enabled_plugins(mut self, keys: Vec<String>) -> Self {
+        self.enabled_plugins = keys;
+        self
     }
 }
 
@@ -109,6 +120,7 @@ fn discover_slash_commands_with_timeout(
         return Ok(cached);
     }
 
+    let generation = cache_generation(&project.name);
     let container = claude_container_name(&project.name);
     let outcome = lead_discovery(&project.name, || {
         run_discovery_with_timeout(runtime, &container, timeout).map_err(|e| e.to_string())
@@ -116,8 +128,8 @@ fn discover_slash_commands_with_timeout(
 
     match outcome {
         Ok(raw) => {
-            let discovery = enrich_and_filter(raw, &project.dir, consts::data_dir().as_path());
-            cache_put(&project.name, discovery.clone());
+            let discovery = enrich_and_filter(raw, project, consts::data_dir().as_path());
+            cache_put(&project.name, generation, discovery.clone());
             Ok(discovery)
         }
         Err(err) => {
@@ -127,7 +139,7 @@ fn discover_slash_commands_with_timeout(
                 source: DiscoverySource::Unavailable,
                 reason: Some(err),
             };
-            cache_put(&project.name, discovery.clone());
+            cache_put(&project.name, generation, discovery.clone());
             Ok(discovery)
         }
     }
@@ -208,23 +220,17 @@ fn follow_slot(slot: &InFlightSlot) -> Result<RawDiscovery, String> {
         .unwrap_or_else(|| Err("discovery leader failed".to_string()))
 }
 
-/// Invalidates the cached discovery for one project. Call on plugin
-/// install/remove, active-project change, or an explicit refresh.
+/// Drops the cached discovery for one project and retires any discovery in flight for it.
 pub fn invalidate_cache(project_name: &str) {
     match cache().lock() {
-        Ok(mut map) => {
-            map.remove(project_name);
+        Ok(mut state) => {
+            state.entries.remove(project_name);
+            *state
+                .generations
+                .entry(project_name.to_string())
+                .or_insert(0) += 1;
         }
         Err(e) => log_cache_poisoned("invalidate_cache", &e),
-    }
-}
-
-/// Invalidates every cached discovery. Useful on factory reset and at
-/// the end of tests that share process state.
-pub fn invalidate_all_caches() {
-    match cache().lock() {
-        Ok(mut map) => map.clear(),
-        Err(e) => log_cache_poisoned("invalidate_all_caches", &e),
     }
 }
 
@@ -260,9 +266,31 @@ struct CachedDiscovery {
     discovery: SlashDiscovery,
 }
 
-fn cache() -> &'static Mutex<HashMap<String, CachedDiscovery>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CachedDiscovery>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<String, CachedDiscovery>,
+    generations: HashMap<String, u64>,
+}
+
+impl CacheState {
+    fn generation(&self, project_name: &str) -> u64 {
+        self.generations.get(project_name).copied().unwrap_or(0)
+    }
+}
+
+fn cache() -> &'static Mutex<CacheState> {
+    static CACHE: OnceLock<Mutex<CacheState>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CacheState::default()))
+}
+
+fn cache_generation(project_name: &str) -> Option<u64> {
+    match cache().lock() {
+        Ok(state) => Some(state.generation(project_name)),
+        Err(e) => {
+            log_cache_poisoned("cache_generation", &e);
+            None
+        }
+    }
 }
 
 fn ttl_for(discovery: &SlashDiscovery) -> Duration {
@@ -273,35 +301,45 @@ fn ttl_for(discovery: &SlashDiscovery) -> Duration {
 }
 
 fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
-    let mut map = match cache().lock() {
-        Ok(map) => map,
+    let mut state = match cache().lock() {
+        Ok(state) => state,
         Err(e) => {
             log_cache_poisoned("cache_get", &e);
             return None;
         }
     };
-    let entry = map.get(project_name)?;
+    let entry = state.entries.get(project_name)?;
     if entry.stored_at.elapsed() < ttl_for(&entry.discovery) {
         Some(entry.discovery.clone())
     } else {
-        map.remove(project_name);
+        state.entries.remove(project_name);
         None
     }
 }
 
 #[cfg(test)]
 fn backdate_cache_entry(project_name: &str, age: Duration) {
-    if let Ok(mut map) = cache().lock() {
-        if let Some(entry) = map.get_mut(project_name) {
+    if let Ok(mut state) = cache().lock() {
+        if let Some(entry) = state.entries.get_mut(project_name) {
             entry.stored_at -= age;
         }
     }
 }
 
-fn cache_put(project_name: &str, discovery: SlashDiscovery) {
+fn cache_put(project_name: &str, generation: Option<u64>, discovery: SlashDiscovery) {
+    let Some(generation) = generation else {
+        return;
+    };
     match cache().lock() {
-        Ok(mut map) => {
-            map.insert(
+        Ok(mut state) => {
+            if state.generation(project_name) != generation {
+                log::debug!(
+                    "slash discovery for '{project_name}' finished after its containers changed; \
+                     result not cached"
+                );
+                return;
+            }
+            state.entries.insert(
                 project_name.to_string(),
                 CachedDiscovery {
                     stored_at: Instant::now(),
@@ -402,7 +440,11 @@ fn run_discovery_with_timeout(
     timeout: Duration,
 ) -> anyhow::Result<RawDiscovery> {
     let instance_id = crate::session::new_instance_id();
-    let marker_argv = crate::session::instance_env_argv(&instance_id);
+    let mut env_argv = crate::session::instance_env_argv(&instance_id);
+    env_argv.push(format!(
+        "ANTHROPIC_BASE_URL={}",
+        consts::CLAUDE_OFFLINE_BASE_URL
+    ));
     let claude_argv = [
         consts::CLAUDE_BINARY,
         "-p",
@@ -414,7 +456,7 @@ fn run_discovery_with_timeout(
         "--",
         "/",
     ];
-    let argv: Vec<&str> = marker_argv
+    let argv: Vec<&str> = env_argv
         .iter()
         .map(String::as_str)
         .chain(claude_argv.iter().copied())
@@ -559,9 +601,25 @@ struct SlashFrontmatter {
     user_invocable: Option<bool>,
 }
 
-fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> SlashDiscovery {
-    let bundled_dir = data_dir.join("claude-resources");
-    let personal_dir = personal_claude_dir();
+fn linked_resource_dirs(data_dir: &Path, enabled_plugins: &[String]) -> Vec<PathBuf> {
+    crate::plugin::enabled_claude_resources_dirs(
+        &crate::plugin::plugins_base_dir_in(data_dir),
+        enabled_plugins,
+    )
+    .into_iter()
+    .rev()
+    .chain(std::iter::once(data_dir.join("claude-resources")))
+    .collect()
+}
+
+fn enrich_and_filter(
+    raw: RawDiscovery,
+    project: &ProjectHandle,
+    data_dir: &Path,
+) -> SlashDiscovery {
+    let project_dir = project.dir.as_path();
+    let resource_dirs = linked_resource_dirs(data_dir, &project.enabled_plugins);
+    let personal_dir = crate::claude_home::claude_config_dir(data_dir, &project.name);
     let mut commands: Vec<SlashCommand> = Vec::new();
 
     for name in raw.slash_commands {
@@ -578,8 +636,8 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
                 clean_name,
                 None,
                 project_dir,
-                None,
-                personal_dir.as_deref(),
+                &[],
+                Some(personal_dir.as_path()),
                 &raw.plugins,
             );
             if matches!(on_disk.user_invocable, Some(false)) {
@@ -602,12 +660,13 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
         }
 
         let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
+        let unprefixed = plugin.is_none();
         let (frontmatter, origin) = lookup_frontmatter(
             clean_name,
             plugin.as_deref(),
             project_dir,
-            Some(&bundled_dir),
-            personal_dir.as_deref(),
+            if unprefixed { &resource_dirs } else { &[] },
+            unprefixed.then_some(personal_dir.as_path()),
             &raw.plugins,
         );
 
@@ -689,10 +748,13 @@ fn lookup_frontmatter(
     name: &str,
     plugin: Option<&str>,
     project_dir: &Path,
-    bundled_dir: Option<&Path>,
+    resource_dirs: &[PathBuf],
     personal_dir: Option<&Path>,
     plugins: &[PluginEntry],
 ) -> (SlashFrontmatter, Option<FrontmatterOrigin>) {
+    if !is_plain_name(name) {
+        return (SlashFrontmatter::default(), None);
+    }
     let mut candidates: Vec<(PathBuf, FrontmatterOrigin)> = Vec::new();
 
     for base in [
@@ -701,11 +763,11 @@ fn lookup_frontmatter(
     ] {
         push_skill_candidates(&base, name, &mut candidates);
     }
-    if let Some(bundled) = bundled_dir {
-        push_skill_candidates(bundled, name, &mut candidates);
-    }
     if let Some(personal) = personal_dir {
         push_skill_candidates(personal, name, &mut candidates);
+    }
+    for resource_dir in resource_dirs {
+        push_skill_candidates(resource_dir, name, &mut candidates);
     }
     if let Some(plugin_name) = plugin {
         for plugin_entry in plugins.iter().filter(|p| p.name == plugin_name) {
@@ -725,7 +787,7 @@ fn lookup_frontmatter(
     }
 
     for (candidate, origin) in candidates {
-        match std::fs::read_to_string(&candidate) {
+        match read_frontmatter_head(&candidate) {
             Ok(contents) => {
                 if let Some(fm) = parse_frontmatter(&contents) {
                     return (fm, Some(origin));
@@ -735,7 +797,7 @@ fn lookup_frontmatter(
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
                     log::debug!(
-                        "slash: read_to_string('{}') failed: {err}",
+                        "cannot read slash command frontmatter from {}: {err}",
                         candidate.display()
                     );
                 }
@@ -750,6 +812,27 @@ fn lookup_frontmatter(
 enum FrontmatterOrigin {
     Skill,
     Command,
+}
+
+fn is_plain_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+fn read_frontmatter_head(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut head = Vec::new();
+    std::fs::File::open(path)?
+        .take(FRONTMATTER_READ_LIMIT)
+        .read_to_end(&mut head)?;
+    Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
 fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<(PathBuf, FrontmatterOrigin)>) {
@@ -767,6 +850,9 @@ fn lookup_integration_frontmatter(
     name: &str,
     data_dir: &Path,
 ) -> Option<(SlashFrontmatter, FrontmatterOrigin)> {
+    if !is_plain_name(name) {
+        return None;
+    }
     let base = data_dir.join("claude-resources");
     let candidates = [
         (
@@ -785,14 +871,14 @@ fn lookup_integration_frontmatter(
     ];
 
     for (candidate, origin) in candidates {
-        match std::fs::read_to_string(&candidate) {
+        match read_frontmatter_head(&candidate) {
             Ok(contents) => {
                 return Some((parse_frontmatter(&contents).unwrap_or_default(), origin));
             }
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
                     log::debug!(
-                        "slash: read_to_string('{}') failed: {err}",
+                        "cannot read slash command frontmatter from {}: {err}",
                         candidate.display()
                     );
                 }
@@ -801,10 +887,6 @@ fn lookup_integration_frontmatter(
     }
 
     None
-}
-
-fn personal_claude_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".claude"))
 }
 
 fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
@@ -826,7 +908,12 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
 }
 
 fn claude_container_name(project: &str) -> String {
-    format!("{}_{}_claude", consts::compose_prefix(), project)
+    format!(
+        "{}_{}_{}",
+        consts::compose_prefix(),
+        project,
+        consts::CLAUDE_COMPOSE_SERVICE
+    )
 }
 
 #[cfg(test)]
@@ -837,7 +924,7 @@ fn claude_container_name(project: &str) -> String {
 )]
 mod tests {
     use super::*;
-    use crate::runtime::mock_runtime::MockRuntimeBuilder;
+    use crate::runtime::mock_runtime::{MockHandles, MockRuntimeBuilder};
 
     #[test]
     fn is_bare_slash_matches_lone_slash_with_surrounding_whitespace() {
@@ -1144,7 +1231,7 @@ mod tests {
             plugins: vec![],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1176,7 +1263,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["visible"]);
     }
@@ -1197,7 +1284,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "user-only");
         assert_eq!(d.commands[0].description.as_deref(), Some("user only"));
@@ -1219,7 +1306,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].description.as_deref(), Some("from project"));
     }
@@ -1240,7 +1327,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "model");
         assert_eq!(d.commands[0].kind, SlashKind::Builtin);
@@ -1259,7 +1346,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(
             d.commands[0].description.as_deref(),
@@ -1283,7 +1370,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(
             d.commands.is_empty(),
             "expected 'model' to be hidden by on-disk user-invocable: false, got {:?}",
@@ -1307,7 +1394,7 @@ mod tests {
             }],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let by_name: HashMap<&str, &SlashCommand> =
             d.commands.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -1326,7 +1413,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
     }
 
@@ -1379,6 +1466,25 @@ mod tests {
         let calls = handles.exec_calls.lock().unwrap();
         assert_eq!(calls[0].argv[0], "env");
         assert!(calls[0].argv[1].starts_with("SPW_SESSION_INSTANCE_ID="));
+    }
+
+    #[test]
+    fn run_discovery_sends_its_slash_prompt_to_no_model() {
+        let (runtime, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_script("noise\n")
+            .build();
+        let _ = run_discovery(&runtime, "test-container");
+        let calls = handles.exec_calls.lock().unwrap();
+        let argv = &calls[0].argv;
+        let claude_at = argv
+            .iter()
+            .position(|arg| arg == consts::CLAUDE_BINARY)
+            .expect("the discovery argv runs Claude Code");
+        let closed_base_url = format!("ANTHROPIC_BASE_URL={}", consts::CLAUDE_OFFLINE_BASE_URL);
+        assert!(
+            argv[..claude_at].contains(&closed_base_url),
+            "the `/` prompt must go to a closed port, not to a model: {argv:?}"
+        );
     }
 
     #[test]
@@ -1461,7 +1567,6 @@ mod tests {
 
     #[test]
     fn failed_discovery_is_negative_cached_within_ttl() {
-        invalidate_all_caches();
         let project = ProjectHandle::new(unique_project_name("negcache"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
@@ -1491,7 +1596,6 @@ mod tests {
 
     #[test]
     fn negative_cache_expires_after_ttl_and_reprobes() {
-        invalidate_all_caches();
         let project = ProjectHandle::new(unique_project_name("negttl"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
@@ -1511,7 +1615,6 @@ mod tests {
 
     #[test]
     fn invalidate_cache_clears_a_negative_entry() {
-        invalidate_all_caches();
         let project =
             ProjectHandle::new(unique_project_name("neginvalidate"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
@@ -1531,7 +1634,6 @@ mod tests {
 
     #[test]
     fn discover_slash_commands_caches_results() {
-        invalidate_all_caches();
         let script = format!("{}\n", sample_init_json());
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join(".claude/skills/my-skill");
@@ -1566,17 +1668,190 @@ mod tests {
         assert_eq!(third.source, DiscoverySource::Unavailable);
     }
 
+    fn cache_a_real_discovery(project: &ProjectHandle) {
+        let script = format!("{}\n", sample_init_json());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        assert_eq!(
+            discover_slash_commands(&working, project).unwrap().source,
+            DiscoverySource::Init
+        );
+    }
+
+    fn failing_runtime() -> (crate::runtime::LockedRuntime, MockHandles) {
+        MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build()
+    }
+
+    fn reap_compose_lock_dirs(projects: &[&str]) {
+        for project in projects {
+            crate::runtime::compose_locks::remove_project_lock_dir_for_test(project);
+        }
+    }
+
+    #[test]
+    fn a_compose_recreate_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("recreate"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up_recreate(&project.name).unwrap();
+        let after = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(after.source, DiscoverySource::Unavailable);
+        assert_eq!(
+            handles.exec_calls.lock().unwrap().len(),
+            1,
+            "the recreate must drop the cached entry so discovery re-runs"
+        );
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_compose_up_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("up"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up(&project.name).unwrap();
+        let after = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(after.source, DiscoverySource::Unavailable);
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_failed_compose_up_still_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("up-failed"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = MockRuntimeBuilder::new()
+            .with_fail_on_up(&[project.name.as_str()])
+            .with_exec_piped_error("container not running")
+            .build();
+        failing
+            .compose_up(&project.name)
+            .expect_err("the mock compose_up must fail");
+        let after = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(after.source, DiscoverySource::Unavailable);
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_compose_recreate_for_another_project_keeps_the_cache() {
+        let project = ProjectHandle::new(unique_project_name("other"), std::env::temp_dir());
+        let unrelated = unique_project_name("unrelated");
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up_recreate(&unrelated).unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Init
+        );
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+        reap_compose_lock_dirs(&[&unrelated]);
+    }
+
+    #[test]
+    fn a_claude_service_recreate_drops_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("svc-claude"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing
+            .compose_up_service(&project.name, consts::CLAUDE_COMPOSE_SERVICE)
+            .unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Unavailable
+        );
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_proxy_service_recreate_keeps_the_cached_discovery() {
+        let project = ProjectHandle::new(unique_project_name("svc-proxy"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, handles) = failing_runtime();
+        failing.compose_up_service(&project.name, "proxy").unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Init
+        );
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    fn discover_while_recreating(
+        project: &ProjectHandle,
+        recreated: &str,
+    ) -> (SlashDiscovery, crate::runtime::LockedRuntime) {
+        let (hanging, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .with_exec_piped_script("")
+            .build();
+        let rt = &hanging;
+        let outcome = std::thread::scope(|s| {
+            let discovery = s.spawn(|| {
+                discover_slash_commands_with_timeout(rt, project, Duration::from_millis(500))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handles.exec_calls.lock().unwrap().is_empty() {
+                assert!(
+                    Instant::now() < deadline,
+                    "discovery never spawned its probe"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            rt.compose_up_recreate(recreated).unwrap();
+            discovery.join().unwrap().unwrap()
+        });
+        assert_eq!(outcome.source, DiscoverySource::Unavailable);
+        (outcome, hanging)
+    }
+
+    #[test]
+    fn a_recreate_during_an_in_flight_discovery_leaves_nothing_cached() {
+        let project = ProjectHandle::new(unique_project_name("inflight"), std::env::temp_dir());
+        discover_while_recreating(&project, &project.name);
+
+        let script = format!("{}\n", sample_init_json());
+        let (working, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        let after = discover_slash_commands(&working, &project).unwrap();
+        assert_eq!(
+            after.source,
+            DiscoverySource::Init,
+            "a result produced against the replaced container must not be cached"
+        );
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+        reap_compose_lock_dirs(&[&project.name]);
+    }
+
+    #[test]
+    fn a_recreate_of_another_project_during_an_in_flight_discovery_keeps_the_result() {
+        let project =
+            ProjectHandle::new(unique_project_name("inflight-other"), std::env::temp_dir());
+        let unrelated = unique_project_name("inflight-unrelated");
+        let (first, _) = discover_while_recreating(&project, &unrelated);
+
+        let (working, handles) = failing_runtime();
+        let after = discover_slash_commands(&working, &project).unwrap();
+        assert_eq!(after, first);
+        assert!(handles.exec_calls.lock().unwrap().is_empty());
+        reap_compose_lock_dirs(&[&unrelated]);
+    }
+
     #[test]
     fn parse_init_line_ignores_trailing_whitespace() {
         let src = format!("   {}   \n", sample_init_json());
         assert!(parse_init_line(&src).is_some());
-    }
-
-    #[test]
-    fn personal_claude_dir_resolves_to_home() {
-        let home = dirs::home_dir();
-        let personal = personal_claude_dir();
-        assert_eq!(home.map(|h| h.join(".claude")), personal);
     }
 
     #[test]
@@ -1610,14 +1885,13 @@ mod tests {
         }];
 
         let (fm, origin) =
-            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, None, &plugins);
+            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, &[], None, &plugins);
         assert_eq!(fm.description.as_deref(), Some("from plugin"));
         assert_eq!(origin, Some(FrontmatterOrigin::Skill));
     }
 
     #[test]
     fn concurrent_discovery_runs_exactly_one_exec_and_shares_the_result() {
-        invalidate_all_caches();
         let project = unique_project_name("single-flight");
         let (runtime, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_hang(2)
@@ -1715,7 +1989,7 @@ mod tests {
             "speedwave-grill-me",
             None,
             &project_dir,
-            Some(&bundled),
+            std::slice::from_ref(&bundled),
             None,
             &[],
         );
@@ -1750,7 +2024,7 @@ mod tests {
             "speedwave-grill-me",
             None,
             &project_dir,
-            Some(&bundled),
+            std::slice::from_ref(&bundled),
             None,
             &[],
         );
@@ -1775,7 +2049,7 @@ mod tests {
             agents: vec![],
         };
         let data_tmp = tempfile::tempdir().unwrap();
-        let discovery = enrich_and_filter(raw, &project, data_tmp.path());
+        let discovery = enrich_and_filter(raw, &test_project(&project), data_tmp.path());
         assert_eq!(discovery.commands.len(), 1);
         assert_eq!(discovery.commands[0].kind, SlashKind::Skill);
     }
@@ -1788,7 +2062,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].kind, SlashKind::Builtin);
         assert!(!d.commands[0]
@@ -1806,7 +2080,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(d.commands.is_empty());
     }
 
@@ -1818,7 +2092,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(d.commands.is_empty());
     }
 
@@ -1834,7 +2108,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let data_tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"redmine:ticket"));
         assert!(names.contains(&"my-agent"));
@@ -1862,7 +2136,7 @@ mod tests {
             ..RawDiscovery::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert!(d.commands.is_empty());
     }
 
@@ -1884,9 +2158,451 @@ mod tests {
             ..RawDiscovery::default()
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let d = enrich_and_filter(raw, &test_project(tmp.path()), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].kind, SlashKind::Skill);
         assert_eq!(d.commands[0].description.as_deref(), Some("redmine skill"));
+    }
+
+    fn test_project(dir: &Path) -> ProjectHandle {
+        ProjectHandle::new("test-project", dir)
+    }
+
+    fn with_plugins(dir: &Path, keys: &[&str]) -> ProjectHandle {
+        test_project(dir).with_enabled_plugins(keys.iter().map(|k| k.to_string()).collect())
+    }
+
+    fn install_plugin_resource(data_dir: &Path, slug: &str, relative: &str, contents: &str) {
+        let plugin_dir = crate::plugin::plugins_base_dir_in(data_dir).join(slug);
+        let file = crate::plugin::plugin_claude_resources_dir(&plugin_dir).join(relative);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, contents).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(r#"{{"name":"{slug}","slug":"{slug}","version":"1.0.0","description":"t"}}"#),
+        )
+        .unwrap();
+    }
+
+    fn write_bundled_skill(data_dir: &Path, name: &str, frontmatter: &str) {
+        let skill_dir = data_dir.join("claude-resources/skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), frontmatter).unwrap();
+    }
+
+    fn write_personal_skill(data_dir: &Path, project: &str, name: &str, description: &str) {
+        let skill_dir = crate::claude_home::claude_config_dir(data_dir, project)
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: {description}\n---\n"),
+        )
+        .unwrap();
+    }
+
+    fn discover_names(names: &[&str]) -> RawDiscovery {
+        RawDiscovery {
+            slash_commands: names.iter().map(|n| n.to_string()).collect(),
+            ..RawDiscovery::default()
+        }
+    }
+
+    #[test]
+    fn enrich_shows_a_skill_linked_from_an_enabled_speedwave_plugin() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "glpi",
+            "skills/glpi-operations/SKILL.md",
+            "---\ndescription: GLPI tickets\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["glpi-operations"]),
+            &with_plugins(tmp.path(), &["glpi"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].name, "glpi-operations");
+        assert_eq!(d.commands[0].kind, SlashKind::Skill);
+        assert_eq!(d.commands[0].description.as_deref(), Some("GLPI tickets"));
+        assert_eq!(d.commands[0].plugin, None);
+    }
+
+    #[test]
+    fn enrich_shows_a_command_linked_from_an_enabled_speedwave_plugin() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "presale",
+            "commands/presale.md",
+            "---\ndescription: Presale pipeline\nargument-hint: <rfp>\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["presale"]),
+            &with_plugins(tmp.path(), &["presale"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].kind, SlashKind::Command);
+        assert_eq!(
+            d.commands[0].description.as_deref(),
+            Some("Presale pipeline")
+        );
+        assert_eq!(d.commands[0].argument_hint.as_deref(), Some("<rfp>"));
+    }
+
+    #[test]
+    fn enrich_hides_a_plugin_skill_declaring_user_invocable_false() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "presale",
+            "skills/presale-add/SKILL.md",
+            "---\ndescription: internal step\nuser-invocable: false\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["presale-add"]),
+            &with_plugins(tmp.path(), &["presale"]),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_ignores_a_skill_from_a_plugin_not_enabled_in_the_project() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "glpi",
+            "skills/glpi-operations/SKILL.md",
+            "---\ndescription: GLPI tickets\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["glpi-operations"]),
+            &with_plugins(tmp.path(), &["presale"]),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_keeps_a_bundled_skill_that_a_disabled_plugin_would_hide() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_bundled_skill(
+            data_tmp.path(),
+            "shared",
+            "---\ndescription: from bundle\n---\n",
+        );
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/shared/SKILL.md",
+            "---\ndescription: from plugin\nuser-invocable: false\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("from bundle"));
+    }
+
+    #[test]
+    fn enrich_prefers_a_plugin_skill_over_a_bundled_skill_of_the_same_name() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_bundled_skill(
+            data_tmp.path(),
+            "shared",
+            "---\ndescription: from bundle\n---\n",
+        );
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/shared/SKILL.md",
+            "---\ndescription: from plugin\n---\n",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &with_plugins(tmp.path(), &["extra"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("from plugin"));
+    }
+
+    #[test]
+    fn enrich_takes_a_skill_two_plugins_share_from_the_plugin_linked_last() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        for slug in ["alpha", "zeta"] {
+            install_plugin_resource(
+                data_tmp.path(),
+                slug,
+                "skills/shared/SKILL.md",
+                &format!("---\ndescription: from {slug}\n---\n"),
+            );
+        }
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &with_plugins(tmp.path(), &["alpha", "zeta"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("from zeta"));
+    }
+
+    #[test]
+    fn enrich_does_not_look_up_a_prefixed_name_in_speedwave_resource_dirs() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/review/SKILL.md",
+            "---\ndescription: from a speedwave plugin\nuser-invocable: false\n---\n",
+        );
+        write_bundled_skill(
+            data_tmp.path(),
+            "review",
+            "---\ndescription: from bundle\nuser-invocable: false\n---\n",
+        );
+        write_personal_skill(data_tmp.path(), "test-project", "review", "personal");
+        let raw = RawDiscovery {
+            slash_commands: vec!["superpowers:review".into()],
+            plugins: vec![PluginEntry {
+                name: "superpowers".into(),
+                path: None,
+            }],
+            agents: vec![],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(raw, &with_plugins(tmp.path(), &["extra"]), data_tmp.path());
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].name, "superpowers:review");
+        assert_eq!(d.commands[0].kind, SlashKind::Plugin);
+        assert_eq!(d.commands[0].description, None);
+    }
+
+    #[test]
+    fn enrich_shows_a_personal_skill_from_the_projects_claude_home() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_personal_skill(
+            data_tmp.path(),
+            "test-project",
+            "my-own",
+            "made in the container",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["my-own"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].kind, SlashKind::Skill);
+        assert_eq!(
+            d.commands[0].description.as_deref(),
+            Some("made in the container")
+        );
+    }
+
+    #[test]
+    fn enrich_prefers_a_real_claude_home_skill_over_the_linked_resources() {
+        let _g = crate::signing::test_support::UnsignedBypassGuard::new();
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_bundled_skill(
+            data_tmp.path(),
+            "shared",
+            "---\ndescription: from bundle\n---\n",
+        );
+        install_plugin_resource(
+            data_tmp.path(),
+            "extra",
+            "skills/shared/SKILL.md",
+            "---\ndescription: from plugin\n---\n",
+        );
+        write_personal_skill(data_tmp.path(), "test-project", "shared", "personal copy");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["shared"]),
+            &with_plugins(tmp.path(), &["extra"]),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("personal copy"));
+    }
+
+    #[test]
+    fn enrich_ignores_a_personal_skill_of_another_project() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        write_personal_skill(data_tmp.path(), "other-project", "theirs", "not ours");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["theirs"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enrich_skips_a_claude_home_link_that_resolves_only_inside_the_container() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        let skills =
+            crate::claude_home::claude_config_dir(data_tmp.path(), "test-project").join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(
+            "/speedwave/plugins/gone/skills/linked-only",
+            skills.join("linked-only"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["linked-only"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_hides_a_skill_from_a_plugin_that_fails_verification() {
+        let _g = crate::signing::test_support::unsigned_env_lock();
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        let data_tmp = tempfile::tempdir().unwrap();
+        install_plugin_resource(
+            data_tmp.path(),
+            "unsigned",
+            "skills/unsigned-skill/SKILL.md",
+            "---\ndescription: never shown\n---\n",
+        );
+        let listed = crate::plugin::list_for_ui_from_dir(&crate::plugin::plugins_base_dir_in(
+            data_tmp.path(),
+        ));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].verification_status,
+            crate::plugin::VerificationStatus::MissingSignature
+        );
+        let tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["unsigned-skill"]),
+            &with_plugins(tmp.path(), &["unsigned"]),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_does_not_resolve_a_name_that_climbs_out_of_its_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".claude/skills")).unwrap();
+        let outside = tmp.path().join(".claude/outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("SKILL.md"), "---\ndescription: escaped\n---\n").unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["../outside"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert!(d.commands.is_empty(), "got {:?}", d.commands);
+    }
+
+    #[test]
+    fn enrich_reads_the_frontmatter_of_a_file_longer_than_the_read_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/long");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let body = "x".repeat(usize::try_from(FRONTMATTER_READ_LIMIT).unwrap() * 3);
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: long body\n---\n{body}"),
+        )
+        .unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+
+        let d = enrich_and_filter(
+            discover_names(&["long"]),
+            &test_project(tmp.path()),
+            data_tmp.path(),
+        );
+
+        assert_eq!(d.commands.len(), 1, "got {:?}", d.commands);
+        assert_eq!(d.commands[0].description.as_deref(), Some("long body"));
+    }
+
+    #[test]
+    fn is_plain_name_accepts_only_a_single_normal_component() {
+        for ok in ["glpi-operations", "presale", "speedwave-grill-me"] {
+            assert!(is_plain_name(ok), "{ok}");
+        }
+        for bad in ["", ".", "..", "../x", "a/b", "/abs"] {
+            assert!(!is_plain_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn read_frontmatter_head_stops_at_the_read_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("big.md");
+        let limit = usize::try_from(FRONTMATTER_READ_LIMIT).unwrap();
+        std::fs::write(&file, "y".repeat(limit * 2)).unwrap();
+
+        assert_eq!(read_frontmatter_head(&file).unwrap().len(), limit);
+    }
+
+    #[test]
+    fn read_frontmatter_head_rejects_something_other_than_a_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err = read_frontmatter_head(tmp.path()).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

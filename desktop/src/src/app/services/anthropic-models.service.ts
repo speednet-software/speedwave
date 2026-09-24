@@ -1,7 +1,8 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
-import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
+import { AnthropicModel } from '../models/llm';
+import { canonicalModelId } from '../models/model-picker';
 
 /**
  * Frontend cache of the SSOT Anthropic model catalog served by the Rust
@@ -11,8 +12,16 @@ import { AnthropicModel, DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 export class AnthropicModelsService {
   private readonly tauri = inject(TauriService);
   private readonly logger = inject(LoggerService);
-  private cache: AnthropicModel[] | null = null;
+  private readonly catalog = signal<AnthropicModel[] | null>(null);
   private inflight: Promise<AnthropicModel[]> | null = null;
+
+  private get cache(): AnthropicModel[] | null {
+    return this.catalog();
+  }
+
+  private set cache(value: AnthropicModel[] | null) {
+    this.catalog.set(value);
+  }
 
   /**
    * Returns the model catalog, caching the first successful fetch. On failure
@@ -44,50 +53,22 @@ export class AnthropicModelsService {
   }
 
   /**
-   * Context-window lookup for a given model id (exact API id or alias, e.g. `claude-opus-4-7` /
-   * `opus-4.7`). Returns `null` when the catalog hasn't loaded or the id isn't recognised.
-   * @param modelId - Exact API id or alias.
+   * Catalog entry a wire, pinned or observed model id stands for (signal read).
+   * @param modelId - Any spelling of the id: bare, 1M-suffixed or snapshot-dated.
    */
-  contextTokensFor(modelId: string | null | undefined): number | null {
+  entryFor(modelId: string | null | undefined): AnthropicModel | null {
     if (!this.cache || !modelId) return null;
-    const trimmed = modelId.trim();
-    if (!trimmed) return null;
-    const direct = this.cache.find((m) => m.id === trimmed);
-    if (direct) return direct.context_tokens;
-    const candidate = trimmed.startsWith('claude-')
-      ? trimmed
-      : `claude-${trimmed.replace('.', '-')}`;
-    const fuzzy = this.cache.find((m) => m.id === candidate);
-    return fuzzy?.context_tokens ?? null;
+    const id = canonicalModelId(modelId);
+    return this.cache.find((m) => m.id === id) ?? null;
   }
 
   /**
-   * Synchronous variant of {@link contextTokensFor}, always returning a usable number — falls back
-   * to {@link DEFAULT_CONTEXT_TOKENS} when unknown/not-yet-loaded (for computed signals).
-   * @param modelId - Same id as accepted by {@link contextTokensFor}.
-   */
-  contextTokensOrDefault(modelId: string | null | undefined): number {
-    return this.contextTokensFor(modelId) ?? DEFAULT_CONTEXT_TOKENS;
-  }
-
-  /**
-   * Catalog family display label (e.g. "Opus 4.8") for a model id.
-   * @param modelId - CC-selectable id; `[1m]` suffix tolerated.
+   * Catalog family display label (e.g. "Opus 4.8") for a model id (signal read).
+   * @param modelId - Any spelling of the id: bare, 1M-suffixed or snapshot-dated.
    * @returns Label or `null` when the id is not in the catalog.
    */
   familyLabelFor(modelId: string | null | undefined): string | null {
-    if (!this.cache || !modelId) return null;
-    const bare = modelId.replace(/(\[1m\])+$/, '');
-    const hit = this.cache.find((m) => m.id === bare || m.id === modelId);
-    return hit?.family ?? null;
-  }
-
-  /**
-   * The catalog entries offered by the composer selector — legacy (non-`selectable`)
-   * entries stay in the full catalog for pricing history but are excluded here.
-   */
-  selectableModels(): AnthropicModel[] {
-    return (this.cache ?? []).filter((m) => m.selectable);
+    return this.entryFor(modelId)?.family ?? null;
   }
 
   /**
@@ -114,12 +95,19 @@ export class AnthropicModelsService {
    * @param projectId - Project this write applies to.
    * @param providerId - `LlmProviderEntry.id` to update.
    * @param model - New model id (wire-shaped per the id triad).
+   * @param contextTokens - The model's context window from discovery, or null when unknown.
    */
-  async setProviderModel(projectId: string, providerId: string, model: string): Promise<void> {
+  async setProviderModel(
+    projectId: string,
+    providerId: string,
+    model: string,
+    contextTokens: number | null
+  ): Promise<void> {
     await this.tauri.invoke<void>('set_provider_model', {
       projectId,
       providerId,
       model,
+      contextTokens,
     });
   }
 }

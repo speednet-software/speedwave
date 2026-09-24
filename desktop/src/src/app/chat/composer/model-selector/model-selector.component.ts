@@ -12,16 +12,27 @@ import { FormsModule } from '@angular/forms';
 import { TooltipDirective } from '../../../shared/tooltip.directive';
 import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
+import { ClaudeControlService } from '../../../services/claude-control.service';
+import { ModelPickerService } from '../../../services/model-picker.service';
+import { DiscoveredModelsService } from '../../../services/discovered-models.service';
 import { LoggerService } from '../../../services/logger.service';
-import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
+import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
+import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
+
+const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
+const LOAD_FAILED = 'Failed to load models.';
 
 interface ModelOption {
   id: string;
   label: string;
+  wireId: string;
+  isDefault: boolean;
   contextTokens: number | null;
+  description: string | null;
+  requiresUsageCredits: boolean;
   promptPrice?: number;
   completionPrice?: number;
 }
@@ -32,6 +43,8 @@ export interface ModelSelection {
   wireId: string;
   providerId: string;
   kind: string;
+  isDefault: boolean;
+  contextTokens: number | null;
 }
 
 /**
@@ -51,8 +64,8 @@ export interface ModelSelection {
         type="button"
         data-testid="composer-model-badge"
         class="hidden text-[var(--teal)] hover:underline md:inline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
-        [disabled]="streaming()"
-        [attr.title]="streaming() ? 'Model locked while a turn is streaming' : 'Change model'"
+        [disabled]="streaming() || pickerPending()"
+        [attr.title]="badgeTitle()"
         (click)="openCombobox()"
       >
         {{ displayModelLabel() }}
@@ -62,7 +75,7 @@ export interface ModelSelection {
           type="button"
           data-testid="effort-segment"
           class="hidden text-[var(--ink-mute)] hover:text-[var(--ink)] hover:underline md:inline"
-          appTooltip="Reasoning effort - applies to the current session and persists for new ones"
+          appTooltip="Reasoning effort - saved for this project's sessions"
           placement="top"
           (click)="toggleEffortPopover()"
         >
@@ -105,6 +118,22 @@ export interface ModelSelection {
               &#x2715;
             </button>
           </div>
+          @if (stale()) {
+            <div
+              data-testid="model-selector-stale"
+              class="mono flex items-center gap-2 border-b border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+            >
+              <span>Could not refresh. Showing the last known list.</span>
+              <button
+                type="button"
+                data-testid="model-selector-retry"
+                class="hover-bg rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink)]"
+                (click)="fetchOptions(true)"
+              >
+                Retry
+              </button>
+            </div>
+          }
           <div class="max-h-72 overflow-y-auto py-1">
             @if (loading()) {
               <div
@@ -134,9 +163,44 @@ export interface ModelSelection {
                   type="button"
                   [attr.data-testid]="'model-selector-option-' + opt.id"
                   class="mono hover-bg flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
+                  [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
                   (click)="select(opt)"
                 >
-                  <span>{{ opt.label }}</span>
+                  <span class="flex min-w-0 items-start gap-2">
+                    @if (showEffortControl()) {
+                      <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
+                        @if (opt.id === activeOptionId()) {
+                          <span data-testid="model-selector-active-mark">&#x2713;</span>
+                        }
+                      </span>
+                    }
+                    <span class="flex min-w-0 flex-col gap-0.5">
+                      <span class="flex items-center gap-2">
+                        <span>{{ opt.label }}</span>
+                        @if (opt.isDefault) {
+                          <span
+                            data-testid="model-selector-default-badge"
+                            class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
+                            >Default</span
+                          >
+                        }
+                        @if (opt.requiresUsageCredits) {
+                          <span
+                            data-testid="model-selector-usage-credits-badge"
+                            class="rounded border border-amber-500/60 px-1 text-[9px] uppercase tracking-wide text-amber-300"
+                            >Usage credits</span
+                          >
+                        }
+                      </span>
+                      @if (opt.description) {
+                        <span
+                          [attr.data-testid]="'model-selector-description-' + opt.id"
+                          class="whitespace-normal text-[10px] leading-tight text-[var(--ink-mute)]"
+                          >{{ opt.description }}</span
+                        >
+                      }
+                    </span>
+                  </span>
                   @if (opt.promptPrice !== undefined) {
                     <span class="text-[var(--ink-mute)]"
                       >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
@@ -176,6 +240,9 @@ export interface ModelSelection {
 export class ModelSelectorComponent {
   private readonly tauri = inject(TauriService);
   private readonly anthropicModels = inject(AnthropicModelsService);
+  private readonly control = inject(ClaudeControlService);
+  private readonly picker = inject(ModelPickerService);
+  private readonly discovered = inject(DiscoveredModelsService);
   private readonly log = inject(LoggerService);
 
   readonly projectId = input.required<string>();
@@ -193,15 +260,15 @@ export class ModelSelectorComponent {
   readonly query = signal('');
   readonly loading = signal(false);
   readonly error = signal('');
+  protected readonly stale = signal(false);
   protected readonly summary = signal<ActiveProviderSummary | null>(null);
   private summaryProjectId: string | null = null;
   private readonly options = signal<ModelOption[]>([]);
 
   private optionsFetch: Promise<void> = Promise.resolve();
 
-  private discoverCache: { key: string; options: ModelOption[] } | null = null;
+  private probedKey = '';
 
-  private readonly anthropicCatalog = signal<AnthropicModel[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
 
@@ -214,26 +281,42 @@ export class ModelSelectorComponent {
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
-  private readonly currentModelEntry = computed<AnthropicModel | null>(() => {
-    const bare = this.displayModel().replace(/(\[1m\])+$/, '');
-    return this.anthropicCatalog().find((m) => m.id === bare) ?? null;
+  protected readonly pickerPending = computed(
+    () =>
+      this.showEffortControl() &&
+      this.control.sessionInfoState(this.projectId()).state === 'pending'
+  );
+
+  protected readonly badgeTitle = computed<string>(() => {
+    if (this.streaming()) return 'Model locked while a turn is streaming';
+    return this.pickerPending() ? 'Loading models...' : 'Change model';
   });
 
-  private readonly fullLevelEntry = computed<AnthropicModel | null>(
-    () => this.anthropicCatalog().find((m) => m.effort_levels.length === 5) ?? null
+  protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
+
+  private readonly activeRow = computed<ModelPickerRow | null>(() =>
+    this.showEffortControl() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
   );
 
-  protected readonly effortStops = computed<string[]>(
-    () => this.currentModelEntry()?.effort_levels ?? this.fullLevelEntry()?.effort_levels ?? []
-  );
-
-  private readonly catalogDefaultEffort = computed<string | null>(
-    () => this.currentModelEntry()?.default_effort ?? this.fullLevelEntry()?.default_effort ?? null
+  private readonly currentModelEntry = computed<AnthropicModel | null>(() =>
+    this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
   );
 
   private readonly canonicalOrder = computed<string[]>(
-    () => this.fullLevelEntry()?.effort_levels ?? []
+    () => this.picker.picker(this.projectId())?.effort_order ?? []
   );
+
+  protected readonly effortStops = computed<string[]>(
+    () =>
+      this.activeRow()?.effort_levels ??
+      this.currentModelEntry()?.effort_levels ??
+      this.canonicalOrder()
+  );
+
+  private readonly catalogDefaultEffort = computed<string | null>(() => {
+    const row = this.activeRow();
+    return row ? row.default_effort : (this.currentModelEntry()?.default_effort ?? null);
+  });
 
   protected readonly showEffortSegment = computed(
     () => this.showEffortControl() && this.effortStops().length > 0
@@ -247,6 +330,7 @@ export class ModelSelectorComponent {
     if (stops.includes(pin)) return pin;
     const order = this.canonicalOrder();
     const idx = order.indexOf(pin);
+    if (idx === -1) return this.catalogDefaultEffort() ?? stops[0];
     for (let i = idx - 1; i >= 0; i--) {
       if (stops.includes(order[i])) return order[i];
     }
@@ -259,12 +343,9 @@ export class ModelSelectorComponent {
     return level ? capitalizeLevel(level) : 'Default';
   });
 
-  protected readonly displayModelLabel = computed<string>(() => {
-    const id = this.displayModel();
-    const entry = this.currentModelEntry();
-    if (!entry) return id;
-    return id.endsWith('[1m]') ? `${entry.family} [1m]` : entry.family;
-  });
+  protected readonly displayModelLabel = computed<string>(() =>
+    this.picker.label(this.displayModel(), this.projectId())
+  );
 
   private lastSessionModel = '';
 
@@ -282,7 +363,16 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.loadAnthropicCatalog();
+      if (this.showEffortControl() && id) void this.anthropicModels.list();
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (this.showEffortControl() && id) void this.control.refreshSessionInfo(id);
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (!this.showEffortControl() || !id) return;
+      if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
     });
     effect(() => {
       const live = this.sessionModel();
@@ -321,7 +411,12 @@ export class ModelSelectorComponent {
     const q = this.query().trim().toLowerCase();
     const all = this.options();
     if (!q) return all;
-    return all.filter((o) => o.id.toLowerCase().includes(q) || o.label.toLowerCase().includes(q));
+    return all.filter(
+      (o) =>
+        o.id.toLowerCase().includes(q) ||
+        o.label.toLowerCase().includes(q) ||
+        o.description?.toLowerCase().includes(q)
+    );
   });
 
   /**
@@ -357,48 +452,53 @@ export class ModelSelectorComponent {
     this.query.set(value);
   }
 
-  private anthropicOptionsFrom(list: AnthropicModel[]): ModelOption[] {
-    const rows: ModelOption[] = [];
-    for (const m of list) {
-      if (!m.selectable) continue;
-      rows.push({ id: m.id, label: m.family, contextTokens: m.context_tokens });
-      if (m.has_1m) {
-        rows.push({
-          id: `${m.id}[1m]`,
-          label: `${m.family} (1M)`,
-          contextTokens: m.context_tokens,
-        });
-      }
-    }
-    return rows;
+  private anthropicOptionsFrom(picker: ModelPicker, projectId: string): ModelOption[] {
+    return picker.rows.map((row) => ({
+      id: row.id,
+      label: this.picker.label(row.id, projectId),
+      wireId: row.wire_id,
+      isDefault: row.is_default,
+      contextTokens: null,
+      description: row.description,
+      requiresUsageCredits: row.requires_usage_credits,
+    }));
   }
 
-  private async fetchDiscoverOptions(provider: string, baseUrl: string): Promise<ModelOption[]> {
-    const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
-      args: { provider, baseUrl, apiKey: undefined },
-    });
-    return (res?.models ?? []).map((m) => ({
+  private discoveredOptionsFrom(models: DiscoveredModel[]): ModelOption[] {
+    return models.map((m) => ({
       id: m.id,
       label: m.id,
+      wireId: m.id,
+      isDefault: false,
       contextTokens: m.context_tokens ?? null,
+      description: null,
+      requiresUsageCredits: false,
     }));
   }
 
   /**
    * Fetches the option list for the active provider kind (badge combobox source).
-   * Local/OpenRouter results are cached per `kind|base_url`; pass `force` to bypass
-   * the cache (retry-after-error, or a fresh open must still catch a server-side change).
-   * @param force - Skip the cache and re-issue the discovery probe.
+   * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
+   * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
+   * @param force - Re-issue the discovery probe even when this instance already probed.
    */
   async fetchOptions(force = false): Promise<void> {
     const summary = this.summary();
     if (!summary) return;
     this.loading.set(true);
     this.error.set('');
+    this.stale.set(false);
     try {
       if (isAnthropicKind(summary.kind)) {
-        const list = await this.anthropicModels.list();
-        this.options.set(this.anthropicOptionsFrom(list));
+        const projectId = this.projectId();
+        await this.anthropicModels.list();
+        const picker = await this.picker.refresh(projectId);
+        if (!picker) {
+          this.options.set([]);
+          this.error.set(MODEL_LIST_UNAVAILABLE);
+          return;
+        }
+        this.options.set(this.anthropicOptionsFrom(picker, projectId));
       } else {
         const isOpenRouter = summary.kind === 'open_router';
         if (!isOpenRouter && !summary.base_url) {
@@ -406,20 +506,27 @@ export class ModelSelectorComponent {
         }
         const provider = isOpenRouter ? 'openrouter' : 'local';
         const baseUrl = isOpenRouter ? '' : (summary.base_url as string);
-        const cacheKey = `${provider}|${baseUrl}`;
-        if (!force && this.discoverCache?.key === cacheKey) {
-          this.options.set(this.discoverCache.options);
+        const key = `${provider}|${baseUrl}`;
+        const held = this.discovered.cached(provider, baseUrl);
+        if (!force && this.probedKey === key && held) {
+          this.options.set(this.discoveredOptionsFrom(held));
         } else {
-          const opts = await this.fetchDiscoverOptions(provider, baseUrl);
-          this.discoverCache = { key: cacheKey, options: opts };
-          this.options.set(opts);
+          const res = await this.discovered.refresh(provider, baseUrl);
+          if (!res) {
+            this.options.set([]);
+            this.error.set(LOAD_FAILED);
+            return;
+          }
+          if (res.fresh) this.probedKey = key;
+          this.stale.set(!res.fresh);
+          this.options.set(this.discoveredOptionsFrom(res.models));
         }
       }
       if (this.options().length === 0) this.error.set('No models available.');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: fetch failed: ${msg}`);
-      this.error.set('Failed to load models.');
+      this.error.set(LOAD_FAILED);
     } finally {
       this.loading.set(false);
     }
@@ -432,14 +539,26 @@ export class ModelSelectorComponent {
   select(opt: ModelOption): void {
     const summary = this.summary();
     if (!summary) return;
-    const wireId = wireModelId(summary.kind, summary.provider_id, opt.id);
+    if (
+      opt.requiresUsageCredits &&
+      !confirm(
+        `${opt.label} requires usage credits for this account. Speedwave runs Claude Code non-interactively, so Anthropic may charge those credits without another prompt. Continue?`
+      )
+    ) {
+      return;
+    }
+    const wireId = isAnthropicKind(summary.kind)
+      ? opt.wireId
+      : wireModelId(summary.kind, summary.provider_id, opt.id);
     this.modelSelected.emit({
       catalogId: opt.id,
       wireId,
       providerId: summary.provider_id,
       kind: summary.kind,
+      isDefault: opt.isDefault,
+      contextTokens: opt.contextTokens,
     });
-    if (isAnthropicKind(summary.kind)) this.lastPicked.set(opt.id);
+    this.lastPicked.set(opt.id);
     this.open.set(false);
   }
 
@@ -486,11 +605,6 @@ export class ModelSelectorComponent {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: effort pin load failed: ${msg}`);
     }
-  }
-
-  private async loadAnthropicCatalog(): Promise<void> {
-    const list = await this.anthropicModels.list();
-    this.anthropicCatalog.set(list);
   }
 
   protected toggleEffortPopover(): void {

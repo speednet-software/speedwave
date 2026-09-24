@@ -292,7 +292,6 @@ if [ -x "$LIMACTL" ] && LIMA_HOME="$SPEEDWAVE_DATA_DIR/lima" "$LIMACTL" list -q 
             sudo nerdctl compose -f "$compose_file" -p "$project" down 2>/dev/null || true
     done
 fi
-# Kill Lima VM (hostagent ignores SIGTERM)
 pkill -9 -f limactl 2>/dev/null || true
 rm -f $SPEEDWAVE_DATA_DIR/lima/*/ssh.sock 2>/dev/null || true
 # Unmount all Speedwave DMG volumes (Finder appends " 1", " 2" for duplicates)
@@ -844,7 +843,6 @@ fi
 
 # Kill any leftover Speedwave processes from previous runs
 pkill -f speedwave-desktop 2>/dev/null || true
-pkill -f limactl 2>/dev/null || true
 pkill -f 'mcp-os.*index.js' 2>/dev/null || true
 sleep 1
 
@@ -860,7 +858,6 @@ APP_PID=$!
 
 cleanup() {
     # Kill app and all child processes (Lima hostagent, mcp-os node, SSH mux).
-    # Lima hostagent ignores SIGTERM — use SIGKILL after a brief grace period.
     kill $APP_PID 2>/dev/null || true
     pkill -f speedwave-desktop 2>/dev/null || true
     sleep 1

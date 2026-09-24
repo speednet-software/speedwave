@@ -6,6 +6,7 @@ mcp-servers/policies/wasm-pkg/
 mcp-servers/policies/.wasm-build.lock/
 
 node_modules/
+.angular/
 
 .DS_Store
 Thumbs.db
@@ -19,6 +20,7 @@ Desktop.ini
 
 .claude/*.lock
 .claude/worktrees/
+.playwright-mcp/
 
 docs/superpowers/
 

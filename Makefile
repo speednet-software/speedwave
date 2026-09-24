@@ -188,7 +188,13 @@ setup-dev:
 		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
 	else \
 		echo "  📦 wasm-pack not found, installing..."; \
-		npm install -g wasm-pack && echo "  ✅ wasm-pack installed" || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
+		if npm install -g wasm-pack >/dev/null 2>&1 && command -v wasm-pack >/dev/null 2>&1; then \
+			echo "  ✅ wasm-pack installed (npm)"; \
+		elif cargo install wasm-pack; then \
+			echo "  ✅ wasm-pack installed (cargo)"; \
+		else \
+			echo "  ❌ wasm-pack install failed"; FAIL=1; \
+		fi; \
 	fi; \
 	\
 	echo ""; \
@@ -427,6 +433,7 @@ test-rust: guard-not-prod-data-dir
 	@echo "✅ Rust tests passed"
 
 test-transcription: guard-not-prod-data-dir
+	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh "$(CURDIR)" "root workspace build dir"; fi
 	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
@@ -569,7 +576,7 @@ test-ci:
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
-	  _tests/ci/bats-suite-wiring.bats
+	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -586,7 +593,8 @@ test-desktop-config:
 	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
 	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
-	  _tests/desktop/ps1-utf8-bom.bats
+	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \
+	  _tests/desktop/installer-sweep.bats
 	@echo "✅ Desktop config tests passed"
 
 test-release-gate:

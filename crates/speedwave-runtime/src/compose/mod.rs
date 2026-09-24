@@ -55,7 +55,7 @@ pub(crate) use llm::apply_llm_config_in;
 use llm::provider_display_label;
 pub use llm::{
     anthropic_login_unset_keys, canonicalize_local_base_url, default_base_url,
-    read_local_llm_token_opt, read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
+    read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
 use plugins::apply_plugins_from_verified;
@@ -250,7 +250,7 @@ pub fn render_compose_in(
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
-    let verified_plugins = plugin::list_verified_from_dir(&data_dir.join("plugins"))?;
+    let verified_plugins = plugin::list_verified_from_dir(&plugin::plugins_base_dir_in(data_dir))?;
     let plugin_manifests: Vec<PluginManifest> = verified_plugins
         .iter()
         .map(|vp| vp.manifest().clone())
@@ -279,7 +279,9 @@ pub fn render_compose_in(
         yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
     }
 
-    std::fs::create_dir_all(claude_home.join(".claude").join("ide"))?;
+    std::fs::create_dir_all(
+        crate::claude_home::claude_config_dir(data_dir, project_name).join("ide"),
+    )?;
 
     let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
@@ -920,7 +922,7 @@ pub fn oauth_consumer_service_ids(
         .collect();
     for m in enabled_plugins {
         if m.oauth.is_some() {
-            let sid = m.service_id.as_deref().unwrap_or(&m.slug);
+            let sid = m.config_key();
             if resolved.is_plugin_enabled(sid) {
                 out.push(sid.to_string());
             }
@@ -1414,9 +1416,7 @@ mod tests {
         )
         .expect("render must succeed");
 
-        let nested = crate::claude_home::claude_home_dir(data_dir.path(), &project)
-            .join(".claude")
-            .join("ide");
+        let nested = crate::claude_home::claude_config_dir(data_dir.path(), &project).join("ide");
         assert!(
             nested.is_dir(),
             "render_compose must pre-create {nested:?} host-side"
@@ -1681,14 +1681,14 @@ mod tests {
         let env = doc["services"]["claude"]["environment"]
             .as_sequence()
             .expect("claude.environment must be a sequence");
-        let opus = env
+        let sonnet = env
             .iter()
             .filter_map(|v| v.as_str())
-            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL="))
-            .expect("ANTHROPIC_DEFAULT_OPUS_MODEL must be present");
+            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_SONNET_MODEL="))
+            .expect("ANTHROPIC_DEFAULT_SONNET_MODEL must be present");
         assert!(
-            opus.ends_with("[1m]"),
-            "1M-context suffix must survive intact, got: {opus:?}"
+            sonnet.ends_with("[1m]"),
+            "1M-context suffix must survive intact, got: {sonnet:?}"
         );
 
         let services = doc["services"].as_mapping().expect("services mapping");
@@ -4171,10 +4171,19 @@ services:
                     || e.starts_with("ANTHROPIC_API_KEY=")),
             "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
         );
+        for alias in [
+            "ANTHROPIC_DEFAULT_SONNET_MODEL=",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL=",
+        ] {
+            assert!(
+                env.iter().any(|e| e.starts_with(alias)),
+                "alias pin {alias} must be present: {env:?}"
+            );
+        }
         assert!(
-            env.iter()
+            !env.iter()
                 .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
-            "alias pins must be present: {env:?}"
+            "the plan-dependent opus alias must not be pinned for Anthropic kinds: {env:?}"
         );
     }
 

@@ -508,6 +508,24 @@ describe('SecuritySectionComponent', () => {
       expect(update.policies).toEqual(['gdpr-art32']);
     });
 
+    it('loads and saves the policy of the project it was built for', async () => {
+      await create();
+      fixture.componentRef.setInput('project', 'proj');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
+
+      await component.save();
+
+      const projectOf = (cmd: string): unknown[] =>
+        spy.mock.calls
+          .filter((c) => c[0] === cmd)
+          .map((c) => (c[1] as { project?: unknown } | undefined)?.project);
+      expect(new Set(projectOf('get_security_policy'))).toEqual(new Set(['proj']));
+      expect(projectOf('update_security_policy')).toEqual(['proj']);
+    });
+
     it('requests a container restart on success', async () => {
       await create();
       component.ngOnInit();

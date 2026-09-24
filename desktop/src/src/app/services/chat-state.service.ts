@@ -1,17 +1,30 @@
-import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
+import {
+  Injectable,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+  type Signal,
+} from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
+import { ClaudeControlService } from './claude-control.service';
+import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
+import type { ClaudeContextUsage } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
+  isAnthropicKind,
   isLocalProvider,
   isTerminalCostSource,
   type LlmConfigResponse,
+  type LlmProviderKind,
   type ResponseUsage,
 } from '../models/llm';
 import {
@@ -56,9 +69,6 @@ export type {
   QueuedMessage,
 };
 
-const SESSION_START_TIMEOUT_MS = 30_000;
-const SESSION_START_POLL_MS = 500;
-
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
 
 export const NEW_CONVERSATION_FAILED =
@@ -72,6 +82,9 @@ export const NEW_CONVERSATION_STREAMING =
   'The chat is still replying. Wait for it to finish, then try again.';
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
+
+export const MODEL_SWITCH_NOT_APPLIED =
+  'The containers were not restarted, so the model is not in use yet. Pick it again in a moment.';
 
 /**
  * Returns null for anything but the two known backend phrasings.
@@ -110,7 +123,11 @@ export interface ModelSelectionInput {
   wireId: string;
   providerId: string;
   kind: string;
+  isDefault: boolean;
+  contextTokens: number | null;
 }
+
+const DEFAULT_MODEL_ALIAS = 'default';
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
@@ -138,29 +155,34 @@ export class ChatStateService {
 
   private readonly _pendingModelOverride = signal<string | null>(null);
   private readonly _pendingEffortOverride = signal<string | null>(null);
+  private _effortPick = 0;
   readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
+  private readonly _deferredEffort = signal<string | null>(null);
+  /** Effort level saved for the next session because the live one holds its launch effort. */
+  readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
 
   private flushPendingModelOverride(): void {
     if (this.isStreaming) return;
     const model = this._pendingModelOverride();
     if (model) {
       this._pendingModelOverride.set(null);
-      void this.sendMessage(`/model ${model}`);
+      void this.switchLiveModel(model);
       return;
     }
     const effort = this._pendingEffortOverride();
     if (effort) {
       this._pendingEffortOverride.set(null);
-      void this.sendMessage(`/effort ${effort}`);
+      void this.applyEffortToConversation(effort, this._effortPick);
     }
   }
 
   /**
-   * Persists the effort pin, then applies it: queued mid-turn, wired as `/effort` into a live
-   * conversation, or by respawning a session that has no conversation yet (SPEED-538).
+   * Persists the effort pin, then applies it: queued while the chat is busy, wired as `/effort` into
+   * a live conversation (deferred to the next session if it holds its launch effort), else respawned.
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
+    const pick = ++this._effortPick;
     this._modelSelectionError.set('');
     try {
       await this.tauri.invoke('set_effort_pin', {
@@ -168,35 +190,82 @@ export class ChatStateService {
         level,
       });
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`effort pin write-through failed: ${msg}`);
-      this._modelSelectionError.set(msg);
+      this.reportSelectionFailure('effort pin write-through', e);
       return;
     }
-    if (this.isStreaming) {
+    if (pick !== this._effortPick) return;
+    if (this.isStreaming || this._resumeInProgress) {
       this._pendingEffortOverride.set(level);
     } else if (this.hasLiveSession() && this.hasConversation()) {
-      await this.sendMessage(`/effort ${level}`);
-    } else if (!this._resumeInProgress) {
+      await this.applyEffortToConversation(level, pick);
+    } else {
       this.resetForNewConversation();
       this.initialized = true;
       await this.startChatSession();
     }
   }
 
+  private chatBusy(): boolean {
+    return this.isStreaming || this._resumeInProgress || this.startingSession;
+  }
+
+  private async applyEffortToConversation(level: string, pick: number): Promise<void> {
+    const project = this.projectState.activeProject();
+    if (!project) return;
+    if (this._lastKnownSessionId === null || this.chatBusy()) {
+      this._pendingEffortOverride.set(level);
+      return;
+    }
+    const generation = this._sessionGeneration;
+    const takesWire = await this.sessionTakesWireEffort(project);
+    if (generation !== this._sessionGeneration || pick !== this._effortPick) return;
+    if (!takesWire) {
+      this._deferredEffort.set(level);
+      return;
+    }
+    if (this.chatBusy()) {
+      this._pendingEffortOverride.set(level);
+      return;
+    }
+    this._deferredEffort.set(null);
+    await this.sendMessage(`/effort ${level}`);
+  }
+
+  private async sessionTakesWireEffort(project: string): Promise<boolean> {
+    try {
+      return (await this.tauri.invoke<boolean>('get_chat_takes_wire_effort', { project })) === true;
+    } catch (e: unknown) {
+      this.log.warn(`[chat-state] get_chat_takes_wire_effort failed: ${String(e)}`);
+      return false;
+    }
+  }
+
+  /** Resumes the live conversation so it launches with the deferred effort; its background tasks stop. */
+  async restartForDeferredEffort(): Promise<void> {
+    const sessionId = this._lastKnownSessionId;
+    if (sessionId === null || this.chatBusy() || this.newConversationBlockedReason()) return;
+    await this.resumeConversation(sessionId);
+  }
+
   private readonly _modelSelectionError = signal('');
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
   /**
-   * The single handler for a composer model-selector pick (Task 16): persists
-   * the pick first (Anthropic: `settings.json` model pin; routed: config write-through), then applies it live (wire switch, queued override, or idle respawn).
+   * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
+   * then applies it: wire switch, queued override, or an idle respawn that a routed pick precedes with a compose re-render.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     this._modelSelectionError.set('');
     const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
+    const clearsPin = isAnthropic && sel.isDefault;
+    const wireId = clearsPin ? DEFAULT_MODEL_ALIAS : sel.wireId;
     try {
-      if (isAnthropic) {
+      if (clearsPin) {
+        await this.tauri.invoke('clear_model_pin', {
+          projectId: this.projectState.activeProject() ?? '',
+        });
+      } else if (isAnthropic) {
         await this.tauri.invoke('set_model_pin', {
           projectId: this.projectState.activeProject() ?? '',
           model: sel.wireId,
@@ -205,23 +274,94 @@ export class ChatStateService {
         await this.anthropicModels.setProviderModel(
           this.projectState.activeProject() ?? '',
           sel.providerId,
-          sel.catalogId
+          sel.catalogId,
+          sel.contextTokens
         );
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`model selection persist failed: ${msg}`);
-      this._modelSelectionError.set(msg);
+      this.reportSelectionFailure('model selection persist', e);
       return;
     }
     if (this.hasLiveSession()) {
-      if (this.isStreaming) this._pendingModelOverride.set(sel.wireId);
-      else await this.sendMessage(`/model ${sel.wireId}`);
-    } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
-      this.resetForNewConversation();
-      this.initialized = true;
-      await this.startChatSession();
+      if (this.isStreaming || this.sessionStartInFlightFromState()) {
+        this._pendingModelOverride.set(wireId);
+      } else {
+        await this.switchLiveModel(wireId);
+      }
+      return;
     }
+    if (this.chatIsOccupied()) return;
+    if (!isAnthropic && !(await this.rerenderContainersForModel())) return;
+    if (this.chatIsOccupied()) return;
+    this.resetForNewConversation();
+    this.initialized = true;
+    await this.startChatSession();
+  }
+
+  private chatIsOccupied(): boolean {
+    return this.isStreaming || this._resumeInProgress || this.hasLiveSession();
+  }
+
+  private async outlastRestart(): Promise<boolean> {
+    const project = this.projectState.activeProject();
+    let restart = this.projectState.restartInFlight;
+    while (restart) {
+      await restart;
+      restart = this.projectState.restartInFlight;
+    }
+    return (
+      project === this.projectState.activeProject() && this.projectState.status() !== 'switching'
+    );
+  }
+
+  private async switchLiveModel(wireId: string): Promise<void> {
+    const generation = this._sessionGeneration;
+    try {
+      await this.tauri.invoke('switch_chat_model', {
+        project: this.projectState.activeProject() ?? '',
+        model: wireId,
+      });
+    } catch (e: unknown) {
+      this.reportSelectionFailure('model switch', e);
+      return;
+    }
+    if (generation !== this._sessionGeneration) return;
+    this.appendControlChip('model', wireId);
+    this.notifyChange();
+  }
+
+  private appendControlChip(command: string, argument: string, uuid?: string | null): void {
+    if (command === 'model' && this.usesAnthropic()) this.forgetContextWindow();
+    this._messages = [
+      ...this._messages,
+      {
+        role: 'user',
+        blocks: [{ type: 'chip', command, argument }],
+        timestamp: Date.now(),
+        ...(uuid ? { uuid, uuid_status: 'Committed' as const } : {}),
+      },
+    ];
+  }
+
+  private reportSelectionFailure(what: string, cause: unknown): void {
+    const msg = cause instanceof Error ? cause.message : String(cause);
+    this.log.warn(`${what} failed: ${msg}`);
+    this._modelSelectionError.set(msg);
+  }
+
+  private async rerenderContainersForModel(): Promise<boolean> {
+    const outcome = await this.projectState.restartContainers();
+    if (outcome === 'restarted') return true;
+    if (outcome === 'failed') {
+      this.reportSelectionFailure(
+        'compose re-render for the picked model',
+        this.projectState.restartError
+      );
+      this.projectState.requestRestart();
+      return false;
+    }
+    this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
+    return false;
   }
 
   private hasLiveSession(): boolean {
@@ -241,11 +381,12 @@ export class ChatStateService {
   }
 
   private _model = '';
-  private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
   private _lastContextTokens: number | null = null;
   private _contextWindowSize: number | null = null;
+  private _contextSnapshot: ClaudeContextUsage | null = null;
   private _currentProvider: string | null = null;
+  private _activeKind: LlmProviderKind | null = null;
 
   private _persistedContextTokens: number | null = null;
 
@@ -266,9 +407,6 @@ export class ChatStateService {
     this.startingSessionSignal.set(v);
   }
   private _sessionGeneration = 0;
-
-  /** How the most recent session start ended; gates a waiting `sendMessage`'s resend. */
-  private _lastStartOutcome: StartOutcome | null = null;
 
   /** Durable session id; survives a container restart that nulls live stats. */
   private _lastKnownSessionId: string | null = null;
@@ -308,12 +446,71 @@ export class ChatStateService {
   private tauri = inject(TauriService);
   private projectState = inject(ProjectStateService);
   private anthropicModels = inject(AnthropicModelsService);
+  private control = inject(ClaudeControlService);
+  private planUsage = inject(PlanUsageService);
   private clipboard = inject(Clipboard);
   private log = inject(LoggerService);
   private unsubProjectChange: (() => void) | null = null;
 
   private readonly _state = signal<ConversationStateTree>({ ...DEFAULT_STATE_TREE });
   readonly state: Signal<ConversationStateTree> = this._state.asReadonly();
+
+  /** Reads Claude Code's control data as soon as a session answers `initialize`. */
+  constructor() {
+    effect(() => {
+      const project = this.projectState.activeProject();
+      if (!project || this.control.sessionInfoState(project).state !== 'ready') return;
+      untracked(() => void this.refreshControlData());
+    });
+  }
+
+  /** Re-reads the plan limits and the context usage on demand (the usage popover opened). */
+  refreshUsage(): Promise<void> {
+    return this.refreshControlData();
+  }
+
+  private async refreshControlData(): Promise<void> {
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    const project = this.projectState.activeProject();
+    if (!project) return;
+    if (this._activeKind === 'anthropic_oauth') void this.planUsage.refresh(project);
+    if (this._activeKind && isAnthropicKind(this._activeKind)) {
+      void this.refreshContextUsage(project);
+    }
+  }
+
+  private async refreshContextUsage(project: string): Promise<void> {
+    const generation = this._sessionGeneration;
+    const usage = await this.control.contextUsage(project);
+    if (generation !== this._sessionGeneration) return;
+    if (project !== this.projectState.activeProject()) return;
+    this._contextSnapshot = usage;
+    if (usage) this._contextWindowSize = usage.max_tokens;
+    const cur = this._sessionStats();
+    if (!cur && !usage) return;
+    this._sessionStats.set({
+      session_id: this._lastKnownSessionId ?? '',
+      total_cost: null,
+      total_output_tokens: 0,
+      ...cur,
+      context: usage ?? undefined,
+      context_window_size: this._contextWindowSize,
+    });
+    this.notifyChange();
+  }
+
+  private usesAnthropic(): boolean {
+    if (this._activeKind !== null) return isAnthropicKind(this._activeKind);
+    return this._currentProvider === 'anthropic';
+  }
+
+  private async recordRateLimit(info: RateLimitInfo): Promise<void> {
+    if (this._activeKind === null) await this.refreshLlmConfigCache();
+    const project = this.projectState.activeProject();
+    if (project && this._activeKind === 'anthropic_oauth') {
+      this.planUsage.recordSignal(project, info);
+    }
+  }
 
   readonly messagesFromState: Signal<readonly ChatMessage[]> = computed(() =>
     stateEntriesToChatMessages(this._state().entries)
@@ -331,6 +528,10 @@ export class ChatStateService {
     return '';
   });
 
+  readonly sessionStartInFlightFromState: Signal<boolean> = computed(
+    () => this.startingSessionSignal() || this.resumeInProgressSignal()
+  );
+
   private readonly _loadingTranscript = signal<boolean>(false);
   readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
 
@@ -344,16 +545,11 @@ export class ChatStateService {
     this._loadingTranscript.set(false);
   }
 
-  /**
-   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
-   * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
-   */
-  beginStartingSession(): (outcome?: StartOutcome) => void {
+  /** Mark a resume's session start in flight until the returned function runs. */
+  beginStartingSession(): () => void {
     this.startingSession = true;
-    this._lastStartOutcome = null;
     this._sessionGeneration += 1;
-    return (outcome: StartOutcome = 'started') => {
-      this._lastStartOutcome = outcome;
+    return () => {
       this.startingSession = false;
     };
   }
@@ -454,7 +650,7 @@ export class ChatStateService {
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
-      this._lastStartOutcome = null;
+      this._deferredEffort.set(null);
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
@@ -482,7 +678,6 @@ export class ChatStateService {
       } finally {
         if (gen === this._sessionGeneration) {
           this.startingSession = false;
-          this._lastStartOutcome = outcome;
         }
       }
       return outcome;
@@ -524,7 +719,7 @@ export class ChatStateService {
     const chatInput: ChatInput = typeof input === 'string' ? chatInputFromText(input) : input;
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
-    if (!hasContent || this.isStreaming) return;
+    if (!hasContent || this.isStreaming || this.sessionStartInFlightFromState()) return;
     if (chatInput.attachments.length === 0 && isBlankOrSlashOnly(chatInput.text)) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
@@ -553,6 +748,13 @@ export class ChatStateService {
     this.notifyChange();
 
     const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
+    const generation = this._sessionGeneration;
+    const turnId = this._turnId;
+    const project = this.projectState.activeProject();
+    const sameConversation = (): boolean =>
+      this.isStreaming && generation === this._sessionGeneration && turnId === this._turnId;
+    const sameProject = (): boolean =>
+      project === this.projectState.activeProject() && this.projectState.status() !== 'switching';
     try {
       await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
@@ -564,64 +766,36 @@ export class ChatStateService {
         errStr.includes('Broken pipe')
       ) {
         try {
-          if (this.startingSession) {
-            const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
-            while (this.startingSession && Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, SESSION_START_POLL_MS));
-            }
-            if (this.startingSession) {
-              this.isStreaming = false;
-              this._messages = [
-                ...this._messages,
-                {
-                  role: 'assistant',
-                  blocks: [
-                    {
-                      type: 'error',
-                      content:
-                        'Session is still starting (containers may be restarting). Please try again in a moment.',
-                    },
-                  ],
-                  timestamp: Date.now(),
-                },
-              ];
-              this.notifyChange();
-              return;
-            }
-            if (this._lastStartOutcome !== 'started') {
-              this.isStreaming = false;
-              this.notifyChange();
-              return;
-            }
-            try {
-              await this.tauri.invoke('send_message', invokeArgs);
-            } catch (postWaitErr) {
-              this.isStreaming = false;
-              this._messages = [
-                ...this._messages,
-                {
-                  role: 'assistant',
-                  blocks: [
-                    {
-                      type: 'error',
-                      content: `Failed to send message after session started: ${postWaitErr}`,
-                    },
-                  ],
-                  timestamp: Date.now(),
-                },
-              ];
-              this.notifyChange();
-            }
+          if (!sameConversation()) return;
+          const result = await this.tauri.invoke<ProjectList>('list_projects');
+          if (!sameConversation()) return;
+          const retryBlocked = this.sessionStartInFlightFromState()
+            ? 'Session is still starting (containers may be restarting). Please try again in a moment.'
+            : result.active_project && project !== null && result.active_project !== project
+              ? `The active project is now '${result.active_project}', not '${project}'. Switch projects in the project list, then resend the message.`
+              : null;
+          if (retryBlocked) {
+            this.isStreaming = false;
+            this._messages = [
+              ...this._messages,
+              {
+                role: 'assistant',
+                blocks: [{ type: 'error', content: retryBlocked }],
+                timestamp: Date.now(),
+              },
+            ];
+            this.notifyChange();
             return;
           }
-          const result = await this.tauri.invoke<ProjectList>('list_projects');
           if (result.active_project) {
             this.startingSession = true;
+            this._deferredEffort.set(null);
             try {
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {
-              this.startingSession = false;
+              if (generation === this._sessionGeneration) this.startingSession = false;
             }
+            if (!sameConversation()) return;
             await this.tauri.invoke('send_message', invokeArgs);
             return;
           }
@@ -644,11 +818,13 @@ export class ChatStateService {
         } catch (retryErr) {
           const retryMsg = String(retryErr);
           if (isNotAuthenticatedError(retryMsg)) {
-            this.projectState.status.set('auth_required');
+            if (sameProject()) this.projectState.status.set('auth_required');
+            if (!sameConversation()) return;
             this.isStreaming = false;
             this.notifyChange();
             return;
           }
+          if (!sameConversation()) return;
           this.isStreaming = false;
           this._messages = [
             ...this._messages,
@@ -662,6 +838,7 @@ export class ChatStateService {
           return;
         }
       }
+      if (!sameConversation()) return;
       this.isStreaming = false;
       this._messages = [
         ...this._messages,
@@ -871,30 +1048,12 @@ export class ChatStateService {
 
       case 'ControlChip': {
         const { command, argument, uuid } = chunk.data;
-        this._messages = [
-          ...this._messages,
-          {
-            role: 'user',
-            blocks: [{ type: 'chip', command, argument }],
-            timestamp: Date.now(),
-            ...(uuid ? { uuid, uuid_status: 'Committed' as const } : {}),
-          },
-        ];
+        this.appendControlChip(command, argument, uuid);
         break;
       }
 
       case 'RateLimit':
-        if (chunk.data.utilization !== null) {
-          this._rateLimit = {
-            status: chunk.data.status,
-            utilization: chunk.data.utilization,
-            resets_at: chunk.data.resets_at,
-          };
-          const cur = this._sessionStats();
-          if (cur) {
-            this._sessionStats.set({ ...cur, rate_limit: this._rateLimit });
-          }
-        }
+        void this.recordRateLimit(chunk.data);
         break;
 
       case 'Result': {
@@ -932,10 +1091,7 @@ export class ChatStateService {
         if (chunk.data.usage) {
           this._totalOutputTokens += chunk.data.usage.output_tokens;
         }
-        this._contextWindowSize = this.resolveContextWindow(
-          chunk.data.context_window_size,
-          resolvedModel
-        );
+        this._contextWindowSize = this.resolveContextWindow(chunk.data.context_window_size);
         const livePreviewCost =
           !isLocalProvider(this._currentProvider) &&
           typeof chunk.data.total_cost === 'number' &&
@@ -949,7 +1105,7 @@ export class ChatStateService {
           usage: chunk.data.usage,
           context_usage: contextUsage,
           model: resolvedModel,
-          rate_limit: this._rateLimit ?? undefined,
+          context: this._contextSnapshot ?? undefined,
           context_window_size: this._contextWindowSize,
           total_output_tokens: this._totalOutputTokens,
         });
@@ -962,6 +1118,7 @@ export class ChatStateService {
           this._lastContextTokens = contextTokensFrom(contextUsage);
         }
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
+        void this.refreshControlData();
         break;
       }
 
@@ -1003,6 +1160,8 @@ export class ChatStateService {
         ];
         this._currentBlocks = [];
         this.isStreaming = false;
+        if (chunk.data.turn_ended) this.flushPendingModelOverride();
+        void this.refreshControlData();
         break;
       }
 
@@ -1037,9 +1196,16 @@ export class ChatStateService {
     this.isStreaming = false;
     this._sessionStats.set(null);
     this._model = '';
-    this._rateLimit = null;
     this._totalOutputTokens = 0;
     this._contextWindowSize = null;
+    this._contextSnapshot = null;
+  }
+
+  private forgetContextWindow(): void {
+    this._contextWindowSize = null;
+    this._contextSnapshot = null;
+    const cur = this._sessionStats();
+    if (cur) this._sessionStats.set({ ...cur, context: undefined, context_window_size: null });
   }
 
   /** Clears all chat state to start a fresh conversation. */
@@ -1054,6 +1220,7 @@ export class ChatStateService {
     this.clearSessionTracking();
     this._pendingModelOverride.set(null);
     this._pendingEffortOverride.set(null);
+    this._deferredEffort.set(null);
     this.notifyChange();
   }
 
@@ -1080,7 +1247,7 @@ export class ChatStateService {
     this._lastKnownSessionId = sessionId;
     const cur = this._sessionStats();
     if (cur?.session_id === sessionId) return;
-    const seeded = this.resolveContextWindow(undefined, cur?.model);
+    const seeded = this.resolveContextWindow(undefined);
     this._sessionStats.set({
       total_cost: null,
       context_window_size: seeded,
@@ -1196,6 +1363,7 @@ export class ChatStateService {
     this._currentBlocks = [];
     this.isStreaming = true;
     this._turnId += 1;
+    this._deferredEffort.set(null);
     this.notifyChange();
 
     try {
@@ -1221,13 +1389,20 @@ export class ChatStateService {
 
   private setupProjectStateListeners(): void {
     this.unsubProjectChange = this.projectState.onChange(() => {
+      const status = this.projectState.status();
+      const project = this.projectState.activeProject();
+      if (project && (status === 'no_provider' || status === 'auth_required')) {
+        this.planUsage.drop(project);
+      }
       if (this.projectState.status() === 'switching') {
         this.resetCoreStreamState();
         this._persistedContextTokens = null;
         this._currentProvider = null;
+        this._activeKind = null;
         this.clearSessionTracking();
         this._pendingModelOverride.set(null);
         this._pendingEffortOverride.set(null);
+        this._deferredEffort.set(null);
         this.notifyChange();
       } else if (this.projectState.status() === 'ready') {
         void this.refreshLlmConfigCache();
@@ -1248,12 +1423,20 @@ export class ChatStateService {
     const id = this._lastKnownSessionId;
     if (!id) return;
     await this.refreshLlmConfigCache();
-    if (historyFitsTarget(this._lastContextTokens, this._persistedContextTokens)) {
+    if (this._lastKnownSessionId !== id) return;
+    const historyTokens = this._lastContextTokens;
+    const windowTokens = this._persistedContextTokens;
+    const fits = historyFitsTarget(historyTokens, windowTokens);
+    this.log.info(
+      `[chat-state] restart resume decision: history_tokens=${historyTokens ?? 'unknown'} window_tokens=${windowTokens ?? 'unknown'} fits=${fits} decider=${this._resumeDecider !== null}`
+    );
+    if (fits) {
       void this.resumeConversation(id);
       return;
     }
     if (this._resumeDecider) {
       const choice = await this._resumeDecider();
+      if (this._lastKnownSessionId !== id) return;
       if (choice === 'resume') void this.resumeConversation(id);
       else void this.startFreshSession();
     } else {
@@ -1282,6 +1465,10 @@ export class ChatStateService {
   async resumeConversation(sessionId: string): Promise<void> {
     if (this._resumeInProgress) return;
     this._resumeInProgress = true;
+    if (this.projectState.restartInFlight && !(await this.outlastRestart())) {
+      this._resumeInProgress = false;
+      return;
+    }
     this.resetForNewConversation();
     this.beginTranscriptLoad();
     const endStartingSession = this.beginStartingSession();
@@ -1294,15 +1481,14 @@ export class ChatStateService {
       const project = this.projectState.activeProject();
       if (!project) return;
 
-      const transcriptPromise = this.tauri
+      await this.tauri.invoke('resume_conversation', { project, sessionId });
+      if (gen !== this._sessionGeneration) return;
+      const transcript = await this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
         .catch((err) => {
           this.log.error(`[chat-state] get_conversation failed: ${String(err)}`);
           return null;
         });
-      const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
-
-      const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
       if (gen !== this._sessionGeneration) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
@@ -1347,13 +1533,14 @@ export class ChatStateService {
       }
     } finally {
       this.endTranscriptLoad();
-      endStartingSession(outcome);
+      endStartingSession();
       this._resumeInProgress = false;
       if (gen !== this._sessionGeneration) {
         this._optimisticSessionId = null;
         void this.startChatSession();
       }
     }
+    if (outcome === 'started' && gen === this._sessionGeneration) this.flushPendingModelOverride();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
@@ -1427,16 +1614,15 @@ export class ChatStateService {
     }
   }
 
-  private resolveContextWindow(
-    liveValue: number | undefined,
-    model: string | undefined
-  ): number | null {
+  private resolveContextWindow(liveValue: number | undefined): number | null {
+    if (this.usesAnthropic()) {
+      return this._contextSnapshot?.max_tokens ?? liveValue ?? this._contextWindowSize;
+    }
     if (liveValue) return liveValue;
-    const fromSsot = this.anthropicModels.contextTokensFor(model);
-    if (fromSsot) return fromSsot;
     if (this._persistedContextTokens) return this._persistedContextTokens;
     if (this._contextWindowSize) return this._contextWindowSize;
-    return isLocalProvider(this._currentProvider) ? null : DEFAULT_CONTEXT_TOKENS;
+    if (this._currentProvider === null || isLocalProvider(this._currentProvider)) return null;
+    return DEFAULT_CONTEXT_TOKENS;
   }
 
   /** Re-reads `get_llm_config()` and updates the chat fallback-chain cache. */
@@ -1445,6 +1631,12 @@ export class ChatStateService {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       this._persistedContextTokens = config.context_tokens ?? null;
       this._currentProvider = config.provider;
+      const kind = config.providers?.find((p) => p.id === config.active?.provider_id)?.kind ?? null;
+      const project = this.projectState.activeProject();
+      if (project && this._activeKind === 'anthropic_oauth' && kind !== 'anthropic_oauth') {
+        this.planUsage.drop(project);
+      }
+      this._activeKind = kind;
       if (this._persistedContextTokens && !this._sessionStats()?.usage) {
         this._contextWindowSize = this._persistedContextTokens;
       }
@@ -1457,6 +1649,7 @@ export class ChatStateService {
   private async setupStreamListener(): Promise<void> {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
+        if (this.sessionStartInFlightFromState()) return;
         const chunk = event.payload;
         if (
           chunk.chunk_type === 'SystemInit' ||
@@ -1719,7 +1912,7 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
     turn_count: src.messages.filter((m) => m.role === 'assistant').length,
   };
   return {
-    session_id: src.sessionStats?.session_id ?? null,
+    session_id: src.sessionStats?.session_id || null,
     entries,
     session_totals: totals,
     pending_queue: src.pendingQueue,
@@ -1904,8 +2097,7 @@ export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
 }
 
 /**
- * Null handling is asymmetric: unknown history defaults to fits (resume), unknown window
- * defaults to doesn't fit (ask) — local models with no discovery.
+ * Only a known window at or below a known history size counts as not fitting; unknown values resume.
  * @param historyTokens - Tokens used by the conversation so far, or null if unknown.
  * @param windowTokens - Target model's context window, or null if undiscovered.
  */
@@ -1913,8 +2105,7 @@ export function historyFitsTarget(
   historyTokens: number | null,
   windowTokens: number | null
 ): boolean {
-  if (historyTokens == null) return true;
-  if (windowTokens == null) return false;
+  if (historyTokens == null || windowTokens == null) return true;
   return historyTokens < windowTokens;
 }
 
