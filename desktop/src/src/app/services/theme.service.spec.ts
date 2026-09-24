@@ -1,4 +1,6 @@
+import { vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { NativeThemeAdapter } from './native-theme-adapter';
 import {
   ThemeService,
   THEME_MODES,
@@ -275,6 +277,38 @@ describe('ThemeService', () => {
       svc.ngOnDestroy();
       media.fireChange(true);
       expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    function createWithNative(): { svc: ThemeService; sync: ReturnType<typeof vi.fn> } {
+      const sync = vi.fn();
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({
+        providers: [{ provide: NativeThemeAdapter, useValue: { syncWindowTheme: sync } }],
+      });
+      return { svc: TestBed.inject(ThemeService), sync };
+    }
+
+    it('pins the native window only in explicit modes and hands it to the OS in auto', () => {
+      const { svc, sync } = createWithNative();
+      expect(sync).toHaveBeenLastCalledWith('dark');
+      svc.setMode('light');
+      expect(sync).toHaveBeenLastCalledWith('light');
+      svc.setMode('auto');
+      expect(sync).toHaveBeenLastCalledWith(null);
+      svc.setMode('dark');
+      expect(sync).toHaveBeenLastCalledWith('dark');
+    });
+
+    it('never pins the native window while auto follows prefers-color-scheme', () => {
+      localStorage.setItem(MODE_STORAGE_KEY, 'auto');
+      const { sync } = createWithNative();
+      expect(sync).toHaveBeenLastCalledWith(null);
+      media.fireChange(true);
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      media.fireChange(false);
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      expect(sync).toHaveBeenCalledTimes(3);
+      for (const call of sync.mock.calls) expect(call).toEqual([null]);
     });
 
     it('reacts to prefers-color-scheme changes while in auto mode', () => {
