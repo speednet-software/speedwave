@@ -355,9 +355,10 @@ describe('ModelSelectorComponent', () => {
     await TestBed.inject(ClaudeControlService).refreshSessionInfo(project);
     fixture.detectChanges();
     await fixture.whenStable();
-    await fixture.componentInstance.whenOptionsSettled();
-    fixture.detectChanges();
+    await settle();
   }
+
+  const opusOnly: ModelPicker = { ...picker, rows: [picker.rows[1]] };
 
   const errorRow = () => fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'));
   const loadingRow = () =>
@@ -393,10 +394,10 @@ describe('ModelSelectorComponent', () => {
     expect(loadingRow()).toBeFalsy();
   });
 
-  it('keeps an open list on its held rows while the session respawns, then re-reads them', async () => {
+  it('keeps an open list on its held rows while the session respawns, then shows the new rows', async () => {
     let state: unknown = { state: 'ready', info: { models: [], account: {} } };
     let reported: ModelPicker | null = picker;
-    const invoke = mockSessionLifecycle(
+    mockSessionLifecycle(
       () => state,
       () => reported
     );
@@ -414,19 +415,110 @@ describe('ModelSelectorComponent', () => {
     expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
     expect(loadingRow()).toBeFalsy();
 
-    const fetches = (): number =>
-      invoke.mock.calls.filter(
-        ([cmd, args]) =>
-          cmd === 'list_model_picker' && (args as { project: string }).project === 'proj-respawn'
-      ).length;
-    const beforeReady = fetches();
-    reported = picker;
+    reported = opusOnly;
     state = { state: 'ready', info: { models: [], account: {} } };
     await reportSessionInfo('proj-respawn');
 
-    expect(fetches()).toBe(beforeReady + 1);
+    expect(optionIds()).toEqual(['claude-opus-4-1']);
+    expect(errorRow()).toBeFalsy();
+  });
+
+  it('lets only the latest fetch decide the list when an older one resolves last', async () => {
+    const pending: Array<(rows: ModelPicker | null) => void> = [];
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'get_chat_session_info') return Promise.resolve({ state: 'unavailable' });
+      if (cmd === 'list_model_picker')
+        return new Promise((resolve) => {
+          pending.push(resolve);
+        });
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-race');
+    fixture.detectChanges();
+    await settle();
+    pending.splice(0).forEach((resolve) => resolve(null));
+    await settle();
+
+    await fixture.componentInstance.openCombobox();
+    const older = fixture.componentInstance.whenOptionsSettled();
+    await settle();
+    const newer = fixture.componentInstance.fetchOptions();
+    await settle();
+    expect(pending.length).toBe(2);
+
+    pending[0](null);
+    await older;
+    await settle();
+    expect(errorRow()).toBeFalsy();
+    expect(loadingRow()).toBeTruthy();
+
+    pending[1](picker);
+    await newer;
+    await settle();
+
     expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
     expect(errorRow()).toBeFalsy();
+    expect(loadingRow()).toBeFalsy();
+  });
+
+  it('offers Retry in a pending list and leaves the loader when the session is gone', async () => {
+    let state: unknown = { state: 'unavailable' };
+    mockSessionLifecycle(
+      () => state,
+      () => null
+    );
+    fixture.componentRef.setInput('projectId', 'proj-stuck');
+    fixture.detectChanges();
+    await settle();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    state = { state: 'pending' };
+    await reportSessionInfo('proj-stuck');
+    const retry = loadingRow().query(By.css('[data-testid="model-selector-retry"]'));
+    expect(retry).toBeTruthy();
+
+    state = { state: 'unavailable' };
+    retry.nativeElement.click();
+    await settle();
+    await fixture.componentInstance.whenOptionsSettled();
+    await settle();
+
+    expect(loadingRow()).toBeFalsy();
+    expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
+  });
+
+  it('shows the rows of the project it belongs to after a project switch with the list open', async () => {
+    tauriInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'get_chat_session_info')
+        return Promise.resolve({ state: 'ready', info: { models: [], account: {} } });
+      if (cmd === 'list_model_picker')
+        return Promise.resolve(
+          (args as { project: string }).project === 'proj-b' ? opusOnly : picker
+        );
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-a');
+    fixture.detectChanges();
+    await settle();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+
+    await TestBed.inject(ClaudeControlService).refreshSessionInfo('proj-b');
+    fixture.componentRef.setInput('projectId', 'proj-b');
+    fixture.detectChanges();
+    await settle();
+    await settle();
+
+    expect(fixture.componentInstance.open()).toBe(true);
+    expect(optionIds()).toEqual(['claude-opus-4-1']);
   });
 
   it('marks the active model with a check mark and the plan default with a badge', async () => {
