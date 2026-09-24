@@ -644,6 +644,46 @@ describe('ModelSelectorComponent', () => {
     expect(fixture.componentInstance['options']()).toEqual(expectedOptions);
   });
 
+  it('a routed row click carries the discovered window of that row, or null without one', async () => {
+    const localSummary: ActiveProviderSummary = {
+      provider_id: 'my-litellm',
+      kind: 'local',
+      model: 'my-litellm/gemma-4-26b-a4b',
+      base_url: 'https://litellm.example',
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummary);
+      if (cmd === 'discover_llm_models') {
+        return Promise.resolve({
+          models: [
+            { id: 'gemma-4-26b-a4b', context_tokens: 262_144 },
+            { id: 'qwen3-coder-30b', context_tokens: null },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-window');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    const events: ModelSelection[] = [];
+    fixture.componentInstance.modelSelected.subscribe((e) => events.push(e));
+
+    for (const id of ['gemma-4-26b-a4b', 'qwen3-coder-30b']) {
+      await fixture.componentInstance.openCombobox();
+      await fixture.componentInstance.whenOptionsSettled();
+      fixture.detectChanges();
+      fixture.debugElement
+        .query(By.css(`[data-testid="model-selector-option-${id}"]`))
+        .nativeElement.click();
+    }
+
+    expect(events.map((e) => [e.catalogId, e.providerId, e.contextTokens])).toEqual([
+      ['gemma-4-26b-a4b', 'my-litellm', 262_144],
+      ['qwen3-coder-30b', 'my-litellm', null],
+    ]);
+  });
+
   it('reuses cached discovery results on a second open, but re-probes on a provider/base_url change', async () => {
     const localSummary: ActiveProviderSummary = {
       provider_id: 'my-ollama',

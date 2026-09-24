@@ -1541,14 +1541,16 @@ fn preserve_stored_entry_models(
     stored: &[speedwave_runtime::config::LlmProviderEntry],
 ) {
     for entry in incoming.iter_mut() {
-        if entry.model.is_some() {
+        let Some(prior) = stored.iter().find(|p| p.id == entry.id) else {
+            continue;
+        };
+        if entry.model.is_none() {
+            entry.model = prior.model.clone();
+        } else if entry.model != prior.model {
             continue;
         }
-        if let Some(prior) = stored.iter().find(|p| p.id == entry.id) {
-            entry.model = prior.model.clone();
-            if entry.context_tokens.is_none() {
-                entry.context_tokens = prior.context_tokens;
-            }
+        if entry.context_tokens.is_none() {
+            entry.context_tokens = prior.context_tokens;
         }
     }
 }
@@ -3388,6 +3390,29 @@ mod tests {
             .unwrap()
             .providers[0]
             .context_tokens
+    }
+
+    #[test]
+    fn a_settings_save_of_the_stored_model_keeps_its_window() {
+        let stored = vec![local_entry_with("gemma-4-26b-a4b", Some(262_144))];
+
+        let mut same_model = vec![local_entry_with("gemma-4-26b-a4b", None)];
+        preserve_stored_entry_models(&mut same_model, &stored);
+        assert_eq!(same_model[0].context_tokens, Some(262_144));
+
+        let mut other_model = vec![local_entry_with("qwen3.8-27b", None)];
+        preserve_stored_entry_models(&mut other_model, &stored);
+        assert_eq!(other_model[0].model.as_deref(), Some("qwen3.8-27b"));
+        assert_eq!(other_model[0].context_tokens, None);
+
+        let mut no_model = vec![v2_entry(
+            "local",
+            speedwave_runtime::config::LlmProviderKind::Local,
+            Some("https://litellm.example"),
+        )];
+        preserve_stored_entry_models(&mut no_model, &stored);
+        assert_eq!(no_model[0].model.as_deref(), Some("gemma-4-26b-a4b"));
+        assert_eq!(no_model[0].context_tokens, Some(262_144));
     }
 
     #[test]

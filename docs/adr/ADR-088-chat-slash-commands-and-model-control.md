@@ -301,6 +301,18 @@ wire `/model` (the proxy routes on the id prefix,
 `containers/proxy/src/router.rs`) and a mid-stream pick still defers its
 override; neither restarts a container.
 
+**Amendment (SPEED-669, 2026-09-24: the pick also stores the model's context
+window).** `set_provider_model` no longer mutates only `providers[].model`: it
+also takes the picked row's discovered window and writes it to the same
+entry's `context_tokens`. A known window is stored; a pick of a different
+model whose window is unknown clears the stored one, since it belonged to the
+previous model; re-picking the same model without a window keeps it. The
+window reaches Claude Code the way the model does, as container environment
+(`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `crates/speedwave-runtime/src/compose/llm.rs`),
+so a pick with no live session applies it through the re-render above, while
+a live-session wire `/model` leaves the running container on the previous
+window until its next render.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
