@@ -52,7 +52,7 @@ function tabTitle(store: ChatSessionStore): string {
       @for (row of tabRows(); track row.id) {
         <div
           class="group flex min-w-[110px] max-w-[200px] flex-1 items-stretch border-r border-[var(--line)]"
-          [class]="row.active ? 'bg-[var(--bg-2)]' : 'hover-bg'"
+          [class]="row.active ? 'bg-[var(--bg-3)]' : 'hover-bg'"
           role="presentation"
           data-testid="chat-tab"
           [attr.data-active]="row.active ? 'true' : null"

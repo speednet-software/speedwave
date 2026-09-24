@@ -102,6 +102,16 @@ describe('ChatHeaderComponent', () => {
     expect(emitted).toBe(1);
   });
 
+  it('describes the plus button as restarting the current conversation, keeping the ⌘N shortcut', () => {
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector(
+      '[data-testid="chat-header-new"]'
+    ) as HTMLButtonElement;
+    expect(btn.getAttribute('aria-label')).toBe('Restart current conversation');
+    expect(btn.getAttribute('appTooltip')).toBe('Restart current conversation');
+    expect(btn.getAttribute('tooltipKbd')).toBe('⌘N');
+  });
+
   it('sets aria-pressed=true on memory button when memoryOpen is true', () => {
     fixture.componentRef.setInput('memoryOpen', true);
     fixture.detectChanges();

@@ -336,6 +336,22 @@ describe('ChatTabsComponent', () => {
     expect(activateBtn.getAttribute('aria-label')).toBe('Switch to tab: New chat, session ended');
   });
 
+  it('gives the active tab a visibly darker background than an inactive tab', () => {
+    const s1 = new FakeStore();
+    const s2 = new FakeStore();
+    chat.setTabs([
+      ['t1', s1],
+      ['t2', s2],
+    ]);
+    chat.setActive('t1');
+    fixture.detectChanges();
+
+    const tabs = tabEls();
+    expect(tabs[0].classList.contains('bg-[var(--bg-3)]')).toBe(true);
+    expect(tabs[1].classList.contains('bg-[var(--bg-3)]')).toBe(false);
+    expect(tabs[1].classList.contains('hover-bg')).toBe(true);
+  });
+
   it('marks an inactive tab unselected on its tab button', () => {
     const s1 = new FakeStore();
     const s2 = new FakeStore();
