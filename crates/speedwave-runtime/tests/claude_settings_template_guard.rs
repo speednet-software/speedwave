@@ -1,5 +1,5 @@
 //! Guard for the bundled Claude Code `settings.json` template: it must not seed
-//! a key that host-side code owns as a per-project store.
+//! a key that host-side code owns as a per-project store, and it keeps claude.ai sync off.
 
 #![expect(
     clippy::expect_used,

@@ -684,7 +684,7 @@ PY
     cp "${SETTINGS_TEMPLATE}" "${SPEEDWAVE_RESOURCES}/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false ? 0 : 1)"
+    run _settings_check "s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false"
     [ "$status" -eq 0 ]
 }
 
@@ -693,13 +693,13 @@ PY
     printf '{"model":"claude-opus-5"}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false && s.model==='claude-opus-5' ? 0 : 1)"
+    run _settings_check "s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false && s.model==='claude-opus-5'"
     [ "$status" -eq 0 ]
 
     printf '{"syncClaudeAiSkills":true,"syncClaudeAiPlugins":true}' > "${TEST_HOME}/.claude/settings.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.syncClaudeAiSkills===true && s.syncClaudeAiPlugins===true ? 0 : 1)"
+    run _settings_check "s.syncClaudeAiSkills===true && s.syncClaudeAiPlugins===true"
     [ "$status" -eq 0 ]
 }
 
