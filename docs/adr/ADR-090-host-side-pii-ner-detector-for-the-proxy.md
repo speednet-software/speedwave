@@ -17,7 +17,7 @@ HTTP rather than a `HostBridge`: the bridge skeleton is WebSocket-only and the e
 The service writes `<data_dir>/pii-ner.lock.json` in the host worker lock schema (`host_mcp_process::lock`, `LockService::PiiNer`) with its PID, port and token, and keeps it alive with a watchdog; the token persists in `<data_dir>/pii-ner-auth-token`, so a rendered config only changes when the port does. `compose::pii_ner::live_service_in` reads the lock and requires a live PID. `write_proxy_config_in` adds a `ner` section to `proxy.json` only then, and only when the project's switch (below) is on:
 
 ```json
-"ner": {"url": "http://host.docker.internal:<port>", "token": "...", "min_confidence": 0.6, "labels": [...], "required": false}
+"ner": {"url": "http://host.docker.internal:<port>", "token": "...", "min_confidence": 0.6, "labels": [...]}
 ```
 
 The URL goes through `compose::container_facing_port`, so under WSL2 mirrored mode it names the guest relay port. No new mount: `proxy.json` already sits in the `config:ro` volume, and `SPW_CONFIG_DIGEST` covers it, so a port change recreates the proxy. Desktop's `reconcile_compose_port` now also compares `proxy.json` with the live detector (`compose::ner_url_state`) and treats a missing mcp-os lock as absent instead of returning early.
@@ -26,7 +26,7 @@ The URL goes through `compose::container_facing_port`, so under WSL2 mirrored mo
 
 - Existing tokens win over rules, rules win over detector spans: a span is sealed only when it lies entirely inside text no rule and no earlier token claimed; overlapping spans keep the earliest, then the longest. Observation-mode categories from the policy count detector hits without sealing them.
 - Default labels (`compose::DEFAULT_NER_LABELS`) omit `ORG`, `IMEI`, `URL` and `IP_ADDRESS`: routine technical content in a coding assistant, and tokenized URLs would break tool calls. The proxy filters by label and by `min_confidence` on top of the detector's own 0.6 pipeline threshold.
-- An unavailable detector (503 while the model loads, timeout, malformed answer, wrong list count, oversized request above 4 MiB) degrades the request to rules only, logs at most once per minute and writes one `NER_UNAVAILABLE` / `passed` audit row with `source: "ner"`; `ner.required: true` turns that into a 503 to the caller. Timeouts: 2 s connect, 15 s total, no redirects. A send that got no answer at all is repeated once before degrading, because `/v1/detect` is pure inference and the failures seen in practice were transport failures on the container-to-host hop under a burst of parallel sessions, not a detector that was down.
+- An unavailable detector (503 while the model loads, timeout, malformed answer, wrong list count, oversized request above 4 MiB) degrades the request to rules only, logs at most once per minute and writes one `NER_UNAVAILABLE` / `passed` audit row with `source: "ner"`. Timeouts: 2 s connect, 15 s total, no redirects. A send that got no answer at all is repeated once before degrading, because `/v1/detect` is pure inference and the failures seen in practice were transport failures on the container-to-host hop under a burst of parallel sessions, not a detector that was down.
 - Audit rows of sealed detector spans carry `source: "ner"`; rule rows are unchanged, so the hub's audit consumers see the same shape as before.
 
 ### What the detector is asked to look at
@@ -62,7 +62,7 @@ The hub (`mcp-hub`, Node, wasm engine) keeps rules only for now; tool results fl
 
 ## Consequences
 
-- Every `/v1/messages` gains one host round trip before forwarding, carrying the `messages[].content` leaves that are new to this proxy. The CPU budget for a long conversation (about 100 KB of text, several hundred windows) is measured with `make bench-pii-ner` before anyone sets `required: true`; that full price is paid on a session's first turn, after which the cache leaves only the new message.
+- Every `/v1/messages` gains one host round trip before forwarding, carrying the `messages[].content` leaves that are new to this proxy. The CPU budget for a long conversation (about 100 KB of text, several hundred windows) is measured with `make bench-pii-ner`; that full price is paid on a session's first turn, after which the cache leaves only the new message.
 - The cache is per proxy process: restarting the project's containers re-detects the conversation from scratch.
 - Request text now leaves the proxy container to a second process on the same machine. It is the user's own machine and the same text the Desktop UI displayed; the gate above pins the destination to the host gateway.
 - The CLI (`speedwave`) never starts the service: exactly one supervisor, the Desktop app, as for mcp-os and oauth. A CLI-only session renders `proxy.json` without `ner` and keeps rule-based protection.

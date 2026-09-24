@@ -89,7 +89,6 @@ pub(crate) struct NerRenderConfig {
     token: String,
     min_confidence: f32,
     labels: Vec<String>,
-    required: bool,
 }
 
 pub(crate) fn ner_render_config(live: &LiveNerService) -> NerRenderConfig {
@@ -98,7 +97,6 @@ pub(crate) fn ner_render_config(live: &LiveNerService) -> NerRenderConfig {
         token: live.token.clone(),
         min_confidence: DEFAULT_NER_MIN_CONFIDENCE,
         labels: DEFAULT_NER_LABELS.iter().map(|l| l.to_string()).collect(),
-        required: false,
     }
 }
 
@@ -198,11 +196,9 @@ mod tests {
         let cfg = ner_render_config(&live);
         assert_eq!(validate_ner_url(&cfg.url), Ok(50222));
         assert_eq!(cfg.token, "tok");
-        assert!(!cfg.required);
         assert_eq!(cfg.labels.len(), DEFAULT_NER_LABELS.len());
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.starts_with(r#"{"url":"http://host.docker.internal:50222","token":"tok","min_confidence":0.6,"labels":["SSN","#));
-        assert!(json.ends_with(r#""required":false}"#));
     }
 
     #[test]

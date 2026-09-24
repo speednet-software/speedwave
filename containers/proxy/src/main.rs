@@ -977,13 +977,12 @@ mod tests {
         (addr, calls, seen)
     }
 
-    fn ner_client(addr: &std::net::SocketAddr, required: bool) -> crate::ner::NerClient {
+    fn ner_client(addr: &std::net::SocketAddr) -> crate::ner::NerClient {
         crate::ner::NerClient::for_test(crate::ner::NerConfig {
             url: format!("http://{addr}"),
             token: "ner-secret".to_string(),
             min_confidence: 0.6,
             labels: vec!["SURNAME".to_string(), "CITY".to_string()],
-            required,
             timeout_ms: 2000,
         })
     }
@@ -1034,8 +1033,7 @@ mod tests {
         )
         .await;
         let audit_dir = tempfile::tempdir().unwrap();
-        let (status, forwarded) =
-            post_with_ner(ner_client(&ner_addr, false), audit_dir.path()).await;
+        let (status, forwarded) = post_with_ner(ner_client(&ner_addr), audit_dir.path()).await;
         assert_eq!(status, 200);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let request: serde_json::Value = serde_json::from_slice(&seen.lock().await).unwrap();
@@ -1077,8 +1075,7 @@ mod tests {
     async fn unavailable_detector_degrades_to_rules_and_audits_the_gap() {
         let (ner_addr, _, _) = spawn_mock_ner(503, r#"{"error":"loading"}"#).await;
         let audit_dir = tempfile::tempdir().unwrap();
-        let (status, forwarded) =
-            post_with_ner(ner_client(&ner_addr, false), audit_dir.path()).await;
+        let (status, forwarded) = post_with_ner(ner_client(&ner_addr), audit_dir.path()).await;
         assert_eq!(status, 200);
         let body = String::from_utf8(forwarded).unwrap();
         assert!(body.contains("Jan Kowalski"), "{body}");
@@ -1086,16 +1083,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["category"], crate::audit::NER_UNAVAILABLE_CATEGORY);
         assert_eq!(rows[0]["action"], "passed");
-    }
-
-    #[tokio::test]
-    async fn required_detector_that_is_unavailable_fails_the_request() {
-        let (ner_addr, _, _) = spawn_mock_ner(503, r#"{"error":"loading"}"#).await;
-        let audit_dir = tempfile::tempdir().unwrap();
-        let (status, forwarded) =
-            post_with_ner(ner_client(&ner_addr, true), audit_dir.path()).await;
-        assert_eq!(status, 503);
-        assert!(forwarded.is_empty(), "nothing may reach the upstream");
     }
 
     #[tokio::test]
@@ -1107,8 +1094,7 @@ mod tests {
         ] {
             let (ner_addr, _, _) = spawn_mock_ner(200, body).await;
             let audit_dir = tempfile::tempdir().unwrap();
-            let (status, forwarded) =
-                post_with_ner(ner_client(&ner_addr, false), audit_dir.path()).await;
+            let (status, forwarded) = post_with_ner(ner_client(&ner_addr), audit_dir.path()).await;
             assert_eq!(status, 200, "{body}");
             assert!(
                 String::from_utf8(forwarded).unwrap().contains("Kowalski"),
@@ -1126,7 +1112,6 @@ mod tests {
             token: "wrong".to_string(),
             min_confidence: 0.6,
             labels: vec![],
-            required: false,
             timeout_ms: 2000,
         };
         client_cfg.labels.push("SURNAME".to_string());

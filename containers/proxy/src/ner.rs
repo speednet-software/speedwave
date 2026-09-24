@@ -53,9 +53,6 @@ pub struct NerConfig {
     /// Labels to seal; an empty list accepts every label the detector reports.
     #[serde(default)]
     pub labels: Vec<String>,
-    /// When set, an unavailable detector fails the request instead of degrading to rules only.
-    #[serde(default)]
-    pub required: bool,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 }
@@ -67,7 +64,6 @@ impl std::fmt::Debug for NerConfig {
             .field("token", &"[redacted]")
             .field("min_confidence", &self.min_confidence)
             .field("labels", &self.labels)
-            .field("required", &self.required)
             .field("timeout_ms", &self.timeout_ms)
             .finish()
     }
@@ -178,7 +174,6 @@ pub struct NerClient {
     token: String,
     min_confidence: f32,
     labels: HashSet<String>,
-    required: bool,
     client: reqwest::Client,
     last_warn: Mutex<Option<Instant>>,
     cache: SpanCache,
@@ -191,7 +186,6 @@ impl std::fmt::Debug for NerClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NerClient")
             .field("endpoint", &self.endpoint)
-            .field("required", &self.required)
             .finish_non_exhaustive()
     }
 }
@@ -266,17 +260,11 @@ impl NerClient {
             token: cfg.token,
             min_confidence: cfg.min_confidence,
             labels: cfg.labels.into_iter().collect(),
-            required: cfg.required,
             client,
             last_warn: Mutex::new(None),
             cache: SpanCache::new(),
             gate: tokio::sync::Semaphore::new(1),
         })
-    }
-
-    /// Whether an unavailable detector must fail the request.
-    pub fn required(&self) -> bool {
-        self.required
     }
 
     /// Detects spans for every text; the result has exactly one list per input text, in the
@@ -450,7 +438,6 @@ mod tests {
             token: "t".to_string(),
             min_confidence: 0.6,
             labels: vec!["SURNAME".into(), "CITY".into()],
-            required: false,
             timeout_ms: 5000,
         }
     }
@@ -483,7 +470,6 @@ mod tests {
             client.endpoint,
             "http://host.docker.internal:50123/v1/detect"
         );
-        assert!(!client.required());
     }
 
     #[test]

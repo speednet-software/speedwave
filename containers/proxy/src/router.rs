@@ -330,11 +330,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"routes":[],"ner":{"url":"http://host.docker.internal:50123","token":"t","min_confidence":0.6,"labels":["SURNAME"],"required":true}}"#,
+            r#"{"routes":[],"ner":{"url":"http://host.docker.internal:50123","token":"t","min_confidence":0.6,"labels":["SURNAME"]}}"#,
         );
         let cfg = Config::load_from(&path).unwrap();
-        let ner = cfg.ner.as_ref().unwrap();
-        assert!(ner.required());
+        assert!(cfg.ner.is_some());
         assert!(!format!("{cfg:?}").contains("\"t\""));
     }
 

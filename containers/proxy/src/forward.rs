@@ -233,14 +233,6 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         Some(ner) => match ner.detect_batch(&pii::collect_scan_leaves(&parsed)).await {
             NerOutcome::Spans(spans) => Some(spans),
             NerOutcome::Unavailable(reason) => {
-                if ner.required() {
-                    log::error!("PII NER detector required but unavailable, rejecting /v1/messages: {reason}");
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({"error": "PII detector unavailable"})),
-                    )
-                        .into_response();
-                }
                 ner.warn_unavailable(&reason);
                 audit::write_ner_unavailable(cfg.audit_dir.as_deref());
                 None

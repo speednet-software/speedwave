@@ -433,7 +433,6 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(doc["ner"]["token"], "ner-tok");
         assert_eq!(doc["ner"]["min_confidence"], 0.6);
-        assert_eq!(doc["ner"]["required"], false);
         assert_eq!(
             doc["ner"]["labels"].as_array().unwrap().len(),
             super::super::pii_ner::DEFAULT_NER_LABELS.len()
