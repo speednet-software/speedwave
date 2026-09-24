@@ -440,7 +440,11 @@ fn run_discovery_with_timeout(
     timeout: Duration,
 ) -> anyhow::Result<RawDiscovery> {
     let instance_id = crate::session::new_instance_id();
-    let marker_argv = crate::session::instance_env_argv(&instance_id);
+    let mut env_argv = crate::session::instance_env_argv(&instance_id);
+    env_argv.push(format!(
+        "ANTHROPIC_BASE_URL={}",
+        consts::CLAUDE_OFFLINE_BASE_URL
+    ));
     let claude_argv = [
         consts::CLAUDE_BINARY,
         "-p",
@@ -452,7 +456,7 @@ fn run_discovery_with_timeout(
         "--",
         "/",
     ];
-    let argv: Vec<&str> = marker_argv
+    let argv: Vec<&str> = env_argv
         .iter()
         .map(String::as_str)
         .chain(claude_argv.iter().copied())
@@ -1462,6 +1466,25 @@ mod tests {
         let calls = handles.exec_calls.lock().unwrap();
         assert_eq!(calls[0].argv[0], "env");
         assert!(calls[0].argv[1].starts_with("SPW_SESSION_INSTANCE_ID="));
+    }
+
+    #[test]
+    fn run_discovery_sends_its_slash_prompt_to_no_model() {
+        let (runtime, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_script("noise\n")
+            .build();
+        let _ = run_discovery(&runtime, "test-container");
+        let calls = handles.exec_calls.lock().unwrap();
+        let argv = &calls[0].argv;
+        let claude_at = argv
+            .iter()
+            .position(|arg| arg == consts::CLAUDE_BINARY)
+            .expect("the discovery argv runs Claude Code");
+        let closed_base_url = format!("ANTHROPIC_BASE_URL={}", consts::CLAUDE_OFFLINE_BASE_URL);
+        assert!(
+            argv[..claude_at].contains(&closed_base_url),
+            "the `/` prompt must go to a closed port, not to a model: {argv:?}"
+        );
     }
 
     #[test]
