@@ -313,29 +313,51 @@ so a pick with no live session applies it through the re-render above, while
 a live-session wire `/model` leaves the running container on the previous
 window until its next render.
 
-**Amendment (SPEED-696, 2026-09-24: the soft-impose answer stays out of the
-chat, and a model the user sends disarms it).** The soft-impose above had two
-defects, both found on the e2e rig. First, Claude Code answers the injected
-`/model` with its own `result`: `num_turns: 0`, after a `<synthetic>` "Set model
-to … for this session only" message. The stdout reader emitted that `result`
-to the chat like any turn end. When the user sent a message before it arrived,
-that `result` ended the user's turn, and the listener then dropped the turn's
-answer. Second, the decision compared the observed model with the
-configuration read at spawn. Claude Code emits `system/init` for every input
-it starts, a local command included, so a composer pick made after the spawn
-was switched back at the next input.
+**Amendment (SPEED-696, 2026-09-24: the soft-impose waits for the turn to end,
+and its answer stays out of the chat).** The soft-impose above had three
+defects, found on the e2e rig and confirmed with the pinned 2.1.267 binary
+driven against a stub API:
 
-A capture from the pinned 2.1.267 binary
-(`desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`)
-shows the order: the input in progress when `init` arrives answers first, and
-the injected command answers second. The reader now withholds that second
-`result` when it is a command result (`num_turns: 0`); a result of any other
-shape still reaches the chat, with a warning in the log. A withheld `result`
-is neither emitted nor used to drain the message queue. A `/model` the user
-sends, directly or from the queue, settles the session's model
-(`chat.rs::ModelSettled`, checked and set under the stdin lock on both sides),
-and no soft-impose fires after it. The first-turn gap recorded above is
-unchanged.
+1. **It was written into a running turn.** It was sent on `system/init`, while
+   the first turn was still running. When that turn uses a tool, Claude Code
+   does not run a command queued behind it. It hands the text to the model as
+   a user message ("The user sent a new message while you were working:
+   /model …"), answers it with no command result, and runs the next turn on
+   the unchanged model
+   (`desktop/src-tauri/tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson`).
+2. **Its answer ended the user's turn in the chat.** Claude Code answers an
+   executed `/model` with its own `result`: `num_turns: 0`, after a
+   `<synthetic>` "Set model to `<id>` for this session only" message. The
+   stdout reader emitted that `result` like any turn end. A message the user
+   sent before it arrived had its turn ended by it, and the chat listener
+   (`chat-state.service.ts::setupStreamListener`) then dropped that turn's
+   answer.
+3. **It could switch a user's pick back.** The decision compared the observed
+   model with the configuration read at spawn. Claude Code emits
+   `system/init` for every input it starts, a local command included, so a
+   composer pick made after the spawn was switched back at the next input.
+
+The reader (`chat.rs::SoftImpose`) now works as follows:
+
+- A mismatched `init` only makes the switch due.
+- The `/model` is written when the input in progress ends: on its `result`,
+  before that `result` reaches the chat and before a queued message is
+  drained. Claude Code is idle then, so it runs the command, and anything the
+  user sends after seeing the turn end queues behind it
+  (`desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`,
+  written after a tool-using turn).
+- The command's own `init` and its answer are withheld: the first `result`
+  after the write, when it has `num_turns: 0` and names the written model.
+  Neither is emitted, and the withheld `result` drains nothing. Any other
+  line first means Claude Code did not run the command, and everything from
+  that line on reaches the chat, with a warning in the log.
+- A `/model` the user sends, directly or from the queue, settles the
+  session's model (`ModelSettled`). The check and the write happen under the
+  stdin lock on both sides, so no soft-impose is written after a user pick.
+
+The first-turn gap recorded above is unchanged. The captures are pinned to
+the Claude Code version: `the_soft_impose_captures_are_of_the_pinned_claude_code`
+fails on a bump until both are re-captured.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 
