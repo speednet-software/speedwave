@@ -730,6 +730,63 @@ describe('ChatComponent', () => {
     });
   });
 
+  describe('restart request channel (⌘R shares the plus button code path)', () => {
+    it('does not call newConversation on initial render (no spurious restart)', () => {
+      const spy = vi.spyOn(component, 'newConversation');
+      fixture.detectChanges();
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('calls newConversation when UiStateService.requestRestart fires', async () => {
+      fixture.detectChanges();
+      const spy = vi.spyOn(component, 'newConversation');
+
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('calls newConversation again on a second request', async () => {
+      fixture.detectChanges();
+      const spy = vi.spyOn(component, 'newConversation');
+
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it('performs the same reset the plus button performs (state cleared, drawers closed)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [{ type: 'text', content: 'stream' }],
+      });
+      chatState.isStreaming = true;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
+
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(chatState.messages).toEqual([]);
+      expect(chatState.isStreaming).toBe(false);
+      expect(component.showHistory).toBe(false);
+      expect(component.showMemory).toBe(false);
+    });
+  });
+
   describe('toggleHistory', () => {
     it('toggles showHistory boolean', async () => {
       projectState.activeProject.set('test');

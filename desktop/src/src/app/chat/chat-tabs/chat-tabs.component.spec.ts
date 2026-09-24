@@ -275,7 +275,7 @@ describe('ChatTabsComponent', () => {
     expect(plus.title).toBe('Maximum 3 tabs');
   });
 
-  it('leaves the plus button enabled with a "New tab" tooltip below the cap', () => {
+  it('leaves the plus button enabled with a "New tab (⌘N)" tooltip below the cap', () => {
     const store = new FakeStore();
     chat.setTabs([['t1', store]]);
     chat.setCanOpenTab(true);
@@ -285,7 +285,7 @@ describe('ChatTabsComponent', () => {
       '[data-testid="chat-tabs-new"]'
     ) as HTMLButtonElement;
     expect(plus.disabled).toBe(false);
-    expect(plus.title).toBe('New tab');
+    expect(plus.title).toBe('New tab (⌘N)');
   });
 
   it('exposes tab semantics for accessibility (role on the focusable button, labels)', () => {

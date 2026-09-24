@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { signal, computed } from '@angular/core';
+import { Component, signal, computed } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
@@ -11,6 +11,14 @@ import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { TranscriptionService } from '../services/transcription.service';
+
+/**
+ * Stand-in for every routed view in the test router config below — routing to `ShellComponent`
+ * itself would recreate it inside its own `<router-outlet>` on navigation (double keydown
+ * listener, double side effects), so a trivial standalone component takes its place.
+ */
+@Component({ selector: 'app-route-stub', standalone: true, template: '' })
+class RouteStubComponent {}
 
 class FakeTabStore {
   readonly messagesFromState = (): readonly unknown[] => [];
@@ -74,12 +82,13 @@ describe('ShellComponent', () => {
     await TestBed.configureTestingModule({
       imports: [
         ShellComponent,
+        RouteStubComponent,
         RouterModule.forRoot([
-          { path: 'chat', component: ShellComponent },
-          { path: 'integrations', component: ShellComponent },
-          { path: 'plugins', component: ShellComponent },
-          { path: 'settings', component: ShellComponent },
-          { path: 'logs', component: ShellComponent },
+          { path: 'chat', component: RouteStubComponent },
+          { path: 'integrations', component: RouteStubComponent },
+          { path: 'plugins', component: RouteStubComponent },
+          { path: 'settings', component: RouteStubComponent },
+          { path: 'logs', component: RouteStubComponent },
         ]),
       ],
       providers: [
@@ -716,6 +725,110 @@ describe('ShellComponent', () => {
       const event = pressCmdT();
       expect(chatState.openTab).not.toHaveBeenCalled();
       expect(event.defaultPrevented).toBe(false);
+    });
+  });
+
+  describe('Cmd+N / Ctrl+N open-tab shortcut', () => {
+    function pressCmdN(): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { key: 'n', metaKey: true, cancelable: true });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('opens a new tab when beta is on and under the cap, same guard as ⌘T', () => {
+      pressCmdN();
+      expect(chatState.openTab).toHaveBeenCalled();
+    });
+
+    it('is inert when beta is off, and never prevents the default browser action', () => {
+      betaEnabled.set(false);
+      const event = pressCmdN();
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert at the tab cap, and never prevents the default browser action', () => {
+      chatState.setCanOpenTab(false);
+      const event = pressCmdN();
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('leaves ⌘T working too — two shortcuts, one action', () => {
+      pressCmdN();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true }));
+      expect(chatState.openTab).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Cmd+R / Ctrl+R restart-conversation shortcut', () => {
+    function pressCmdR(): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { key: 'r', metaKey: true, cancelable: true });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('requests a restart when the chat route is active and the project is ready — same gate as the header plus', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before + 1);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('is inert off the chat route (the header plus is not rendered there either)', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert while the project is not ready (compact header, no plus rendered), and never prevents the default — lets WebView2 reload win', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('auth_required');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('ignores plain `r` keypress without a modifier', () => {
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'r' }));
+      expect(ui.restartRequested()).toBe(before);
+    });
+
+    it('does not fire after the component is destroyed', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      fixture.destroy();
+      pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
     });
   });
 

@@ -150,9 +150,24 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.restoreIncomingTabState(activeId);
       });
     });
+
+    effect(() => {
+      const requested = this.ui.restartRequested();
+      untracked(() => {
+        const previous = this.previousRestartRequest;
+        this.previousRestartRequest = requested;
+        if (previous === null || previous === requested) return;
+        void this.newConversation();
+      });
+    });
   }
 
   private previousTabId: string | null = null;
+  /**
+   * Last seen value of `UiStateService.restartRequested`; `null` until the first effect run so a
+   * component (re)mount never replays a request bumped before it existed (shell's ⌘R channel).
+   */
+  private previousRestartRequest: number | null = null;
 
   /**
    * Snapshots the outgoing tab's composer draft and scroll offset before the view rebinds.

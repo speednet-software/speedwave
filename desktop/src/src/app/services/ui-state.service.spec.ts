@@ -156,6 +156,20 @@ describe('UiStateService', () => {
     });
   });
 
+  describe('restartRequested / requestRestart', () => {
+    it('starts at 0', () => {
+      expect(service.restartRequested()).toBe(0);
+    });
+
+    it('bumps by one per call, so a consumer can distinguish request counts', () => {
+      service.requestRestart();
+      expect(service.restartRequested()).toBe(1);
+
+      service.requestRestart();
+      expect(service.restartRequested()).toBe(2);
+    });
+  });
+
   describe('singleton scoping', () => {
     it('returns the same instance across inject() calls', () => {
       const second = TestBed.inject(UiStateService);

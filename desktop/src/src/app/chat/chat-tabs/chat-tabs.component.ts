@@ -102,7 +102,7 @@ function tabTitle(store: ChatSessionStore): string {
       type="button"
       class="flex flex-shrink-0 items-center justify-center px-3 text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40"
       [disabled]="!chat.canOpenTab()"
-      [attr.title]="chat.canOpenTab() ? 'New tab' : maxTabsTooltip"
+      [attr.title]="chat.canOpenTab() ? 'New tab (⌘N)' : maxTabsTooltip"
       data-testid="chat-tabs-new"
       aria-label="Open new chat tab"
       (click)="chat.openTab()"

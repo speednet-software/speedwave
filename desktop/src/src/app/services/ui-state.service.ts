@@ -7,6 +7,7 @@ export class UiStateService {
   private readonly memoryOpenSignal = signal<boolean>(false);
   private readonly paletteOpenSignal = signal<boolean>(false);
   private readonly projectSwitcherOpenSignal = signal<boolean>(false);
+  private readonly restartRequestedSignal = signal<number>(0);
 
   /** Read-only signal reflecting the conversations sidebar drawer's open state. */
   readonly sidebarOpen: Signal<boolean> = this.sidebarOpenSignal.asReadonly();
@@ -19,6 +20,14 @@ export class UiStateService {
 
   /** Read-only signal reflecting the project switcher dropdown's open state. */
   readonly projectSwitcherOpen: Signal<boolean> = this.projectSwitcherOpenSignal.asReadonly();
+
+  /**
+   * One-shot request channel (shell → chat): a monotonically increasing counter bumped by
+   * {@link requestRestart}. `ChatComponent` reacts via an effect that compares against the
+   * previously seen value, so the shell (⌘R / Ctrl+R) and the chat header's plus button drive
+   * the exact same `newConversation()` path without the shell duplicating its logic.
+   */
+  readonly restartRequested: Signal<number> = this.restartRequestedSignal.asReadonly();
 
   /** Flips the conversations sidebar drawer; closes the memory drawer first (shared left-edge anchor). */
   toggleSidebar(): void {
@@ -66,5 +75,10 @@ export class UiStateService {
   /** Forces the project switcher dropdown closed. */
   closeProjectSwitcher(): void {
     this.projectSwitcherOpenSignal.set(false);
+  }
+
+  /** Bumps {@link restartRequested}, asking the chat view to restart its current conversation. */
+  requestRestart(): void {
+    this.restartRequestedSignal.update((n) => n + 1);
   }
 }
