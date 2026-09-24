@@ -28,8 +28,8 @@
     "undici": "^8.10.2"
   },
   "devDependencies": {
-    "@types/node": "^26.4.1",
-    "@vitest/coverage-v8": "^5.0.0",
+    "@types/node": "^26.6.1",
+    "@vitest/coverage-v8": "^5.0.1",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0"
   }
