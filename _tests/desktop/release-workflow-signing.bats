@@ -123,6 +123,7 @@ SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 
 
 SIGNING_LOGIN_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/azure-signing-login/action.yml"
+RELEASE_PLEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release-please.yml"
 
 @test "workflow configures Windows signing before tauri-action" {
     login_line=$(grep -n "name: Configure Windows code signing" "$WORKFLOW" | head -1 | cut -d: -f1)
@@ -147,6 +148,27 @@ SIGNING_LOGIN_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/azure-signing-log
 @test "jobs that sign grant id-token: write and run in the release environment" {
     [ "$(grep -c "^      id-token: write$" "$WORKFLOW")" -eq 2 ]
     [ "$(grep -c "^    environment: release$" "$WORKFLOW")" -eq 2 ]
+}
+
+@test "release-please grants the release build every permission its jobs request" {
+    caller=$(awk '/^  build-and-publish:$/ { found = 1; next } found && /^  [^ ]/ { exit } found' "$RELEASE_PLEASE_WORKFLOW")
+    echo "$caller" | grep -qxF "    uses: ./.github/workflows/desktop-release.yml"
+    requested=$(grep -E "^      [a-z-]+: (read|write)$" "$WORKFLOW" | sed 's/^ *//' | sort -u)
+    [ -n "$requested" ]
+    while IFS= read -r perm; do
+        name=${perm%%:*}
+        if [ "${perm#*: }" = "read" ]; then
+            granted="^      $name: (read|write)$"
+        else
+            granted="^      $name: write$"
+        fi
+        if ! echo "$caller" | grep -qE "$granted"; then
+            echo "ERROR: desktop-release.yml requests '$perm' but release-please.yml build-and-publish does not grant it" >&2
+            return 1
+        fi
+    done <<EOF
+$requested
+EOF
 }
 
 @test "cli job signs the Windows CLI before packaging it" {
