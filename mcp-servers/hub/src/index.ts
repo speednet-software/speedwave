@@ -111,7 +111,7 @@ const { ids, total_count } = await redmine.listIssueIds({
 
 // Step 2: Get full details for selected issues (batch returns { results, errors })
 const { results: issues } = await batch(ids.slice(0, 5).map(id =>
-  redmine.getIssueFull({ issue_id: id, include: ["journals", "custom_fields"] })
+  redmine.getIssueFull({ issue_id: id, include: ["journals"] })
 ));
 
 // Step 3: Work with complete data
@@ -179,7 +179,7 @@ return { total: results.length, failed: errors.length };
       {
         description: 'Partial: get full details for selected items',
         input: {
-          code: `const { ids } = await redmine.listIssueIds({ status: "open", assigned_to: "me" });\nconst { results } = await batch(ids.slice(0, 5).map(id => redmine.getIssueFull({ issue_id: id, include: ["custom_fields"] })));\nreturn { results };`,
+          code: `const { ids } = await redmine.listIssueIds({ status: "open", assigned_to: "me" });\nconst { results } = await batch(ids.slice(0, 5).map(id => redmine.getIssueFull({ issue_id: id, include: ["journals"] })));\nreturn { results };`,
         },
       },
       {

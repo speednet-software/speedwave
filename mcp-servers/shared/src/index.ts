@@ -51,7 +51,11 @@ export {
   HOST_GATEWAY_ALIAS,
 } from './security.js';
 
-export { withResultValidation, withClientValidation } from './tool-validation.js';
+export {
+  withResultValidation,
+  withClientValidation,
+  withDeclaredParams,
+} from './tool-validation.js';
 export type {
   ToolResult,
   ClientValidationOptions,

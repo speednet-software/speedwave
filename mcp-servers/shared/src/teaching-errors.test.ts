@@ -62,6 +62,18 @@ describe('teachingErrorResult', () => {
     ).toContain('null');
   });
 
+  it('leaves the received clause out when the received key is absent', () => {
+    expect(
+      teachingErrorResult({ paramName: 'descripton', nextStep: 'Use description.' }).content[0].text
+    ).toBe('Error: Invalid descripton. Use description.');
+  });
+
+  it('still renders an explicitly undefined received value', () => {
+    expect(
+      teachingErrorResult({ paramName: 'q', received: undefined, nextStep: 'x' }).content[0].text
+    ).toBe('Error: Invalid q (received: undefined). x');
+  });
+
   it('summarizes an object received value as JSON', () => {
     const result = teachingErrorResult({
       paramName: 'filter',
