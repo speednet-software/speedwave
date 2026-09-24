@@ -438,12 +438,14 @@ export class ProjectStateService {
     }
     if (this.status() === 'ready' || this.status() === next) return;
     this.status.set(next);
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
   /** Force-sets status to no_provider, skipping the never-downgrade guard. */
   forceUnconfigured(): void {
     this.status.set('no_provider');
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
@@ -482,6 +484,7 @@ export class ProjectStateService {
       this.status.set('ready');
       this.error = '';
     }
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 

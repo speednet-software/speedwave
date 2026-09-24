@@ -1685,12 +1685,20 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(true);
     });
 
-    it('forgets a restart owed to the project a switch left once the switch lands', async () => {
+    it('forgets a restart owed to the project a switch left, also when a later switch fails back to it', async () => {
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
       service.requestRestartFor('test');
-
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
       await new Promise((r) => setTimeout(r, 0));
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'test' });
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'third' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.dismissError();
 
       expect(service.status()).toBe('ready');
       expect(service.needsRestart).toBe(false);
@@ -1707,6 +1715,84 @@ describe('ProjectStateService', () => {
       await service.retry();
 
       expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when its error is dismissed', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      expect(service.status()).toBe('error');
+
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when the dismiss cannot check the containers', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') throw new Error('timeout');
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('holds a restart owed across a failed switch while a dismiss finds the containers down', async () => {
+      let running = false;
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'check_containers_running' ? running : undefined;
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      await service.dismissError();
+      expect(service.status()).toBe('error');
+      expect(service.needsRestart).toBe(false);
+
+      running = true;
+      await service.dismissError();
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when a sign-in check finds the project signed out', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+
+      expect(service.status()).toBe('auth_required');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('drops a restart owed across a failed switch once a logout leaves the project without a provider', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      service.forceUnconfigured();
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: true,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
     });
   });
 
