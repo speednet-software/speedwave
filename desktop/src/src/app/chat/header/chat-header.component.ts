@@ -1,15 +1,18 @@
-import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, input, output } from '@angular/core';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { BetaService } from '../../services/beta.service';
+import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
 
 /**
- * Chat header strip — terminal-minimal layout. Full mode shows conversation controls (history/memory/new) plus the project pill.
- * `compact` hides the conversation controls so blocked chat states (no-provider, auth-required) still expose the project switcher.
+ * Chat header strip — terminal-minimal layout. Full mode shows conversation controls (history/memory/new), the
+ * beta-gated inline tab strip, and the project pill. `compact` hides the conversation controls (and the tab
+ * strip) so blocked chat states (no-provider, auth-required) still expose only the title and project switcher.
  */
 @Component({
   selector: 'app-chat-header',
-  imports: [ProjectPillComponent, IconComponent, TooltipDirective],
+  imports: [ProjectPillComponent, IconComponent, TooltipDirective, ChatTabsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block flex-shrink-0' },
   template: `
@@ -63,6 +66,10 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
         {{ viewTitle() }}
       </h1>
 
+      @if (!compact() && beta.enabled()) {
+        <app-chat-tabs />
+      }
+
       <div class="ml-auto flex flex-shrink-0 items-center gap-3">
         <app-project-pill />
       </div>
@@ -70,6 +77,8 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
   `,
 })
 export class ChatHeaderComponent {
+  protected readonly beta = inject(BetaService);
+
   /** Conversation title (or default "Chat" when none set yet). */
   readonly viewTitle = input<string>('Chat');
   /** Whether the memory panel is currently open (drives aria-pressed). */

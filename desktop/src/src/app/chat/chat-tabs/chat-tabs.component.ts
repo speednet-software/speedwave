@@ -38,81 +38,77 @@ function tabTitle(store: ChatSessionStore): string {
 }
 
 /**
- * Browser-style tab bar for parallel chat sessions. Reads `ChatStateService.tabs` directly;
- * gating whether the bar is shown at all lives in the parent shell.
+ * Browser-style tab bar for parallel chat sessions, rendered inline inside the chat header's
+ * title row. Reads `ChatStateService.tabs` directly; gating whether the strip is shown at all
+ * (beta + not compact) lives in the parent header.
  */
 @Component({
   selector: 'app-chat-tabs',
   imports: [IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'block flex-shrink-0' },
+  host: { class: 'flex h-full min-w-0 flex-1 items-stretch', 'data-testid': 'chat-tabs' },
   template: `
-    <div
-      data-testid="chat-tabs"
-      class="flex h-11 flex-shrink-0 items-stretch border-b border-[var(--line)] bg-[var(--bg-1)]"
-    >
-      <div class="flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label="Chat tabs">
-        @for (row of tabRows(); track row.id) {
-          <div
-            class="group flex min-w-[110px] max-w-[200px] flex-1 items-stretch border-r border-[var(--line)]"
-            [class]="row.active ? 'bg-[var(--bg-2)]' : 'hover-bg'"
-            role="presentation"
-            data-testid="chat-tab"
-            [attr.data-active]="row.active ? 'true' : null"
-            (click)="chat.activateTab(row.id)"
+    <div class="flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label="Chat tabs">
+      @for (row of tabRows(); track row.id) {
+        <div
+          class="group flex min-w-[110px] max-w-[200px] flex-1 items-stretch border-r border-[var(--line)]"
+          [class]="row.active ? 'bg-[var(--bg-2)]' : 'hover-bg'"
+          role="presentation"
+          data-testid="chat-tab"
+          [attr.data-active]="row.active ? 'true' : null"
+          (click)="chat.activateTab(row.id)"
+        >
+          <button
+            type="button"
+            class="flex min-w-0 flex-1 items-center gap-1.5 px-3 text-left"
+            role="tab"
+            data-testid="chat-tab-activate"
+            [attr.aria-selected]="row.active ? 'true' : 'false'"
+            [attr.aria-label]="row.ariaLabel"
           >
-            <button
-              type="button"
-              class="flex min-w-0 flex-1 items-center gap-1.5 px-3 text-left"
-              role="tab"
-              data-testid="chat-tab-activate"
-              [attr.aria-selected]="row.active ? 'true' : 'false'"
-              [attr.aria-label]="row.ariaLabel"
-            >
-              @if (row.streaming) {
-                <span
-                  class="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-[var(--accent)]"
-                  data-testid="chat-tab-streaming"
-                  aria-hidden="true"
-                ></span>
-              }
+            @if (row.streaming) {
               <span
-                class="truncate text-[12px]"
-                data-testid="chat-tab-title"
-                [class]="row.active ? 'text-[var(--ink)]' : 'text-[var(--ink-mute)]'"
-              >
-                {{ row.title }}
-              </span>
-              @if (row.ended) {
-                <span class="pill flex-shrink-0" data-testid="chat-tab-ended">ended</span>
-              }
-            </button>
-            <button
-              type="button"
-              class="flex flex-shrink-0 items-center px-2 text-[var(--ink-mute)] opacity-0 hover:text-[var(--ink)] group-hover:opacity-100"
-              [class.opacity-100]="row.active"
-              data-testid="chat-tab-close"
-              [attr.aria-label]="'Close tab: ' + row.title"
-              (click)="close($event, row.id)"
+                class="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-[var(--accent)]"
+                data-testid="chat-tab-streaming"
+                aria-hidden="true"
+              ></span>
+            }
+            <span
+              class="truncate text-[12px]"
+              data-testid="chat-tab-title"
+              [class]="row.active ? 'text-[var(--ink)]' : 'text-[var(--ink-mute)]'"
             >
-              <app-icon name="x" class="h-3 w-3" />
-            </button>
-          </div>
-        }
-      </div>
-
-      <button
-        type="button"
-        class="flex flex-shrink-0 items-center justify-center px-3 text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40"
-        [disabled]="!chat.canOpenTab()"
-        [attr.title]="chat.canOpenTab() ? null : maxTabsTooltip"
-        data-testid="chat-tabs-new"
-        aria-label="Open new chat tab"
-        (click)="chat.openTab()"
-      >
-        <app-icon name="plus" class="h-4 w-4" />
-      </button>
+              {{ row.title }}
+            </span>
+            @if (row.ended) {
+              <span class="pill flex-shrink-0" data-testid="chat-tab-ended">ended</span>
+            }
+          </button>
+          <button
+            type="button"
+            class="flex flex-shrink-0 items-center px-2 text-[var(--ink-mute)] opacity-0 hover:text-[var(--ink)] group-hover:opacity-100"
+            [class.opacity-100]="row.active"
+            data-testid="chat-tab-close"
+            [attr.aria-label]="'Close tab: ' + row.title"
+            (click)="close($event, row.id)"
+          >
+            <app-icon name="x" class="h-3 w-3" />
+          </button>
+        </div>
+      }
     </div>
+
+    <button
+      type="button"
+      class="flex flex-shrink-0 items-center justify-center px-3 text-[var(--ink-mute)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40"
+      [disabled]="!chat.canOpenTab()"
+      [attr.title]="chat.canOpenTab() ? 'New tab' : maxTabsTooltip"
+      data-testid="chat-tabs-new"
+      aria-label="Open new chat tab"
+      (click)="chat.openTab()"
+    >
+      <app-icon name="plus" class="h-4 w-4" />
+    </button>
   `,
 })
 export class ChatTabsComponent {

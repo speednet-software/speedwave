@@ -275,7 +275,7 @@ describe('ChatTabsComponent', () => {
     expect(plus.title).toBe('Maximum 3 tabs');
   });
 
-  it('leaves the plus button enabled with no tooltip below the cap', () => {
+  it('leaves the plus button enabled with a "New tab" tooltip below the cap', () => {
     const store = new FakeStore();
     chat.setTabs([['t1', store]]);
     chat.setCanOpenTab(true);
@@ -285,7 +285,7 @@ describe('ChatTabsComponent', () => {
       '[data-testid="chat-tabs-new"]'
     ) as HTMLButtonElement;
     expect(plus.disabled).toBe(false);
-    expect(plus.title).toBe('');
+    expect(plus.title).toBe('New tab');
   });
 
   it('exposes tab semantics for accessibility (role on the focusable button, labels)', () => {
@@ -372,5 +372,16 @@ describe('ChatTabsComponent', () => {
     fixture.detectChanges();
 
     expect(titleFor(tabEls()[0])).toBe('日本語 テスト');
+  });
+
+  it('carries host classes that shrink-then-scroll as an inline flex child of the header row', () => {
+    const store = new FakeStore();
+    chat.setTabs([['t1', store]]);
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.classList.contains('flex-1')).toBe(true);
+    expect(host.classList.contains('min-w-0')).toBe(true);
+    expect(host.getAttribute('data-testid')).toBe('chat-tabs');
   });
 });

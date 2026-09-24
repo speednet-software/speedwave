@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { ChatHeaderComponent } from './chat-header.component';
+import { BetaService } from '../../services/beta.service';
 
 describe('ChatHeaderComponent', () => {
   let fixture: ComponentFixture<ChatHeaderComponent>;
+  let betaEnabled: ReturnType<typeof signal<boolean>>;
 
   beforeEach(async () => {
+    betaEnabled = signal(false);
     await TestBed.configureTestingModule({
       imports: [ChatHeaderComponent],
+      providers: [{ provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatHeaderComponent);
@@ -138,5 +143,37 @@ describe('ChatHeaderComponent', () => {
       '[data-testid="chat-header-title"]'
     ) as HTMLElement;
     expect(titleEl.textContent?.trim()).toBe('Σφαῖρα — тест 漢字');
+  });
+
+  describe('inline tab strip', () => {
+    it('is hidden when beta is disabled, even in full mode', () => {
+      betaEnabled.set(false);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
+    });
+
+    it('is shown inline between the title and the project pill when beta is enabled', () => {
+      betaEnabled.set(true);
+      fixture.detectChanges();
+
+      const tabs = fixture.nativeElement.querySelector('app-chat-tabs');
+      expect(tabs).not.toBeNull();
+      const titleEl = fixture.nativeElement.querySelector(
+        '[data-testid="chat-header-title"]'
+      ) as HTMLElement;
+      expect(titleEl.nextElementSibling).toBe(tabs);
+      const pillContainer = fixture.nativeElement.querySelector('app-project-pill')
+        ?.parentElement as HTMLElement;
+      expect(tabs.nextElementSibling).toBe(pillContainer);
+    });
+
+    it('stays hidden in compact mode even when beta is enabled (no live chat to show tabs for)', () => {
+      betaEnabled.set(true);
+      fixture.componentRef.setInput('compact', true);
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-project-pill')).not.toBeNull();
+    });
   });
 });

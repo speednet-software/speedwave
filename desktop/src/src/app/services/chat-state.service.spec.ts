@@ -607,7 +607,7 @@ describe('ChatStateService', () => {
         expect(service.activeTabId()).toBe(tab2);
       });
 
-      it('single-tab gate: a busy sole tab resumes in place instead of spawning an invisible second tab', async () => {
+      it('beta off, single tab: a busy sole tab resumes in place instead of spawning an invisible second tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
         betaEnabled.set(false);
         const tab1 = service.activeTabId();
@@ -652,10 +652,11 @@ describe('ChatStateService', () => {
         );
       });
 
-      it('branch 2: with 2+ tabs an idle+clean active tab resumes in place', async () => {
+      it('pristine active tab + beta on: opens a new tab and resumes there instead of reusing the pristine tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
-        const tab2 = await service.openTab();
-        expect(service.tabs().size).toBe(2);
+        betaEnabled.set(true);
+        const tab1 = service.activeTabId();
+        expect(service.hasConversation()).toBe(false);
         mockTauri.invokeHandler = async (cmd: string) => {
           if (cmd === 'get_conversation') return { session_id: 'resume-me', messages: [] };
           return undefined;
@@ -664,16 +665,18 @@ describe('ChatStateService', () => {
 
         await service.openConversation('resume-me');
 
-        expect(service.activeTabId()).toBe(tab2);
         expect(service.tabs().size).toBe(2);
+        const newTabId = service.activeTabId();
+        expect(newTabId).not.toBe(tab1);
         expect(invokeSpy).toHaveBeenCalledWith(
           'resume_conversation',
-          expect.objectContaining({ sessionId: 'resume-me', tabId: tab2 })
+          expect.objectContaining({ sessionId: 'resume-me', tabId: newTabId })
         );
       });
 
-      it('branch 3: with 2+ tabs a busy active tab under the cap opens a new resuming tab', async () => {
+      it('busy active tab + beta on: with 2+ tabs already open, opens a new resuming tab under the cap', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(true);
         const tab2 = await service.openTab();
         expect(service.tabs().size).toBe(2);
         const active = service.tabs().get(tab2)!;
@@ -695,8 +698,9 @@ describe('ChatStateService', () => {
         );
       });
 
-      it('branch 3: applies the remembered resume decider to the freshly opened resuming tab', async () => {
+      it('busy active tab + beta on: applies the remembered resume decider to the freshly opened resuming tab', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(true);
         const decider = vi.fn(() => Promise.resolve('fresh' as const));
         service.setResumeDecider(decider);
         const tab2 = await service.openTab();
@@ -717,8 +721,9 @@ describe('ChatStateService', () => {
         expect((newStore as unknown as { _resumeDecider: unknown })._resumeDecider).toBe(decider);
       });
 
-      it('branch 4: resumes into the active tab once at the cap, even while busy', async () => {
+      it('at cap + beta on: resumes into the active tab in place, even while busy', async () => {
         TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(true);
         const tab1 = service.activeTabId();
         const active = service.tabs().get(tab1)!;
         active.isStreaming = true;

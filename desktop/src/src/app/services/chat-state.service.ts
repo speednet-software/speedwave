@@ -231,11 +231,11 @@ export class ChatStateService {
   /**
    * Resumes a conversation. A tab already owning the session is activated; if that tab's
    * backend session already ended (e.g. a container restart while it was backgrounded), the
-   * activation is followed by a real reconnect instead of a silent no-op. While the tab bar
-   * is visible (more than one tab open, or the beta tab UI is on), an idle+clean active tab
-   * resumes in place, an occupied one opens a new resuming tab under the cap; otherwise
-   * (single tab with the bar hidden, or at the cap) the active tab resumes in place — today's
-   * replace semantics.
+   * activation is followed by a real reconnect instead of a silent no-op. Otherwise, with the
+   * beta tab UI on and under the tab cap, resuming always opens a new tab, even when the
+   * active tab is pristine, so a resumed conversation never silently replaces whatever the
+   * active tab was showing. Without beta, or at the cap, the active tab resumes in place
+   * (today's replace semantics).
    * @param sessionId - Session UUID to resume.
    */
   async openConversation(sessionId: string): Promise<void> {
@@ -247,18 +247,11 @@ export class ChatStateService {
       }
       return;
     }
-    const active = this.activeStore();
-    if (this._tabs().size > 1 || this.beta.enabled()) {
-      if (!active.hasConversation() && !active.isStreaming) {
-        await active.resumeConversation(sessionId);
-        return;
-      }
-      if (this.canOpenTab()) {
-        await this.openTabResuming(sessionId);
-        return;
-      }
+    if (this.beta.enabled() && this.canOpenTab()) {
+      await this.openTabResuming(sessionId);
+      return;
     }
-    await active.resumeConversation(sessionId);
+    await this.activeStore().resumeConversation(sessionId);
   }
 
   /** Stable per-tab id sent on every session-scoped Tauri command; the active tab's id. */

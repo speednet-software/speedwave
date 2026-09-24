@@ -692,60 +692,6 @@ describe('ShellComponent', () => {
     });
   });
 
-  describe('chat tab bar gating', () => {
-    async function goToChatReady(): Promise<void> {
-      await component.ngOnInit();
-      await fixture.whenStable();
-      await TestBed.inject(Router).navigate(['/chat']);
-      projectState.status.set('ready');
-      component['cdr'].markForCheck();
-      fixture.detectChanges();
-    }
-
-    it('is hidden when beta is disabled, even on the chat route with a ready project', async () => {
-      betaEnabled.set(false);
-      await goToChatReady();
-
-      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
-    });
-
-    it('is hidden off the chat route, even with beta on and the project ready', async () => {
-      await component.ngOnInit();
-      await fixture.whenStable();
-      await TestBed.inject(Router).navigate(['/settings']);
-      projectState.status.set('ready');
-      component['cdr'].markForCheck();
-      fixture.detectChanges();
-
-      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
-    });
-
-    it('is hidden when the project is not ready, even on the chat route with beta on', async () => {
-      await component.ngOnInit();
-      await fixture.whenStable();
-      await TestBed.inject(Router).navigate(['/chat']);
-      projectState.status.set('starting');
-      component['cdr'].markForCheck();
-      fixture.detectChanges();
-
-      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
-    });
-
-    it('is visible when beta is on, the route is chat, and the project is ready', async () => {
-      await goToChatReady();
-
-      expect(fixture.nativeElement.querySelector('app-chat-tabs')).not.toBeNull();
-    });
-
-    it('does not span over the nav rail (lives inside the right column, not the outer flex row)', async () => {
-      await goToChatReady();
-
-      const rightColumn = fixture.nativeElement.querySelector('app-nav-rail')
-        ?.nextElementSibling as HTMLElement;
-      expect(rightColumn.querySelector('app-chat-tabs')).not.toBeNull();
-    });
-  });
-
   describe('Cmd+T / Ctrl+T open-tab shortcut', () => {
     function pressCmdT(): KeyboardEvent {
       const event = new KeyboardEvent('keydown', { key: 't', metaKey: true, cancelable: true });
