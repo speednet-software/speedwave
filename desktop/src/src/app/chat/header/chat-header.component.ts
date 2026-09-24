@@ -59,12 +59,14 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
         </button>
       }
 
-      <h1
-        data-testid="chat-header-title"
-        class="view-title view-title-page flex-shrink-0 truncate text-[var(--ink)]"
-      >
-        {{ viewTitle() }}
-      </h1>
+      @if (compact() || !beta.enabled()) {
+        <h1
+          data-testid="chat-header-title"
+          class="view-title view-title-page flex-shrink-0 truncate text-[var(--ink)]"
+        >
+          {{ viewTitle() }}
+        </h1>
+      }
 
       @if (!compact() && beta.enabled()) {
         <app-chat-tabs />

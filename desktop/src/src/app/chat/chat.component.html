@@ -15,6 +15,23 @@
     (closed)="onContextOverflowFresh()"
   />
 }
+@if (restartConfirmOpen()) {
+  <app-modal-overlay
+    [open]="restartConfirmOpen()"
+    kicker="⚠ restart conversation"
+    kickerColor="amber"
+    modalTitle="Restart conversation?"
+    body="The response in progress will be discarded."
+    primaryLabel="Restart"
+    secondaryLabel="Cancel"
+    testId="restart-confirm-overlay"
+    primaryTestId="restart-confirm-restart"
+    secondaryTestId="restart-confirm-cancel"
+    (primary)="onRestartConfirm()"
+    (secondary)="onRestartCancel()"
+    (closed)="onRestartCancel()"
+  />
+}
 @if (projectState.status() === 'ready') {
   <section class="relative flex h-full overflow-hidden bg-[var(--bg)]" data-testid="chat-view">
     <app-conversations-sidebar

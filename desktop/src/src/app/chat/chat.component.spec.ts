@@ -5,6 +5,7 @@ import { RouterModule } from '@angular/router';
 import { By } from '@angular/platform-browser';
 import { ChatComponent } from './chat.component';
 import { ComposerComponent } from './composer/composer.component';
+import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -711,12 +712,12 @@ describe('ChatComponent', () => {
   });
 
   describe('newConversation', () => {
-    it('resets all state and re-initialises', async () => {
+    it('resets all state and re-initialises when idle', async () => {
       chatState._setState({
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [{ type: 'text', content: 'stream' }],
       });
-      chatState.isStreaming = true;
+      chatState.isStreaming = false;
       uiState.toggleSidebar();
       uiState.toggleMemory();
 
@@ -727,6 +728,7 @@ describe('ChatComponent', () => {
       expect(chatState.currentBlocks).toEqual([]);
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
+      expect(component.restartConfirmOpen()).toBe(false);
     });
   });
 
@@ -762,7 +764,7 @@ describe('ChatComponent', () => {
       expect(spy).toHaveBeenCalledTimes(2);
     });
 
-    it('performs the same reset the plus button performs (state cleared, drawers closed)', async () => {
+    it('performs the same reset the plus button performs when idle (state cleared, drawers closed)', async () => {
       projectState.activeProject.set('test');
       projectState.status.set('ready');
       await component.ngOnInit();
@@ -772,7 +774,7 @@ describe('ChatComponent', () => {
         messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
         currentBlocks: [{ type: 'text', content: 'stream' }],
       });
-      chatState.isStreaming = true;
+      chatState.isStreaming = false;
       uiState.toggleSidebar();
       uiState.toggleMemory();
 
@@ -784,6 +786,85 @@ describe('ChatComponent', () => {
       expect(chatState.isStreaming).toBe(false);
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
+    });
+  });
+
+  describe('mid-stream restart confirmation', () => {
+    beforeEach(async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [{ type: 'text', content: 'stream' }],
+      });
+      chatState.isStreaming = true;
+    });
+
+    it('shows the confirmation modal instead of resetting when the plus button is clicked mid-stream', async () => {
+      await component.newConversation();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
+    });
+
+    it('shows the confirmation modal instead of resetting when ⌘R fires mid-stream', async () => {
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
+    });
+
+    it('renders the confirm dialog with the expected wording', async () => {
+      await component.newConversation();
+      fixture.detectChanges();
+
+      const overlay = document.querySelector('[data-testid="restart-confirm-overlay"]');
+      expect(overlay).toBeTruthy();
+      expect(document.querySelector('[data-testid="modal-title"]')?.textContent?.trim()).toBe(
+        'Restart conversation?'
+      );
+      expect(document.querySelector('[data-testid="restart-confirm-restart"]')).toBeTruthy();
+      expect(document.querySelector('[data-testid="restart-confirm-cancel"]')).toBeTruthy();
+    });
+
+    it('confirming the modal performs the reset', async () => {
+      await component.newConversation();
+      expect(component.restartConfirmOpen()).toBe(true);
+
+      await component.onRestartConfirm();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toEqual([]);
+      expect(chatState.isStreaming).toBe(false);
+    });
+
+    it('cancelling the modal performs no reset', async () => {
+      await component.newConversation();
+      expect(component.restartConfirmOpen()).toBe(true);
+
+      component.onRestartCancel();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
+    });
+
+    it('dismissing the dialog (closed output) performs no reset', async () => {
+      await component.newConversation();
+      fixture.detectChanges();
+
+      const overlay = fixture.debugElement.query(By.directive(ModalOverlayComponent));
+      overlay.triggerEventHandler('closed', undefined);
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
     });
   });
 

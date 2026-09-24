@@ -162,28 +162,39 @@ describe('ChatHeaderComponent', () => {
       expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
     });
 
-    it('is shown inline between the title and the project pill when beta is enabled', () => {
+    it('is shown before the project pill when beta is enabled, with the title dropped', () => {
       betaEnabled.set(true);
       fixture.detectChanges();
 
       const tabs = fixture.nativeElement.querySelector('app-chat-tabs');
       expect(tabs).not.toBeNull();
-      const titleEl = fixture.nativeElement.querySelector(
-        '[data-testid="chat-header-title"]'
-      ) as HTMLElement;
-      expect(titleEl.nextElementSibling).toBe(tabs);
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).toBeNull();
       const pillContainer = fixture.nativeElement.querySelector('app-project-pill')
         ?.parentElement as HTMLElement;
       expect(tabs.nextElementSibling).toBe(pillContainer);
     });
 
-    it('stays hidden in compact mode even when beta is enabled (no live chat to show tabs for)', () => {
+    it('stays hidden in compact mode even when beta is enabled (no live chat to show tabs for), title stays', () => {
       betaEnabled.set(true);
       fixture.componentRef.setInput('compact', true);
       fixture.detectChanges();
 
       expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
       expect(fixture.nativeElement.querySelector('app-project-pill')).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')
+      ).not.toBeNull();
+    });
+
+    it('hides the title in full mode once beta is enabled (tabs take its place)', () => {
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')
+      ).not.toBeNull();
+
+      betaEnabled.set(true);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).toBeNull();
     });
   });
 });

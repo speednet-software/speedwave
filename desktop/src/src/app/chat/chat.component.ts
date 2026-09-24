@@ -91,6 +91,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly contextOverflowOpen = signal(false);
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
+  readonly restartConfirmOpen = signal(false);
+
   @ViewChild('composer') private composer?: ComposerComponent;
   @ViewChild(ChatMessageListComponent) private messageList?: ChatMessageListComponent;
 
@@ -419,8 +421,34 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
+  /**
+   * Restarts the current conversation — the header plus button and ⌘R both call this. While a
+   * turn streams, asks for confirmation first (the reset would discard the running response);
+   * idle, it resets immediately.
+   */
   async newConversation(): Promise<void> {
+    if (this.chat.isStreaming) {
+      this.restartConfirmOpen.set(true);
+      this.cdr.markForCheck();
+      return;
+    }
+    await this.resetConversation();
+  }
+
+  /** User confirmed restarting mid-stream: closes the dialog and performs the reset. */
+  async onRestartConfirm(): Promise<void> {
+    this.restartConfirmOpen.set(false);
+    await this.resetConversation();
+  }
+
+  /** User dismissed the mid-stream restart confirmation (Cancel, backdrop, or Esc): no reset. */
+  onRestartCancel(): void {
+    this.restartConfirmOpen.set(false);
+    this.cdr.markForCheck();
+  }
+
+  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
+  private async resetConversation(): Promise<void> {
     this.ui.closeSidebar();
     this.ui.closeMemory();
     this.chat.resetForNewConversation();
