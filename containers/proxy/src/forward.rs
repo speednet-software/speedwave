@@ -14,7 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::audit;
 use crate::pii::{self, PiiEngineState};
-use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
+use crate::router::{resolve, Auth, BareAuth, Config, Route, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
 /// Cap on the SSE sniff buffer. A partial line past this is not a real usage
@@ -188,6 +188,60 @@ fn bound_for_log(s: &str, max: usize) -> String {
     format!("{}…", &cleaned[..end])
 }
 
+/// Claude Code's gateway token for a rejected mid-conversation `{role:"system"}` turn: on a 400
+/// carrying exactly this message it resends without such turns until `/clear` or `/compact`.
+const MID_CONV_SYSTEM_REJECTION: &str = "capability_rejected: mid_conv_system";
+
+/// True for the native Anthropic route, the only upstream that accepts mid-conversation system
+/// turns; a route file without `provider_kind` falls back to the `anthropic` prefix.
+fn is_anthropic_route(route: &Route) -> bool {
+    if route.provider_kind.is_empty() {
+        route.prefix == "anthropic"
+    } else {
+        route.provider_kind.starts_with("anthropic")
+    }
+}
+
+/// True when `messages` carries a `{role:"system"}` turn (Claude Code's `mid_conv_system`).
+fn has_mid_conversation_system_turn(body: &serde_json::Value) -> bool {
+    body.get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|messages| {
+            messages
+                .iter()
+                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        })
+}
+
+/// Answers a routed request that carries a mid-conversation system turn with Claude Code's
+/// rejection token instead of forwarding it; `None` lets the request through.
+fn reject_routed_mid_conversation_system(
+    cfg: &Config,
+    body: &serde_json::Value,
+) -> Option<Response> {
+    let model = body.get("model").and_then(|m| m.as_str())?;
+    let route = resolve(cfg, model)?;
+    if is_anthropic_route(route) || !has_mid_conversation_system_turn(body) {
+        return None;
+    }
+    log::info!(
+        "proxy req: model='{}' carries a mid-conversation system turn; answering 400 '{}' so \
+         Claude Code resends without it",
+        bound_for_log(model, MAX_LOGGED_ERROR_MESSAGE),
+        MID_CONV_SYSTEM_REJECTION
+    );
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": MID_CONV_SYSTEM_REJECTION}
+            })),
+        )
+            .into_response(),
+    )
+}
+
 /// Terminal status for a forwarded request: failure on an upstream ≥400, an aborted byte
 /// stream, or an in-band SSE `error` frame; success otherwise.
 fn resolve_request_status(
@@ -215,6 +269,10 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
+
+    if let Some(rejection) = reject_routed_mid_conversation_system(&cfg, &parsed) {
+        return rejection;
+    }
 
     let (policy, key) = match cfg.pii.as_ref() {
         PiiEngineState::Ready { policy, key } => (policy, key),
@@ -814,5 +872,90 @@ mod tests {
             "Text/Event-Stream; charset=utf-8".parse().unwrap(),
         );
         assert!(is_event_stream(&headers), "params and case are tolerated");
+    }
+
+    fn route(prefix: &str, provider_kind: &str) -> Route {
+        Route {
+            prefix: prefix.to_string(),
+            base_url: "http://upstream".to_string(),
+            auth: Auth::Bare(BareAuth::None),
+            provider_kind: provider_kind.to_string(),
+            provider_id: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn anthropic_route_is_told_apart_by_kind_then_by_prefix() {
+        assert!(is_anthropic_route(&route("anthropic", "anthropic_oauth")));
+        assert!(is_anthropic_route(&route("anthropic", "anthropic_api_key")));
+        assert!(!is_anthropic_route(&route("local", "local")));
+        assert!(!is_anthropic_route(&route("openrouter", "openrouter")));
+        assert!(
+            is_anthropic_route(&route("anthropic", "")),
+            "a route file without provider_kind keeps the anthropic prefix native"
+        );
+        assert!(!is_anthropic_route(&route("local", "")));
+    }
+
+    #[test]
+    fn mid_conversation_system_turn_is_any_system_role_in_messages() {
+        let with = |messages: serde_json::Value| json!({"model": "local/x", "messages": messages});
+        assert!(has_mid_conversation_system_turn(&with(json!([
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": [{"type": "text", "text": "reminder"}]}
+        ]))));
+        assert!(has_mid_conversation_system_turn(&with(json!([
+            {"role": "system", "content": "first"},
+            {"role": "user", "content": "hi"}
+        ]))));
+        assert!(!has_mid_conversation_system_turn(&with(json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"}
+        ]))));
+        assert!(!has_mid_conversation_system_turn(&with(json!([]))));
+        assert!(!has_mid_conversation_system_turn(
+            &json!({"model": "local/x", "system": "top-level system prompt stays allowed"})
+        ));
+        assert!(!has_mid_conversation_system_turn(
+            &json!({"model": "local/x", "messages": "not an array"})
+        ));
+    }
+
+    #[test]
+    fn only_a_routed_model_with_a_system_turn_is_rejected() {
+        let cfg = Config {
+            routes: vec![
+                route("anthropic", "anthropic_oauth"),
+                route("local", "local"),
+            ],
+            ..Default::default()
+        };
+        let system_turn = json!([
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "reminder"}
+        ]);
+        let routed = json!({"model": "local/qwen3.8-27b", "messages": system_turn});
+        assert_eq!(
+            reject_routed_mid_conversation_system(&cfg, &routed).map(|r| r.status()),
+            Some(StatusCode::BAD_REQUEST),
+            "a routed system turn must be answered locally"
+        );
+
+        let native = json!({"model": "claude-sonnet-5", "messages": system_turn});
+        assert!(reject_routed_mid_conversation_system(&cfg, &native).is_none());
+
+        let plain =
+            json!({"model": "local/qwen3.8-27b", "messages": [{"role": "user", "content": "hi"}]});
+        assert!(reject_routed_mid_conversation_system(&cfg, &plain).is_none());
+
+        let unrouted = json!({"model": "nowhere/model", "messages": system_turn});
+        assert!(
+            reject_routed_mid_conversation_system(&cfg, &unrouted).is_none(),
+            "an unknown prefix keeps its existing no-route answer"
+        );
+        assert!(
+            reject_routed_mid_conversation_system(&cfg, &json!({"messages": system_turn}))
+                .is_none()
+        );
     }
 }

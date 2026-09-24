@@ -719,6 +719,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v1_messages_answers_a_routed_system_turn_with_the_rejection_token_and_never_calls_upstream(
+    ) {
+        use crate::router::{Auth, BareAuth, Route};
+        let usage_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.routes.push(Route {
+            prefix: "my-or".to_string(),
+            base_url: format!("http://{addr}"),
+            auth: Auth::Bare(BareAuth::None),
+            provider_kind: "openrouter".to_string(),
+            provider_id: "my-or".to_string(),
+        });
+        cfg.audit_dir = Some(audit_dir.path().to_path_buf());
+        let app = build_router(Arc::new(cfg));
+
+        for model in ["local/qwen3.8-27b", "my-or/anthropic/claude-sonnet-5"] {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "system", "content": [{"type": "text", "text": "mail bob@example.com"}]}
+                ]
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/messages")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 400, "{model}");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["type"], "error", "{model}");
+            assert_eq!(parsed["error"]["type"], "invalid_request_error", "{model}");
+            assert_eq!(
+                parsed["error"]["message"], "capability_rejected: mid_conv_system",
+                "{model}: Claude Code matches the whole message exactly"
+            );
+        }
+        assert!(
+            captured.lock().await.is_empty(),
+            "a rejected system turn must never reach the upstream"
+        );
+        assert_eq!(
+            std::fs::read_dir(audit_dir.path()).unwrap().count(),
+            0,
+            "a request answered locally leaves no PII audit entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_messages_forwards_an_anthropic_system_turn_unchanged() {
+        use crate::router::{Auth, BareAuth, Route};
+        let usage_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.routes.push(Route {
+            prefix: "anthropic".to_string(),
+            base_url: format!("http://{addr}"),
+            auth: Auth::Bare(BareAuth::Passthrough),
+            provider_kind: "anthropic_oauth".to_string(),
+            provider_id: "anthropic".to_string(),
+        });
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"},{"role":"system","content":"reminder"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let body_sent = captured.lock().await.clone();
+        let parsed: serde_json::Value = serde_json::from_slice(&body_sent).unwrap();
+        assert_eq!(parsed["messages"][1]["role"], "system");
+        assert_eq!(parsed["messages"][1]["content"], "reminder");
+    }
+
+    #[tokio::test]
     async fn v1_messages_rejects_with_5xx_when_pii_engine_failed_and_never_calls_upstream() {
         let usage_dir = tempfile::tempdir().unwrap();
         let (addr, captured) = spawn_capturing_backend().await;
