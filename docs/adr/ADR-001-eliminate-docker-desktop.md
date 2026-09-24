@@ -17,9 +17,9 @@ Speedwave does not require Docker Desktop. Each supported platform uses a native
 
 ## Where it lives in code
 
-- macOS runtime (Lima, vzNAT host gateway, Lima 0.11.0+ requirement) — `crates/speedwave-runtime/src/runtime/lima.rs`
+- macOS runtime (Lima, user-mode network host gateway, Lima 0.11.0+ requirement) — `crates/speedwave-runtime/src/runtime/lima.rs`
 - Windows runtime (WSL2 distro management, containerd/buildkit inside the distro) — `crates/speedwave-runtime/src/runtime/wsl.rs`
-- Lima vzNAT static host IP (192.168.5.2) — `crates/speedwave-runtime/src/consts.rs` (`LIMA_VZ_HOST_IP`)
+- Lima user-mode network static host IP (192.168.5.2) — `crates/speedwave-runtime/src/consts.rs` (`LIMA_VZ_HOST_IP`)
 - Public runtime façade selecting the per-platform implementation — `crates/speedwave-runtime/src/runtime/locked.rs` (see [ADR-066](ADR-066-locked-runtime-per-project-compose-lock.md))
 
 ## Rejected alternatives

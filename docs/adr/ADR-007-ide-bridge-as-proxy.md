@@ -18,7 +18,7 @@ Speedwave runs an on-host **IDE Bridge** that impersonates an IDE to the isolate
 ## How it connects
 
 - The bridge writes its lock file under `<data_dir>/ide-bridge/<port>.lock` on the host; that directory is mounted read-only into the Claude container at `/home/speedwave/.claude/ide`, so Claude sees the standard `~/.claude/ide/<port>.lock` path.
-- The bridge binds a host TCP listener; containers reach it through the canonical gateway alias `host.docker.internal`, injected into each container's `extra_hosts` and mapped to the per-platform gateway IP (Lima user-mode vzNAT[^3] on macOS, WSL2 NAT on Windows). One alias, one code path; only the resolved host IP differs per platform.
+- The bridge binds a host TCP listener; containers reach it through the canonical gateway alias `host.docker.internal`, injected into each container's `extra_hosts` and mapped to the per-platform gateway IP (Lima's user-mode network[^3] on macOS, WSL2 NAT on Windows). One alias, one code path; only the resolved host IP differs per platform.
 - `render_compose()` injects `CLAUDE_CODE_IDE_HOST_OVERRIDE=host.docker.internal` into the Claude container so Claude Code connects to the bridge instead of its default `127.0.0.1`. See ADR-014 for the platform mechanism.
 
 ## Security

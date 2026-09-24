@@ -7,7 +7,7 @@
 
 ## Decision
 
-The IDE Bridge is a single host-side TCP listener. Claude connects to it over WebSocket through the canonical gateway alias `host.docker.internal`, which each platform resolves to its own gateway IP.[^1] There is one mechanism, not three — the only per-platform difference is the IP that the alias resolves to (Lima vzNAT on macOS,[^2] the WSL2 adapter IP on Windows).
+The IDE Bridge is a single host-side TCP listener. Claude connects to it over WebSocket through the canonical gateway alias `host.docker.internal`, which each platform resolves to its own gateway IP.[^1] There is one mechanism, not three — the only per-platform difference is the IP that the alias resolves to (Lima's user-mode network on macOS,[^2] the WSL2 adapter IP on Windows).
 
 ## Why
 
@@ -47,7 +47,7 @@ The lock-file body carries `pid: 1` (the host PID is meaningless in the containe
 
 [^1]: [Docker Desktop networking how-tos: `host.docker.internal`](https://docs.docker.com/desktop/features/networking/networking-how-tos/) - the alias resolves to the internal IP address of the host from inside a container.
 
-[^2]: [Lima docs: VMNet networks / vzNAT](https://lima-vm.io/docs/config/network/vmnet/) - vzNAT is Lima's NAT networking mode built on Apple's Virtualization Framework, requiring Lima >= 0.14 and macOS >= 13.
+[^2]: [Lima docs: User-mode Network](https://lima-vm.io/docs/config/network/user/) - documents `192.168.5.2` as the host's address reachable from the guest in Lima's default user-mode network.
 
 [^3]: [microsoft/WSL issue #11312: mirrored networking cannot access Windows host via 127.0.0.1](https://github.com/microsoft/WSL/issues/11312) - documents the TCP handshake failure when connecting to a Windows host listener via loopback in mirrored mode.
 
