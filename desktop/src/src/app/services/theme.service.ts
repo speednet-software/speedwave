@@ -180,14 +180,14 @@ export class ThemeService implements OnDestroy {
   }
 
   /**
-   * Resolves effective mode, applies DOM class, syncs native chrome.
-   * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
+   * Resolves effective mode, applies DOM class, pins the native chrome to an explicit mode or
+   * lets it follow the OS in auto. Does NOT persist; see {@link setMode}.
    * @param mode - Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {
     const effective = resolveEffectiveMode(mode);
     applyModeClass(effective);
-    this.native.syncWindowTheme(effective);
+    this.native.syncWindowTheme(mode === 'auto' ? null : effective);
   }
 }
 
