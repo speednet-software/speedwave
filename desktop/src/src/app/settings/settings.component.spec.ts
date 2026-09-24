@@ -195,6 +195,89 @@ describe('SettingsComponent', () => {
     expect(llmProvider.componentInstance.activeProject()).toBe('other-project');
   });
 
+  describe('provider form across a project switch', () => {
+    const configs: Record<string, unknown> = {
+      'no-llm': {
+        provider: 'anthropic',
+        model: null,
+        base_url: null,
+        default_base_url: null,
+        providers: [],
+      },
+      'with-openrouter': {
+        provider: 'openrouter',
+        model: 'openai/gpt-4o-mini',
+        base_url: null,
+        default_base_url: null,
+        providers: [
+          {
+            id: 'openrouter',
+            kind: 'open_router',
+            model: 'openai/gpt-4o-mini',
+            has_api_key: true,
+            context_tokens: 128000,
+          },
+        ],
+        active: { provider_id: 'openrouter', model: 'openai/gpt-4o-mini' },
+      },
+    };
+    let backendProject = 'no-llm';
+    let configLoads: string[] = [];
+
+    beforeEach(() => {
+      backendProject = 'no-llm';
+      configLoads = [];
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'get_llm_config') {
+          configLoads.push(backendProject);
+          return configs[backendProject];
+        }
+        return base(cmd, args);
+      };
+    });
+
+    async function showProject(project: string): Promise<LlmProviderComponent> {
+      backendProject = project;
+      TestBed.inject(ProjectStateService).activeProject.set(project);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((resolve) => setTimeout(resolve));
+      return fixture.debugElement.query(By.directive(LlmProviderComponent))
+        .componentInstance as LlmProviderComponent;
+    }
+
+    it('loads the form of the project a switch lands on, not the one it left', async () => {
+      const before = await showProject('no-llm');
+      before.apiKey.set('typed-for-the-project-left');
+
+      const after = await showProject('with-openrouter');
+
+      expect(after).not.toBe(before);
+      expect(configLoads).toEqual(['no-llm', 'with-openrouter']);
+      expect(after.apiKey()).toBe('');
+      const openrouter = after.extraProviders().find((p) => p.id === 'openrouter');
+      expect(openrouter?.model).toBe('openai/gpt-4o-mini');
+      expect(openrouter?.hasKey).toBe(true);
+      expect(openrouter?.contextTokens).toBe(128000);
+    });
+
+    it('keeps the form and its unsaved input while the project stays the same', async () => {
+      const before = await showProject('with-openrouter');
+      before.apiKey.set('still-editing');
+
+      TestBed.inject(ProjectStateService).status.set('auth_required');
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const after = fixture.debugElement.query(By.directive(LlmProviderComponent))
+        .componentInstance as LlmProviderComponent;
+      expect(after).toBe(before);
+      expect(after.apiKey()).toBe('still-editing');
+      expect(configLoads).toEqual(['with-openrouter']);
+    });
+  });
+
   describe('terminal-minimal restyle', () => {
     it('renders the title in the 44px header band as a view-title', () => {
       fixture.detectChanges();

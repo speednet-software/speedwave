@@ -114,11 +114,13 @@ const MODE_CARDS: readonly ModeCard[] = THEME_MODES.map((id) => ({
           </div>
         }
 
-        <app-llm-provider
-          [activeProject]="activeProject()"
-          (providerChange)="llmProvider = $event"
-          (errorOccurred)="error = $event"
-        />
+        @for (project of [activeProject()]; track project) {
+          <app-llm-provider
+            [activeProject]="project"
+            (providerChange)="llmProvider = $event"
+            (errorOccurred)="error = $event"
+          />
+        }
 
         @if (beta.enabled()) {
           <app-transcription-section (errorOccurred)="error = $event" />
