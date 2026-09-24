@@ -873,6 +873,18 @@ describe('ComposerComponent', () => {
         'Select a project before attaching an image.'
       );
     });
+
+    it('shows an unsupported-type error when a non-image file is dropped', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe(
+        'Supported image formats: JPEG, PNG, GIF, WebP.'
+      );
+    });
   });
 });
 

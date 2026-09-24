@@ -1833,4 +1833,27 @@ mod tests {
             "CSP image directive must allow data: for image sources; got: {directive}"
         );
     }
+
+    #[test]
+    fn main_window_disables_native_drag_drop_for_html5_composer_dnd() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json parses");
+        let windows = conf["app"]["windows"]
+            .as_array()
+            .expect("app.windows is an array");
+        let main_window = windows
+            .first()
+            .expect("app.windows must define the main window");
+
+        let drag_drop_enabled = main_window["dragDropEnabled"]
+            .as_bool()
+            .expect("main window must set dragDropEnabled explicitly");
+        assert!(
+            !drag_drop_enabled,
+            "dragDropEnabled must be false: Tauri's default native drag-drop \
+             handler swallows the drop before it reaches the webview, so \
+             composer.component.ts's HTML5 drag & drop (file-drop.directive.ts) \
+             never fires (SPEED-636)"
+        );
+    }
 }
