@@ -17,8 +17,8 @@ export function capitalizeLevel(level: string): string {
 }
 
 /**
- * Discrete effort slider over the caller's stops (low to max); an unknown level shows no handle but
- * keeps it focusable. A stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
+ * Discrete effort slider over the caller's stops (low to max); an unknown level hides the handle until
+ * keyboard focus. A stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
  */
 @Component({
   selector: 'app-effort-slider',
@@ -46,13 +46,14 @@ export function capitalizeLevel(level: string): string {
           role="slider"
           tabindex="0"
           aria-label="Effort"
-          class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)]"
+          class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--teal)]"
           [class.opacity-40]="!pinned() && hasPosition()"
           [class.opacity-0]="!hasPosition()"
-          [style.left.%]="stopPercent(hasPosition() ? displayedIndex() : 0)"
+          [class.pointer-events-none]="!hasPosition()"
+          [style.left.%]="stopPercent(handleIndex())"
           [attr.aria-valuemin]="0"
           [attr.aria-valuemax]="stops().length - 1"
-          [attr.aria-valuenow]="hasPosition() ? displayedIndex() : null"
+          [attr.aria-valuenow]="handleIndex()"
           [attr.aria-valuetext]="hasPosition() ? capitalizedDisplayedLevel() : 'Default'"
           (keydown)="onKeydown($event)"
           (pointerdown)="onHandlePointerDown($event)"
@@ -93,6 +94,8 @@ export class EffortSliderComponent {
 
   protected readonly hasPosition = computed(() => this.displayedIndex() >= 0);
 
+  protected readonly handleIndex = computed(() => Math.max(0, this.displayedIndex()));
+
   protected readonly capitalize = capitalizeLevel;
 
   protected readonly headerLevel = computed(() =>
@@ -124,7 +127,13 @@ export class EffortSliderComponent {
       this.pending.set(current < 0 ? 0 : Math.min(max, current + 1));
     } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
       event.preventDefault();
-      this.pending.set(current < 0 ? max : Math.max(0, current - 1));
+      this.pending.set(Math.max(0, current - 1));
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      this.pending.set(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      this.pending.set(max);
     } else if (event.key === 'Enter') {
       event.preventDefault();
       this.applyIndex(this.displayedIndex());

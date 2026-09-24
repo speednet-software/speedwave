@@ -1131,8 +1131,8 @@ describe('ModelSelectorComponent', () => {
       const handle = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
         .nativeElement as HTMLElement;
       expect(handle.className).toContain('opacity-0');
+      expect(handle.classList).toContain('pointer-events-none');
       expect(handle.getAttribute('aria-valuetext')).toBe('Default');
-      expect(handle.getAttribute('aria-valuenow')).toBeNull();
     }
 
     for (const kind of ['open_router', 'local'] as const) {

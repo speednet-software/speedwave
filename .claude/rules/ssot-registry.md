@@ -19,7 +19,7 @@ Never hand-write a path/value/model-string where an SSOT exists; a wrong literal
 - `defaults.rs::EFFORT_LEVELS`: the Claude Code effort levels Speedwave can pin (`low` … `max`, slider order). Everything else derives from it, never a second list: pin and live-pick validation (`pin_cmd::validate_effort_level`), the catalog's per-model level lists, and the composer's slider order for every provider kind (`ActiveProviderSummary.effort_levels`), which is also the full stop list of a routed provider.
 - `config.rs::ProjectUserEntry::effort_pin`: the only on-disk store of a chosen effort level, for every provider kind. **Desktop-only:** three Desktop paths use it.
   - `chat.rs::launch_effort_level` carries it to Claude Code as `--effort <pin>` at every chat spawn.
-  - A composer pick reaches a live session as an `apply_flag_settings` control request, which writes no settings file and stores no level (SPEED-707; on 2.1.267 it records only the launch-hold release flags `unpin…LaunchEffort` in `.claude.json`).
+  - A composer pick reaches a live session as an `apply_flag_settings` control request, which writes no settings file and stores no level (SPEED-707; on 2.1.267 it records only the launch-hold release flags `unpin…LaunchEffort: true` in `.claude.json`).
   - `pin_cmd::ensure_effort_pin_migrated_in` removes the container's `settings.json` `effortLevel` on every run, so that key is never a second store; the bundled template must not seed it back (SPEED-664).
 
   `crates/speedwave-cli` reaches none of these (it depends only on `speedwave-runtime`), so a CLI spawn ignores the pin and leaves the key alone. Do not state the rule unqualified, and move the spawn flag and the migration into `speedwave-runtime` before claiming the CLI honours it.

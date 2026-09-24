@@ -807,18 +807,46 @@ mod tests {
     #[test]
     fn an_effort_change_stores_no_level_outside_the_pin() {
         let capture = apply_effort_capture();
-        let added: Vec<&str> = capture["claude_json_keys_added"]
-            .as_array()
-            .expect("the capture records the keys .claude.json gained")
-            .iter()
-            .map(|key| key.as_str().unwrap())
-            .collect();
+        let added = capture["claude_json_added"]
+            .as_object()
+            .expect("the capture records what .claude.json gained");
 
-        assert!(
-            added
-                .iter()
-                .all(|key| key.starts_with("unpin") && key.ends_with("LaunchEffort")),
-            "apply_flag_settings may record only launch-hold releases in .claude.json: {added:?}"
+        for (key, value) in added {
+            assert!(
+                key.starts_with("unpin") && key.ends_with("LaunchEffort"),
+                "apply_flag_settings may record only launch-hold releases in .claude.json: {key}"
+            );
+            assert_eq!(
+                value,
+                &serde_json::Value::Bool(true),
+                "a launch-hold release is a flag, never a level: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_effort_change_sent_before_the_first_turn_reaches_its_first_model_request() {
+        let capture = apply_effort_capture();
+        let before = &capture["before_first_turn"];
+
+        assert_eq!(before["response"]["response"]["subtype"], "success");
+        assert_eq!(before["requests"], serde_json::json!([before["applied"]]));
+    }
+
+    #[test]
+    fn an_effort_input_written_during_a_tool_using_turn_never_runs() {
+        let capture = apply_effort_capture();
+        let mid_turn = &capture["effort_command_mid_tool_turn"];
+
+        assert_eq!(
+            mid_turn["result_num_turns"],
+            serde_json::json!([2, 1]),
+            "no answer of its own may follow the tool-using turn"
+        );
+        assert_eq!(
+            mid_turn["requests"],
+            serde_json::json!(["high", "high", "high"]),
+            "the next turn must keep the launch level"
         );
     }
 

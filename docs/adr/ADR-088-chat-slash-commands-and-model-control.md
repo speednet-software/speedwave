@@ -663,8 +663,9 @@ against their release manifests, run with the stream-json arguments of
   stdout. `settings.json` was left byte for byte unchanged.
   - On 2.1.267 the config directory's `.claude.json` gained the launch-hold release
     flags `unpinFable5LaunchEffort`, `unpinOpus47LaunchEffort` and
-    `unpinOpus48LaunchEffort`. They store no level; a later process started without
-    `--effort`, such as a CLI session, simply starts without the hold.
+    `unpinOpus48LaunchEffort`, each set to `true`. They store no level; a later
+    process started without `--effort`, such as a CLI session, simply starts without
+    the hold.
   - On 2.1.282 `.claude.json` gained nothing.
 
   `effort_pin` therefore stays the only level store, and every spawn still passes
@@ -673,6 +674,9 @@ against their release manifests, run with the stream-json arguments of
   `control_channel.rs::the_apply_effort_capture_is_of_the_pinned_claude_code` fails
   on every Claude Code bump until it is recorded again from the new binary.
 
+- A request sent before the first user message was answered `success` the same way,
+  and the first model request already carried its level. The recording holds this
+  run too (`before_first_turn`).
 - Opus 5.5 on 2.1.282, spawned with `--effort high`, behaved the same.
 - `set_model` keeps the flag-layer level: after `low` was applied on Opus 4.8 and
   the session switched to Sonnet 5, the Sonnet request carried `low`.
@@ -692,11 +696,15 @@ against their release manifests, run with the stream-json arguments of
 
 The request needs no launch flag, so the condition of the SPEED-650 amendment is
 removed together with the notice an unpinned project saw on its first pick. It
-also keeps effort picks out of a change the 2.1.282 bump brings: there an
-`/effort` or `/model` input written during a tool-using turn runs after that turn
-as an input of its own, with its own `init` and `result` (`num_turns: 0`), which
-ends the user's turn in the chat (the second defect of the SPEED-696 amendment).
-A `/effort` the user types still goes to Claude Code as an input.
+also keeps effort picks away from how Claude Code treats an `/effort` input written
+during a tool-using turn. On 2.1.267 such an input never runs: the recording's
+`effort_command_mid_tool_turn` run, launched with `--effort high`, wrote
+`/effort low` at the first `init` of a turn whose first answer was a tool call, and
+no answer of its own followed that turn while the next turn still carried `high`.
+The same run on 2.1.282 answered after the turn with its own `init` and `result`
+(`num_turns: 0`), and the next turn carried `low`; an input answered that way ends
+the user's turn in the chat (the second defect of the SPEED-696 amendment). A
+`/effort` the user types still goes to Claude Code as an input.
 
 The effort control is rendered for every provider kind. This replaces the sentence
 of this decision that renders it only for Anthropic provider kinds. For an
@@ -716,39 +724,47 @@ got HTTP 200 and `end_turn` from each of:
 - OpenRouter's `/api/v1/messages` with `openai/gpt-4o-mini`;
 - OpenRouter's `/api/v1/messages` with `anthropic/claude-sonnet-5`.
 
-e2e spec 11 picks a level on the live local session and on the live OpenRouter
-session, and checks that the next turn still answers.
+e2e spec 11 picks a level on the live local session and spec 20 on the live
+OpenRouter session, and each checks that the next turn still answers.
 
 The timing rules of the SPEED-650 amendment stand: a pick made while a turn streams,
-or while a session starts or resumes, waits. It is applied at the turn end, when the
-resume completes, or when a fresh start completes. A session that has not reported
-an id yet keeps it until its first turn ends. Only the latest pick is applied:
+or while a session starts or resumes, waits. Only the latest pick is applied:
 
 - Picks go to the session one at a time, in pick order. `ChatStateService.sendEffortToSession`
   calls the command, and `applyEffortToConversation` chains the calls.
 - A pick is dropped once a newer one is made, even while the newer one is still
   saving its pin.
-- The pins are written in pick order.
+- The pins are written in pick order, the model pins too.
 - When the newest pick's pin cannot be written, the session is sent the level the
   pin holds, so the session never keeps a level the composer no longer shows.
 - A pick belongs to the project it was made in. It counts only while the app is
-  settled on that project (`ProjectStateService.isSettledOn`: that project is active
-  and no switch runs). A pick made before or during a switch is therefore neither
-  sent nor queued, and its error and notice never reach the other project. The switch
-  also clears the composer's selection error.
-- Model picks follow the same project rule, and a model pick made while a fresh
-  session starts is queued as well, instead of starting a second session.
+  settled on that project and no switch has started since the pick, even one that
+  failed back to the project (`ProjectStateService.settledMark` at the pick,
+  `isStillSettledOn` after every wait). A pick made before or during a switch is
+  therefore neither sent nor queued, and its error and notice never reach the other
+  project. The switch also clears the composer's selection error.
+- Model picks follow the same project rule. A newer model pick replaces or clears the
+  queued one, so a queued pick never undoes a later one.
 
-A turn end releases a pending model pick and a pending effort pick together, since
-neither is an input any more. A Stop the user clicks releases them too, because the
-interrupted turn's own `result` is dropped while nothing streams. The Stop a container
-restart begins with releases nothing: the restart resumes the conversation in a
-process that launches with the pins.
+A waiting pick is released at the turn end, when a Stop the user clicks succeeds
+(the interrupted turn's own `result` is dropped while nothing streams), when a resume
+or a fresh start completes, and when a container restart fails, since the process
+the restart would have replaced keeps running. A released pick goes to the process at
+once, also before the process has reported a session id: a request sent before the
+first user message already sets the first model request's level (measured above).
+A model pick queued while a fresh session started is taken as a pick in a chat with
+no conversation: an Anthropic model goes to the new process as `set_model`, while a
+routed one re-renders the containers and respawns the session, because its model and
+window reach Claude Code only as container environment. A start or a resume that
+fails drops the waiting picks; their pins carry them to the next spawn. The Stop a
+container restart begins with releases nothing: the restart resumes the conversation
+in a process that launches with the pins.
 
-A pick in a chat with no conversation yet still restarts the idle session, so the
-session launches with the pin. Before the first message the chat has no session id
-that tells a live process from none, and a session without a conversation has no work
-a restart could lose.
+A pick in a chat with neither a session id nor a conversation still restarts the
+idle session, so the session launches with the pin. Before the first message the
+chat has no session id that tells a live process from none, and a session without a
+conversation has no work a restart could lose. Restart now in such a chat restarts
+it the same way.
 
 Any failure of the request keeps the pin and shows the notice with Restart now,
 which is the notice's only remaining role. The failures are:

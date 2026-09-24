@@ -108,5 +108,4 @@ describe('Local Provider + Resume', function () {
     await sendMessageAndWait('Reply with the single word: ok.');
     expect((await lastAssistantText()).toLowerCase()).toContain('ok');
   });
-
 });
