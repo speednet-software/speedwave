@@ -133,11 +133,8 @@ function hasStopReason(body: string): boolean {
 /** Fatal preconditions, empty when the suite may run. An unreachable local LLM is not
  *  fatal — it marks spec 11 and the live-server tests of spec 12 skippable so the rest keep reporting. */
 export async function runPreflight(): Promise<PreflightFailure[]> {
-  const [openrouter, localOk, modelProblem] = await Promise.all([
-    checkOpenrouter(),
-    localLlmReachable(),
-    localModelProblem(),
-  ]);
+  const [openrouter, localOk] = await Promise.all([checkOpenrouter(), localLlmReachable()]);
+  const modelProblem = localOk ? await localModelProblem() : null;
   const target = process.env.LOCAL_LLM_BASE_URL || '(LOCAL_LLM_BASE_URL unset)';
 
   if (!localOk) {
@@ -152,8 +149,8 @@ export async function runPreflight(): Promise<PreflightFailure[]> {
     process.env[LOCAL_LLM_MODEL_UNUSABLE_ENV] = '1';
     console.warn(
       `\n⚠  E2E preflight: model ${process.env.LOCAL_LLM_MODEL} on ${target} does not answer (${modelProblem}).\n` +
-        '   Spec 11 (local-provider-resume) and the local-provider test of spec 20 will SKIP;\n' +
-        '   spec 12 still runs against the server. Set LOCAL_LLM_MODEL to a model it serves.\n'
+        '   Spec 11 (local-provider-resume) will SKIP; specs 12 and 20 still run against the\n' +
+        '   server. Set LOCAL_LLM_MODEL to a model it serves.\n'
     );
   }
 

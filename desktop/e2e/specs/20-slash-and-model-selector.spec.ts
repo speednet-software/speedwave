@@ -31,7 +31,7 @@ import {
   waitForTurnStart,
   waitForTurnComplete,
 } from '../helpers/llm';
-import { localModelUnavailable } from '../helpers/preflight';
+import { localLlmUnreachable } from '../helpers/preflight';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 const ANTHROPIC_PROJECT = 'e2e-second';
@@ -193,7 +193,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
   it('write-through: local provider soft-imposes the chosen model on the next session', async function () {
     this.timeout(RESTART_WAIT_MS + 120_000);
-    if (localModelUnavailable()) this.skip();
+    if (localLlmUnreachable()) this.skip();
     const local = requireLocalLlm();
     await openSettings();
     await configureLocalProvider(local.baseUrl, local.apiKey);
