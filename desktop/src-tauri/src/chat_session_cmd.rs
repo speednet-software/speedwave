@@ -269,6 +269,51 @@ pub(crate) async fn get_chat_session_info(
     Ok(session_info_state_inner(state.inner(), &project))
 }
 
+const MAX_MODEL_ID_LEN: usize = 256;
+
+fn validate_model_pick(model: &str) -> Result<(), String> {
+    if model.is_empty() {
+        return Err("model must not be empty".to_string());
+    }
+    if model.len() > MAX_MODEL_ID_LEN {
+        return Err(format!("model id is longer than {MAX_MODEL_ID_LEN} bytes"));
+    }
+    if model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("model id must not contain whitespace or control characters".to_string());
+    }
+    Ok(())
+}
+
+fn switch_model_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+    model: &str,
+) -> Result<(), String> {
+    let switch = {
+        let session = lock_session_for_input(session_arc)?;
+        if session.project_name() != project {
+            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+        }
+        session.model_switch().map_err(|e| e.to_string())?
+    };
+    log::info!("switching the chat session to {model}");
+    switch.apply(model).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn switch_chat_model(
+    project: String,
+    model: String,
+    state: tauri::State<'_, SharedChatSession>,
+) -> Result<(), String> {
+    check_project(&project)?;
+    validate_model_pick(&model)?;
+    let session_arc = state.inner().clone();
+    tokio::task::spawn_blocking(move || switch_model_inner(&session_arc, &project, &model))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn get_plan_usage(
     project: String,
@@ -527,6 +572,63 @@ mod tests {
             panic!("a poisoned session must not be taken for input");
         };
         assert!(err.starts_with("Lock poisoned"), "{err}");
+    }
+
+    #[test]
+    fn model_picks_are_validated_before_they_reach_the_session() {
+        for good in [
+            "claude-haiku-4-5",
+            "claude-opus-5[1m]",
+            "default",
+            "openrouter/openai/gpt-4o-mini",
+            "local/qwen3.5:9b",
+        ] {
+            assert_eq!(validate_model_pick(good), Ok(()), "{good}");
+        }
+        let too_long = "m".repeat(MAX_MODEL_ID_LEN + 1);
+        for bad in [
+            "",
+            " claude-haiku-4-5",
+            "claude haiku",
+            "claude-haiku-4-5\n",
+            "claude\u{0}haiku",
+            too_long.as_str(),
+        ] {
+            assert!(validate_model_pick(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_model_pick_needs_a_live_session_of_the_same_project() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+
+        let other = switch_model_inner(&session_arc, "other", "claude-haiku-4-5");
+        let idle = switch_model_inner(&session_arc, "acme", "claude-haiku-4-5");
+
+        assert_eq!(other, Err(MSG_NO_SESSION_FOR_PROJECT.to_string()));
+        assert!(idle.unwrap_err().contains("no active session"));
+    }
+
+    #[test]
+    fn a_model_pick_on_a_session_held_by_another_command_says_it_is_busy() {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let _held = session_arc.lock().unwrap();
+
+        let picked = switch_model_inner(&session_arc, "acme", "claude-haiku-4-5");
+
+        assert_eq!(picked, Err(MSG_SESSION_BUSY.to_string()));
+    }
+
+    #[test]
+    fn a_model_pick_releases_the_session_lock_before_it_waits_for_the_answer() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn switch_model_inner(");
+        let locked = body
+            .find("lock_session_for_input")
+            .expect("the pick takes the session lock");
+        let released = body.find("};").expect("the lock lives in a block");
+        let waited = body.find(".apply(").expect("the pick waits for the answer");
+        assert!(locked < released && released < waited);
     }
 
     #[test]

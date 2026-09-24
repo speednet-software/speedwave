@@ -1284,7 +1284,8 @@ describe('ChatStateService', () => {
       const modelSent = () =>
         calls.some(
           (c) =>
-            c.cmd === 'send_message' && JSON.stringify(c.args).includes('/model claude-haiku-4-5')
+            c.cmd === 'switch_chat_model' &&
+            JSON.stringify(c.args).includes('"model":"claude-haiku-4-5"')
         );
 
       const resuming = service.resumeConversation('sess-resumed');
@@ -2622,9 +2623,7 @@ describe('ChatStateService', () => {
         data: { model: 'claude-sonnet-5', session_id: 'sess-restart' },
       });
       await Promise.resolve();
-      let modelSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      let modelSend = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSend).toBeUndefined();
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -2633,12 +2632,10 @@ describe('ChatStateService', () => {
         data: { session_id: 'sess-restart' },
       } as never);
       await vi.waitFor(() => {
-        modelSend = invokeSpy.mock.calls.find(
-          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-        );
+        modelSend = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
         expect(modelSend).toBeDefined();
       });
-      expect(JSON.stringify(modelSend?.[1])).toContain('/model claude-haiku-4-5');
+      expect(JSON.stringify(modelSend?.[1])).toContain('"model":"claude-haiku-4-5"');
       expect(service.pendingModelOverride()).toBeNull();
     });
 
@@ -2833,8 +2830,7 @@ describe('ChatStateService', () => {
 
       const wiredEffort = (level: string) => (cmd: string, args: unknown) =>
         cmd === 'send_message' && JSON.stringify(args).includes(`/effort ${level}`);
-      const wiredModel = (cmd: string, args: unknown) =>
-        cmd === 'send_message' && JSON.stringify(args).includes('/model ');
+      const wiredModel = (cmd: string) => cmd === 'switch_chat_model';
       const checked = (cmd: string) => cmd === 'get_chat_takes_wire_effort';
       const restarted = (cmd: string) => cmd === 'resume_conversation';
 
@@ -3261,10 +3257,11 @@ describe('ChatStateService', () => {
       const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
       expect(commands).toContain('clear_model_pin');
       expect(commands).not.toContain('set_model_pin');
-      expect(commands.indexOf('clear_model_pin')).toBeLessThan(commands.indexOf('send_message'));
-      const sent = invokeSpy.mock.calls.find(([cmd]) => cmd === 'send_message');
-      expect(JSON.stringify(sent?.[1])).toContain('/model default');
-      expect(JSON.stringify(sent?.[1])).not.toContain('[1m]');
+      expect(commands.indexOf('clear_model_pin')).toBeLessThan(
+        commands.indexOf('switch_chat_model')
+      );
+      const sent = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
+      expect((sent?.[1] as { model?: string } | undefined)?.model).toBe('default');
     });
 
     it('picking the Default row mid-stream queues the default alias, never the 1M wire id', async () => {
@@ -3349,9 +3346,7 @@ describe('ChatStateService', () => {
         isDefault: false,
         contextTokens: null,
       });
-      const modelSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      const modelSend = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSend).toBeUndefined();
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
     });
@@ -3389,9 +3384,7 @@ describe('ChatStateService', () => {
       } as never);
       await new Promise((r) => setTimeout(r, 0));
 
-      const modelSendCall = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      const modelSendCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSendCall).toBeUndefined();
     });
 
@@ -3429,9 +3422,7 @@ describe('ChatStateService', () => {
       } as never);
       await new Promise((r) => setTimeout(r, 0));
 
-      const modelSendCall = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      const modelSendCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSendCall).toBeUndefined();
       expect(service.pendingModelOverride()).toBeNull();
     });
@@ -3471,9 +3462,7 @@ describe('ChatStateService', () => {
       });
       await Promise.resolve();
 
-      const modelSendCall = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      const modelSendCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSendCall).toBeUndefined();
     });
   });
@@ -6816,6 +6805,93 @@ describe('ChatStateService', () => {
   });
 
   describe('applyModelSelection', () => {
+    function pickHaiku(service: ChatStateService): Promise<void> {
+      return service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
+        contextTokens: null,
+      });
+    }
+
+    function modelChips(service: ChatStateService): number {
+      return service.messages.filter((m) =>
+        m.blocks?.some((b) => b.type === 'chip' && b.command === 'model')
+      ).length;
+    }
+
+    it('switches a live session with set_model: the chip shows at once and no turn starts', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-pick' },
+      });
+
+      await pickHaiku(service);
+
+      expect(invokeSpy).toHaveBeenCalledWith('switch_chat_model', {
+        project: 'proj',
+        model: 'claude-haiku-4-5',
+      });
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'send_message')).toHaveLength(0);
+      expect(service.isStreaming).toBe(false);
+      const last = service.messages[service.messages.length - 1];
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-haiku-4-5' },
+      ]);
+    });
+
+    it('a switch the session refuses shows the error and adds no chip', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'switch_chat_model') {
+          throw new Error("control request 'set_model' got no response within 10000 ms");
+        }
+        return base(cmd, args);
+      };
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-pick' },
+      });
+
+      await pickHaiku(service);
+
+      expect(service.modelSelectionError()).toContain('got no response');
+      expect(modelChips(service)).toBe(0);
+    });
+
+    it('a switch that answers after a new conversation started adds no chip to it', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const base = mockTauri.invokeHandler;
+      let answer: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'switch_chat_model') {
+          return new Promise((resolve) => (answer = () => resolve(undefined)));
+        }
+        return base(cmd, args);
+      };
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-pick' },
+      });
+
+      const picking = pickHaiku(service);
+      await vi.waitFor(() => expect(answer).not.toBeNull());
+      service.resetForNewConversation();
+      answer!();
+      await picking;
+
+      expect(modelChips(service)).toBe(0);
+      expect(service.modelSelectionError()).toBe('');
+    });
+
     it('awaits setProviderModel BEFORE sending the wire command for a live non-anthropic selection', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');
@@ -6833,9 +6909,11 @@ describe('ChatStateService', () => {
             };
           })
       );
-      vi.spyOn(service, 'sendMessage').mockImplementation(async () => {
-        calls.push('sendMessage');
-      });
+      const handler = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'switch_chat_model') calls.push('switch_chat_model');
+        return handler(cmd, args);
+      };
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'my-or/anthropic/claude-sonnet-5', session_id: 'sess-1' },
@@ -6852,7 +6930,11 @@ describe('ChatStateService', () => {
       expect(calls).toEqual(['setProviderModel-start']);
       resolveSet();
       await pending;
-      expect(calls).toEqual(['setProviderModel-start', 'setProviderModel-resolved', 'sendMessage']);
+      expect(calls).toEqual([
+        'setProviderModel-start',
+        'setProviderModel-resolved',
+        'switch_chat_model',
+      ]);
       expect(invokeSpy).not.toHaveBeenCalledWith('set_model_pin', expect.anything());
       expect(
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
@@ -6864,7 +6946,7 @@ describe('ChatStateService', () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const anthropicModels = TestBed.inject(AnthropicModelsService);
       vi.spyOn(anthropicModels, 'setProviderModel').mockRejectedValue(new Error('locked config'));
-      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await service.applyModelSelection({
         catalogId: 'anthropic/claude-haiku-4-5',
@@ -6875,7 +6957,7 @@ describe('ChatStateService', () => {
         contextTokens: null,
       });
 
-      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'switch_chat_model')).toHaveLength(0);
       expect(service.modelSelectionError()).toContain('locked config');
     });
 
@@ -6895,10 +6977,8 @@ describe('ChatStateService', () => {
             };
           });
         }
+        if (cmd === 'switch_chat_model') calls.push('switch_chat_model');
         return undefined;
-      });
-      vi.spyOn(service, 'sendMessage').mockImplementation(async () => {
-        calls.push('sendMessage');
       });
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -6916,15 +6996,16 @@ describe('ChatStateService', () => {
       expect(calls).toEqual(['set_model_pin-start']);
       resolvePin();
       await pending;
-      expect(calls).toEqual(['set_model_pin-start', 'set_model_pin-resolved', 'sendMessage']);
+      expect(calls).toEqual(['set_model_pin-start', 'set_model_pin-resolved', 'switch_chat_model']);
       expect(setProviderModelSpy).not.toHaveBeenCalled();
     });
 
     it('blocks the wire and surfaces an error when the model pin write fails on a live session', async () => {
       const service = TestBed.inject(ChatStateService);
-      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      const switched: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'set_model_pin') throw new Error('unknown Anthropic model');
+        if (cmd === 'switch_chat_model') switched.push(cmd);
         return undefined;
       };
       service.handleStreamChunk({
@@ -6941,14 +7022,13 @@ describe('ChatStateService', () => {
         contextTokens: null,
       });
 
-      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(switched).toEqual([]);
       expect(service.modelSelectionError()).toContain('unknown Anthropic model');
     });
 
     it('persists the model pin and sends nothing further when no session or project is active', async () => {
       const service = TestBed.inject(ChatStateService);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
 
       await service.applyModelSelection({
         catalogId: 'claude-opus-4-8',
@@ -6963,7 +7043,7 @@ describe('ChatStateService', () => {
         projectId: '',
         model: 'claude-opus-4-8',
       });
-      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'switch_chat_model')).toHaveLength(0);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
       expect(service.pendingModelOverride()).toBeNull();
     });
@@ -7076,9 +7156,7 @@ describe('ChatStateService', () => {
         projectId: expect.any(String),
         model: 'claude-haiku-4-5',
       });
-      let modelSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      let modelSend = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSend).toBeUndefined();
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -7089,7 +7167,8 @@ describe('ChatStateService', () => {
       await vi.waitFor(() => {
         modelSend = invokeSpy.mock.calls.find(
           ([cmd, args]) =>
-            cmd === 'send_message' && JSON.stringify(args).includes('/model claude-haiku-4-5')
+            cmd === 'switch_chat_model' &&
+            JSON.stringify(args).includes('"model":"claude-haiku-4-5"')
         );
         expect(modelSend).toBeDefined();
       });
@@ -7103,7 +7182,6 @@ describe('ChatStateService', () => {
       projectState.activeProject.set('test');
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
-      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
       await service.applyModelSelection({
@@ -7127,7 +7205,7 @@ describe('ChatStateService', () => {
       const restartIdx = commands.indexOf('restart_integration_containers');
       expect(restartIdx).toBeGreaterThan(writeIdx);
       expect(commands.lastIndexOf('start_chat')).toBeGreaterThan(restartIdx);
-      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(commands).not.toContain('switch_chat_model');
       expect(service.modelSelectionError()).toBe('');
       expect(service.pendingModelOverride()).toBeNull();
     });

@@ -279,7 +279,7 @@ session id exists only once the first stream chunk arrives) persisted to
 `config.json` while the running container kept the previously rendered model,
 and the turn failed against a model the badge no longer showed. Soft-impose
 does not cover this case: it fires on the `system/init` line
-(`chat.rs::maybe_soft_impose`), which arrives inside the first turn, so its
+(`chat.rs::soft_impose_step`), which arrives inside the first turn, so its
 repair lands no earlier than the second one - the field-tested first-turn gap
 recorded in the first amendment above (badge `claude-fable-5`, first reply
 `claude-opus-4-8`), which the Anthropic side closed with the `settings.json`
@@ -312,6 +312,101 @@ window reaches Claude Code the way the model does, as container environment
 so a pick with no live session applies it through the re-render above, while
 a live-session wire `/model` leaves the running container on the previous
 window until its next render.
+
+**Amendment (SPEED-696, 2026-09-24: a model switch on a live session is a
+`set_model` control request, not a `/model` input).** Speedwave writes two
+switches into a live chat process: the soft-impose above and the composer
+pick of decision 3. Both wrote `/model <id>` to Claude Code's stdin as a user
+input. That had three defects, found on the e2e rig and confirmed with the
+pinned 2.1.267 binary driven against a stub API:
+
+1. **A `/model` written while a turn uses a tool never runs.** Claude Code
+   does not run the queued input as a command.
+   - `desktop/src-tauri/tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson`
+     holds the stdout of a run that wrote it at the first `init` of such a
+     turn; the input itself is not part of the file. No command answer
+     follows, and both `init` lines, the later turn's included, report the
+     old model.
+   - A composer pick deferred to a turn end landed in the same place when the
+     backend had already started a queued message at that turn end
+     (`chat.rs::drain_queued_message`).
+2. **An executed `/model` answers as an input of its own.**
+   - `desktop/src-tauri/tests/fixtures/cc-2.1.267-model-picks.sanitized.ndjson`
+     ends with one typed into an idle session. The answer is an `init`, a
+     `<synthetic>` "Set model to `Haiku 4.5` for this session only" and a
+     `result` with `num_turns: 0`. The confirmation names the model's family,
+     not the id that was written.
+   - The stdout reader emitted that `result` like any turn end. A message the
+     user sent before it arrived had its turn ended by it, and the chat
+     listener (`chat-state.service.ts::setupStreamListener`) then dropped that
+     turn's answer. This failed spec 13 on the macOS rig.
+3. **The soft-impose could switch a user's pick back.** The decision compared
+   the observed model with the configuration read at spawn. Claude Code emits
+   `system/init` for every input it starts, a local command included, so a
+   composer pick made after the spawn was switched back at the next input.
+
+Writing the soft-impose only when a turn ends fixes the first defect but not
+the second: behind a message sent right after Stop, or queued before the
+command, the command still runs as an input the chat does not expect, and a
+later Stop can interrupt it instead of the user's turn.
+
+Both switches are now `set_model`, the control request behind the Agent
+SDK's `Query.setModel()`. The SDK types describe the method as changing "the
+model used for subsequent responses", and the request type says that an
+omitted, null or `default` model "resets to the session default model"[^7].
+
+- **The soft-impose.** On the first `system/init` whose model differs from
+  the configured wire id, the reader sends it once per session
+  (`chat.rs::soft_impose_step`). A rejected or unanswered request is logged,
+  and the session stays on the model from the container environment.
+- **A composer pick on a live session.** It goes through
+  `chat_session_cmd.rs::switch_chat_model`, which sends the request and waits
+  for the answer without holding the session mutex (`chat.rs::ModelSwitch`).
+  Angular adds the `/model` chip once Claude Code confirms
+  (`chat-state.service.ts::switchLiveModel`), and no turn starts in the chat.
+  A pick made while a turn streams or a session starts is still deferred to
+  the turn end or the start's completion. It then applies to whatever turn
+  Claude Code is running, from its next model request. The default row sends
+  `set_model` with `default`: in the capture Claude Code confirms the account
+  default (`claude-opus-5[1m]` in the stub run), and the next `init` reports
+  it.
+- **What Claude Code does with it.** Claude Code handles a control request
+  outside its input queue. The capture
+  `desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`
+  sends it at the first `init` of a tool-using turn:
+  - the answer arrives before the turn's next model response;
+  - the request after the tool result already goes to the new model, and the
+    next `init` reports it;
+  - no `init`, `<synthetic>` line or `result` belongs to the switch;
+  - the only other line is a `user` line whose content is a
+    `<local-command-stdout>` string, and the stream parser makes no chunk of
+    it.
+
+  Nothing is withheld from the chat, and the switch does not interact with
+  Stop or with queued messages.
+
+- **The transcript.** Claude Code records the switch the way it records an
+  executed `/model`: a caveat, `<command-name>/model</command-name>` with its
+  arguments, and the confirmation. These entries follow the turn that was
+  running. A conversation rebuilt from history therefore shows the `/model`
+  chip between those turns
+  (`history.rs::a_set_model_switch_is_rebuilt_as_a_model_chip_between_the_turns`,
+  which uses the captured entries).
+- **Settling.** A pick settles the session's model (`ModelSettled`), as does a
+  `/model` the user types, which still goes to Claude Code as an input. Both
+  settle it under the stdin lock, and the soft-impose checks and settles it
+  under the same lock before it writes, so a pick written first always wins.
+- **ADR-089 decision 1.** It said proxy-routed providers send no control
+  request. Besides `interrupt` on Stop, they now send this one. `set_model`
+  changes the session and asks Claude Code for no data, so the reason routed
+  sessions send no query does not apply (see the ADR-089 amendment of the
+  same date).
+
+The first-turn gap recorded above now covers only the model requests Claude
+Code sends before it applies the switch: at least the first request of the
+first turn. The three captures are pinned to the Claude Code version.
+`the_soft_impose_captures_are_of_the_pinned_claude_code` fails on a bump until
+they are re-captured.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 
@@ -802,3 +897,5 @@ stays selectable without typing its id.
 [^5]: Claude Code settings - the `model` key's "Any file" scope, "Set the key in the tool that generates the file" guidance for a pick that must survive when Claude Code itself cannot persist it, and the account-type default model table ("Max, Team Premium, Enterprise, and Anthropic API: defaults to Opus 5"; "Pro and Team Standard: defaults to Sonnet 5"; "Before v2.1.219, `default` resolved to Opus 4.8"). https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
 
 [^6]: Claude Code settings - "Claude Code reads some keys only once, at session start, so an edit to one of them doesn't reach the running session," naming `model` among them; `/model` in `-p` mode "applies to the current session only and isn't saved as your default." https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
+
+[^7]: `@anthropic-ai/claude-agent-sdk` 0.3.267, the SDK release for Claude Code 2.1.267: `Query.setModel(model?)` "Change the model used for subsequent responses. Only available in streaming input mode", and `SDKControlSetModelRequest` (`subtype: 'set_model'`), whose `model` field reads "Omitted, null, or 'default' resets to the session default model". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
