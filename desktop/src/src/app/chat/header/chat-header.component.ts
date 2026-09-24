@@ -45,18 +45,6 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
         >
           <app-icon name="brain" class="h-4 w-4" />
         </button>
-
-        <button
-          type="button"
-          data-testid="chat-header-new"
-          class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
-          appTooltip="Restart current conversation"
-          tooltipKbd="⌘R"
-          aria-label="Restart current conversation"
-          (click)="newConversation.emit()"
-        >
-          <app-icon name="refresh" class="h-4 w-4" />
-        </button>
       }
 
       @if (compact() || !beta.enabled()) {
@@ -94,6 +82,4 @@ export class ChatHeaderComponent {
   readonly toggleMemory = output<void>();
   /** Toggle the conversations drawer (hamburger button → ⌘B). */
   readonly toggleHistory = output<void>();
-  /** Restart the current conversation (plus button → ⌘R). */
-  readonly newConversation = output<void>();
 }
