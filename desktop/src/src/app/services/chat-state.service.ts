@@ -124,6 +124,7 @@ export interface ModelSelectionInput {
   providerId: string;
   kind: string;
   isDefault: boolean;
+  contextTokens: number | null;
 }
 
 const DEFAULT_MODEL_ALIAS = 'default';
@@ -273,7 +274,8 @@ export class ChatStateService {
         await this.anthropicModels.setProviderModel(
           this.projectState.activeProject() ?? '',
           sel.providerId,
-          sel.catalogId
+          sel.catalogId,
+          sel.contextTokens
         );
       }
     } catch (e: unknown) {

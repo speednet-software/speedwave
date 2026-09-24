@@ -391,6 +391,7 @@ describe('ModelSelectorComponent', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: true,
+        contextTokens: null,
       },
     ]);
   });
@@ -814,7 +815,7 @@ describe('ModelSelectorComponent', () => {
     ).toBe(0);
   });
 
-  it('emits exactly one modelSelected event carrying catalogId, wireId, providerId and kind', async () => {
+  it('emits exactly one modelSelected event carrying catalogId, wireId, providerId, kind and the row window', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     const events: ModelSelection[] = [];
@@ -840,6 +841,7 @@ describe('ModelSelectorComponent', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: 200000,
       },
     ]);
   });

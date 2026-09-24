@@ -1278,6 +1278,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(modelSent()).toBe(false);
@@ -2523,6 +2524,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -2592,6 +2594,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -3143,6 +3146,7 @@ describe('ChatStateService', () => {
           providerId: 'anthropic',
           kind: 'anthropic_oauth',
           isDefault: false,
+          contextTokens: null,
         });
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
@@ -3168,6 +3172,7 @@ describe('ChatStateService', () => {
           providerId: 'anthropic',
           kind: 'anthropic_oauth',
           isDefault: false,
+          contextTokens: null,
         });
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
@@ -3194,6 +3199,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
@@ -3230,6 +3236,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: true,
+        contextTokens: null,
       });
 
       const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
@@ -3255,6 +3262,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: true,
+        contextTokens: null,
       });
 
       expect(service.pendingModelOverride()).toBe('default');
@@ -3269,6 +3277,7 @@ describe('ChatStateService', () => {
         providerId: 'local',
         kind: 'local',
         isDefault: true,
+        contextTokens: null,
       });
 
       const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
@@ -3296,6 +3305,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: true,
+        contextTokens: null,
       });
 
       expect(service.modelSelectionError()).toBe('malformed settings.json');
@@ -3318,6 +3328,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       const modelSend = invokeSpy.mock.calls.find(
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
@@ -3340,6 +3351,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
@@ -3379,6 +3391,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
       service.isStreaming = false;
@@ -3423,6 +3436,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(service.pendingModelOverride()).toBe('claude-opus-4-8[1m]');
       service.isStreaming = false;
@@ -6814,6 +6828,7 @@ describe('ChatStateService', () => {
         providerId: 'my-or',
         kind: 'open_router',
         isDefault: false,
+        contextTokens: null,
       });
       expect(calls).toEqual(['setProviderModel-start']);
       resolveSet();
@@ -6838,6 +6853,7 @@ describe('ChatStateService', () => {
         providerId: 'my-or',
         kind: 'open_router',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -6876,6 +6892,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(calls).toEqual(['set_model_pin-start']);
       resolvePin();
@@ -6902,6 +6919,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -6919,6 +6937,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
@@ -6945,6 +6964,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -6977,6 +6997,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
@@ -7006,6 +7027,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(service.modelSelectionError()).toContain('locked settings.json');
@@ -7029,6 +7051,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
         projectId: expect.any(String),
@@ -7070,6 +7093,7 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         kind: 'local',
         isDefault: false,
+        contextTokens: 262_144,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -7077,6 +7101,7 @@ describe('ChatStateService', () => {
         projectId: 'test',
         providerId: 'my-ollama',
         model: 'llama4',
+        contextTokens: 262_144,
       });
       const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
       const writeIdx = commands.indexOf('set_provider_model');
@@ -7107,6 +7132,7 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         kind: 'local',
         isDefault: false,
+        contextTokens: null,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -7132,6 +7158,7 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         kind: 'local',
         isDefault: false,
+        contextTokens: null,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -7139,6 +7166,7 @@ describe('ChatStateService', () => {
         projectId: 'test',
         providerId: 'my-ollama',
         model: 'llama4',
+        contextTokens: null,
       });
       expect(service.modelSelectionError()).toBe(MODEL_SWITCH_NOT_APPLIED);
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
@@ -7160,6 +7188,7 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         kind: 'local',
         isDefault: false,
+        contextTokens: null,
       });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -7189,6 +7218,7 @@ describe('ChatStateService', () => {
         providerId: 'my-or',
         kind: 'open_router',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(service.pendingModelOverride()).toBe('my-or/anthropic/claude-haiku-4-5');
@@ -7209,12 +7239,14 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         kind: 'local',
         isDefault: false,
+        contextTokens: null,
       });
 
       expect(invokeSpy).toHaveBeenCalledWith('set_provider_model', {
         projectId: 'proj',
         providerId: 'my-ollama',
         model: 'llama4',
+        contextTokens: null,
       });
       expect(
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
@@ -7233,6 +7265,7 @@ describe('ChatStateService', () => {
         providerId: 'my-ollama',
         kind: 'local' as const,
         isDefault: false,
+        contextTokens: null,
       };
 
       beforeEach(async () => {
