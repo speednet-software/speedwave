@@ -2,6 +2,7 @@ use crate::chat::SharedChatSession;
 use crate::control_channel::{ModelRow, SessionInfo, SessionInfoState};
 use crate::types::check_project;
 use serde::Serialize;
+use speedwave_runtime::claude_settings;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
     anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
@@ -223,7 +224,7 @@ pub(crate) fn normalize_pin_for_session(
 ) {
     let plan = plan_for(kind, info);
     let picker = info.and_then(|session| build_picker(session, plan));
-    match speedwave_runtime::claude_settings::normalize_model_pin(data_dir, project, |pin| {
+    match claude_settings::normalize_model_pin(data_dir, project, |pin| {
         if let Some(picker) = &picker {
             let id = canonical_anthropic_model_id(pin);
             picker
@@ -813,13 +814,13 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            speedwave_runtime::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-opus-5[1m]")
         );
 
         normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
         assert_eq!(
-            speedwave_runtime::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-opus-5[1m]"),
             "an unknown plan must not downgrade a plan-dependent pin"
         );
@@ -848,7 +849,7 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            speedwave_runtime::claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-sonnet-5")
         );
     }
