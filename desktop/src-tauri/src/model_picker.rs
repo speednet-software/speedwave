@@ -27,7 +27,6 @@ pub(crate) struct PickerRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ModelPicker {
     pub(crate) rows: Vec<PickerRow>,
-    pub(crate) effort_order: Vec<String>,
 }
 
 pub(crate) fn plan_for(kind: LlmProviderKind, info: Option<&SessionInfo>) -> AnthropicPlan {
@@ -43,10 +42,6 @@ fn row_model(row: &ModelRow) -> &str {
 
 fn catalog_entry(id: &str) -> Option<&'static AnthropicModelInfo> {
     ANTHROPIC_MODELS.iter().find(|m| m.id == id)
-}
-
-fn effort_order() -> Vec<String> {
-    EFFORT_LEVELS.iter().map(|l| (*l).to_string()).collect()
 }
 
 fn listed_effort_levels(listed: &ModelRow) -> Vec<String> {
@@ -196,10 +191,7 @@ pub(crate) fn build_picker(info: &SessionInfo, plan: AnthropicPlan) -> Option<Mo
         let is_default = default_id.as_deref() == Some(id);
         rows.push(listed_row(id, info, plan, is_default));
     }
-    Some(ModelPicker {
-        rows,
-        effort_order: effort_order(),
-    })
+    Some(ModelPicker { rows })
 }
 
 pub(crate) fn normalized_pin(pin: &str, plan: AnthropicPlan) -> Option<String> {
@@ -425,12 +417,6 @@ mod tests {
         let (levels, default) = effort_of(&picker, "claude-nova-1");
         assert_eq!(levels, ["low", "high"]);
         assert_eq!(default, None);
-    }
-
-    #[test]
-    fn picker_carries_the_effort_order_from_the_ssot() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
-        assert_eq!(picker.effort_order, EFFORT_LEVELS);
     }
 
     fn info_of(models: Vec<ModelRow>, plan: Option<&str>) -> SessionInfo {
@@ -852,18 +838,6 @@ mod tests {
             claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
             Some("claude-sonnet-5")
         );
-    }
-
-    #[test]
-    fn model_selector_takes_the_slider_order_from_the_picker_not_from_a_level_count() {
-        let ts = include_str!(
-            "../../src/src/app/chat/composer/model-selector/model-selector.component.ts"
-        );
-        assert!(
-            !ts.contains("length === 5"),
-            "the slider order comes from EFFORT_LEVELS via the picker's effort_order"
-        );
-        assert!(ts.contains("effort_order"));
     }
 
     #[test]

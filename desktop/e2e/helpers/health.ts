@@ -1,3 +1,5 @@
+import { invokeCommand } from './tauri-invoke';
+
 export interface ContainerHealth {
   name: string;
   status: string;
@@ -18,12 +20,8 @@ export interface HealthReport {
 }
 
 export async function getHealth(project: string): Promise<HealthReport | { error: string }> {
-  return browser.executeAsync((proj: string, done: (r: any) => void) => {
-    (window as any).__TAURI_INTERNALS__
-      .invoke('get_health', { project: proj })
-      .then((r: any) => done(r))
-      .catch((e: any) => done({ error: String(e) }));
-  }, project) as Promise<HealthReport | { error: string }>;
+  const result = await invokeCommand<HealthReport>('get_health', { project });
+  return result.ok ? result.value : { error: result.error };
 }
 
 export async function waitForHealthy(project: string): Promise<void> {

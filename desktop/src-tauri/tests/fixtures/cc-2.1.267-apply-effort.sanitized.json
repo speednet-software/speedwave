@@ -1,0 +1,41 @@
+{
+  "claude_code_version": "2.1.267",
+  "captured": "2026-09-24",
+  "note": "apply_flag_settings {settings: {effortLevel}} sent on stdin between turns of a stream-json session (the arguments of chat.rs::build_claude_args, --model claude-fable-5 and no --effort) against a stub /v1/messages, with a settings.json already in the config directory. requests[i] is output_config.effort of the model request of the turn after applied[i]. responses holds Claude Code's answer to each request; nothing else reached stdout before it.",
+  "applied": [
+    "launch",
+    "low",
+    "max",
+    "turbo"
+  ],
+  "requests": [
+    "high",
+    "low",
+    "max",
+    "max"
+  ],
+  "responses": {
+    "low": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "req_apply_flag_settings_1"
+      }
+    },
+    "max": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "req_apply_flag_settings_2"
+      }
+    },
+    "turbo": {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "req_apply_flag_settings_3"
+      }
+    }
+  },
+  "settings_json_unchanged": true
+}

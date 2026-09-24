@@ -2007,7 +2007,7 @@ impl ChatSession {
             if let Some(entry) = http_collator.flush() {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
-            control_for_reader.fail_all();
+            control_for_reader.close();
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if awaited_for_reader.is_awaited() && !stopping {
@@ -2130,17 +2130,22 @@ impl ChatSession {
     }
 
     #[cfg(test)]
-    fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
+    pub(crate) fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
         self.child = Some(spawn_test_child());
     }
 
     #[cfg(test)]
-    fn set_test_stdin_capture(&mut self) -> Arc<Mutex<Vec<u8>>> {
-        let (stdin, captured) = test_capturing_stdin();
+    fn set_test_stdin_capture(&mut self) -> std::thread::JoinHandle<Vec<u8>> {
+        let (stdin, capture) = test_capturing_stdin();
         self.shared_stdin = Some(Arc::new(Mutex::new(stdin)));
         self.child = Some(spawn_test_child());
-        captured
+        capture
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_control_ids(&self) -> Vec<String> {
+        self.control.pending_ids()
     }
 
     #[cfg(test)]
@@ -2314,7 +2319,7 @@ impl ChatSession {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared_stdin = None;
-        self.control.fail_all();
+        self.control.close();
         *self
             .session_info
             .lock()
@@ -2440,18 +2445,18 @@ fn write_and_emit_drained_message(
 }
 
 #[cfg(test)]
-fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
-    let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
+fn test_stdin_pipe() -> (std::io::PipeReader, std::process::ChildStdin) {
+    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
     #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
+    let stdin = std::process::ChildStdin::from(std::os::fd::OwnedFd::from(writer));
     #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
+    let stdin = std::process::ChildStdin::from(std::os::windows::io::OwnedHandle::from(writer));
+    (reader, stdin)
+}
+
+#[cfg(test)]
+fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
+    let (mut reader, stdin) = test_stdin_pipe();
     std::thread::spawn(move || {
         let mut drained = buf;
         let _ = std::io::Read::read_to_end(&mut reader, &mut drained);
@@ -2460,48 +2465,20 @@ fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
-fn test_capturing_stdin() -> (std::process::ChildStdin, Arc<Mutex<Vec<u8>>>) {
-    let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
-    #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
-    #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let sink = captured.clone();
-    std::thread::spawn(move || {
-        let mut chunk = [0u8; 4096];
-        while let Ok(n) = std::io::Read::read(&mut reader, &mut chunk) {
-            if n == 0 {
-                break;
-            }
-            if let Ok(mut bytes) = sink.lock() {
-                bytes.extend_from_slice(&chunk[..n]);
-            }
-        }
+fn test_capturing_stdin() -> (std::process::ChildStdin, std::thread::JoinHandle<Vec<u8>>) {
+    let (mut reader, stdin) = test_stdin_pipe();
+    let capture = std::thread::spawn(move || {
+        let mut written = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut written);
+        written
     });
-    (stdin, captured)
+    (stdin, capture)
 }
 
 #[cfg(test)]
 fn test_broken_pipe_stdin() -> std::process::ChildStdin {
-    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
+    let (reader, stdin) = test_stdin_pipe();
     drop(reader);
-    #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
-    #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
     stdin
 }
 
@@ -3433,7 +3410,7 @@ mod tests {
         let src = include_str!("chat.rs");
         let prod = src.split("\nmod tests {").next().unwrap_or(src);
         assert!(
-            prod.contains("control_for_reader.fail_all();"),
+            prod.contains("control_for_reader.close();"),
             "a dead process must fail waiting control requests instead of letting them time out"
         );
     }
@@ -4182,7 +4159,7 @@ mod tests {
         let orphaned = control
             .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
             .expect("written");
-        control.fail_all();
+        control.close();
         let started = std::time::Instant::now();
 
         report_soft_impose(answered, "local/llama-3.1-70b");
@@ -4309,29 +4286,23 @@ mod tests {
         })
     }
 
-    fn captured_lines(captured: &Mutex<Vec<u8>>, count: usize) -> Vec<serde_json::Value> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-            let lines: Vec<serde_json::Value> = text
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            if lines.len() >= count {
-                return lines;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "stdin never received {count} line(s)"
-            );
-            std::thread::yield_now();
-        }
+    fn lines_written_until_stdin_closed(
+        capture: std::thread::JoinHandle<Vec<u8>>,
+    ) -> Vec<serde_json::Value> {
+        let text = String::from_utf8(capture.join().unwrap()).unwrap();
+        assert!(
+            text.is_empty() || text.ends_with('\n'),
+            "every write to stdin is a whole line: {text:?}"
+        );
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 
     #[test]
     fn an_effort_pick_on_a_live_session_is_an_apply_flag_settings_request_resolved_by_its_answer() {
         let mut session = ChatSession::new("proj");
-        let captured = session.set_test_stdin_capture();
+        let capture = session.set_test_stdin_capture();
         let answerer = answer_the_pending_request(session.control.clone(), |id| {
             serde_json::json!({
                 "type": "control_response",
@@ -4346,7 +4317,13 @@ mod tests {
 
         assert_eq!(applied, Ok(()));
         assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
-        let written = captured_lines(&captured, 1);
+        assert!(
+            !session.model_settled.is_settled(),
+            "an effort pick leaves the soft-impose armed"
+        );
+        assert!(session.control.pending_ids().is_empty());
+        drop(session);
+        let written = lines_written_until_stdin_closed(capture);
         assert_eq!(written.len(), 1, "one request, no /effort input");
         assert_eq!(written[0]["type"], "control_request");
         assert_eq!(
@@ -4356,11 +4333,23 @@ mod tests {
                 "settings": { "effortLevel": "low" },
             })
         );
-        assert!(
-            !session.model_settled.is_settled(),
-            "an effort pick leaves the soft-impose armed"
-        );
-        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_after_the_process_output_ended_fails_at_once_and_writes_nothing() {
+        let mut session = ChatSession::new("proj");
+        let capture = session.set_test_stdin_capture();
+        let handle = session.control_handle().expect("stdin is still open");
+        session.control.close();
+        let started = std::time::Instant::now();
+
+        let applied = handle.apply_effort("low");
+
+        assert_eq!(applied, Err(control_channel::ControlError::SessionEnded));
+        assert!(started.elapsed() < control_channel::APPLY_EFFORT_TIMEOUT / 2);
+        drop(handle);
+        drop(session);
+        assert!(lines_written_until_stdin_closed(capture).is_empty());
     }
 
     #[test]
@@ -4441,7 +4430,7 @@ mod tests {
                 assert!(std::time::Instant::now() < deadline);
                 std::thread::yield_now();
             }
-            control.fail_all();
+            control.close();
         });
         let started = std::time::Instant::now();
 

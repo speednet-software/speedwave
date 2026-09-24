@@ -931,6 +931,7 @@ pub struct ActiveProviderSummary {
     pub kind: config::LlmProviderKind,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub effort_levels: &'static [&'static str],
 }
 
 pub(crate) fn active_provider_summary_from(
@@ -953,6 +954,7 @@ pub(crate) fn active_provider_summary_from(
         kind: entry.kind,
         model: llm.effective_active_model(),
         base_url: entry.base_url.clone(),
+        effort_levels: speedwave_runtime::defaults::EFFORT_LEVELS,
     })
 }
 
@@ -3667,6 +3669,54 @@ mod tests {
             Some("http://host.docker.internal:11434"),
             "local discovery needs the entry's base_url, not the provider_id"
         );
+        assert_eq!(
+            summary.effort_levels,
+            speedwave_runtime::defaults::EFFORT_LEVELS,
+            "a routed model takes every effort level Speedwave can pin"
+        );
+    }
+
+    #[test]
+    fn active_provider_summary_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/llm.ts");
+        let body = ts
+            .split("export interface ActiveProviderSummary {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("ActiveProviderSummary interface in models/llm.ts");
+        let ts_fields: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().split(':').next())
+            .map(|name| name.trim_end_matches('?'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        let summary = ActiveProviderSummary {
+            provider_id: "p".to_string(),
+            kind: config::LlmProviderKind::Local,
+            model: None,
+            base_url: None,
+            effort_levels: speedwave_runtime::defaults::EFFORT_LEVELS,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        let rust_fields: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(ts_fields, rust_fields);
+    }
+
+    #[test]
+    fn model_selector_takes_the_slider_order_from_the_summary_not_from_a_level_count() {
+        let ts = include_str!(
+            "../../src/src/app/chat/composer/model-selector/model-selector.component.ts"
+        );
+        assert!(
+            !ts.contains("length === 5"),
+            "the slider order comes from EFFORT_LEVELS via ActiveProviderSummary.effort_levels"
+        );
+        assert!(ts.contains("summary()?.effort_levels"));
     }
 
     #[test]

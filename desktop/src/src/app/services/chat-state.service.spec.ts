@@ -3019,8 +3019,12 @@ describe('ChatStateService', () => {
         await Promise.resolve();
         service.isStreaming = true;
         await service.applyEffortSelection('low');
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBeGreaterThan(-1);
+        });
         service.handleStreamChunk({
           chunk_type: 'QueueDrained',
           data: { text: 'next question' },
@@ -3047,14 +3051,260 @@ describe('ChatStateService', () => {
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const first = service.applyEffortSelection('low');
-        await service.applyEffortSelection('max');
+        const second = service.applyEffortSelection('max');
         firstPin.resolve();
-        await first;
-        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
-        await new Promise((r) => setTimeout(r, 10));
+        await Promise.all([first, second]);
 
         expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
         expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBe(-1);
+      });
+
+      it('writes the pins in pick order, so the latest pick is the pin a new session gets', async () => {
+        liveConversation();
+        const firstPin = createDeferred<void>();
+        const written: string[] = [];
+        overrideInvoke('set_effort_pin', async () => undefined);
+        const base = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd, args) => {
+          if (cmd !== 'set_effort_pin') return base(cmd, args);
+          const level = (args as { level: string }).level;
+          if (level === 'low') await firstPin.promise;
+          written.push(level);
+          return undefined;
+        };
+        await Promise.resolve();
+
+        const first = service.applyEffortSelection('low');
+        const second = service.applyEffortSelection('max');
+        await new Promise((r) => setTimeout(r, 0));
+        expect(written).toEqual([]);
+        firstPin.resolve();
+        await Promise.all([first, second]);
+
+        expect(written).toEqual(['low', 'max']);
+      });
+
+      it('a queued pick superseded by a newer one that is still saving is never sent', async () => {
+        liveConversation();
+        const maxPin = createDeferred<void>();
+        const base = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd, args) => {
+          if (cmd === 'set_effort_pin' && (args as { level: string }).level === 'max') {
+            await maxPin.promise;
+            return undefined;
+          }
+          return base(cmd, args);
+        };
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('low');
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const newer = service.applyEffortSelection('max');
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await new Promise((r) => setTimeout(r, 0));
+        maxPin.resolve();
+        await newer;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+      });
+
+      it('when the newest pick cannot be saved, the session gets the level the pin holds', async () => {
+        liveConversation();
+        const lowPin = createDeferred<void>();
+        const base = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd, args) => {
+          if (cmd === 'set_effort_pin') {
+            const level = (args as { level: string }).level;
+            if (level === 'low') {
+              await lowPin.promise;
+              return undefined;
+            }
+            throw new Error('config is locked');
+          }
+          if (cmd === 'get_effort_pin') return 'low';
+          return base(cmd, args);
+        };
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const first = service.applyEffortSelection('low');
+        const second = service.applyEffortSelection('max');
+        lowPin.resolve();
+        await Promise.all([first, second]);
+
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBe(-1);
+        expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'apply_chat_effort')).toEqual([
+          ['apply_chat_effort', { project: 'test', level: 'low' }],
+        ]);
+        expect(service.modelSelectionError()).toContain('config is locked');
+      });
+
+      it('a pick answered after the project changed shows no notice on the new project', async () => {
+        const answer = createDeferred<void>();
+        liveConversation(() => answer.promise);
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const pick = service.applyEffortSelection('low');
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBeGreaterThan(-1);
+        });
+        TestBed.inject(ProjectStateService).activeProject.set('other');
+        answer.reject(new Error("control request 'apply_flag_settings' got no response"));
+        await pick;
+
+        expect(service.deferredEffort()).toBeNull();
+      });
+
+      it('a pick waiting behind another is never sent once the project changed', async () => {
+        const answer = createDeferred<void>();
+        let applies = 0;
+        liveConversation(async () => {
+          applies += 1;
+          if (applies === 1) await answer.promise;
+        });
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const first = service.applyEffortSelection('low');
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('low'))).toBeGreaterThan(-1);
+        });
+        const second = service.applyEffortSelection('max');
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(
+              invokeSpy.mock.calls,
+              (cmd, args) => cmd === 'set_effort_pin' && (args as { level: string }).level === 'max'
+            )
+          ).toBeGreaterThan(-1);
+        });
+        await new Promise((r) => setTimeout(r, 0));
+        TestBed.inject(ProjectStateService).activeProject.set('other');
+        answer.resolve();
+        await Promise.all([first, second]);
+
+        expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'apply_chat_effort')).toEqual([
+          ['apply_chat_effort', { project: 'test', level: 'low' }],
+        ]);
+        expect(service.deferredEffort()).toBeNull();
+      });
+
+      it('a pick made before a project change is saved for its own project and never queued for the new one', async () => {
+        liveConversation();
+        const pin = createDeferred<void>();
+        overrideInvoke('set_effort_pin', () => pin.promise);
+        await Promise.resolve();
+        service.isStreaming = true;
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const pick = service.applyEffortSelection('max');
+        TestBed.inject(ProjectStateService).activeProject.set('other');
+        pin.resolve();
+        await pick;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(invokeSpy).toHaveBeenCalledWith('set_effort_pin', {
+          projectId: 'test',
+          level: 'max',
+        });
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+      });
+
+      it('Stop sends the effort and model picks made during the stopped turn at once', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('xhigh');
+        await service.applyModelSelection({
+          catalogId: 'claude-haiku-4-5',
+          wireId: 'claude-haiku-4-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+          isDefault: false,
+          contextTokens: null,
+        });
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+
+        await service.stopConversation();
+
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('xhigh'))).toBeGreaterThan(-1);
+        });
+        const calls = invokeSpy.mock.calls;
+        const stopped = indexOfCall(calls, (cmd) => cmd === 'stop_chat');
+        expect(stopped).toBeGreaterThan(-1);
+        expect(indexOfCall(calls, appliedEffort('xhigh'))).toBeGreaterThan(stopped);
+        expect(indexOfCall(calls, switchedModel)).toBeGreaterThan(stopped);
+        expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      it('a Stop that fails keeps the picks for the end of the still running turn', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('xhigh');
+        overrideInvoke('stop_chat', rejected('failed to write interrupt control_request'));
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.stopConversation();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+      });
+
+      const haikuPick = {
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
+        contextTokens: null,
+      };
+
+      it('a model pick whose project changed while its pin was saved is not switched on the new project', async () => {
+        liveConversation();
+        const pin = createDeferred<void>();
+        overrideInvoke('set_model_pin', () => pin.promise);
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const pick = service.applyModelSelection(haikuPick);
+        TestBed.inject(ProjectStateService).activeProject.set('other');
+        pin.resolve();
+        await pick;
+
+        expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+          projectId: 'test',
+          model: 'claude-haiku-4-5',
+        });
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+        expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      it('a model switch answered after the project changed adds no chip and no error there', async () => {
+        liveConversation();
+        const answer = createDeferred<void>();
+        overrideInvoke('switch_chat_model', () => answer.promise);
+        await Promise.resolve();
+        const messagesBefore = service.messagesFromState().length;
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        const pick = service.applyModelSelection(haikuPick);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
+        });
+        TestBed.inject(ProjectStateService).activeProject.set('other');
+        answer.reject(new Error('no chat session for this project'));
+        await pick;
+
+        expect(service.messagesFromState()).toHaveLength(messagesBefore);
+        expect(service.modelSelectionError()).toBe('');
       });
 
       it('sends picks one at a time, in pick order, and drops one superseded while it waits', async () => {

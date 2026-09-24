@@ -23,6 +23,8 @@ import {
 } from '../helpers/llm';
 import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
 import { localModelUnavailable } from '../helpers/preflight';
+import { pickComposerEffort } from '../helpers/applied-effort';
+import { clearEffortPinFile } from '../helpers/host-files';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
@@ -66,6 +68,17 @@ describe('Local Provider + Resume', function () {
     expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
   });
 
+  it('takes an effort pick on the live local-model session, which keeps answering', async function () {
+    this.timeout(240_000);
+    await openChat();
+    await pickComposerEffort('max');
+    expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
+    expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(false);
+
+    await sendMessageAndWait(`At the new effort: ${MEMORY_RECALL_PROMPT}`);
+    expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
+  });
+
   it('does not price a local model in the chat footer', async function () {
     this.timeout(30_000);
     expect(await isUnpriced('[data-testid="session-stats"]')).toBe(true);
@@ -88,5 +101,18 @@ describe('Local Provider + Resume', function () {
     await useCheapOpenRouterModel();
     await sendMessageAndWait('Reply with the single word: ok.');
     expect((await lastAssistantText()).toLowerCase()).toContain('ok');
+  });
+
+  it('takes an effort pick on the live OpenRouter session, which keeps answering', async function () {
+    this.timeout(120_000);
+    await pickComposerEffort('low');
+    expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
+
+    await sendMessageAndWait('Reply with the single word: yes.');
+    expect((await lastAssistantText()).toLowerCase()).toContain('yes');
+  });
+
+  after(function () {
+    clearEffortPinFile(E2E_PROJECT_NAME);
   });
 });

@@ -17,8 +17,8 @@ export function capitalizeLevel(level: string): string {
 }
 
 /**
- * Discrete effort slider over the caller's stops (the active model's `effort_levels`, low
- * to max); a stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
+ * Discrete effort slider over the caller's stops (low to max), with no handle while the level is
+ * unknown; a stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
  */
 @Component({
   selector: 'app-effort-slider',
@@ -41,23 +41,25 @@ export function capitalizeLevel(level: string): string {
             (click)="applyIndex(i)"
           ></button>
         }
-        <div
-          data-testid="effort-slider"
-          role="slider"
-          tabindex="0"
-          class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)]"
-          [class.opacity-40]="!pinned()"
-          [style.left.%]="stopPercent(displayedIndex())"
-          [attr.aria-valuemin]="0"
-          [attr.aria-valuemax]="stops().length - 1"
-          [attr.aria-valuenow]="displayedIndex()"
-          [attr.aria-valuetext]="capitalizedDisplayedLevel()"
-          (keydown)="onKeydown($event)"
-          (pointerdown)="onHandlePointerDown($event)"
-          (pointermove)="onHandlePointerMove($event, track)"
-          (pointerup)="onHandlePointerUp($event)"
-          (pointercancel)="onHandlePointerCancel()"
-        ></div>
+        @if (displayedIndex() >= 0) {
+          <div
+            data-testid="effort-slider"
+            role="slider"
+            tabindex="0"
+            class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)]"
+            [class.opacity-40]="!pinned()"
+            [style.left.%]="stopPercent(displayedIndex())"
+            [attr.aria-valuemin]="0"
+            [attr.aria-valuemax]="stops().length - 1"
+            [attr.aria-valuenow]="displayedIndex()"
+            [attr.aria-valuetext]="capitalizedDisplayedLevel()"
+            (keydown)="onKeydown($event)"
+            (pointerdown)="onHandlePointerDown($event)"
+            (pointermove)="onHandlePointerMove($event, track)"
+            (pointerup)="onHandlePointerUp($event)"
+            (pointercancel)="onHandlePointerCancel()"
+          ></div>
+        }
       </div>
       <div class="mono mt-2 flex justify-between text-[10px] text-[var(--ink-mute)]">
         <span>Faster</span>
@@ -85,10 +87,7 @@ export class EffortSliderComponent {
     });
   }
 
-  private readonly committedIndex = computed(() => {
-    const i = this.stops().indexOf(this.activeLevel());
-    return i === -1 ? 0 : i;
-  });
+  private readonly committedIndex = computed(() => this.stops().indexOf(this.activeLevel()));
 
   protected readonly displayedIndex = computed(() => this.pending() ?? this.committedIndex());
 

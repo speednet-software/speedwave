@@ -137,15 +137,19 @@ pub(crate) enum Routed {
     Malformed,
 }
 
-type WaiterMap = HashMap<String, mpsc::Sender<ControlOutcome>>;
+#[derive(Default)]
+struct Waiters {
+    by_id: HashMap<String, mpsc::Sender<ControlOutcome>>,
+    closed: bool,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct ControlChannel {
-    waiters: Arc<Mutex<WaiterMap>>,
+    waiters: Arc<Mutex<Waiters>>,
 }
 
 impl ControlChannel {
-    fn lock_waiters(&self) -> std::sync::MutexGuard<'_, WaiterMap> {
+    fn lock_waiters(&self) -> std::sync::MutexGuard<'_, Waiters> {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -155,7 +159,7 @@ impl ControlChannel {
             log::debug!("dropped control_response without a request id");
             return Routed::Malformed;
         };
-        let Some(waiter) = self.lock_waiters().remove(request_id) else {
+        let Some(waiter) = self.lock_waiters().by_id.remove(request_id) else {
             log::debug!("dropped control_response for unknown request id {request_id}");
             return Routed::Unmatched;
         };
@@ -178,25 +182,31 @@ impl ControlChannel {
         Routed::Delivered
     }
 
-    pub(crate) fn fail_all(&self) {
-        self.lock_waiters().clear();
+    pub(crate) fn close(&self) {
+        let mut waiters = self.lock_waiters();
+        waiters.closed = true;
+        waiters.by_id.clear();
     }
 
     #[cfg(test)]
     pub(crate) fn pending_ids(&self) -> Vec<String> {
-        self.lock_waiters().keys().cloned().collect()
+        self.lock_waiters().by_id.keys().cloned().collect()
     }
 
-    fn register(&self, subtype: &'static str) -> PendingControl {
+    fn register(&self, subtype: &'static str) -> Result<PendingControl, ControlError> {
         let request_id = next_request_id(subtype);
         let (tx, rx) = mpsc::channel();
-        self.lock_waiters().insert(request_id.clone(), tx);
-        PendingControl {
+        let mut waiters = self.lock_waiters();
+        if waiters.closed {
+            return Err(ControlError::SessionEnded);
+        }
+        waiters.by_id.insert(request_id.clone(), tx);
+        Ok(PendingControl {
             channel: self.clone(),
             request_id,
             subtype,
             rx,
-        }
+        })
     }
 
     pub(crate) fn request<W: Write>(
@@ -205,7 +215,7 @@ impl ControlChannel {
         query: ControlQuery,
         timeout: Duration,
     ) -> Result<serde_json::Value, ControlError> {
-        let pending = self.register(query.subtype());
+        let pending = self.register(query.subtype())?;
         let payload = build_control_request(&pending.request_id, query);
         let written = match stdin.lock() {
             Ok(mut w) => writeln!(w, "{payload}").and_then(|()| w.flush()),
@@ -244,7 +254,7 @@ impl ControlChannel {
         subtype: &'static str,
         build: impl FnOnce(&str) -> serde_json::Value,
     ) -> Result<PendingControl, ControlError> {
-        let pending = self.register(subtype);
+        let pending = self.register(subtype)?;
         let payload = build(&pending.request_id);
         if let Err(e) = writeln!(locked_stdin, "{payload}").and_then(|()| locked_stdin.flush()) {
             pending.forget();
@@ -263,7 +273,7 @@ pub(crate) struct PendingControl {
 
 impl PendingControl {
     fn forget(&self) {
-        self.channel.lock_waiters().remove(&self.request_id);
+        self.channel.lock_waiters().by_id.remove(&self.request_id);
     }
 
     pub(crate) fn wait(self, timeout: Duration) -> Result<serde_json::Value, ControlError> {
@@ -487,6 +497,10 @@ pub(crate) const FIXTURE: &str =
     include_str!("../tests/fixtures/cc-2.1.267-control-responses.sanitized.json");
 
 #[cfg(test)]
+const APPLY_EFFORT_FIXTURE: &str =
+    include_str!("../tests/fixtures/cc-2.1.267-apply-effort.sanitized.json");
+
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -705,13 +719,118 @@ mod tests {
     }
 
     #[test]
-    fn fail_all_ends_every_pending_request() {
+    fn closing_the_channel_ends_every_pending_request() {
         let channel = ControlChannel::default();
         let sink = Arc::new(Mutex::new(Vec::new()));
         let caller = request_in_background(&channel, &sink, ControlQuery::Initialize);
         wait_for_pending(&channel, 1);
-        channel.fail_all();
+        channel.close();
         assert_eq!(caller.join().unwrap(), Err(ControlError::SessionEnded));
+    }
+
+    #[test]
+    fn a_query_on_a_closed_channel_fails_at_once_and_writes_nothing() {
+        let channel = ControlChannel::default();
+        channel.close();
+        let sink = Mutex::new(Vec::new());
+        let started = std::time::Instant::now();
+
+        let err = channel
+            .request(&sink, ControlQuery::Usage, Duration::from_secs(30))
+            .expect_err("the session has ended");
+
+        assert_eq!(err, ControlError::SessionEnded);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(sink.lock().unwrap().is_empty());
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_session_change_on_a_closed_channel_fails_at_once_and_writes_nothing() {
+        let channel = ControlChannel::default();
+        channel.close();
+        let mut sink = Vec::new();
+
+        let effort = channel.send_apply_effort(&mut sink, "low").err();
+        let model = channel.send_set_model(&mut sink, "claude-haiku-4-5").err();
+
+        assert_eq!(effort, Some(ControlError::SessionEnded));
+        assert_eq!(model, Some(ControlError::SessionEnded));
+        assert!(sink.is_empty());
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_clone_taken_before_the_close_is_closed_too() {
+        let channel = ControlChannel::default();
+        let held_by_a_handle = channel.clone();
+
+        channel.close();
+
+        assert_eq!(
+            held_by_a_handle
+                .send_apply_effort(&mut Vec::new(), "high")
+                .err(),
+            Some(ControlError::SessionEnded)
+        );
+    }
+
+    fn apply_effort_capture() -> serde_json::Value {
+        serde_json::from_str(APPLY_EFFORT_FIXTURE).expect("capture is valid JSON")
+    }
+
+    #[test]
+    fn the_apply_effort_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            apply_effort_capture()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the apply_flag_settings contract for the new Claude Code pin"
+        );
+    }
+
+    #[test]
+    fn claude_code_takes_an_effort_change_from_the_next_model_request_and_writes_no_settings() {
+        let capture = apply_effort_capture();
+
+        assert_eq!(
+            capture["applied"],
+            serde_json::json!(["launch", "low", "max", "turbo"])
+        );
+        assert_eq!(
+            capture["requests"],
+            serde_json::json!(["high", "low", "max", "max"]),
+            "each level must reach the next model request without a restart"
+        );
+        assert_eq!(capture["settings_json_unchanged"], true);
+    }
+
+    #[test]
+    fn claude_codes_answer_to_an_effort_change_resolves_the_pick() {
+        let capture = apply_effort_capture();
+        for level in ["low", "max"] {
+            let channel = ControlChannel::default();
+            let pending = channel
+                .send_apply_effort(&mut Vec::new(), level)
+                .expect("written");
+            let id = channel.pending_ids().pop().expect("a waiter");
+            let mut answer = capture["responses"][level].clone();
+            answer["response"]["request_id"] = serde_json::Value::String(id);
+
+            assert_eq!(channel.route_response(&answer), Routed::Delivered);
+            assert!(pending.wait(Duration::from_secs(5)).is_ok(), "{level}");
+        }
+    }
+
+    #[test]
+    fn claude_code_answers_an_unknown_effort_level_with_success_and_keeps_the_level() {
+        let capture = apply_effort_capture();
+
+        assert_eq!(
+            capture["responses"]["turbo"]["response"]["subtype"],
+            "success"
+        );
+        assert_eq!(capture["requests"][3], capture["requests"][2]);
+        assert!(crate::pin_cmd::validate_effort_level("turbo").is_err());
     }
 
     #[test]

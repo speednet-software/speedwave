@@ -3,7 +3,7 @@ import { confirmRestartAndWait, RESTART_WAIT_MS } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
-import { waitForAppliedEffort } from '../helpers/applied-effort';
+import { pickComposerEffort } from '../helpers/applied-effort';
 import { clearModelPinFile, clearEffortPinFile } from '../helpers/host-files';
 import {
   anthropicCatalog,
@@ -333,11 +333,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       );
 
       const argsBeforeEffortPick = await lastSpawnArgs();
-      await (await $('[data-testid="effort-segment"]')).click();
-      await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000 });
-      await (await $('[data-testid="effort-stop-max"]')).click();
-      await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000, reverse: true });
-      await waitForAppliedEffort('max');
+      await pickComposerEffort('max');
       expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
       expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
         false
@@ -437,15 +433,14 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
       const popoverText = await (await $('[data-testid="effort-popover"]')).getText();
       expect(popoverText).not.toMatch(/(^|\s)\?(\s|$)/);
-
-      await (await $('[data-testid="effort-stop-low"]')).click();
+      await browser.keys('Escape');
       await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000, reverse: true });
 
+      await pickComposerEffort('low');
       await browser.waitUntil(
         async () => (await (await $('[data-testid="effort-segment"]')).getText()).trim() === 'Low',
         { timeout: 10_000, timeoutMsg: 'effort-segment never showed Low after the pick' }
       );
-      await waitForAppliedEffort('low');
       expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
         false
       );

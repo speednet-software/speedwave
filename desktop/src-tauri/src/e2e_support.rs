@@ -29,17 +29,28 @@ pub fn e2e_last_spawn_args() -> Vec<String> {
 }
 
 #[cfg(any(test, feature = "e2e"))]
-static LAST_APPLIED_EFFORT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AppliedEffort {
+    pub seq: u64,
+    pub level: String,
+}
+
+#[cfg(any(test, feature = "e2e"))]
+static LAST_APPLIED_EFFORT: std::sync::Mutex<Option<AppliedEffort>> = std::sync::Mutex::new(None);
 
 #[cfg(any(test, feature = "e2e"))]
 pub fn record_applied_effort(level: &str) {
     if let Ok(mut guard) = LAST_APPLIED_EFFORT.lock() {
-        *guard = Some(level.to_string());
+        let seq = guard.as_ref().map_or(1, |prev| prev.seq + 1);
+        *guard = Some(AppliedEffort {
+            seq,
+            level: level.to_string(),
+        });
     }
 }
 
 #[cfg(any(test, feature = "e2e"))]
-pub fn last_applied_effort() -> Option<String> {
+pub fn last_applied_effort() -> Option<AppliedEffort> {
     LAST_APPLIED_EFFORT
         .lock()
         .map(|guard| guard.clone())
@@ -48,7 +59,7 @@ pub fn last_applied_effort() -> Option<String> {
 
 #[cfg(feature = "e2e")]
 #[tauri::command]
-pub fn e2e_last_applied_effort() -> Option<String> {
+pub fn e2e_last_applied_effort() -> Option<AppliedEffort> {
     last_applied_effort()
 }
 
@@ -103,10 +114,22 @@ mod tests {
     }
 
     #[test]
-    fn the_applied_effort_record_keeps_the_latest_level() {
+    fn every_applied_effort_gets_a_newer_sequence_number_than_the_last() {
         record_applied_effort("low");
+        let first = last_applied_effort().unwrap();
+        record_applied_effort("low");
+        let second = last_applied_effort().unwrap();
         record_applied_effort("max");
-        assert_eq!(last_applied_effort().as_deref(), Some("max"));
+        let third = last_applied_effort().unwrap();
+
+        assert_eq!(first.level, "low");
+        assert!(
+            second.seq > first.seq,
+            "the same level applied twice is two records"
+        );
+        assert_eq!(second.level, "low");
+        assert!(third.seq > second.seq);
+        assert_eq!(third.level, "max");
     }
 
     #[test]

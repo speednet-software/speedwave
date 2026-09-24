@@ -177,7 +177,7 @@ export interface ModelSelection {
                   (click)="select(opt)"
                 >
                   <span class="flex min-w-0 items-start gap-2">
-                    @if (showEffortControl()) {
+                    @if (isAnthropic()) {
                       <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
                         @if (opt.id === activeOptionId()) {
                           <span data-testid="model-selector-active-mark">&#x2713;</span>
@@ -288,19 +288,19 @@ export class ModelSelectorComponent {
 
   private readonly modelHint = signal('');
 
-  protected readonly showEffortControl = computed(() => {
+  protected readonly isAnthropic = computed(() => {
     const summary = this.summary();
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
+  protected readonly showEffortControl = computed(() => this.summary() !== null);
+
   protected readonly pickerPending = computed(
-    () =>
-      this.showEffortControl() &&
-      this.control.sessionInfoState(this.projectId()).state === 'pending'
+    () => this.isAnthropic() && this.control.sessionInfoState(this.projectId()).state === 'pending'
   );
 
   private readonly options = computed<ModelOption[]>(() => {
-    if (!this.showEffortControl()) return this.discoveredOptions();
+    if (!this.isAnthropic()) return this.discoveredOptions();
     const projectId = this.projectId();
     const held = this.picker.picker(projectId);
     return held ? this.anthropicOptionsFrom(held, projectId) : [];
@@ -320,23 +320,23 @@ export class ModelSelectorComponent {
   protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
 
   private readonly activeRow = computed<ModelPickerRow | null>(() =>
-    this.showEffortControl() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
+    this.isAnthropic() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
   );
 
   private readonly currentModelEntry = computed<AnthropicModel | null>(() =>
-    this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
+    this.isAnthropic()
+      ? this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
+      : null
   );
 
-  private readonly canonicalOrder = computed<string[]>(
-    () => this.picker.picker(this.projectId())?.effort_order ?? []
-  );
+  private readonly canonicalOrder = computed<string[]>(() => this.summary()?.effort_levels ?? []);
 
-  protected readonly effortStops = computed<string[]>(
-    () =>
-      this.activeRow()?.effort_levels ??
-      this.currentModelEntry()?.effort_levels ??
-      this.canonicalOrder()
-  );
+  protected readonly effortStops = computed<string[]>(() => {
+    if (!this.isAnthropic()) return this.canonicalOrder();
+    const listed = this.activeRow()?.effort_levels ?? this.currentModelEntry()?.effort_levels;
+    if (listed) return listed;
+    return this.picker.picker(this.projectId()) ? this.canonicalOrder() : [];
+  });
 
   private readonly catalogDefaultEffort = computed<string | null>(() => {
     const row = this.activeRow();
@@ -388,15 +388,15 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.anthropicModels.list();
+      if (this.isAnthropic() && id) void this.anthropicModels.list();
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.control.refreshSessionInfo(id);
+      if (this.isAnthropic() && id) void this.control.refreshSessionInfo(id);
     });
     effect(() => {
       const id = this.projectId();
-      if (!this.showEffortControl() || !id) return;
+      if (!this.isAnthropic() || !id) return;
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
     });
     effect(() => {

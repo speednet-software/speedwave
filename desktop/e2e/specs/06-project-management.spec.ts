@@ -18,8 +18,9 @@ import * as path from 'node:path';
 
 import { waitForHealthy } from '../helpers/health';
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
-import { activeProjectSlug, switchToProject } from '../helpers/projects';
+import { activeProjectSlug, containersRunning, switchToProject } from '../helpers/projects';
 import { waitForShellReady } from '../helpers/shell';
+import { invokeCommand } from '../helpers/tauri-invoke';
 
 const SECOND_PROJECT_NAME = 'e2e-second';
 const SECOND_PROJECT_DIR = process.env.E2E_SECOND_PROJECT_DIR || '/tmp/speedwave-e2e-project-2';
@@ -146,19 +147,7 @@ describe('Project Management', function () {
     it('leaves the new no-provider project without running containers', async function () {
       this.timeout(30_000);
       expect(await activeProjectSlug()).toBe(SECOND_PROJECT_NAME);
-      const running = await browser.executeAsync((project: string, done: (r: boolean) => void) => {
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: {
-              invoke: (cmd: string, args: unknown) => Promise<boolean>;
-            };
-          }
-        ).__TAURI_INTERNALS__
-          .invoke('check_containers_running', { project })
-          .then((r) => done(r))
-          .catch(() => done(false));
-      }, SECOND_PROJECT_NAME);
-      expect(running).toBe(false);
+      expect(await containersRunning(SECOND_PROJECT_NAME)).toBe(false);
     });
   });
 
@@ -255,17 +244,8 @@ describe('Project Management', function () {
         await $(`[data-testid="project-switcher-remove-${SECOND_PROJECT_NAME}"]`).isExisting()
       ).toBe(true);
 
-      const rejection = await browser.executeAsync((done: (r: string | null) => void) => {
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<void> };
-          }
-        ).__TAURI_INTERNALS__
-          .invoke('remove_project', { name: 'e2e-test' })
-          .then(() => done(null))
-          .catch((e: unknown) => done(String(e)));
-      });
-      expect(rejection).not.toBeNull();
+      const removal = await invokeCommand<void>('remove_project', { name: 'e2e-test' });
+      expect(removal.ok).toBe(false);
 
       expect(await activeProjectSlug()).toBe('e2e-test');
       await pill.click();

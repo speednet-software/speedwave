@@ -262,18 +262,24 @@ fn validate_model_pick(model: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn live_session_input<T>(
+    session_arc: &SharedChatSession,
+    project: &str,
+    take: impl FnOnce(&ChatSession) -> anyhow::Result<T>,
+) -> Result<T, String> {
+    let session = lock_session_for_input(session_arc)?;
+    if session.project_name() != project {
+        return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+    }
+    take(&session).map_err(|e| e.to_string())
+}
+
 fn switch_model_inner(
     session_arc: &SharedChatSession,
     project: &str,
     model: &str,
 ) -> Result<(), String> {
-    let switch = {
-        let session = lock_session_for_input(session_arc)?;
-        if session.project_name() != project {
-            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
-        }
-        session.model_switch().map_err(|e| e.to_string())?
-    };
+    let switch = live_session_input(session_arc, project, ChatSession::model_switch)?;
     log::info!("switching the chat session to {model}");
     switch.apply(model).map_err(|e| e.to_string())
 }
@@ -292,26 +298,12 @@ pub(crate) async fn switch_chat_model(
         .map_err(|e| e.to_string())?
 }
 
-fn validate_effort_pick(level: &str) -> Result<(), String> {
-    if speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
-        Ok(())
-    } else {
-        Err(format!("unknown effort level: {level}"))
-    }
-}
-
 fn apply_effort_inner(
     session_arc: &SharedChatSession,
     project: &str,
     level: &str,
 ) -> Result<(), String> {
-    let handle = {
-        let session = lock_session_for_input(session_arc)?;
-        if session.project_name() != project {
-            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
-        }
-        session.control_handle().map_err(|e| e.to_string())?
-    };
+    let handle = live_session_input(session_arc, project, ChatSession::control_handle)?;
     log::info!("applying effort {level} to the chat session");
     handle.apply_effort(level).map_err(|e| {
         log::warn!("the chat session did not take effort {level}: {e}");
@@ -329,7 +321,7 @@ pub(crate) async fn apply_chat_effort(
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), String> {
     check_project(&project)?;
-    validate_effort_pick(&level)?;
+    crate::pin_cmd::validate_effort_level(&level)?;
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || apply_effort_inner(&session_arc, &project, &level))
         .await
@@ -408,14 +400,47 @@ mod tests {
         );
     }
 
+    fn assert_the_pick_leaves_the_session_free_while_it_waits(
+        pick: fn(&SharedChatSession) -> Result<(), String>,
+    ) {
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        session_arc.lock().unwrap().set_test_stdin_sink(Vec::new());
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || pick(&session_arc))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(mut session) = session_arc.try_lock() {
+                if !session.pending_control_ids().is_empty() {
+                    session.stop().unwrap();
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pick held the session lock while it waited for Claude Code"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            picker.join().unwrap(),
+            Err(control_channel::ControlError::SessionEnded.to_string())
+        );
+    }
+
     #[test]
-    fn effort_picks_are_validated_before_they_reach_the_session() {
-        for level in speedwave_runtime::defaults::EFFORT_LEVELS {
-            assert_eq!(validate_effort_pick(level), Ok(()), "{level}");
-        }
-        for bad in ["", "turbo", "High", " low", "low\n", "auto"] {
-            assert!(validate_effort_pick(bad).is_err(), "{bad:?}");
-        }
+    fn an_effort_pick_leaves_the_session_free_while_it_waits_for_the_answer() {
+        assert_the_pick_leaves_the_session_free_while_it_waits(|session_arc| {
+            apply_effort_inner(session_arc, "acme", "low")
+        });
+    }
+
+    #[test]
+    fn a_model_pick_leaves_the_session_free_while_it_waits_for_the_answer() {
+        assert_the_pick_leaves_the_session_free_while_it_waits(|session_arc| {
+            switch_model_inner(session_arc, "acme", "claude-haiku-4-5")
+        });
     }
 
     #[test]
@@ -440,25 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn an_effort_pick_releases_the_session_lock_before_it_waits_for_the_answer() {
-        let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn apply_effort_inner(");
-        let locked = body
-            .find("lock_session_for_input")
-            .expect("the pick takes the session lock");
-        let released = body.find("};").expect("the lock lives in a block");
-        let waited = body
-            .find(".apply_effort(")
-            .expect("the pick waits for the answer");
-        assert!(locked < released && released < waited);
-    }
-
-    #[test]
     fn apply_chat_effort_validates_before_spawn_blocking() {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "async fn apply_chat_effort(");
         let checked = body
-            .find("validate_effort_pick")
+            .find("validate_effort_level")
             .expect("apply_chat_effort must validate the level");
         let spawned = body
             .find("spawn_blocking")
@@ -619,18 +630,6 @@ mod tests {
         let picked = switch_model_inner(&session_arc, "acme", "claude-haiku-4-5");
 
         assert_eq!(picked, Err(MSG_SESSION_BUSY.to_string()));
-    }
-
-    #[test]
-    fn a_model_pick_releases_the_session_lock_before_it_waits_for_the_answer() {
-        let source = include_str!("chat_session_cmd.rs");
-        let body = extract_fn_body(source, "fn switch_model_inner(");
-        let locked = body
-            .find("lock_session_for_input")
-            .expect("the pick takes the session lock");
-        let released = body.find("};").expect("the lock lives in a block");
-        let waited = body.find(".apply(").expect("the pick waits for the answer");
-        assert!(locked < released && released < waited);
     }
 
     #[test]

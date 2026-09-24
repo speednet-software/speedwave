@@ -242,9 +242,25 @@ describe('EffortSliderComponent', () => {
     expect(slider().getAttribute('aria-valuetext')).toBe('Low');
   });
 
-  it('falls back to the first stop when activeLevel is not one of the stops', () => {
+  it('shows no handle and no filled stop when activeLevel is not one of the stops', () => {
     setInputs(NO_XHIGH_STOPS, 'xhigh');
-    expect(slider().getAttribute('aria-valuenow')).toBe('0');
+    expect(slider()).toBeNull();
+    for (const level of NO_XHIGH_STOPS) {
+      expect(stopEl(level).className).toContain('bg-[var(--line-strong)]');
+    }
+  });
+
+  it('with no known level shows Default and still takes a stop click', () => {
+    setInputs(FULL_STOPS, '', false);
+    const emitted: string[] = [];
+    fixture.componentInstance.levelSelected.subscribe((l) => emitted.push(l));
+
+    const header = fixture.nativeElement.querySelector('[data-testid="effort-popover-header"]');
+    expect(header.textContent).toContain('Effort Default');
+    expect(slider()).toBeNull();
+    stopEl('max').click();
+
+    expect(emitted).toEqual(['max']);
   });
 
   it('ignores a non-primary button press: a following move over the track leaves the level unchanged and emits nothing', () => {

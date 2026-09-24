@@ -655,21 +655,32 @@ Measured on the pinned 2.1.267 and on 2.1.282 (the darwin-arm64 binaries, checke
 against their release manifests, run with the stream-json arguments of
 `chat.rs::build_claude_args` against a stub `/v1/messages`):
 
-- Fable 5 spawned without `--effort`, the hold model of this decision: the first
+- Fable 5 spawned without `--effort`, the hold model of this decision, with a
+  `settings.json` already in the config directory, as in the container: the first
   request carried `output_config.effort: high`, the request after
   `apply_flag_settings` with `low` carried `low`, and after `max` it carried `max`.
-  Each request was answered `success` at once, and nothing else was written to
-  stdout.
+  Each request was answered `success` at once and nothing else was written to
+  stdout. `settings.json` was left byte for byte unchanged, so `effort_pin` stays
+  the only store and every spawn still passes `--effort <pin>`. This run is
+  recorded in `desktop/src-tauri/tests/fixtures/cc-<version>-apply-effort.sanitized.json`;
+  `control_channel.rs::the_apply_effort_capture_is_of_the_pinned_claude_code` fails
+  on every Claude Code bump until it is recorded again from the new binary.
 - Opus 5.5 on 2.1.282, spawned with `--effort high`, behaved the same.
 - `set_model` keeps the flag-layer level: after `low` was applied on Opus 4.8 and
   the session switched to Sonnet 5, the Sonnet request carried `low`.
-- No `settings.json` was created in the isolated config directory, so `effort_pin`
-  stays the only store and every spawn still passes `--effort <pin>`.
-- An unknown level (`turbo`) was answered `success` too, which is why the command
-  validates the level before it writes anything.
+- An unknown level (`turbo`) was answered `success` and changed nothing: the next
+  request still carried `max`. An unchecked pick would therefore report success for
+  a level that never applied, so the command validates the level with
+  `pin_cmd::validate_effort_level`, the check the pin write uses, before it writes
+  anything.
 - `CLAUDE_CODE_EFFORT_LEVEL` outranks the request: with the variable set to `high`,
   the request after `apply_flag_settings` with `low` kept `high`. Speedwave never
   sets that variable (ADR-017).
+- Routed models take every level. On both versions, with the routed env of
+  `compose/llm.rs` for `openrouter/anthropic/claude-sonnet-5` and for
+  `local/gemma-4-26b-a4b`, the first request carried `output_config.effort: high`
+  and each later one carried the level of the `apply_flag_settings` before it:
+  `low`, `medium`, `high`, `xhigh`, `max`.
 
 The request needs no launch flag, so the condition of the SPEED-650 amendment is
 removed together with the notice an unpinned project saw on its first pick. It
@@ -679,15 +690,59 @@ as an input of its own, with its own `init` and `result` (`num_turns: 0`), which
 ends the user's turn in the chat (the second defect of the SPEED-696 amendment).
 A `/effort` the user types still goes to Claude Code as an input.
 
-The timing rules of the SPEED-650 amendment stand: a pick made while a turn streams
-or a session starts or resumes waits for the turn end or the resume, and only the
-latest pick is applied. Picks go to the session one at a time, in pick order
-(`ChatStateService` chains them), and a pick superseded while it waits is dropped.
+The effort control is rendered for every provider kind. This replaces the sentence
+of this decision that renders it only for Anthropic provider kinds. For an
+Anthropic provider the slider stops stay per model: the picker row, else the
+catalog entry. For a local or OpenRouter provider the slider offers every level of
+`defaults::EFFORT_LEVELS`. The composer receives that list as
+`containers_cmd.rs::ActiveProviderSummary::effort_levels`, which is now the slider
+order for every provider kind; the picker's `effort_order` field is gone. Until a
+level is pinned, the routed slider shows no position, because an unpinned routed
+session runs at the level Claude Code picks for a model id outside its catalog.
+
+The upstreams were checked on 2026-09-24 with the request shape Claude Code sends:
+streamed, with `thinking: {type: adaptive}` and `output_config.effort`. Every level
+got HTTP 200 and `end_turn` from each of:
+
+- LiteLLM's native `/v1/messages` passthrough with `gemma-4-26b-a4b`;
+- OpenRouter's `/api/v1/messages` with `openai/gpt-4o-mini`;
+- OpenRouter's `/api/v1/messages` with `anthropic/claude-sonnet-5`.
+
+e2e spec 11 picks a level on the live local session and on the live OpenRouter
+session, and checks that the next turn still answers.
+
+The timing rules of the SPEED-650 amendment stand: a pick made while a turn streams,
+or while a session starts or resumes, waits for the turn end or the resume. Only the
+latest pick is applied:
+
+- Picks go to the session one at a time, in pick order; `ChatStateService` chains
+  them.
+- A pick is dropped once a newer one is made, even while the newer one is still
+  saving its pin.
+- The pins are written in pick order.
+- When the newest pick's pin cannot be written, the session is sent the level the
+  pin holds, so the session never keeps a level the composer no longer shows.
+- A pick belongs to the project it was made in. After a project change it is neither
+  sent nor queued, and its outcome raises no notice.
+
 A turn end releases a pending model pick and a pending effort pick together, since
-neither is an input any more. A rejected request, a timeout
-(`control_channel::APPLY_EFFORT_TIMEOUT`, 10 s) or a session with no live process
-keeps the pin and shows the notice with Restart now, which is the notice's only
-remaining role. No automatic respawn is added, for the reasons above.
+neither is an input any more. A Stop that interrupts the turn releases them too,
+because the interrupted turn's own `result` is dropped while nothing streams.
+
+Any failure of the request keeps the pin and shows the notice with Restart now,
+which is the notice's only remaining role. The failures are:
+
+- a rejection;
+- a timeout (`control_channel::APPLY_EFFORT_TIMEOUT`, 10 s);
+- a session with no live process;
+- a session another command holds;
+- a session of another project.
+
+A request made after the process's output has ended fails at once, because the
+stdout reader closes the control channel when the stream ends. A timed-out request
+may still be applied late. The notice therefore says that the level is saved for new
+sessions and that this session did not confirm it, never that the session keeps its
+old level. No automatic respawn is added, for the reasons above.
 
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
@@ -713,6 +768,15 @@ place, so this fact is currently inert for the effort feature itself - it
 is recorded here because it is the actual, verified behavior of the
 forwarding path, correcting an unverified guess before it could calcify
 into an assumed invariant elsewhere.
+
+**Amendment (SPEED-707, 2026-09-24: effort does reach routed upstreams).** The
+claim that no effort-carrying body is generated for a non-Anthropic route was
+never true. Measured on 2.1.267 and 2.1.282, Claude Code puts
+`output_config.effort` into every request for a routed model id: its default
+`high`, or the level of the `--effort <pin>` a project saved while it used an
+Anthropic provider. Since SPEED-707 the composer also offers every effort level for
+local and OpenRouter providers (decision 5, SPEED-707 amendment). The forwarding
+facts above are what carry the level to the upstream unchanged.
 
 ### 7. Anthropic-native entries stop storing a configured model
 
