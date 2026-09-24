@@ -408,6 +408,41 @@ first turn. The three captures are pinned to the Claude Code version.
 `the_soft_impose_captures_are_of_the_pinned_claude_code` fails on a bump until
 they are re-captured.
 
+**Amendment (SPEED-709, 2026-09-24: the captures move to Claude Code 2.1.282).**
+The three captures were recorded again from the 2.1.282 binary and are now named
+`cc-2.1.282-*`. The `cc-2.1.267-*` paths above name the files they replaced. What
+2.1.282 changes:
+
+- **Defect 1 turned into defect 2.** A `/model` written at the first `init` of a
+  tool-using turn now runs after that turn, as an input of its own. The turn ends on
+  the old model; then the command answers with its own `init`, a `<synthetic>`
+  "Set model to ... for this session only" and a `result` with `num_turns: 0`; and
+  the next `init` reports the new model
+  (`cc-2.1.282-model-command-mid-tool-turn.sanitized.ndjson`,
+  `chat.rs::a_model_command_written_during_a_tool_using_turn_runs_after_it_as_an_input_of_its_own`).
+  An input the chat does not expect ends the user's turn, so both switches stay
+  `set_model` requests. `/effort` behaves the same way, which the SPEED-707 amendment
+  of decision 5 relies on.
+- **`set_model` is unchanged in the stream.** The soft-impose capture still shows the
+  switch applied from the tool-using turn's next model request, no `init`,
+  `<synthetic>` line or `result` of its own, and one `<local-command-stdout>` user
+  line, which on 2.1.282 arrives before the control response.
+- **`set_model` now checks the new model.** Before it answers, Claude Code sends the
+  new model a one-token request, and it answers with an error when that request
+  fails. On a Max account `set_model` with `claude-sonnet-4-6[1m]` was refused with
+  `API error: 429 Usage credits are required for long context requests · model not
+changed` (ADR-089, SPEED-709 amendment). A refused composer pick keeps the
+  session on its model and shows the error in the composer
+  (`chat-state.service.ts::switchLiveModel`), and a refused soft-impose is logged.
+- **The account default moved.** The default row's `set_model` with `default` now
+  confirms `claude-opus-5-5[1m]` in the stub run (`cc-2.1.282-model-picks.sanitized.ndjson`),
+  where 2.1.267 confirmed `claude-opus-5[1m]`.
+- **A settings-writing request exists, and Speedwave does not use it.** The 0.3.282
+  SDK types add `update_settings`, which writes `effortLevel` into the user settings
+  file "as /effort saves it", and state that `apply_flag_settings`, by contrast,
+  "only touches the session-scoped flag layer"[^9]. `effort_pin` stays the only
+  store (decision 5, SPEED-707 amendment), so Speedwave never sends `update_settings`.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
@@ -1145,3 +1180,5 @@ stays selectable without typing its id.
 [^7]: `@anthropic-ai/claude-agent-sdk` 0.3.267, the SDK release for Claude Code 2.1.267: `Query.setModel(model?)` "Change the model used for subsequent responses. Only available in streaming input mode", and `SDKControlSetModelRequest` (`subtype: 'set_model'`), whose `model` field reads "Omitted, null, or 'default' resets to the session default model". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
 
 [^8]: `@anthropic-ai/claude-agent-sdk` 0.3.267: `Query.applyFlagSettings(settings)` "Merge the provided settings into the flag settings layer, dynamically updating the active configuration. ... Flag settings sit above user/project/local settings and below managed policy settings in the precedence order", with "`effortLevel` additionally accepts `'max'`, which is session-scoped"; the request type `SDKControlApplyFlagSettingsRequest` (`subtype: 'apply_flag_settings'`, `settings`). https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
+
+[^9]: `@anthropic-ai/claude-agent-sdk` 0.3.282, the SDK release for Claude Code 2.1.282: `SDKControlUpdateSettingsRequest` (`subtype: 'update_settings'`), which for `userSettings` "takes effortLevel only and saves it as the default for the session's current model, under modelSettings as /effort saves it ... the running session's level is not set here — send apply_flag_settings for that. Unlike apply_flag_settings, which only touches the session-scoped flag layer". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.282/sdk.d.ts

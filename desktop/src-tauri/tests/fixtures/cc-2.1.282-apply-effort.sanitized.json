@@ -1,5 +1,5 @@
 {
-  "claude_code_version": "2.1.267",
+  "claude_code_version": "2.1.282",
   "captured": "2026-09-25",
   "note": "Stream-json sessions of the pinned binary (the arguments of chat.rs::build_claude_args and --model claude-fable-5) against a stub /v1/messages. requests lists output_config.effort of each turn's model requests in order; responses are Claude Code's answers, and nothing else reached stdout before them. Top level: no --effort, a settings.json already in the config directory, apply_flag_settings between turns; requests[i] is the turn after applied[i], and claude_json_added holds the keys .claude.json gained between the first turn and the last, with their values. before_first_turn: launched with --effort high, apply_flag_settings low sent before the first user message. effort_command_mid_tool_turn: launched with --effort high, /effort low written as an input at the first init of a turn whose first answer is a tool call, then one more turn; result_num_turns lists num_turns of every result line.",
   "applied": [
@@ -38,11 +38,7 @@
     }
   },
   "settings_json_unchanged": true,
-  "claude_json_added": {
-    "unpinFable5LaunchEffort": true,
-    "unpinOpus47LaunchEffort": true,
-    "unpinOpus48LaunchEffort": true
-  },
+  "claude_json_added": {},
   "before_first_turn": {
     "launched": "high",
     "applied": "low",
@@ -62,12 +58,13 @@
     "typed": "/effort low",
     "result_num_turns": [
       2,
+      0,
       1
     ],
     "requests": [
       "high",
       "high",
-      "high"
+      "low"
     ]
   }
 }

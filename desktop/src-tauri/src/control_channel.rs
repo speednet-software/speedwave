@@ -498,7 +498,7 @@ pub(crate) const FIXTURE: &str =
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.267-apply-effort.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.282-apply-effort.sanitized.json");
 
 #[cfg(test)]
 #[expect(
@@ -842,19 +842,19 @@ mod tests {
     }
 
     #[test]
-    fn an_effort_input_written_during_a_tool_using_turn_never_runs() {
+    fn an_effort_input_written_during_a_tool_using_turn_runs_after_it_as_a_turn_of_its_own() {
         let capture = apply_effort_capture();
         let mid_turn = &capture["effort_command_mid_tool_turn"];
 
         assert_eq!(
             mid_turn["result_num_turns"],
-            serde_json::json!([2, 1]),
-            "no answer of its own may follow the tool-using turn"
+            serde_json::json!([2, 0, 1]),
+            "the input answers after the tool-using turn with a result of its own"
         );
         assert_eq!(
             mid_turn["requests"],
-            serde_json::json!(["high", "high", "high"]),
-            "the next turn must keep the launch level"
+            serde_json::json!(["high", "high", "low"]),
+            "the turn after it carries the new level"
         );
     }
 
