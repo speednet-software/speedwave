@@ -52,7 +52,6 @@ provision:
   - mode: boot
     script: |
       #!/bin/sh
-      # Make eth0 (vzNAT) the preferred default route, not lima0 (usernet).
       set -eu
       mkdir -p /etc/netplan
       cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'
@@ -1700,8 +1699,6 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Provision script demotes lima0 (usernet) below eth0 (vzNAT) for VPN
-    /// reach. See lima-vm/lima#2984.
     #[test]
     fn lima_config_includes_vpn_aware_provision_script() {
         let yaml = lima_config();
@@ -1715,7 +1712,7 @@ mod tests {
         );
         assert!(
             yaml.contains("99-speedwave-prefer-vznat.yaml"),
-            "provision must drop in a netplan file that demotes lima0 and promotes eth0 (vzNAT)"
+            "provision must drop in a netplan file that demotes lima0 (vzNAT) and promotes eth0 (usernet)"
         );
         assert!(
             yaml.contains("use-routes: false"),

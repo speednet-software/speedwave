@@ -26,7 +26,7 @@
 | guest → host `127.0.0.1`                                           | reachable              | mirrored mode forwards guest loopback to the host via a `loopback0` device[^1]                                       |
 | container → host, any address                                      | no route               | the container is in a separate netns with no `loopback0`; loopback to the host is broken[^3]                         |
 
-Conclusion: under mirrored mode there is **no single address the host can bind that a container can also reach**. macOS (Lima) is unaffected — vzNAT splits gateway `192.168.5.2` / bind `127.0.0.1`, both working.
+Conclusion: under mirrored mode there is **no single address the host can bind that a container can also reach**. macOS (Lima) is unaffected — Lima's user-mode network splits gateway `192.168.5.2` / bind `127.0.0.1`, both working.
 
 ## Decision
 

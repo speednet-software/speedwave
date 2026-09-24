@@ -7,7 +7,7 @@
 
 ## Decision
 
-A single SSOT, `compose::HostAddressing`, owns both halves of the addressing pair: `gateway_ip` (what the container's `host.docker.internal` resolves to) and `bind_address` (what the host process passes to `TcpListener::bind`). Every host listener bind, every Compose `extra_hosts` substitution, and every Node-side MCP worker default reads these through thin wrappers — never a hardcoded literal. On Windows the two halves are mandatorily equal (the WSL vEthernet adapter IP, e.g. `172.x.x.1`), detected at runtime; on macOS they split (gateway `192.168.5.2`, bind `127.0.0.1`) because Lima's vzNAT translates the gateway to host loopback. There is no stable Windows IP, so it must be probed live, not pinned in a const.
+A single SSOT, `compose::HostAddressing`, owns both halves of the addressing pair: `gateway_ip` (what the container's `host.docker.internal` resolves to) and `bind_address` (what the host process passes to `TcpListener::bind`). Every host listener bind, every Compose `extra_hosts` substitution, and every Node-side MCP worker default reads these through thin wrappers — never a hardcoded literal. On Windows the two halves are mandatorily equal (the WSL vEthernet adapter IP, e.g. `172.x.x.1`), detected at runtime; on macOS they split (gateway `192.168.5.2`, bind `127.0.0.1`) because Lima's user-mode network translates the gateway to host loopback. There is no stable Windows IP, so it must be probed live, not pinned in a const.
 
 ## Why
 

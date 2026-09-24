@@ -115,8 +115,8 @@ pub const CONTAINER_PATH: &str = "/home/speedwave/.local/bin:/usr/local/bin:/usr
 /// `extra_hosts` (static + dynamic per-service, ADR-062). See CLAUDE.md SSOT row.
 pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 
-/// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
-/// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
+/// IP of the macOS host as seen from the Lima VZ VM and its nerdctl containers: the gateway of
+/// Lima's user-mode network on eth0 (192.168.5.0/24), static, not DHCP. vzNAT is lima0.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
 
 /// Guest-local gateway IP for the WSL2 mirrored-mode host relay (ADR-080): a `socat`
