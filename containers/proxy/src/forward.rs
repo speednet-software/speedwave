@@ -337,7 +337,18 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         let mut client_disconnected = false;
 
         use futures_util::StreamExt;
-        while let Some(chunk) = byte_stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                () = tx.closed() => {
+                    client_disconnected = true;
+                    break;
+                }
+                next = byte_stream.next() => match next {
+                    Some(chunk) => chunk,
+                    None => break,
+                },
+            };
             match chunk {
                 Ok(bytes) => {
                     if let Ok(text) = std::str::from_utf8(&bytes) {
