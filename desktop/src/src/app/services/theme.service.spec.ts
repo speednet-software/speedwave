@@ -3,6 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { NativeThemeAdapter } from './native-theme-adapter';
 import {
   ThemeService,
+  DEFAULT_THEME_MODE,
   THEME_MODES,
   THEME_STORAGE_KEY,
   MODE_STORAGE_KEY,
@@ -199,10 +200,22 @@ describe('ThemeService', () => {
       media.restore();
     });
 
-    it('defaults to dark when no mode is persisted (first run)', () => {
+    // Happy paths
+    it('defaults to auto and follows a light system when no mode is persisted (first run)', () => {
       const svc = create();
-      expect(svc.mode()).toBe<ThemeMode>('dark');
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      // First run must not persist a choice the user never made.
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('defaults to auto and follows a dark system when no mode is persisted (first run)', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
       expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
     });
 
     it('setMode("light") removes .dark and persists the choice', () => {
@@ -231,10 +244,12 @@ describe('ThemeService', () => {
       expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
-    it('treats unknown stored mode as dark', () => {
+    // Edge cases
+    it('treats unknown stored mode as the first-run default', () => {
       localStorage.setItem(MODE_STORAGE_KEY, 'sepia');
       const svc = create();
-      expect(svc.mode()).toBe<ThemeMode>('dark');
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
     it('setMode("auto") with prefers-color-scheme=dark adds .dark while keeping mode()==="auto"', () => {
@@ -384,6 +399,11 @@ describe('ThemeService', () => {
       expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
     });
 
+    it('DEFAULT_THEME_MODE is auto (first run follows the OS)', () => {
+      expect(DEFAULT_THEME_MODE).toBe<ThemeMode>('auto');
+    });
+
+    // Pins the literal the anti-FOUC script in index.html depends on.
     it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
       expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
     });
