@@ -55,7 +55,7 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
           aria-label="Restart current conversation"
           (click)="newConversation.emit()"
         >
-          <app-icon name="plus" class="h-4 w-4" />
+          <app-icon name="refresh" class="h-4 w-4" />
         </button>
       }
 
