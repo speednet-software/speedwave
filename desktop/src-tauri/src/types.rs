@@ -130,6 +130,8 @@ pub(crate) struct LlmConfigUpdate {
     pub(crate) active: Option<speedwave_runtime::config::LlmActive>,
     #[serde(default)]
     pub(crate) proxy_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) project: Option<String>,
 }
 
 #[derive(Serialize, Default)]

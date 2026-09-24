@@ -99,6 +99,7 @@ export class ProjectStateService {
   restartError = '';
   /** Restart requested while status was pre-ready; surfaced once we settle. */
   private pendingRestartOnSettle = false;
+  private restartOwedTo: string | null = null;
 
   /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
@@ -437,12 +438,14 @@ export class ProjectStateService {
     }
     if (this.status() === 'ready' || this.status() === next) return;
     this.status.set(next);
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
   /** Force-sets status to no_provider, skipping the never-downgrade guard. */
   forceUnconfigured(): void {
     this.status.set('no_provider');
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
@@ -481,7 +484,32 @@ export class ProjectStateService {
       this.status.set('ready');
       this.error = '';
     }
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
+  }
+
+  /**
+   * True while `project` is the active project and no switch runs, so work finishing for it still applies.
+   * @param project - the project a late result or a save belongs to
+   */
+  isSettledOn(project: string | null): boolean {
+    return project === this.activeProject() && this.status() !== 'switching';
+  }
+
+  /**
+   * Requests the restart a save of `project` needs, now while the app is settled on it, or once a switch away from it fails back to it.
+   * @param project - the project whose saved settings its running containers do not have yet
+   */
+  requestRestartFor(project: string | null): void {
+    if (this.isSettledOn(project)) {
+      this.requestRestart();
+    } else if (
+      project !== null &&
+      this.status() === 'switching' &&
+      project === this.activeProject()
+    ) {
+      this.restartOwedTo = project;
+    }
   }
 
   /** Marks that pending changes require a container restart. */
@@ -623,6 +651,9 @@ export class ProjectStateService {
         this.errorKind = undefined;
         this.failureProvider = undefined;
         this.failureProjectDir = undefined;
+        if (this.needsRestart || this.pendingRestartOnSettle) {
+          this.restartOwedTo = this.activeProject();
+        }
         this.needsRestart = false;
         this.pendingRestartOnSettle = false;
         this.restarting = false;
@@ -633,6 +664,7 @@ export class ProjectStateService {
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
         this.activeProject.set(event.payload.project);
         this.targetProject = null;
+        this.restartOwedTo = null;
         this.error = '';
         void this.resolveSwitchSucceededStatus();
         void this.refreshProjectList();
@@ -641,6 +673,8 @@ export class ProjectStateService {
       await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
         this.activeProject.set(event.payload.project);
         this.targetProject = null;
+        if (this.restartOwedTo === event.payload.project) this.pendingRestartOnSettle = true;
+        this.restartOwedTo = null;
         this.status.set('error');
         this.error = event.payload.error;
         this.errorKind = event.payload.error_kind;

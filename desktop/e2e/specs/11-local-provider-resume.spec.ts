@@ -15,7 +15,9 @@ import {
   startNewConversation,
   requireLocalLlm,
   requireOpenrouterKey,
+  requireOpenrouterModel,
   useCheapOpenRouterModel,
+  storedProviderModel,
   isUnpriced,
   modelRowsUnpriced,
 } from '../helpers/llm';
@@ -80,6 +82,7 @@ describe('Local Provider + Resume', function () {
     this.timeout(2 * RESTART_WAIT_MS + 60_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
+    expect(await storedProviderModel('openrouter')).toBe(requireOpenrouterModel());
     await confirmRestartAndWait();
     await openChat();
     await useCheapOpenRouterModel();
