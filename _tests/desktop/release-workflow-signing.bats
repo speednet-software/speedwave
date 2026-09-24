@@ -171,6 +171,26 @@ $requested
 EOF
 }
 
+@test "every signing login is followed at once by the Artifact Signing token fetch" {
+    token_run="run: az account get-access-token --resource https://codesigning.azure.net --output none"
+    [ "$(grep -cF "$token_run" "$WORKFLOW")" -eq 2 ]
+    logins=$(grep -n "uses: ./.github/actions/azure-signing-login" "$WORKFLOW" | cut -d: -f1)
+    [ -n "$logins" ]
+    for login_line in $logins; do
+        next_step=$(awk -v start="$login_line" 'NR>start && /^      - / { print; exit }' "$WORKFLOW")
+        if [ "$next_step" != "      - name: Cache the Artifact Signing token (Windows)" ]; then
+            echo "ERROR: the step after the signing login at line $login_line is '$next_step', not the token fetch" >&2
+            return 1
+        fi
+    done
+}
+
+@test "the Artifact Signing token fetch is skipped when signing is not configured" {
+    grep -A1 "name: Cache the Artifact Signing token (Windows)" "$WORKFLOW" | grep "if:" > "$BATS_TEST_TMPDIR/guards"
+    [ "$(wc -l < "$BATS_TEST_TMPDIR/guards")" -eq 2 ]
+    [ "$(grep -cF "&& vars.AZURE_CLIENT_ID != ''" "$BATS_TEST_TMPDIR/guards")" -eq 2 ]
+}
+
 @test "cli job signs the Windows CLI before packaging it" {
     sign_line=$(grep -n "name: Sign CLI binary (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
     pack_line=$(grep -n "name: Package CLI (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
