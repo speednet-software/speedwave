@@ -7,6 +7,7 @@ import {
   input,
   output,
   signal,
+  untracked,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { TooltipDirective } from '../../../shared/tooltip.directive';
@@ -135,7 +136,7 @@ export interface ModelSelection {
             </div>
           }
           <div class="max-h-72 overflow-y-auto py-1">
-            @if (loading()) {
+            @if (listLoading()) {
               <div
                 data-testid="model-selector-loading"
                 class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
@@ -267,6 +268,8 @@ export class ModelSelectorComponent {
 
   private optionsFetch: Promise<void> = Promise.resolve();
 
+  private listInfoState = '';
+
   private probedKey = '';
 
   protected readonly currentEffortPin = signal<string | null>(null);
@@ -285,6 +288,10 @@ export class ModelSelectorComponent {
     () =>
       this.showEffortControl() &&
       this.control.sessionInfoState(this.projectId()).state === 'pending'
+  );
+
+  protected readonly listLoading = computed(
+    () => this.loading() || (this.pickerPending() && this.options().length === 0)
   );
 
   protected readonly badgeTitle = computed<string>(() => {
@@ -372,7 +379,15 @@ export class ModelSelectorComponent {
     effect(() => {
       const id = this.projectId();
       if (!this.showEffortControl() || !id) return;
-      if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
+      const state = this.control.sessionInfoState(id).state;
+      if (state === 'pending') {
+        this.listInfoState = state;
+        return;
+      }
+      untracked(() => {
+        if (this.open() && state !== this.listInfoState) this.optionsFetch = this.fetchOptions();
+        else void this.picker.refresh(id);
+      });
     });
     effect(() => {
       const live = this.sessionModel();
@@ -491,6 +506,7 @@ export class ModelSelectorComponent {
     try {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
+        this.listInfoState = this.control.sessionInfoState(projectId).state;
         await this.anthropicModels.list();
         const picker = await this.picker.refresh(projectId);
         if (!picker) {

@@ -336,6 +336,99 @@ describe('ModelSelectorComponent', () => {
     expect(fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'))).toBeFalsy();
   });
 
+  function mockSessionLifecycle(
+    state: () => unknown,
+    rows: () => ModelPicker | null
+  ): ReturnType<typeof vi.fn> {
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
+      if (cmd === 'get_chat_session_info') return Promise.resolve(state());
+      if (cmd === 'list_model_picker') return Promise.resolve(rows());
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    return tauriInvoke;
+  }
+
+  async function reportSessionInfo(project: string): Promise<void> {
+    await TestBed.inject(ClaudeControlService).refreshSessionInfo(project);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+  }
+
+  const errorRow = () => fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'));
+  const loadingRow = () =>
+    fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'));
+
+  it('fills a list opened before the session started once the session reports its models', async () => {
+    let state: unknown = { state: 'unavailable' };
+    let reported: ModelPicker | null = null;
+    mockSessionLifecycle(
+      () => state,
+      () => reported
+    );
+    fixture.componentRef.setInput('projectId', 'proj-late');
+    fixture.detectChanges();
+    await settle();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
+
+    state = { state: 'pending' };
+    await reportSessionInfo('proj-late');
+    expect(loadingRow()).toBeTruthy();
+    expect(errorRow()).toBeFalsy();
+
+    reported = picker;
+    state = { state: 'ready', info: { models: [], account: {} } };
+    await reportSessionInfo('proj-late');
+
+    expect(fixture.componentInstance.open()).toBe(true);
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(errorRow()).toBeFalsy();
+    expect(loadingRow()).toBeFalsy();
+  });
+
+  it('keeps an open list on its held rows while the session respawns, then re-reads them', async () => {
+    let state: unknown = { state: 'ready', info: { models: [], account: {} } };
+    let reported: ModelPicker | null = picker;
+    const invoke = mockSessionLifecycle(
+      () => state,
+      () => reported
+    );
+    fixture.componentRef.setInput('projectId', 'proj-respawn');
+    fixture.detectChanges();
+    await settle();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+
+    reported = null;
+    state = { state: 'pending' };
+    await reportSessionInfo('proj-respawn');
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(loadingRow()).toBeFalsy();
+
+    const fetches = (): number =>
+      invoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === 'list_model_picker' && (args as { project: string }).project === 'proj-respawn'
+      ).length;
+    const beforeReady = fetches();
+    reported = picker;
+    state = { state: 'ready', info: { models: [], account: {} } };
+    await reportSessionInfo('proj-respawn');
+
+    expect(fetches()).toBe(beforeReady + 1);
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(errorRow()).toBeFalsy();
+  });
+
   it('marks the active model with a check mark and the plan default with a badge', async () => {
     await fixture.whenStable();
     await fixture.componentInstance.openCombobox();
