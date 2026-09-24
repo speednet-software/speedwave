@@ -4517,11 +4517,11 @@ mod tests {
     }
 
     const SOFT_IMPOSE_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.282-soft-impose.sanitized.ndjson");
     const MID_TURN_COMMAND_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.282-model-command-mid-tool-turn.sanitized.ndjson");
     const MODEL_PICKS_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.267-model-picks.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.282-model-picks.sanitized.ndjson");
 
     fn capture_lines(capture: &str) -> Vec<serde_json::Value> {
         capture
@@ -4579,12 +4579,16 @@ mod tests {
             confirmations,
             vec![
                 "<local-command-stdout>Set model to `claude-haiku-4-5`</local-command-stdout>",
-                "<local-command-stdout>Set model to `claude-opus-5[1m]`</local-command-stdout>",
+                "<local-command-stdout>Set model to `claude-opus-5-5[1m]`</local-command-stdout>",
             ]
         );
         assert_eq!(
             init_models(&lines)[..3],
-            ["claude-opus-5[1m]", "claude-haiku-4-5", "claude-opus-5[1m]"]
+            [
+                "claude-opus-5-5[1m]",
+                "claude-haiku-4-5",
+                "claude-opus-5-5[1m]"
+            ]
         );
     }
 
@@ -4620,16 +4624,30 @@ mod tests {
     }
 
     #[test]
-    fn a_model_command_queued_behind_a_tool_using_turn_never_runs() {
+    fn a_model_command_written_during_a_tool_using_turn_runs_after_it_as_an_input_of_its_own() {
         let lines = capture_lines(MID_TURN_COMMAND_CAPTURE);
+        let results: Vec<u64> = lines
+            .iter()
+            .filter(|l| l["type"] == "result")
+            .map(|l| l["num_turns"].as_u64().unwrap())
+            .collect();
+        let mut parser = StreamParser::new();
+        let turn_ends = lines
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count();
 
-        assert!(
-            lines
-                .iter()
-                .all(|l| !(l["type"] == "result" && l["num_turns"] == 0)),
-            "the queued /model must have produced no command answer"
+        assert_eq!(
+            results,
+            vec![2, 0, 1],
+            "the tool-using turn, then the queued /model's own answer, then the next message"
         );
-        assert_eq!(init_models(&lines), vec![ENV_MODEL, ENV_MODEL]);
+        assert_eq!(init_models(&lines), vec![ENV_MODEL, ENV_MODEL, ROUTED_PICK]);
+        assert_eq!(
+            turn_ends, 3,
+            "the command's answer is a turn end in the chat, which is why no switch is a /model input"
+        );
     }
 
     #[test]

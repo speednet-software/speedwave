@@ -494,7 +494,7 @@ pub(crate) fn parse_context_usage(value: &serde_json::Value) -> Result<ContextUs
 
 #[cfg(test)]
 pub(crate) const FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.267-control-responses.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.282-control-responses.sanitized.json");
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
@@ -1148,8 +1148,8 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                Some("claude-opus-5[1m]"),
-                Some("claude-opus-5[1m]"),
+                Some("claude-opus-5-5[1m]"),
+                Some("claude-opus-5-5[1m]"),
                 Some("claude-fable-5-1[1m]"),
                 Some("claude-sonnet-5[1m]"),
                 Some("claude-sonnet-5[1m]"),
@@ -1181,7 +1181,7 @@ mod tests {
                 .find(|m| m.value == v)
                 .and_then(|m| m.resolved_model.clone())
         };
-        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5[1m]"));
+        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5-5[1m]"));
         assert_eq!(by_value("sonnet").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             by_value("haiku").as_deref(),
@@ -1243,20 +1243,20 @@ mod tests {
 
     #[test]
     fn usage_fixture_parses_the_typed_windows() {
-        for run in ["run_A", "run_B"] {
+        for (run, five_hour_used) in [("run_A", 1.0), ("run_B", 2.0)] {
             let usage = parse_plan_usage(&fixture()[run]["get_usage"]).unwrap();
             assert_eq!(usage.subscription_type.as_deref(), Some("max"));
             assert!(usage.rate_limits_available);
             let limits = usage.rate_limits.expect("rate limits");
             let five = limits.five_hour.expect("five_hour");
-            assert_eq!(five.utilization, Some(15.0));
-            assert!(five.resets_at.unwrap().starts_with("2026-09-18T12:40:00"));
-            assert_eq!(limits.seven_day.unwrap().utilization, Some(70.0));
+            assert_eq!(five.utilization, Some(five_hour_used), "{run}");
+            assert!(five.resets_at.unwrap().starts_with("2026-09-25T02:19:59"));
+            assert_eq!(limits.seven_day.unwrap().utilization, Some(71.0));
             assert_eq!(limits.seven_day_opus, None);
             assert_eq!(limits.seven_day_sonnet, None);
             assert_eq!(limits.model_scoped.len(), 1);
             assert_eq!(limits.model_scoped[0].display_name, "Fable");
-            assert_eq!(limits.model_scoped[0].utilization, Some(67.0));
+            assert_eq!(limits.model_scoped[0].utilization, Some(3.0));
             let extra = limits.extra_usage.expect("extra_usage");
             assert!(!extra.is_enabled);
             assert_eq!(extra.utilization, None);
@@ -1398,6 +1398,40 @@ mod tests {
     }
 
     #[test]
+    fn a_max_account_is_refused_the_sonnet_4_6_1m_window_the_catalog_keeps_for_api_billing() {
+        let fx = fixture();
+        let sonnet_4_6 = speedwave_runtime::defaults::ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .expect("claude-sonnet-4-6 is in the catalog");
+        assert_eq!(
+            sonnet_4_6.one_million_context,
+            speedwave_runtime::defaults::OneMillionContext::ApiOnly
+        );
+        for run in ["run_A", "run_B"] {
+            let refused: Vec<&str> = fx[run]
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(key, value)| key.starts_with("set_model/") && !value["error"].is_null())
+                .map(|(key, _)| key.as_str())
+                .collect();
+            assert_eq!(refused, vec!["set_model/claude-sonnet-4-6[1m]"], "{run}");
+            let error = fx[run]["set_model/claude-sonnet-4-6[1m]"]["error"]
+                .as_str()
+                .unwrap();
+            assert!(
+                error.contains("Usage credits are required for long context requests"),
+                "{run}: {error}"
+            );
+            let unchanged =
+                parse_context_usage(&fx[run]["get_context_usage/claude-sonnet-4-6[1m]"]).unwrap();
+            assert_eq!(unchanged.model, "claude-sonnet-4-6", "{run}");
+            assert_eq!(unchanged.max_tokens, 200_000, "{run}");
+        }
+    }
+
+    #[test]
     fn context_usage_for_display_drops_free_space_and_keeps_every_used_category() {
         let raw =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5"]).unwrap();
@@ -1452,12 +1486,12 @@ mod tests {
     #[test]
     fn context_usage_before_the_first_message_reports_the_baseline() {
         let usage = parse_context_usage(&fixture()["run_A"]["get_context_usage/initial"]).unwrap();
-        assert_eq!(usage.model, "claude-fable-5-1[1m]");
-        assert_eq!(usage.total_tokens, 46_567);
-        assert_eq!(usage.max_tokens, 1_000_000);
-        assert!((usage.percentage - 5.0).abs() < f64::EPSILON);
+        assert_eq!(usage.model, "claude-haiku-4-5");
+        assert_eq!(usage.total_tokens, 61_125);
+        assert_eq!(usage.max_tokens, 200_000);
+        assert!((usage.percentage - 31.0).abs() < f64::EPSILON);
         assert_eq!(usage.categories[0].name, "System prompt");
-        assert_eq!(usage.categories[0].tokens, 3_902);
+        assert_eq!(usage.categories[0].tokens, 6_890);
     }
 
     #[test]
