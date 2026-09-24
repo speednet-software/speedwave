@@ -313,51 +313,77 @@ so a pick with no live session applies it through the re-render above, while
 a live-session wire `/model` leaves the running container on the previous
 window until its next render.
 
-**Amendment (SPEED-696, 2026-09-24: the soft-impose waits for the turn to end,
-and its answer stays out of the chat).** The soft-impose above had three
-defects, found on the e2e rig and confirmed with the pinned 2.1.267 binary
-driven against a stub API:
+**Amendment (SPEED-696, 2026-09-24: the soft-impose is a `set_model` control
+request, not a `/model` input).** The soft-impose above wrote `/model <wire id>`
+to Claude Code's stdin as a user input. That had three defects, found on the
+e2e rig and confirmed with the pinned 2.1.267 binary driven against a stub API:
 
-1. **It was written into a running turn.** It was sent on `system/init`, while
-   the first turn was still running. When that turn uses a tool, Claude Code
-   does not run a command queued behind it. It hands the text to the model as
-   a user message ("The user sent a new message while you were working:
-   /model …"), answers it with no command result, and runs the next turn on
-   the unchanged model
-   (`desktop/src-tauri/tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson`).
-2. **Its answer ended the user's turn in the chat.** Claude Code answers an
-   executed `/model` with its own `result`: `num_turns: 0`, after a
-   `<synthetic>` "Set model to `<id>` for this session only" message. The
-   stdout reader emitted that `result` like any turn end. A message the user
-   sent before it arrived had its turn ended by it, and the chat listener
+1. **A `/model` written while a turn uses a tool never runs.** Claude Code
+   does not run the queued input as a command. The capture
+   `desktop/src-tauri/tests/fixtures/cc-2.1.267-model-command-mid-tool-turn.sanitized.ndjson`
+   has no command answer (no `result` with `num_turns: 0`), and both `init`
+   lines, the later turn's included, report the old model.
+2. **An executed `/model` ends the user's turn in the chat.** Claude Code
+   answers the command as an input of its own: an `init`, a `<synthetic>`
+   "Set model to `<id>`" message and a `result` with `num_turns: 0`. The stdout
+   reader emitted that `result` like any turn end. A message the user sent
+   before it arrived had its turn ended by it, and the chat listener
    (`chat-state.service.ts::setupStreamListener`) then dropped that turn's
-   answer.
+   answer. This failed spec 13 on the macOS rig.
 3. **It could switch a user's pick back.** The decision compared the observed
    model with the configuration read at spawn. Claude Code emits
    `system/init` for every input it starts, a local command included, so a
    composer pick made after the spawn was switched back at the next input.
 
-The reader (`chat.rs::SoftImpose`) now works as follows:
+Writing the command only when a turn ends fixes the first defect, but not the
+second. Behind a message sent right after Stop, or queued before the command,
+the command still runs as an input the chat does not expect. It can also be
+the input a later Stop interrupts.
 
-- A mismatched `init` only makes the switch due.
-- The `/model` is written when the input in progress ends: on its `result`,
-  before that `result` reaches the chat and before a queued message is
-  drained. Claude Code is idle then, so it runs the command, and anything the
-  user sends after seeing the turn end queues behind it
-  (`desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`,
-  written after a tool-using turn).
-- The command's own `init` and its answer are withheld: the first `result`
-  after the write, when it has `num_turns: 0` and names the written model.
-  Neither is emitted, and the withheld `result` drains nothing. Any other
-  line first means Claude Code did not run the command, and everything from
-  that line on reaches the chat, with a warning in the log.
-- A `/model` the user sends, directly or from the queue, settles the
-  session's model (`ModelSettled`). The check and the write happen under the
-  stdin lock on both sides, so no soft-impose is written after a user pick.
+The soft-impose now sends `set_model`, the control request behind the Agent
+SDK's `Query.setModel()`[^7]:
 
-The first-turn gap recorded above is unchanged. The captures are pinned to
-the Claude Code version: `the_soft_impose_captures_are_of_the_pinned_claude_code`
-fails on a bump until both are re-captured.
+- On the first `system/init` whose model differs from the configured wire id,
+  the reader writes
+  `{type: "control_request", request: {subtype: "set_model", model: <wire id>}}`
+  (`chat.rs::soft_impose_step`, `control_channel.rs::ControlChannel::send_set_model`),
+  once per session. The answer reaches its waiter like every control response,
+  on a thread of its own (`chat.rs::report_soft_impose`). A rejected or
+  unanswered request is logged, and the session stays on the model from the
+  container environment.
+- Claude Code handles a control request outside its input queue. The capture
+  `desktop/src-tauri/tests/fixtures/cc-2.1.267-soft-impose.sanitized.ndjson`
+  sends it at the first `init` of a tool-using turn:
+  - the success answer arrives within milliseconds;
+  - the request that follows the tool result already goes to the new model,
+    and the next `init` reports it;
+  - no `init`, `<synthetic>` line or `result` belongs to the switch;
+  - the only other line is a `user` line whose content is a
+    `<local-command-stdout>` string, and the stream parser makes no chunk of it.
+
+  Nothing is withheld from the chat, and the switch does not interact with
+  Stop or with queued messages.
+
+- Claude Code records the switch in the transcript the way it records an
+  executed `/model`: a caveat, `<command-name>/model</command-name>` with its
+  arguments, and the confirmation. These entries follow the turn that was
+  running. A conversation rebuilt from history therefore shows a `/model` chip
+  between those turns, and the live stream shows none
+  (`history.rs::a_set_model_switch_is_rebuilt_as_a_model_chip_between_the_turns`).
+- A `/model` the user sends, directly or from the queue, settles the session's
+  model (`ModelSettled`). The soft-impose checks and settles it under the
+  stdin lock, before it writes. A pick written first always wins, and a pick
+  written after it runs as an input after the switch.
+- ADR-089 decision 1 said proxy-routed providers send no control request. They
+  now send this one. `set_model` changes the session and asks Claude Code for
+  no data, so the reason routed sessions send no query does not apply (see the
+  ADR-089 amendment of the same date).
+
+The first-turn gap recorded above now covers only the requests Claude Code
+makes before the reader sees the first `init`: at least the first model
+request of the first turn. Both captures are pinned to the Claude Code
+version. `the_soft_impose_captures_are_of_the_pinned_claude_code` fails on a
+bump until both are re-captured.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 
@@ -848,3 +874,5 @@ stays selectable without typing its id.
 [^5]: Claude Code settings - the `model` key's "Any file" scope, "Set the key in the tool that generates the file" guidance for a pick that must survive when Claude Code itself cannot persist it, and the account-type default model table ("Max, Team Premium, Enterprise, and Anthropic API: defaults to Opus 5"; "Pro and Team Standard: defaults to Sonnet 5"; "Before v2.1.219, `default` resolved to Opus 4.8"). https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
 
 [^6]: Claude Code settings - "Claude Code reads some keys only once, at session start, so an edit to one of them doesn't reach the running session," naming `model` among them; `/model` in `-p` mode "applies to the current session only and isn't saved as your default." https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
+
+[^7]: Agent SDK reference, TypeScript: `Query.setModel()` changes the model of a session that takes streaming input. https://code.claude.com/docs/en/agent-sdk/typescript

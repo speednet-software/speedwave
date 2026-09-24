@@ -1242,107 +1242,61 @@ fn settles_model(text: &str) -> bool {
     )
 }
 
-#[derive(Default)]
-struct SoftImpose {
-    due: Option<String>,
-    answer: Option<CommandAnswer>,
+fn soft_impose_step(
+    line: &serde_json::Value,
+    chunks: &[StreamChunk],
+    cfg: &SoftImposeConfig,
+    settled: &ModelSettled,
+    control: &ControlChannel,
+    stdin: &Mutex<impl Write>,
+) -> Option<(control_channel::PendingControl, String)> {
+    if !chunks
+        .iter()
+        .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
+    {
+        return None;
+    }
+    let observed = line["model"].as_str().filter(|s| !s.is_empty())?;
+    let model = soft_impose_target(
+        cfg.kind,
+        &cfg.entry_id,
+        cfg.entry_model.as_deref(),
+        observed,
+    )?;
+    let pending = send_soft_impose(stdin, control, settled, &model)?;
+    Some((pending, model))
 }
 
-struct CommandAnswer {
-    model: String,
-    init_seen: bool,
-}
-
-impl SoftImpose {
-    fn observe_init(
-        &mut self,
-        settled: &ModelSettled,
-        cfg: &SoftImposeConfig,
-        init_line: &serde_json::Value,
-    ) {
-        if self.answer.is_some() || self.due.is_some() || settled.is_settled() {
-            return;
-        }
-        let Some(observed) = init_line["model"].as_str().filter(|s| !s.is_empty()) else {
-            return;
-        };
-        self.due = soft_impose_target(
-            cfg.kind,
-            &cfg.entry_id,
-            cfg.entry_model.as_deref(),
-            observed,
-        );
-    }
-
-    fn take_due(&mut self) -> Option<String> {
-        self.due.take()
-    }
-
-    fn written(&mut self, model: String) {
-        self.answer = Some(CommandAnswer {
-            model,
-            init_seen: false,
-        });
-    }
-
-    fn withholds(&mut self, parsed: &serde_json::Value, chunks: &[StreamChunk]) -> bool {
-        let Some(answer) = self.answer.as_mut() else {
-            return false;
-        };
-        let is_init = chunks
-            .iter()
-            .any(|c| matches!(c, StreamChunk::SystemInit { .. }));
-        let command_line = match parsed["type"].as_str().unwrap_or("") {
-            "result" => {
-                let answered = parsed["num_turns"].as_u64() == Some(0)
-                    && parsed["result"]
-                        .as_str()
-                        .is_some_and(|text| text.contains(answer.model.as_str()));
-                self.answer = None;
-                if !answered {
-                    log::warn!(
-                        "a result that is not the soft-imposed /model's answer came first; \
-                         passing it to the chat"
-                    );
-                }
-                return answered;
-            }
-            "system" if is_init => !std::mem::replace(&mut answer.init_seen, true),
-            "system" | "rate_limit_event" => return false,
-            "assistant" => parsed["message"]["model"].as_str() == Some("<synthetic>"),
-            _ => false,
-        };
-        if !command_line {
-            self.answer = None;
-            log::warn!(
-                "the chat stream moved on before the soft-imposed /model answered; \
-                 passing it through"
-            );
-        }
-        command_line
-    }
-}
-
-fn write_soft_impose(stdin: &Mutex<impl Write>, settled: &ModelSettled, model: &str) -> bool {
+fn send_soft_impose(
+    stdin: &Mutex<impl Write>,
+    control: &ControlChannel,
+    settled: &ModelSettled,
+    model: &str,
+) -> Option<control_channel::PendingControl> {
     let Ok(mut handle) = stdin.lock() else {
         log::error!("stdin mutex poisoned; dropping the soft-impose");
-        return false;
+        return None;
     };
     if settled.is_settled() {
-        return false;
+        return None;
     }
     settled.settle();
-    let command = format!("/model {model}");
-    let line = build_user_message(&text_only(&command)).to_string();
-    match writeln!(handle, "{line}").and_then(|()| handle.flush()) {
-        Ok(()) => {
-            log::debug!("soft-imposing {command} at the end of the turn");
-            true
+    match control.send_set_model(&mut *handle, model) {
+        Ok(pending) => {
+            log::info!("soft-imposing {model} with a set_model control request");
+            Some(pending)
         }
         Err(e) => {
-            log::error!("soft-impose stdin write failed: {e}");
-            false
+            log::error!("the soft-impose set_model request was not written: {e}");
+            None
         }
+    }
+}
+
+fn report_soft_impose(pending: control_channel::PendingControl, model: &str) {
+    match pending.wait(control_channel::SET_MODEL_TIMEOUT) {
+        Ok(_) => log::info!("Claude Code switched the session to {model}"),
+        Err(e) => log::warn!("the soft-impose to {model} did not apply: {e}"),
     }
 }
 
@@ -1822,7 +1776,6 @@ impl ChatSession {
 
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
-            let mut soft_impose = SoftImpose::default();
             if let Some(seed) = resume_seed {
                 parser.restore_session_snapshot(
                     TurnUsage {
@@ -1999,22 +1952,15 @@ impl ChatSession {
                         }
                     }
                 }
-                if soft_impose.withholds(&parsed, &chunks) {
-                    log::debug!("withheld the soft-imposed /model's own {msg_type} line");
-                    continue;
-                }
-                if chunks
-                    .iter()
-                    .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
-                {
-                    soft_impose.observe_init(&settled_for_reader, &soft_impose_cfg, &parsed);
-                }
-                if msg_type == "result" {
-                    if let Some(model) = soft_impose.take_due() {
-                        if write_soft_impose(&stdin_for_reader, &settled_for_reader, &model) {
-                            soft_impose.written(model);
-                        }
-                    }
+                if let Some((pending, model)) = soft_impose_step(
+                    &parsed,
+                    &chunks,
+                    &soft_impose_cfg,
+                    &settled_for_reader,
+                    &control_for_reader,
+                    &stdin_for_reader,
+                ) {
+                    std::thread::spawn(move || report_soft_impose(pending, &model));
                 }
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
@@ -3332,7 +3278,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stdout_reader_writes_the_soft_impose_before_the_turn_end_leaves_the_reader() {
+    fn the_stdout_reader_runs_the_soft_impose_step_on_every_parsed_line() {
         let source = include_str!("chat.rs");
         let start = source
             .find("pub fn start_with_retry(")
@@ -3347,24 +3293,19 @@ mod tests {
             body.find(needle)
                 .unwrap_or_else(|| panic!("the reader must use `{needle}`"))
         };
-        let withheld = at("ifsoft_impose.withholds(&parsed,&chunks){");
-        let written = at("write_soft_impose(&stdin_for_reader,&settled_for_reader,&model)");
-        for later in [
-            "letresult_session_id",
-            "awaited_for_reader.observe(&chunks)",
-            "forchunkinchunks{emit_sanitized_chunk(",
-            "drain_queued_message(&app_handle,",
-        ] {
-            let later_at = at(later);
-            assert!(withheld < later_at, "withhold before `{later}`");
-            assert!(
-                written < later_at,
-                "write the /model before `{later}`, so everything sent after the turn end queues behind it"
-            );
-        }
-        at("soft_impose.observe_init(&settled_for_reader,&soft_impose_cfg,&parsed)");
-        at("ifmsg_type==\"result\"{ifletSome(model)=soft_impose.take_due(){ifwrite_soft_impose(");
-        at("&stdin_for_reader,&settled_for_reader,&display_policy,");
+        let answers_routed =
+            at("ifconsume_control_response(&control_for_reader,&parsed){continue;}");
+        let parsed = at("let(chunks,log_entry)=parser.parse_line(&parsed);");
+        let step = at(concat!(
+            "ifletSome((pending,model))=soft_impose_step(&parsed,&chunks,&soft_impose_cfg,",
+            "&settled_for_reader,&control_for_reader,&stdin_for_reader,)",
+            "{std::thread::spawn(move||report_soft_impose(pending,&model));}"
+        ));
+        assert!(
+            answers_routed < parsed,
+            "control answers never reach the parser"
+        );
+        assert!(parsed < step, "the step reads the parsed chunks");
     }
 
     #[test]
@@ -4008,90 +3949,131 @@ mod tests {
         }]
     }
 
-    #[test]
-    fn a_mismatched_init_makes_the_soft_impose_due_once() {
-        let mut soft = SoftImpose::default();
-        let settled = ModelSettled::default();
-
-        soft.observe_init(
-            &settled,
-            &local_llama(),
-            &init_with_model("wrong-observed-model"),
-        );
-
-        assert_eq!(soft.take_due().as_deref(), Some("local/llama-3.1-70b"));
-        assert_eq!(soft.take_due(), None);
+    fn written_lines(stdin: &Mutex<Vec<u8>>) -> Vec<serde_json::Value> {
+        String::from_utf8(stdin.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 
     #[test]
-    fn a_matching_init_or_a_model_the_user_picked_makes_nothing_due() {
-        let mut soft = SoftImpose::default();
+    fn a_mismatched_init_sends_one_set_model_with_the_configured_wire_id() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
         let settled = ModelSettled::default();
-        soft.observe_init(
-            &settled,
-            &local_llama(),
-            &init_with_model("local/llama-3.1-70b"),
-        );
-        assert_eq!(soft.take_due(), None);
+        let init = init_with_model("wrong-observed-model");
+        let chunks = init_chunk("wrong-observed-model");
 
-        settled.settle();
-        soft.observe_init(
-            &settled,
-            &local_llama(),
-            &init_with_model("wrong-observed-model"),
-        );
+        let first = soft_impose_step(&init, &chunks, &local_llama(), &settled, &control, &stdin);
+        let second = soft_impose_step(&init, &chunks, &local_llama(), &settled, &control, &stdin);
+
         assert_eq!(
-            soft.take_due(),
-            None,
+            first.map(|(_, model)| model).as_deref(),
+            Some("local/llama-3.1-70b")
+        );
+        assert!(second.is_none(), "a session is soft-imposed once");
+        let written = written_lines(&stdin);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0]["type"], "control_request");
+        assert_eq!(
+            written[0]["request"],
+            serde_json::json!({ "subtype": "set_model", "model": "local/llama-3.1-70b" })
+        );
+        assert!(settled.is_settled());
+    }
+
+    #[test]
+    fn a_matching_init_a_line_that_is_not_an_init_or_a_picked_model_sends_nothing() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        let cfg = local_llama();
+
+        let matching = soft_impose_step(
+            &init_with_model("local/llama-3.1-70b"),
+            &init_chunk("local/llama-3.1-70b"),
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+        let not_an_init = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &[],
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+        settled.settle();
+        let picked = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &init_chunk("wrong-observed-model"),
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(matching.is_none());
+        assert!(not_an_init.is_none());
+        assert!(
+            picked.is_none(),
             "a model the user picked is never switched back"
         );
+        assert!(written_lines(&stdin).is_empty());
+        assert!(control.pending_ids().is_empty());
     }
 
     #[test]
     fn an_anthropic_session_is_never_soft_imposed() {
-        let mut soft = SoftImpose::default();
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let settled = ModelSettled::default();
         let cfg = SoftImposeConfig {
             kind: speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
             entry_id: "anthropic".to_string(),
             entry_model: Some("claude-sonnet-5".to_string()),
         };
-        soft.observe_init(
-            &ModelSettled::default(),
-            &cfg,
+
+        let sent = soft_impose_step(
             &init_with_model("totally-different"),
+            &init_chunk("totally-different"),
+            &cfg,
+            &settled,
+            &ControlChannel::default(),
+            &stdin,
         );
-        assert_eq!(soft.take_due(), None);
+
+        assert!(sent.is_none());
+        assert!(written_lines(&stdin).is_empty());
+        assert!(!settled.is_settled());
     }
 
     #[test]
-    fn the_soft_impose_is_written_once_as_a_wrapped_model_command() {
-        let stdin = Mutex::new(Vec::<u8>::new());
+    fn a_model_pick_written_while_the_soft_impose_waits_for_stdin_cancels_it() {
+        let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
         let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+        let held = stdin.lock().unwrap();
+        let sender = {
+            let (stdin, settled, control) = (stdin.clone(), settled.clone(), control.clone());
+            std::thread::spawn(move || {
+                send_soft_impose(&stdin, &control, &settled, "local/llama-3.1-70b").is_some()
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
-        assert!(write_soft_impose(&stdin, &settled, "local/llama-3.1-70b"));
-        assert!(!write_soft_impose(&stdin, &settled, "local/llama-3.1-70b"));
-
-        let written = String::from_utf8(stdin.into_inner().unwrap()).unwrap();
-        let expected = format!(
-            "{}\n",
-            build_user_message(&text_only("/model local/llama-3.1-70b"))
-        );
-        assert_eq!(written, expected);
-        assert!(settled.is_settled());
-    }
-
-    #[test]
-    fn a_model_the_user_sent_first_cancels_the_soft_impose_write() {
-        let stdin = Mutex::new(Vec::<u8>::new());
-        let settled = ModelSettled::default();
         settled.settle();
+        drop(held);
 
-        assert!(!write_soft_impose(&stdin, &settled, "local/llama-3.1-70b"));
-        assert!(stdin.into_inner().unwrap().is_empty());
+        assert!(!sender.join().unwrap());
+        assert!(written_lines(&stdin).is_empty());
+        assert!(control.pending_ids().is_empty());
     }
 
     #[test]
-    fn a_soft_impose_that_fails_to_reach_the_process_is_neither_awaited_nor_retried() {
+    fn a_soft_impose_that_fails_to_reach_the_process_is_not_retried() {
         struct BrokenPipe;
         impl Write for BrokenPipe {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -4101,93 +4083,62 @@ mod tests {
                 Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
             }
         }
-        let stdin = Mutex::new(BrokenPipe);
         let settled = ModelSettled::default();
+        let control = ControlChannel::default();
 
-        assert!(!write_soft_impose(&stdin, &settled, "local/llama-3.1-70b"));
+        let sent = send_soft_impose(
+            &Mutex::new(BrokenPipe),
+            &control,
+            &settled,
+            "local/llama-3.1-70b",
+        );
+
+        assert!(sent.is_none());
         assert!(
             settled.is_settled(),
-            "a dead process is not written to again at every turn end"
+            "a dead process is not written to again at the next init"
         );
-    }
-
-    fn result_line(num_turns: u64, text: &str) -> serde_json::Value {
-        serde_json::json!({
-            "type": "result",
-            "subtype": "success",
-            "is_error": false,
-            "num_turns": num_turns,
-            "result": text,
-            "session_id": "sess-1",
-        })
+        assert!(control.pending_ids().is_empty());
     }
 
     const ROUTED_PICK: &str = "openrouter/openai/gpt-4o-mini";
     const ENV_MODEL: &str = "openrouter/anthropic/claude-sonnet-5";
 
-    fn soft_impose_written() -> SoftImpose {
-        let mut soft = SoftImpose::default();
-        soft.written(ROUTED_PICK.to_string());
-        soft
-    }
-
-    fn model_confirmation() -> String {
-        format!("Set model to `{ROUTED_PICK}` for this session only")
+    fn openrouter_mini() -> SoftImposeConfig {
+        SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            entry_id: "openrouter".to_string(),
+            entry_model: Some("openai/gpt-4o-mini".to_string()),
+        }
     }
 
     #[test]
-    fn the_injected_commands_init_and_answer_are_withheld_and_the_next_turn_is_not() {
-        let mut soft = soft_impose_written();
-        let synthetic = serde_json::json!({
-            "type": "assistant",
-            "message": {"model": "<synthetic>", "role": "assistant", "content": []},
+    fn the_answer_to_a_soft_impose_reaches_its_waiter_and_not_the_chat() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let (pending, model) = soft_impose_step(
+            &init_with_model(ENV_MODEL),
+            &init_chunk(ENV_MODEL),
+            &openrouter_mini(),
+            &ModelSettled::default(),
+            &control,
+            &stdin,
+        )
+        .expect("a mismatch is soft-imposed");
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": written_lines(&stdin)[0]["request_id"],
+            },
         });
 
-        assert!(soft.withholds(&init_with_model(ENV_MODEL), &init_chunk(ENV_MODEL)));
-        assert!(soft.withholds(&synthetic, &[]));
-        assert!(soft.withholds(&result_line(0, &model_confirmation()), &[]));
-        assert!(!soft.withholds(&init_with_model(ROUTED_PICK), &init_chunk(ROUTED_PICK)));
-        assert!(!soft.withholds(&result_line(1, "stub reply"), &[]));
-    }
-
-    #[test]
-    fn another_answer_in_the_awaited_slot_reaches_the_chat_and_ends_the_wait() {
-        let mut soft = soft_impose_written();
-
-        assert!(!soft.withholds(&result_line(0, "Set effort level to high"), &[]));
-        assert!(
-            !soft.withholds(&result_line(0, &model_confirmation()), &[]),
-            "only the first answer after the write is awaited"
+        assert!(consume_control_response(&control, &answer));
+        assert_eq!(
+            pending.wait(std::time::Duration::from_secs(5)),
+            Ok(serde_json::Value::Null)
         );
-    }
-
-    #[test]
-    fn a_turn_that_streams_before_the_answer_ends_the_wait() {
-        let mut soft = soft_impose_written();
-        let delta = serde_json::json!({
-            "type": "stream_event",
-            "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}},
-        });
-
-        assert!(soft.withholds(&init_with_model(ENV_MODEL), &init_chunk(ENV_MODEL)));
-        assert!(!soft.withholds(&delta, &[]));
-        assert!(!soft.withholds(&result_line(1, "stub reply"), &[]));
-    }
-
-    #[test]
-    fn a_second_init_before_the_answer_ends_the_wait() {
-        let mut soft = soft_impose_written();
-
-        assert!(soft.withholds(&init_with_model(ENV_MODEL), &init_chunk(ENV_MODEL)));
-        assert!(!soft.withholds(&init_with_model(ENV_MODEL), &init_chunk(ENV_MODEL)));
-        assert!(!soft.withholds(&result_line(0, &model_confirmation()), &[]));
-    }
-
-    #[test]
-    fn nothing_is_withheld_without_a_soft_impose() {
-        let mut soft = SoftImpose::default();
-        assert!(!soft.withholds(&init_with_model(ENV_MODEL), &init_chunk(ENV_MODEL)));
-        assert!(!soft.withholds(&result_line(0, &model_confirmation()), &[]));
+        assert_eq!(model, ROUTED_PICK);
     }
 
     const SOFT_IMPOSE_CAPTURE: &str =
@@ -4243,69 +4194,64 @@ mod tests {
     }
 
     #[test]
-    fn the_turn_end_soft_impose_never_ends_a_turn_in_the_chat() {
-        let cfg = SoftImposeConfig {
-            kind: speedwave_runtime::config::LlmProviderKind::OpenRouter,
-            entry_id: "openrouter".to_string(),
-            entry_model: Some("openai/gpt-4o-mini".to_string()),
-        };
+    fn a_set_model_soft_impose_switches_the_running_turn_and_adds_nothing_to_the_chat() {
+        let cfg = openrouter_mini();
         let mut parser = StreamParser::new();
         let settled = ModelSettled::default();
+        let control = ControlChannel::default();
         let stdin = Mutex::new(Vec::<u8>::new());
-        let awaited = AwaitedResult::new();
-        let mut soft = SoftImpose::default();
         let mut emitted: Vec<StreamChunk> = Vec::new();
-        let mut written_after: Vec<Option<u64>> = Vec::new();
+        let mut sent = Vec::new();
+        let mut routed_answers = 0;
 
-        for parsed in capture_lines(SOFT_IMPOSE_CAPTURE) {
-            let (chunks, _log) = parser.parse_line(&parsed);
-            if soft.withholds(&parsed, &chunks) {
+        for mut parsed in capture_lines(SOFT_IMPOSE_CAPTURE) {
+            if parsed["type"] == "control_response" {
+                parsed["response"]["request_id"] = written_lines(&stdin)[0]["request_id"].clone();
+            }
+            if consume_control_response(&control, &parsed) {
+                routed_answers += 1;
                 continue;
             }
-            if chunks
-                .iter()
-                .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
+            let (chunks, _log) = parser.parse_line(&parsed);
+            if let Some(step) = soft_impose_step(&parsed, &chunks, &cfg, &settled, &control, &stdin)
             {
-                soft.observe_init(&settled, &cfg, &parsed);
+                sent.push(step);
             }
-            if parsed["type"] == "result" {
-                if let Some(model) = soft.take_due() {
-                    written_after.push(parsed["num_turns"].as_u64());
-                    if write_soft_impose(&stdin, &settled, &model) {
-                        soft.written(model);
-                    }
-                }
-            }
-            awaited.observe(&chunks);
             emitted.extend(chunks);
         }
 
-        let written = String::from_utf8(stdin.into_inner().unwrap()).unwrap();
-        let expected = format!(
-            "{}\n",
-            build_user_message(&text_only(&format!("/model {ROUTED_PICK}")))
-        );
-        assert_eq!(written, expected);
+        assert_eq!(sent.len(), 1, "one set_model, at the first init");
+        let (pending, model) = sent.remove(0);
+        assert_eq!(model, ROUTED_PICK);
+        assert_eq!(routed_answers, 1);
         assert_eq!(
-            written_after,
-            vec![Some(2)],
-            "written when the tool-using first turn ended"
+            pending.wait(std::time::Duration::from_secs(1)),
+            Ok(serde_json::Value::Null),
+            "the captured answer resolves the request"
         );
-        let turn_ends: Vec<Option<String>> = emitted
+        let turn_ends: Vec<(Option<String>, Option<String>)> = emitted
             .iter()
             .filter_map(|c| match c {
-                StreamChunk::Result { result_text, .. } => Some(result_text.clone()),
-                StreamChunk::Error { .. } => Some(None),
+                StreamChunk::Result {
+                    result_text, model, ..
+                } => Some((result_text.clone(), model.clone())),
+                StreamChunk::Error { content, .. } => Some((Some(content.clone()), None)),
                 _ => None,
             })
             .collect();
         assert_eq!(
             turn_ends,
             vec![
-                Some("stub reply".to_string()),
-                Some("stub reply".to_string())
+                (
+                    Some("stub reply".to_string()),
+                    Some(ROUTED_PICK.to_string())
+                ),
+                (
+                    Some("stub reply".to_string()),
+                    Some(ROUTED_PICK.to_string())
+                ),
             ],
-            "the chat sees the two answered turns and not the /model confirmation"
+            "only the user's two turns end, and the first already ends on the pick"
         );
         let emitted_inits: Vec<&str> = emitted
             .iter()
@@ -4314,14 +4260,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            emitted_inits,
-            vec![ENV_MODEL, ROUTED_PICK],
-            "the command's own init is withheld"
-        );
+        assert_eq!(emitted_inits, vec![ENV_MODEL, ROUTED_PICK]);
         assert!(
-            !awaited.is_awaited(),
-            "the command leaves no result awaited"
+            !emitted
+                .iter()
+                .any(|c| matches!(c, StreamChunk::UserMessageCommit { .. })),
+            "the set_model confirmation line adds no user message"
         );
     }
 

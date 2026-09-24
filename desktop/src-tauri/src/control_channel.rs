@@ -13,10 +13,12 @@ pub(crate) const SESSION_INFO_EVENT: &str = "chat_session_info";
 const SUBTYPE_INITIALIZE: &str = "initialize";
 const SUBTYPE_GET_USAGE: &str = "get_usage";
 const SUBTYPE_GET_CONTEXT_USAGE: &str = "get_context_usage";
+const SUBTYPE_SET_MODEL: &str = "set_model";
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlQuery {
@@ -65,14 +67,18 @@ pub(crate) fn build_control_request(request_id: &str, query: ControlQuery) -> se
     })
 }
 
-pub(crate) fn next_control_request_id(query: ControlQuery) -> String {
+pub(crate) fn build_set_model_request(request_id: &str, model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": MSG_TYPE_CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": { "subtype": SUBTYPE_SET_MODEL, "model": model },
+    })
+}
+
+fn next_request_id(subtype: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "req_{}_{}",
-        query.subtype(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    format!("req_{subtype}_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,33 +174,72 @@ impl ControlChannel {
         self.lock_waiters().keys().cloned().collect()
     }
 
+    fn register(&self, subtype: &'static str) -> PendingControl {
+        let request_id = next_request_id(subtype);
+        let (tx, rx) = mpsc::channel();
+        self.lock_waiters().insert(request_id.clone(), tx);
+        PendingControl {
+            channel: self.clone(),
+            request_id,
+            subtype,
+            rx,
+        }
+    }
+
     pub(crate) fn request<W: Write>(
         &self,
         stdin: &Mutex<W>,
         query: ControlQuery,
         timeout: Duration,
     ) -> Result<serde_json::Value, ControlError> {
-        let request_id = next_control_request_id(query);
-        let (tx, rx) = mpsc::channel();
-        self.lock_waiters().insert(request_id.clone(), tx);
-
-        let payload = build_control_request(&request_id, query);
+        let pending = self.register(query.subtype());
+        let payload = build_control_request(&pending.request_id, query);
         let written = match stdin.lock() {
             Ok(mut w) => writeln!(w, "{payload}").and_then(|()| w.flush()),
             Err(e) => Err(std::io::Error::other(format!("stdin lock poisoned: {e}"))),
         };
         if let Err(e) = written {
-            self.lock_waiters().remove(&request_id);
+            pending.forget();
             return Err(ControlError::Write(e.to_string()));
         }
+        pending.wait(timeout)
+    }
 
-        match rx.recv_timeout(timeout) {
+    pub(crate) fn send_set_model<W: Write>(
+        &self,
+        locked_stdin: &mut W,
+        model: &str,
+    ) -> Result<PendingControl, ControlError> {
+        let pending = self.register(SUBTYPE_SET_MODEL);
+        let payload = build_set_model_request(&pending.request_id, model);
+        if let Err(e) = writeln!(locked_stdin, "{payload}").and_then(|()| locked_stdin.flush()) {
+            pending.forget();
+            return Err(ControlError::Write(e.to_string()));
+        }
+        Ok(pending)
+    }
+}
+
+pub(crate) struct PendingControl {
+    channel: ControlChannel,
+    request_id: String,
+    subtype: &'static str,
+    rx: mpsc::Receiver<ControlOutcome>,
+}
+
+impl PendingControl {
+    fn forget(&self) {
+        self.channel.lock_waiters().remove(&self.request_id);
+    }
+
+    pub(crate) fn wait(self, timeout: Duration) -> Result<serde_json::Value, ControlError> {
+        match self.rx.recv_timeout(timeout) {
             Ok(ControlOutcome::Success(value)) => Ok(value),
             Ok(ControlOutcome::Rejected(e)) => Err(ControlError::Rejected(e)),
             Err(RecvTimeoutError::Timeout) => {
-                self.lock_waiters().remove(&request_id);
+                self.forget();
                 Err(ControlError::Timeout {
-                    subtype: query.subtype(),
+                    subtype: self.subtype,
                     timeout,
                 })
             }
@@ -484,11 +529,11 @@ mod tests {
 
     #[test]
     fn request_ids_are_unique_and_carry_the_subtype() {
-        let a = next_control_request_id(ControlQuery::Usage);
-        let b = next_control_request_id(ControlQuery::Usage);
+        let a = next_request_id(ControlQuery::Usage.subtype());
+        let b = next_request_id(ControlQuery::Usage.subtype());
         assert_ne!(a, b);
         assert!(a.starts_with("req_get_usage_"));
-        assert!(next_control_request_id(ControlQuery::Initialize).starts_with("req_initialize_"));
+        assert!(next_request_id(ControlQuery::Initialize.subtype()).starts_with("req_initialize_"));
     }
 
     #[test]
@@ -636,6 +681,92 @@ mod tests {
         assert!(
             matches!(&err, ControlError::Write(e) if e.contains("boom")),
             "{err}"
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn set_model_request_matches_the_sdk_envelope() {
+        let v = build_set_model_request("req_set_model_1", "openrouter/openai/gpt-4o-mini");
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "control_request",
+                "request_id": "req_set_model_1",
+                "request": { "subtype": "set_model", "model": "openrouter/openai/gpt-4o-mini" },
+            })
+        );
+    }
+
+    #[test]
+    fn a_set_model_written_under_the_callers_lock_resolves_on_its_answer() {
+        let channel = ControlChannel::default();
+        let mut sink = Vec::new();
+
+        let pending = channel
+            .send_set_model(&mut sink, "local/llama-3.1-70b")
+            .expect("written");
+
+        let sent: serde_json::Value =
+            serde_json::from_str(String::from_utf8(sink).unwrap().trim_end()).unwrap();
+        assert_eq!(sent["request"]["model"], "local/llama-3.1-70b");
+        let id = sent["request_id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("req_set_model_"), "{id}");
+        assert_eq!(channel.pending_ids(), vec![id.clone()]);
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        });
+        assert_eq!(channel.route_response(&answer), Routed::Delivered);
+        assert_eq!(
+            pending.wait(Duration::from_secs(5)),
+            Ok(serde_json::Value::Null)
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_set_model_that_cannot_be_written_leaves_no_waiter() {
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let channel = ControlChannel::default();
+
+        let err = channel
+            .send_set_model(&mut FailWriter, "local/llama-3.1-70b")
+            .err()
+            .expect("write must fail");
+
+        assert!(
+            matches!(&err, ControlError::Write(e) if e.contains("gone")),
+            "{err}"
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_unanswered_set_model_times_out_and_forgets_its_waiter() {
+        let channel = ControlChannel::default();
+        let pending = channel
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+
+        let err = pending
+            .wait(Duration::from_millis(30))
+            .expect_err("no answer");
+
+        assert_eq!(
+            err,
+            ControlError::Timeout {
+                subtype: "set_model",
+                timeout: Duration::from_millis(30),
+            }
         );
         assert!(channel.pending_ids().is_empty());
     }

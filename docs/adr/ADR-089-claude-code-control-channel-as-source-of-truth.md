@@ -14,6 +14,8 @@ A new short-lived `claude` process per query is ruled out: every extra start-up 
 
 Proxy-routed providers (local, OpenRouter) send no control request: the backend sends `initialize` only when the session's provider kind is Anthropic (`chat.rs`), and Angular asks for usage and context only for Anthropic kinds (`chat-state.service.ts::refreshControlData`). For a routed provider Claude Code would report its own assumptions, not the provider's, so their model list and context window stay on the discovery probe of ADR-041.
 
+**Amendment (SPEED-696, 2026-09-24: one control request for routed sessions).** A proxy-routed session now sends exactly one control request: `set_model`. It goes out when the first `system/init` reports a model other than the configured one (the soft-impose of ADR-088, amendment SPEED-696). The request changes the session and reads no data from Claude Code, so the reason above does not apply to it. Routed sessions still send no `initialize`, `get_usage` or `get_context_usage`. `ControlChannel::send_set_model` writes the request under the stdin lock the caller already holds, because the soft-impose must see a user's `/model` written first. The answer is awaited on a thread of its own (`chat.rs::report_soft_impose`), so the reader still never waits.
+
 ### 2. The requests used and the fields read
 
 | Request                                      | When                                                                                                                                  | Fields read                                                                                                                                                  |
