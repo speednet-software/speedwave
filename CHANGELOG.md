@@ -1,6 +1,18 @@
 # Changelog
 
 
+## [0.19.0](https://github.com/speednet-software/speedwave/compare/v0.18.1...v0.19.0) (2026-09-24)
+
+
+### Features
+
+* Claude Code control channel, signed Windows builds, and container engine self-healing ([#1250](https://github.com/speednet-software/speedwave/issues/1250)) ([3edff14](https://github.com/speednet-software/speedwave/commit/3edff140d102525e0acc3e83c4ada20bb138b7be))
+
+
+### Bug Fixes
+
+* **ci:** grant the release build the permissions its signing jobs request ([#1251](https://github.com/speednet-software/speedwave/issues/1251)) ([43c318f](https://github.com/speednet-software/speedwave/commit/43c318f99fea40977e532be17980a04d7fdc9f99))
+
 ## [0.18.1](https://github.com/speednet-software/speedwave/compare/v0.18.0...v0.18.1) (2026-08-25)
 
 
