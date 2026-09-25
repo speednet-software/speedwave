@@ -425,12 +425,9 @@ pub fn base_env() -> HashMap<String, String> {
 /// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
 pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
-/// Claude Code's cap on an MCP tool description, 2048 characters unless this env var raises it.
-pub const MCP_DESCRIPTION_LENGTH_ENV: &str = "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH";
+pub(crate) const MCP_DESCRIPTION_LENGTH_ENV: &str = "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH";
 
-/// Value of [`MCP_DESCRIPTION_LENGTH_ENV`] in the claude container. Must stay ≥
-/// `MAX_META_TOOL_DESCRIPTION_LENGTH` in `mcp-servers/shared/src/tool-limits.ts`.
-pub const MCP_DESCRIPTION_MAX_LENGTH: usize = 8192;
+pub(crate) const MCP_DESCRIPTION_MAX_LENGTH: usize = 8192;
 
 /// Alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from `ANTHROPIC_MODELS` (Fable resolves
 /// natively); `[1m]` only where every plan has that window, and a plan-dependent one is not pinned.
@@ -636,11 +633,11 @@ mod tests {
     }
 
     fn hub_meta_tool_description_budget() -> usize {
-        let src = include_str!("../../../mcp-servers/shared/src/tool-limits.ts");
+        let src = include_str!("../../../mcp-servers/hub/src/meta-tools.ts");
         let re = regex::Regex::new(r"export const MAX_META_TOOL_DESCRIPTION_LENGTH = ([0-9_]+);")
             .unwrap();
         re.captures(src)
-            .expect("tool-limits.ts must declare MAX_META_TOOL_DESCRIPTION_LENGTH as a literal")
+            .expect("meta-tools.ts must declare MAX_META_TOOL_DESCRIPTION_LENGTH as a literal")
             .get(1)
             .unwrap()
             .as_str()
@@ -659,7 +656,7 @@ mod tests {
         assert!(
             MCP_DESCRIPTION_MAX_LENGTH >= budget,
             "MCP_DESCRIPTION_MAX_LENGTH ({MCP_DESCRIPTION_MAX_LENGTH}) must be >= the hub's \
-             MAX_META_TOOL_DESCRIPTION_LENGTH ({budget}) from tool-limits.ts, or Claude Code cuts \
+             MAX_META_TOOL_DESCRIPTION_LENGTH ({budget}) from meta-tools.ts, or Claude Code cuts \
              a hub meta-tool description"
         );
     }

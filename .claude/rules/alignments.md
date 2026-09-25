@@ -51,11 +51,11 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - Updater config (endpoint ↔ `updater.rs::STABLE_ENDPOINT`, minisign pubkey, v1Compatible artifacts) — `_tests/desktop/updater-config.bats`. Release pipeline signing + asset/sig/latest.json completeness — `_tests/desktop/{release-workflow-signing,verify-release-assets}.bats`.
 - User-message wire envelope (Rust side) — snapshot `build_user_message_snapshot_wire_format`.
 - Model catalog pricing completeness — `tests/anthropic_pricing_completeness.rs`; timeout budgets (MCP idle ≥ worker stall; Lima provision == Desktop reconcile wait) — `mcp_tool_idle_timeout_covers_worker_max`, `lima_provision_start_timeout_matches_desktop_reconcile_wait_budget`.
-- MCP description cap: `defaults.rs::MCP_DESCRIPTION_MAX_LENGTH`, which the claude container gets as `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`, ↔ `mcp-servers/shared/src/tool-limits.ts::MAX_META_TOOL_DESCRIPTION_LENGTH`. Two tests guard the pair:
+- MCP description cap: `defaults.rs::MCP_DESCRIPTION_MAX_LENGTH`, which the claude container gets as `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`, ↔ `mcp-servers/hub/src/meta-tools.ts::MAX_META_TOOL_DESCRIPTION_LENGTH`. Two tests guard the pair:
   - `mcp_description_limit_covers_the_hub_meta_tool_budget` (`defaults.rs`) keeps the env value at or above the budget.
-  - `hub/src/meta-tools.test.ts` keeps every hub meta-tool description within the budget.
+  - `mcp-servers/hub/src/meta-tools.test.ts` keeps every hub meta-tool description within the budget.
 
-  Claude Code cuts an MCP tool description at that env value, 2048 without it. Measured on 2.1.282 with the real hub, the cut dropped the tail of `execute_code`: the `paginate` helper, the plugin camelCase rule and the cross-service example.
+  Claude Code cuts an MCP tool description at that env value, 2048 without it. Measured on 2.1.282 with the real hub, the cut dropped the tail of `execute_code`: the `paginate` helper, the plugin camelCase rule and the cross-service example. No test checks that the pinned binary still reads the variable; the Claude Code bump procedure re-checks it (architecture rules). A repo `.speedwave.json` cannot set it (`config.rs::repo_env_key_is_denied`).
 
 - `AnthropicModelInfo` (Rust) ↔ `AnthropicModel` (TS `models/llm.ts`) field set — `anthropic_model_wire_fields_match_ts_mirror` (`types.rs`); per-model `effort_levels`/`default_effort` pinned against the docs table and checked as a `EFFORT_LEVELS`-order subset — `anthropic_models_effort_table_matches_docs`, `anthropic_models_effort_levels_are_subsets_of_effort_levels_in_order` (`defaults.rs`); the per-model 1M-by-plan policy is pinned against the ADR-089 table by `one_million_context_table_matches_the_plan_decisions` (`defaults.rs`).
 - Control-response fixture ↔ `defaults.rs::CLAUDE_VERSION`: `fixture_is_the_capture_of_the_pinned_claude_code` (`control_channel.rs`) fails on a Claude Code bump until `desktop/src-tauri/tests/fixtures/cc-<version>-control-responses.sanitized.json` is re-captured from the new binary; the picker, plan-usage and context parsers are all asserted against that capture.
@@ -79,7 +79,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - Integration resource link/unlink on toggle — `_tests/entrypoint/entrypoint.bats`.
 - claude-resources `integrations/<dir>` names ↔ descriptor `config_key`s — `integrations_directories_match_known_service_keys`.
 - Service descriptors ↔ resolved-config fields / `BUILT_IN_SERVICE_IDS` / Desktop OS-config getter / native-CLI resolver — `*_covers_all_toggleable_services`, `*_matches_resolved_config_fields`, `resolve_native_cli_binary_covers_all_os_services`.
-- Repo `.speedwave.json` env deny-predicate covers `RESERVED_ENV_KEYS` + Anthropic keys — `test_repo_env_key_is_denied_covers_ssot`.
+- Repo `.speedwave.json` env deny-predicate covers `RESERVED_ENV_KEYS` + Anthropic keys + the telemetry keys + `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` — `test_repo_env_key_is_denied_covers_ssot`.
 - Displayable `DIAGNOSTIC_SOURCES` ↔ /logs merge parity — `logs_view_covers_all_displayable_registry_sources`.
 - Desktop SharePoint required-scopes ↔ `consts::SHAREPOINT_OAUTH_SCOPES` — `sharepoint_required_scopes_matches_ssot_lowercased`.
 - `.clipboard-bridge` filename Rust ↔ `containers/osc52-copy.sh` — `bridge_filename_matches_shell_wrapper_literal` + `_tests/entrypoint/osc52-copy.bats`.

@@ -2506,6 +2506,10 @@ services:
             Some("8192")
         );
         let hub_env = get_service_env_seq(&doc, "mcp-hub");
+        assert!(
+            !hub_env.is_empty(),
+            "the hub service must render its environment"
+        );
         assert!(find_env_value(&hub_env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").is_none());
     }
 

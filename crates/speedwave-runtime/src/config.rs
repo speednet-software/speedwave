@@ -1918,6 +1918,7 @@ fn repo_env_key_is_denied(key: &str) -> bool {
         .copied()
         .chain(crate::consts::RESERVED_ENV_KEYS.iter().copied())
         .chain(telemetry_denied)
+        .chain(std::iter::once(crate::defaults::MCP_DESCRIPTION_LENGTH_ENV))
         .any(|denied| denied.eq_ignore_ascii_case(key))
 }
 
@@ -4937,8 +4938,25 @@ mod tests {
             }
         }
         assert!(repo_env_key_is_denied("otel_exporter_otlp_endpoint"));
+        assert!(repo_env_key_is_denied(
+            crate::defaults::MCP_DESCRIPTION_LENGTH_ENV
+        ));
         assert!(!repo_env_key_is_denied("ANTHROPIC_MODEL"));
         assert!(!repo_env_key_is_denied("SAFE_VAR"));
+    }
+
+    #[test]
+    fn repo_env_cannot_cut_the_hub_tool_descriptions() {
+        let cleaned = sanitize_repo_env(Some(HashMap::from([
+            (
+                "claude_code_max_mcp_description_length".to_string(),
+                "1".to_string(),
+            ),
+            ("KEEP".to_string(), "y".to_string()),
+        ])))
+        .unwrap();
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned.get("KEEP"), Some(&"y".to_string()));
     }
 
     #[test]

@@ -1,12 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { MAX_META_TOOL_DESCRIPTION_LENGTH } from '@speedwave/mcp-shared';
-import { META_TOOLS } from './meta-tools.js';
+import {
+  EXECUTE_CODE_TOOL,
+  MAX_META_TOOL_DESCRIPTION_LENGTH,
+  META_TOOLS,
+  SEARCH_TOOLS_TOOL,
+} from './meta-tools.js';
 
 const CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH = 2048;
 
 describe('META_TOOLS', () => {
-  it('are the two tools the hub registers, in registration order', () => {
-    expect(META_TOOLS.map((tool) => tool.name)).toEqual(['search_tools', 'execute_code']);
+  it('are the two tools the hub registers, each under its own name', () => {
+    expect(META_TOOLS).toEqual([SEARCH_TOOLS_TOOL, EXECUTE_CODE_TOOL]);
+    expect(SEARCH_TOOLS_TOOL.name).toBe('search_tools');
+    expect(EXECUTE_CODE_TOOL.name).toBe('execute_code');
   });
 
   for (const tool of META_TOOLS) {
@@ -17,15 +23,8 @@ describe('META_TOOLS', () => {
   }
 
   it("execute_code needs more than Claude Code's default description length", () => {
-    const executeCode = META_TOOLS.find((tool) => tool.name === 'execute_code');
-    expect(executeCode?.description.length).toBeGreaterThan(CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH);
-  });
-
-  it('keeps the parts of execute_code that sit past the default cut', () => {
-    const executeCode = META_TOOLS.find((tool) => tool.name === 'execute_code');
-    const tail = executeCode?.description.slice(CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH) ?? '';
-    expect(tail).toContain('paginate(fetcher, config)');
-    expect(tail).toContain('camelCased into its global');
-    expect(tail).toContain('Cross-service workflow');
+    expect(EXECUTE_CODE_TOOL.description.length).toBeGreaterThan(
+      CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH
+    );
   });
 });

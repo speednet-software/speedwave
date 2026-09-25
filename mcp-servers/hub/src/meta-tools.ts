@@ -2,11 +2,11 @@ import { Tool, TIMEOUTS } from '@speedwave/mcp-shared';
 
 import { DETAIL_LEVELS } from './search-tools.js';
 
-/** The two tools the hub exposes to Claude: progressive discovery and sandboxed execution. */
-export const META_TOOLS: Tool[] = [
-  {
-    name: 'search_tools',
-    description: `Search available MCP tools by keyword or short phrase. Returns tool names, descriptions, and optionally full schemas.
+export const MAX_META_TOOL_DESCRIPTION_LENGTH = 4096;
+
+export const SEARCH_TOOLS_TOOL: Tool = {
+  name: 'search_tools',
+  description: `Search available MCP tools by keyword or short phrase. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
 Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
@@ -18,36 +18,37 @@ Examples:
 - search_tools({ query: "issue", detail_level: "full_schema", service: "redmine" })
 - search_tools({ query: "reminders", detail_level: "with_descriptions", service: "os" })
 - search_tools({ query: "*", detail_level: "with_descriptions", include_deferred: false })  // core tools only`,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: "Search query (e.g., 'slack', 'issue', 'merge request')",
-        },
-        detail_level: {
-          type: 'string',
-          enum: [...DETAIL_LEVELS],
-          description:
-            "Level of detail. Use 'names_only' first, then 'full_schema' for specific tools.",
-        },
-        service: {
-          type: 'string',
-          description:
-            'Limit search to specific service. Built-in: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services also accepted.',
-        },
-        include_deferred: {
-          type: 'boolean',
-          description:
-            'Include deferred (on-demand) tools (default: true). Set false to get only core tools.',
-        },
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: "Search query (e.g., 'slack', 'issue', 'merge request')",
       },
-      required: ['query'],
+      detail_level: {
+        type: 'string',
+        enum: [...DETAIL_LEVELS],
+        description:
+          "Level of detail. Use 'names_only' first, then 'full_schema' for specific tools.",
+      },
+      service: {
+        type: 'string',
+        description:
+          'Limit search to specific service. Built-in: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services also accepted.',
+      },
+      include_deferred: {
+        type: 'boolean',
+        description:
+          'Include deferred (on-demand) tools (default: true). Set false to get only core tools.',
+      },
     },
+    required: ['query'],
   },
-  {
-    name: 'execute_code',
-    description: `Execute JavaScript code (ES2022+) in a secure sandbox with MCP tools.
+};
+
+export const EXECUTE_CODE_TOOL: Tool = {
+  name: 'execute_code',
+  description: `Execute JavaScript code (ES2022+) in a secure sandbox with MCP tools.
 
 ⚠️ SCHEMA FIRST - MANDATORY WORKFLOW:
 Before calling ANY tool for the first time, you MUST:
@@ -114,40 +115,41 @@ const { results, errors } = await batch([
 
 return { total: results.length, failed: errors.length };
 \`\`\``,
-    inputSchema: {
-      type: 'object',
-      properties: {
-        code: {
-          type: 'string',
-          description:
-            'JavaScript code to execute (ES2022+). Do NOT use TypeScript type annotations. Use globals (redmine, slack, gitlab, etc.) directly - no imports needed; a dashed plugin slug is camelCased (my-plugin -> myPlugin). Return value is sent to model.',
-        },
-        timeout_ms: {
-          type: 'number',
-          description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.downloadFile, sharepoint.uploadFile) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
-        },
+  inputSchema: {
+    type: 'object',
+    properties: {
+      code: {
+        type: 'string',
+        description:
+          'JavaScript code to execute (ES2022+). Do NOT use TypeScript type annotations. Use globals (redmine, slack, gitlab, etc.) directly - no imports needed; a dashed plugin slug is camelCased (my-plugin -> myPlugin). Return value is sent to model.',
       },
-      required: ['code'],
+      timeout_ms: {
+        type: 'number',
+        description: `Execution timeout in milliseconds (default: ${TIMEOUTS.EXECUTION_MS}ms, max: ${TIMEOUTS.EXECUTION_MS}ms). For long operations (sharepoint.downloadFile, sharepoint.uploadFile) timeout auto-extends to ${TIMEOUTS.LONG_OPERATION_MS}ms.`,
+      },
     },
-    inputExamples: [
-      {
-        description: 'Minimal: get IDs only',
-        input: {
-          code: `const { ids, total_count } = await redmine.listIssueIds({ status: "open" });\nreturn { count: total_count, first_10: ids.slice(0, 10) };`,
-        },
-      },
-      {
-        description: 'Partial: get full details for selected items',
-        input: {
-          code: `const { ids } = await redmine.listIssueIds({ status: "open", assigned_to: "me" });\nconst { results } = await batch(ids.slice(0, 5).map(id => redmine.getIssueFull({ issue_id: id, include: ["journals"] })));\nreturn { results };`,
-        },
-      },
-      {
-        description: 'Full: cross-service granular workflow',
-        input: {
-          code: `const [issueData, mrData] = await Promise.all([\n  redmine.listIssueIds({ status: "open" }),\n  gitlab.listMrIds({ project_id: "my-project", state: "opened" })\n]);\nconst { results } = await batch([\n  ...issueData.ids.slice(0, 3).map(id => redmine.getIssueFull({ issue_id: id })),\n  ...mrData.mrs.slice(0, 3).map(mr => gitlab.getMrFull({ project_id: "my-project", mr_iid: mr.iid }))\n]);\nreturn { total: results.length };`,
-        },
-      },
-    ],
+    required: ['code'],
   },
-];
+  inputExamples: [
+    {
+      description: 'Minimal: get IDs only',
+      input: {
+        code: `const { ids, total_count } = await redmine.listIssueIds({ status: "open" });\nreturn { count: total_count, first_10: ids.slice(0, 10) };`,
+      },
+    },
+    {
+      description: 'Partial: get full details for selected items',
+      input: {
+        code: `const { ids } = await redmine.listIssueIds({ status: "open", assigned_to: "me" });\nconst { results } = await batch(ids.slice(0, 5).map(id => redmine.getIssueFull({ issue_id: id, include: ["journals"] })));\nreturn { results };`,
+      },
+    },
+    {
+      description: 'Full: cross-service granular workflow',
+      input: {
+        code: `const [issueData, mrData] = await Promise.all([\n  redmine.listIssueIds({ status: "open" }),\n  gitlab.listMrIds({ project_id: "my-project", state: "opened" })\n]);\nconst { results } = await batch([\n  ...issueData.ids.slice(0, 3).map(id => redmine.getIssueFull({ issue_id: id })),\n  ...mrData.mrs.slice(0, 3).map(mr => gitlab.getMrFull({ project_id: "my-project", mr_iid: mr.iid }))\n]);\nreturn { total: results.length };`,
+      },
+    },
+  ],
+};
+
+export const META_TOOLS: readonly Tool[] = [SEARCH_TOOLS_TOOL, EXECUTE_CODE_TOOL];
