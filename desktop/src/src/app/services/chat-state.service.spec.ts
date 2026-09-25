@@ -3461,7 +3461,7 @@ describe('ChatStateService', () => {
         overrideInvoke('restart_integration_containers', rejected('SecurityCheck failed'));
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
-        await expect(TestBed.inject(ProjectStateService).restartContainers()).resolves.toBe(
+        await expect(TestBed.inject(ProjectStateService).restartContainers('test')).resolves.toBe(
           'failed'
         );
 
@@ -3785,6 +3785,109 @@ describe('ChatStateService', () => {
         });
       });
 
+      function queueWhileStreaming(): Promise<void> {
+        service.isStreaming = true;
+        return service
+          .applyModelSelection(haikuPick)
+          .then(() => service.applyEffortSelection('max'));
+      }
+
+      function switchedModels(calls: unknown[][]): string[] {
+        return calls
+          .filter(([cmd]) => cmd === 'switch_chat_model')
+          .map(([, args]) => (args as { model: string }).model);
+      }
+
+      it('a pick queued while a turn streamed survives a resume the backend kept and reaches that session at its next turn end', async () => {
+        liveConversation();
+        await Promise.resolve();
+        await queueWhileStreaming();
+        expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+
+        expect(service.lastKnownSessionId).toBe(LIVE);
+        expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
+        expect(switchedModels(invokeSpy.mock.calls)).toEqual(['claude-haiku-4-5']);
+        expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      it('a model pick made during a kept resume wins over the one queued while the turn streamed', async () => {
+        liveConversation();
+        await Promise.resolve();
+        await queueWhileStreaming();
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+        await service.applyModelSelection({
+          ...haikuPick,
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+        });
+
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+        expect(service.pendingModelOverride()).toBe('claude-sonnet-5');
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
+
+        expect(switchedModels(invokeSpy.mock.calls)).toEqual(['claude-sonnet-5']);
+      });
+
+      it('a resume the backend carried out drops the picks queued while a turn streamed: the resumed process launches with their pins', async () => {
+        liveConversation();
+        await Promise.resolve();
+        await queueWhileStreaming();
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+        const calls = invokeSpy.mock.calls;
+        const pinned = indexOfCall(
+          calls,
+          (cmd, args) =>
+            cmd === 'set_model_pin' && (args as { model: string }).model === 'claude-haiku-4-5'
+        );
+        expect(pinned).toBeGreaterThan(-1);
+        expect(pinned).toBeLessThan(indexOfCall(calls, (cmd) => cmd === 'resume_conversation'));
+
+        resumed.resolve();
+        await resuming;
+
+        expect(service.lastKnownSessionId).toBe('sess-older');
+        expect(service.pendingModelOverride()).toBeNull();
+        service.isStreaming = true;
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: { session_id: 'sess-older' },
+        } as never);
+        await new Promise((r) => setTimeout(r, 0));
+        expect(indexOfCall(calls, switchedModel)).toBe(-1);
+        expect(indexOfCall(calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+      });
+
       it('a resume that fails after the running session stopped drops the queued picks', async () => {
         liveConversation();
         await Promise.resolve();
@@ -3877,7 +3980,7 @@ describe('ChatStateService', () => {
             -1
           );
         });
-        const restarting = projectState.restartContainers();
+        const restarting = projectState.restartContainers('test');
         stopped.resolve();
         await stopping;
         await new Promise((r) => setTimeout(r, 0));
@@ -3916,7 +4019,7 @@ describe('ChatStateService', () => {
 
         const resuming = service.resumeConversation('sess-older');
         await vi.waitFor(() => expect(called('stop_chat')).toBeGreaterThan(-1));
-        const restarting = projectState.restartContainers();
+        const restarting = projectState.restartContainers('test');
         stopped.resolve();
         await new Promise((r) => setTimeout(r, 0));
         expect(called('resume_conversation')).toBe(-1);
@@ -3961,6 +4064,16 @@ describe('ChatStateService', () => {
           lastKnownSessionId: LIVE,
           optimisticSessionId: 'sess-optimistic',
           deferredEffort: 'high',
+          pendingModelPick: {
+            wireId: haikuPick.wireId,
+            routed: false,
+            project: 'test',
+            mark: 0,
+            request: 1,
+            sel: haikuPick,
+            clearsPin: false,
+          },
+          pendingEffort: { level: 'max', project: 'test', mark: 0, request: 1 },
         };
 
         internals.restoreConversationView(view);
@@ -9389,6 +9502,75 @@ describe('ChatStateService', () => {
 
         expect(callsAfterRestart()).not.toContain('start_chat');
       });
+
+      function saveHeldOpen(): Deferred {
+        const saved = createDeferred();
+        mockTauri.invokeHandler = (cmd: string) => {
+          calls.push(cmd);
+          if (cmd === 'set_provider_model') return saved.promise;
+          if (cmd === 'get_auth_status') {
+            return Promise.resolve({
+              status: 'ready',
+              api_key_configured: false,
+              oauth_authenticated: false,
+              needs_anthropic_auth: false,
+              provider_configured: true,
+            });
+          }
+          return Promise.resolve(undefined);
+        };
+        return saved;
+      }
+
+      it('a project switch that starts while the pick is saving restarts nothing', async () => {
+        const saved = saveHeldOpen();
+        const pick = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('set_provider_model'));
+
+        mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+        saved.resolve();
+        await pick;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(calls).not.toContain('restart_integration_containers');
+        expect(calls).not.toContain('start_chat');
+        expect(service.modelSelectionError()).toBe('');
+      });
+
+      it('a project switch that lands while the pick is saving leaves the new project alone', async () => {
+        const saved = saveHeldOpen();
+        const projectState = TestBed.inject(ProjectStateService);
+        const pick = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('set_provider_model'));
+
+        mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+        mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+        await vi.waitFor(() => expect(projectState.status()).toBe('ready'));
+        saved.resolve();
+        await pick;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(projectState.activeProject()).toBe('other');
+        expect(calls).not.toContain('restart_integration_containers');
+        expect(calls).not.toContain('start_chat');
+        expect(service.modelSelectionError()).toBe('');
+      });
+
+      it('an idle routed pick restarts the containers of its own project, then respawns', async () => {
+        everyCommandAnswers();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(1));
+
+        expect(invokeSpy).toHaveBeenCalledWith('restart_integration_containers', {
+          project: 'test',
+          justEnabled: null,
+        });
+        expect(calls.indexOf('start_chat')).toBeGreaterThan(
+          calls.indexOf('restart_integration_containers')
+        );
+      });
     });
   });
 
@@ -9421,7 +9603,7 @@ describe('ChatStateService', () => {
     }
 
     it('claims the chat at once and replaces the session only after the restart ends', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       await new Promise((r) => setTimeout(r, 0));
 
@@ -9443,7 +9625,7 @@ describe('ChatStateService', () => {
     it('the restart-complete resume of the prior session yields to the one resumed meanwhile', async () => {
       service.seedSessionId('sess-live');
 
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       pendingRestart.resolve();
       await restart;
@@ -9455,7 +9637,7 @@ describe('ChatStateService', () => {
     });
 
     it('still resumes after the restart fails', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       pendingRestart.reject(new Error('compose failed'));
 
@@ -9478,10 +9660,10 @@ describe('ChatStateService', () => {
       projectState.onRestartComplete(() => {
         if (chained) return;
         chained = true;
-        void projectState.restartContainers();
+        void projectState.restartContainers('test');
       });
 
-      const first = projectState.restartContainers();
+      const first = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       pendingRestart.resolve();
       await first;
@@ -9497,7 +9679,7 @@ describe('ChatStateService', () => {
     });
 
     it('drops the resume when a project switch starts before the restart ends', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
@@ -9511,7 +9693,7 @@ describe('ChatStateService', () => {
     });
 
     it('drops the resume when a project switch starts and fails back before the restart ends', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
@@ -9526,7 +9708,7 @@ describe('ChatStateService', () => {
     });
 
     it('drops the resume when the project changes before the restart ends, and frees the chat', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       projectState.activeProject.set('other');

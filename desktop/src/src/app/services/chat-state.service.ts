@@ -90,6 +90,8 @@ interface ConversationView extends LegacyStateSnapshot {
   lastKnownSessionId: string | null;
   optimisticSessionId: string | null;
   deferredEffort: string | null;
+  pendingModelPick: ModelPick | null;
+  pendingEffort: EffortPick | null;
 }
 
 function emptyConversationView(): ConversationView {
@@ -108,6 +110,8 @@ function emptyConversationView(): ConversationView {
     lastKnownSessionId: null,
     optimisticSessionId: null,
     deferredEffort: null,
+    pendingModelPick: null,
+    pendingEffort: null,
   };
 }
 
@@ -450,10 +454,8 @@ export class ChatStateService {
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
   /**
-   * Takes a composer model pick: a live session gets it as a `set_model` control request and
-   * the pick is persisted (Anthropic: `settings.json` pin; routed: config write-through) once
-   * Claude Code accepts it; a busy chat queues it; an idle chat persists it and respawns, a
-   * routed pick after a compose re-render.
+   * Takes a composer model pick: a live session gets a `set_model` and saves it once accepted,
+   * a busy chat queues it, an idle chat saves it and respawns (routed: after a re-render).
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -522,7 +524,7 @@ export class ChatStateService {
       return;
     }
     if (pick.routed && this.launchedFor(pick.wireId)) return;
-    if (!(await this.persistModelPick(pick))) return;
+    if (!(await this.persistModelPick(pick)) || !this.stillSettledFor(pick)) return;
     if (pick.routed && !(await this.rerenderContainersForModel(pick))) return;
     if (!this.stillSettledFor(pick) || this.chatBusy() || this.hasLiveSession()) return;
     await this.respawnIdleSession(pick.routed && this.isNewestModelPick(pick) ? pick.wireId : null);
@@ -616,7 +618,7 @@ export class ChatStateService {
   }
 
   private async rerenderContainersForModel(pick: ModelPick): Promise<boolean> {
-    const outcome = await this.projectState.restartContainers();
+    const outcome = await this.projectState.restartContainers(pick.project);
     if (outcome === 'restarted') return true;
     if (outcome === 'failed') {
       this.projectState.requestRestartFor(pick.project);
@@ -1537,6 +1539,8 @@ export class ChatStateService {
       lastKnownSessionId: this._lastKnownSessionId,
       optimisticSessionId: this._optimisticSessionId,
       deferredEffort: this._deferredEffort(),
+      pendingModelPick: this._pendingModelPick(),
+      pendingEffort: this._pendingEffort,
     };
   }
 
@@ -1555,6 +1559,8 @@ export class ChatStateService {
     this._lastKnownSessionId = view.lastKnownSessionId;
     this._optimisticSessionId = view.optimisticSessionId;
     this._deferredEffort.set(view.deferredEffort);
+    this._pendingModelPick.set(this._pendingModelPick() ?? view.pendingModelPick);
+    this._pendingEffort ??= view.pendingEffort;
     this.notifyChange();
   }
 
