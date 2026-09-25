@@ -3733,6 +3733,81 @@ describe('ChatStateService', () => {
         });
       });
 
+      function resumeStarting(): {
+        resumed: ReturnType<typeof createDeferred<void>>;
+        resuming: Promise<void>;
+        invokeSpy: ReturnType<typeof vi.spyOn>;
+      } {
+        const resumed = createDeferred<void>();
+        overrideInvoke('resume_conversation', () => resumed.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        return { resumed, resuming: service.resumeConversation('sess-older'), invokeSpy };
+      }
+
+      it('a resume the backend refused before it stopped the running session returns to it and keeps the queued picks', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+
+        await service.applyEffortSelection('max');
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+
+        expect(service.lastKnownSessionId).toBe(LIVE);
+        const shown = service.messagesFromState().flatMap((m) => m.blocks);
+        expect(JSON.stringify(shown)).toContain('container images are still building');
+        expect(JSON.stringify(shown)).not.toContain(SESSION_KEPT_MARKER);
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
+      });
+
+      it('a resume that fails after the running session stopped drops the queued picks', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+
+        await service.applyEffortSelection('max');
+        resumed.reject(new Error('failed to spawn claude'));
+        await resuming;
+
+        expect(service.lastKnownSessionId).toBe('sess-older');
+        service.isStreaming = true;
+        service.handleStreamChunk({
+          chunk_type: 'Result',
+          data: { session_id: 'sess-older' },
+        } as never);
+        await new Promise((r) => setTimeout(r, 0));
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+      });
+
+      it('the kept-session prefix never reaches the start error the user reads', async () => {
+        liveConversation();
+        await Promise.resolve();
+        overrideInvoke(
+          'start_chat',
+          rejected(`${SESSION_KEPT_MARKER}: container images are still building`)
+        );
+
+        await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
+
+        const projectState = TestBed.inject(ProjectStateService);
+        expect(projectState.error).toContain('container images are still building');
+        expect(projectState.error).not.toContain(SESSION_KEPT_MARKER);
+      });
+
       it('a new conversation that fails keeps the effort notice of the session it returns to', async () => {
         liveConversation(rejected('chat session ended before the response'));
         await Promise.resolve();

@@ -763,23 +763,22 @@ pick released when a fresh start completes: it re-renders the containers and res
 the session, because its model and window reach Claude Code only as container
 environment and the new session has no conversation yet.
 
-A first start that fails drops the waiting picks, and so do a resume that fails and a
-New chat that fails to spawn, because the backend stops the earlier process before it
-spawns the new one; their pins carry them to the next spawn. The header's New chat
-drops them when it resets the chat, and its session launches with the pins. Only a New
-chat started from a transcript (`startNewConversation`) keeps them, and only when the
-backend refused the start before it stopped the earlier process: images that are not
-ready, a sign-in check that fails or says no, or a poisoned session lock.
-`start_session_inner` prefixes exactly those failures with
-`chat_session_cmd::MSG_SESSION_KEPT`, so the frontend does not infer the order from an
-error text of its own. The chat returns to that process, which takes them at its next
-turn end. The fresh
-start after a container restart drops them even then, since the restart already ended
-the earlier process. A New chat that fails also restores the effort notice together
-with the session id the chat returns to. A pick made while a resume waits out
-a container restart is dropped when the resume begins, since the resumed process
-launches with the pins. The Stop a container restart begins with releases nothing: the
-restart resumes the conversation in a process that launches with the pins.
+A first start that fails drops the waiting picks, and so do a resume and a New chat
+that fail to spawn, because the backend stops the earlier process before it spawns the
+new one; their pins carry them to the next spawn. The header's New chat drops them when
+it resets the chat, and its session launches with the pins. A New chat started from a
+transcript (`startNewConversation`) and a resume keep them, but only when the backend
+refused the start before it stopped the earlier process: images that are not ready, a
+sign-in check that fails or says no, or a poisoned session lock. `start_session_inner`
+prefixes exactly those failures with `chat_session_cmd::MSG_SESSION_KEPT`, so the
+frontend does not infer the order from an error text of its own, and the frontend
+strips the prefix from every error it shows. The chat returns to that process, with its
+session id and effort notice restored, and the process takes them at its next turn end.
+The fresh start after a container restart drops them even then, since the restart
+already ended the earlier process. A pick made while a resume waits out a container
+restart is dropped when the resume begins, since the resumed process launches with the
+pins. The Stop a container restart begins with releases nothing: the restart resumes
+the conversation in a process that launches with the pins.
 
 A pick in a chat without a session id restarts the idle session, even when the chat
 shows messages, so the session launches with the pin; a routed pick re-renders the

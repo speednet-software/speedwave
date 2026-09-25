@@ -9,7 +9,7 @@ use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
 static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(crate) const MSG_SESSION_KEPT: &str = "the running chat session was kept";
+const MSG_SESSION_KEPT: &str = "the running chat session was kept";
 
 fn kept_session_error(e: impl std::fmt::Display) -> String {
     format!("{MSG_SESSION_KEPT}: {e}")
@@ -810,11 +810,22 @@ mod tests {
         let closure_start = before_stop
             .find("rt.transaction(")
             .expect("start_session_inner must check auth under the compose lock");
-        let closure_end = closure_start
+        let body_start = closure_start
             + before_stop[closure_start..]
-                .find("})")
-                .expect("the transaction closure must close")
-            + 2;
+                .find('{')
+                .expect("the transaction closure has a body");
+        let mut depth = 0usize;
+        let closure_end = before_stop[body_start..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(body_start + i + 1)
+            })
+            .expect("the transaction closure must close");
         let outside_closure = format!(
             "{}{}",
             &before_stop[..closure_start],
@@ -835,7 +846,7 @@ mod tests {
 
     #[test]
     fn a_kept_session_error_keeps_the_sign_in_wording_the_frontend_matches() {
-        let refused = kept_session_error(crate::MSG_NOT_AUTHENTICATED);
+        let refused = kept_session_error(anyhow::anyhow!("{}", crate::MSG_NOT_AUTHENTICATED));
 
         assert!(refused.starts_with(MSG_SESSION_KEPT), "{refused}");
         assert!(refused.contains("not authenticated"), "{refused}");

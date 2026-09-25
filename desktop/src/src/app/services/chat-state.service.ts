@@ -100,8 +100,11 @@ export const NEW_CONVERSATION_STREAMING =
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
 
-/** Prefix of a start the backend refused before it stopped the running session. Mirror of Rust `chat_session_cmd::MSG_SESSION_KEPT`. */
 export const SESSION_KEPT_MARKER = 'the running chat session was kept';
+
+function withoutSessionKeptMarker(message: string): string {
+  return message.replace(`${SESSION_KEPT_MARKER}: `, '');
+}
 
 export const MODEL_SWITCH_NOT_APPLIED =
   'The containers were not restarted, so the model is not in use yet. Pick it again in a moment.';
@@ -807,7 +810,7 @@ export class ChatStateService {
           } else {
             this.log.error(`[chat-state] Failed to start chat session: ${msg}`);
             this.projectState.status.set('error');
-            this.projectState.error = `Failed to start chat session: ${msg}`;
+            this.projectState.error = `Failed to start chat session: ${withoutSessionKeptMarker(msg)}`;
             this.notifyChange();
           }
         }
@@ -976,7 +979,12 @@ export class ChatStateService {
             ...this._messages,
             {
               role: 'assistant',
-              blocks: [{ type: 'error', content: `Failed to restart session: ${retryErr}` }],
+              blocks: [
+                {
+                  type: 'error',
+                  content: `Failed to restart session: ${withoutSessionKeptMarker(retryMsg)}`,
+                },
+              ],
               timestamp: Date.now(),
             },
           ];
@@ -1625,6 +1633,8 @@ export class ChatStateService {
       this._resumeInProgress = false;
       return;
     }
+    const priorSessionId = this._lastKnownSessionId;
+    const priorDeferredEffort = this._deferredEffort();
     this.resetForNewConversation();
     this.beginTranscriptLoad();
     const endStartingSession = this.beginStartingSession();
@@ -1633,6 +1643,7 @@ export class ChatStateService {
     this._lastKnownSessionId = sessionId;
 
     let outcome: StartOutcome = 'started';
+    let sessionKept = false;
     try {
       const project = this.projectState.activeProject();
       if (!project) return;
@@ -1673,6 +1684,11 @@ export class ChatStateService {
       }
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
+      sessionKept = msg.includes(SESSION_KEPT_MARKER);
+      if (sessionKept) {
+        this._lastKnownSessionId = priorSessionId;
+        this._deferredEffort.set(priorDeferredEffort);
+      }
       if (isNotAuthenticatedError(msg)) {
         outcome = 'auth';
         await this.projectState.retryAuth();
@@ -1682,7 +1698,12 @@ export class ChatStateService {
           ...this.messagesFromState(),
           {
             role: 'assistant',
-            blocks: [{ type: 'error' as const, content: `Failed to resume session: ${err}` }],
+            blocks: [
+              {
+                type: 'error' as const,
+                content: `Failed to resume session: ${withoutSessionKeptMarker(msg)}`,
+              },
+            ],
             timestamp: Date.now(),
           },
         ]);
@@ -1698,7 +1719,7 @@ export class ChatStateService {
     }
     if (gen !== this._sessionGeneration) return;
     if (outcome === 'started') this.releasePendingPicks();
-    else this.dropPendingPicks();
+    else if (!sessionKept) this.dropPendingPicks();
   }
 
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
