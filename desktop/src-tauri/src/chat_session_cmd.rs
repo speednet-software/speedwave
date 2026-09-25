@@ -16,6 +16,14 @@ fn kept_session_error(e: impl std::fmt::Display) -> String {
     format!("{MSG_SESSION_KEPT}: {e}")
 }
 
+fn failure_before_swap(session_kept: bool, e: impl std::fmt::Display) -> String {
+    if session_kept {
+        kept_session_error(e)
+    } else {
+        e.to_string()
+    }
+}
+
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
@@ -31,9 +39,8 @@ fn start_session_inner(
 
     containers_cmd::ensure_images_ready().map_err(kept_session_error)?;
 
-    if oauth_just_started {
-        containers_cmd::recreate_project_containers_if_running(project);
-    }
+    let recreated =
+        oauth_just_started && containers_cmd::recreate_project_containers_if_running(project);
 
     log::info!("acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
@@ -45,14 +52,14 @@ fn start_session_inner(
         }
         Ok(())
     })
-    .map_err(kept_session_error)?;
+    .map_err(|e| failure_before_swap(!recreated, e))?;
 
     log::info!("extracting old session");
     let mut old_session = {
         let mut guard = session_arc
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))
-            .map_err(kept_session_error)?;
+            .map_err(|e| failure_before_swap(!recreated, e))?;
         std::mem::replace(&mut *guard, ChatSession::new(project))
     };
     log::info!("stopping old session (outside lock)");
@@ -329,21 +336,38 @@ fn live_session_input<T>(
     take_from_project_session(&session, project, take)
 }
 
+fn project_session_after_first_turn<T>(
+    session_arc: &SharedChatSession,
+    project: &str,
+    take: impl FnOnce(&ChatSession) -> anyhow::Result<T>,
+) -> Result<T, String> {
+    let deadline = std::time::Instant::now() + chat::FIRST_TURN_WAIT;
+    let mut first_turn = live_session_input(session_arc, project, |s| Ok(s.first_turn_gate()))?;
+    loop {
+        let settled =
+            first_turn.wait(deadline.saturating_duration_since(std::time::Instant::now()));
+        let session = lock_session_for_input(session_arc)?;
+        if session.project_name() != project {
+            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+        }
+        let current = session.first_turn_gate();
+        if current.is(&first_turn) || std::time::Instant::now() >= deadline {
+            if !settled {
+                log::warn!("taking the session before its model switch settled");
+            }
+            return take(&session).map_err(|e| e.to_string());
+        }
+        log::info!("the project's chat session restarted while an input waited for its first turn");
+        first_turn = current;
+    }
+}
+
 fn switch_model_inner(
     session_arc: &SharedChatSession,
     project: &str,
     model: &str,
 ) -> Result<ModelSwitchOutcome, String> {
-    let first_turn = {
-        let session = lock_session_for_input(session_arc)?;
-        if session.project_name() != project {
-            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
-        }
-        session.first_turn_gate()
-    };
-    let switch = write_after(session_arc, &first_turn, |session| {
-        take_from_project_session(session, project, ChatSession::model_switch)
-    })?;
+    let switch = project_session_after_first_turn(session_arc, project, ChatSession::model_switch)?;
     log::info!("switching the chat session to {model}");
     let outcome = switch.apply(model).map_err(|e| e.to_string())?;
     match &outcome {
@@ -933,7 +957,10 @@ mod tests {
             outside_closure.matches("?;").count(),
             outside_closure
                 .matches(".map_err(kept_session_error)?;")
-                .count(),
+                .count()
+                + outside_closure
+                    .matches(".map_err(|e| failure_before_swap(!recreated, e))?;")
+                    .count(),
             "a failure before the swap leaves the running session in place and must say so"
         );
         let after_stop = &body[body.find("old_session.stop()").unwrap()..];
@@ -1177,11 +1204,93 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         assert!(!picker.is_finished(), "the pick waits for the soft-impose");
+        assert!(
+            session_arc.try_lock().is_ok(),
+            "the pick must not hold the session while it waits"
+        );
         gate.release();
         let Err(err) = picker.join().unwrap() else {
             panic!("a session without a process cannot take the pick");
         };
         assert!(err.contains("no active session"), "{err}");
+    }
+
+    #[test]
+    fn a_model_pick_waits_again_when_its_project_session_restarts_during_the_wait() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let first = session_arc.lock().unwrap().hold_first_turn();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                switch_model_inner(&session_arc, "test-project", "claude-haiku-4-5")
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let second = session_arc.lock().unwrap().hold_first_turn();
+        first.release();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !picker.is_finished(),
+            "the pick waits for the restarted session's own soft-impose"
+        );
+
+        second.release();
+        let Err(err) = picker.join().unwrap() else {
+            panic!("a session without a process cannot take the pick");
+        };
+        assert!(err.contains("no active session"), "{err}");
+        assert_ne!(err, MSG_SESSION_REPLACED);
+    }
+
+    #[test]
+    fn a_model_pick_whose_project_session_was_replaced_by_another_project_is_refused() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                switch_model_inner(&session_arc, "test-project", "claude-haiku-4-5")
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        *session_arc.lock().unwrap() = ChatSession::new("other-project");
+        gate.release();
+
+        assert_eq!(
+            picker.join().unwrap(),
+            Err(MSG_NO_SESSION_FOR_PROJECT.to_string())
+        );
+    }
+
+    #[test]
+    fn a_failure_before_the_swap_says_kept_only_while_the_old_process_still_runs() {
+        assert!(failure_before_swap(true, "not signed in").starts_with(MSG_SESSION_KEPT));
+        assert_eq!(failure_before_swap(false, "not signed in"), "not signed in");
+    }
+
+    #[test]
+    fn a_recreate_for_a_new_oauth_worker_drops_the_kept_marker_after_it() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let recreate = body
+            .find("let recreated =")
+            .expect("the start records whether it recreated the containers");
+        let swap = body.find("std::mem::replace(").expect("the swap");
+        let after_recreate = &body[recreate..swap];
+
+        assert!(body[recreate..].contains("recreate_project_containers_if_running(project)"));
+        assert!(!after_recreate.contains(".map_err(kept_session_error)"));
+        assert!(after_recreate.contains("failure_before_swap(!recreated, e)"));
     }
 
     #[test]

@@ -727,37 +727,37 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub(crate) fn recreate_project_containers_if_running(project: &str) {
+pub(crate) fn recreate_project_containers_if_running(project: &str) -> bool {
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
     if active.as_deref() != Some(project) {
         log::debug!("'{project}' is not the active project — skipping recreate");
-        return;
+        return false;
     }
     if let Err(e) = ensure_images_ready() {
         log::warn!("images not ready for '{project}' — skipping recreate: {e}");
-        return;
+        return false;
     }
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
         log::debug!("runtime not available — skipping recreate");
-        return;
+        return false;
     }
     let running = match rt.compose_ps(project) {
         Ok(c) => !c.is_empty(),
         Err(e) => {
             log::debug!("compose_ps failed ({e}) — skipping recreate");
-            return;
+            return false;
         }
     };
     if !running {
         log::debug!("'{project}' not running — skipping recreate");
-        return;
+        return false;
     }
     if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
         log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
-        return;
+        return false;
     }
     use crate::types::IntoAnyhow;
     let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
@@ -774,6 +774,7 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
             log::warn!("failed to recreate containers for '{project}': {e}");
         }
     }
+    true
 }
 
 #[tauri::command]

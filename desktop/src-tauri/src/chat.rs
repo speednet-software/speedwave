@@ -1234,8 +1234,12 @@ struct SoftImposeConfig {
 #[derive(Clone, Default)]
 struct ModelSettled {
     settled: Arc<std::sync::atomic::AtomicBool>,
-    command_awaits_reply: Arc<std::sync::atomic::AtomicBool>,
+    typed_command: Arc<std::sync::atomic::AtomicU8>,
 }
+
+const NO_TYPED_COMMAND: u8 = 0;
+const TYPED_COMMAND_WRITTEN: u8 = 1;
+const TYPED_COMMAND_RUNNING: u8 = 2;
 
 impl ModelSettled {
     fn settle(&self) {
@@ -1245,8 +1249,17 @@ impl ModelSettled {
 
     fn settle_by_command(&self) {
         self.settle();
-        self.command_awaits_reply
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.typed_command
+            .store(TYPED_COMMAND_WRITTEN, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn input_started(&self) {
+        let _ = self.typed_command.compare_exchange(
+            TYPED_COMMAND_WRITTEN,
+            TYPED_COMMAND_RUNNING,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     fn is_settled(&self) -> bool {
@@ -1255,18 +1268,25 @@ impl ModelSettled {
 
     #[cfg(test)]
     fn command_awaits_reply(&self) -> bool {
-        self.command_awaits_reply
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.typed_command.load(std::sync::atomic::Ordering::SeqCst) != NO_TYPED_COMMAND
     }
 
     fn take_command_reply(&self) -> bool {
-        self.command_awaits_reply
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        self.typed_command
+            .compare_exchange(
+                TYPED_COMMAND_RUNNING,
+                NO_TYPED_COMMAND,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
     }
 }
 
+const FIRST_TURN_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(crate) const FIRST_TURN_WAIT: std::time::Duration =
-    std::time::Duration::from_secs(control_channel::SET_MODEL_TIMEOUT.as_secs() + 1);
+    control_channel::SET_MODEL_TIMEOUT.saturating_add(FIRST_TURN_MARGIN);
 
 #[derive(Clone)]
 pub(crate) struct FirstTurnGate(Arc<(Mutex<bool>, std::sync::Condvar)>);
@@ -1456,18 +1476,24 @@ fn spawn_soft_impose_target(
 const MODEL_SWITCHED_PREFIX: &str = "Set model to ";
 
 fn refused_model_command(line: &serde_json::Value, settled: &ModelSettled) -> Option<String> {
-    if line["type"] != "assistant" || line["message"]["model"] != "<synthetic>" {
+    if line["type"] == "system" && line["subtype"] == "init" {
+        settled.input_started();
         return None;
     }
-    let blocks = line["message"]["content"].as_array()?;
-    if !settled.take_command_reply() {
+    if line["type"] != "assistant"
+        || line["message"]["model"] != crate::session_model::SYNTHETIC_MODEL
+    {
         return None;
     }
-    let text = blocks
+    let text = line["message"]["content"]
+        .as_array()?
         .iter()
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    if text.is_empty() || !settled.take_command_reply() {
+        return None;
+    }
     (!text.starts_with(MODEL_SWITCHED_PREFIX)).then_some(text)
 }
 
@@ -4843,6 +4869,10 @@ mod tests {
         })
     }
 
+    fn init_line() -> serde_json::Value {
+        serde_json::json!({ "type": "system", "subtype": "init", "model": "claude-opus-5-5" })
+    }
+
     #[test]
     fn the_set_model_check_capture_is_of_the_pinned_claude_code() {
         assert_eq!(
@@ -4902,6 +4932,7 @@ mod tests {
             .unwrap();
         let settled = ModelSettled::default();
         settled.settle_by_command();
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
 
         assert_eq!(
             refused_model_command(&synthetic_line(refused), &settled),
@@ -4910,6 +4941,7 @@ mod tests {
         assert!(!settled.command_awaits_reply());
 
         settled.settle_by_command();
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
         assert_eq!(
             refused_model_command(&synthetic_line(confirmed), &settled),
             None
@@ -4929,6 +4961,7 @@ mod tests {
         assert_eq!(refused_model_command(&refusal, &settled), None);
 
         settled.settle_by_command();
+        refused_model_command(&init_line(), &settled);
         let reply = serde_json::json!({
             "type": "assistant",
             "message": { "model": "claude-opus-5-5", "content": [{ "type": "text", "text": "hi" }] },
@@ -4953,17 +4986,64 @@ mod tests {
     fn a_synthetic_line_without_content_blocks_leaves_the_typed_model_waiting() {
         let settled = ModelSettled::default();
         settled.settle_by_command();
+        refused_model_command(&init_line(), &settled);
         let shapeless = serde_json::json!({
             "type": "assistant",
             "message": { "model": "<synthetic>", "content": "not a block list" },
         });
+        let textless = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "<synthetic>", "content": [{ "type": "tool_use", "id": "t" }] },
+        });
 
         assert_eq!(refused_model_command(&shapeless, &settled), None);
+        assert_eq!(refused_model_command(&textless, &settled), None);
         assert!(settled.command_awaits_reply());
         assert_eq!(
             refused_model_command(&synthetic_line("model not changed"), &settled),
             Some("model not changed".to_string())
         );
+    }
+
+    #[test]
+    fn a_synthetic_line_before_the_typed_commands_own_init_is_not_its_reply() {
+        let settled = ModelSettled::default();
+        settled.settle_by_command();
+        let aborted_turn_error = synthetic_line("API Error: Request was aborted.");
+
+        assert_eq!(refused_model_command(&aborted_turn_error, &settled), None);
+        assert!(settled.command_awaits_reply());
+
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
+        assert_eq!(
+            refused_model_command(&synthetic_line("model not changed"), &settled),
+            Some("model not changed".to_string())
+        );
+        assert!(!settled.command_awaits_reply());
+    }
+
+    #[test]
+    fn an_init_without_a_typed_command_arms_nothing() {
+        let settled = ModelSettled::default();
+
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
+        assert!(!settled.command_awaits_reply());
+        assert_eq!(
+            refused_model_command(&synthetic_line("model not changed"), &settled),
+            None
+        );
+    }
+
+    #[test]
+    fn the_typed_model_reply_is_matched_by_the_synthetic_model_ssot() {
+        let source = include_str!("chat.rs");
+        let body = &source[source
+            .find("fn refused_model_command(")
+            .expect("refused_model_command")..];
+        let body = &body[..body.find("\n}\n").expect("end of refused_model_command")];
+
+        assert!(body.contains("session_model::SYNTHETIC_MODEL"));
+        assert!(!body.contains("\"<synthetic>\""));
     }
 
     #[test]
@@ -5125,6 +5205,11 @@ mod tests {
     #[test]
     fn the_first_turn_wait_outlasts_the_soft_impose_answer() {
         assert!(FIRST_TURN_WAIT > control_channel::SET_MODEL_TIMEOUT);
+        assert_eq!(
+            FIRST_TURN_WAIT - control_channel::SET_MODEL_TIMEOUT,
+            FIRST_TURN_MARGIN,
+            "the whole answer timeout is kept, sub-second part included"
+        );
     }
 
     #[test]

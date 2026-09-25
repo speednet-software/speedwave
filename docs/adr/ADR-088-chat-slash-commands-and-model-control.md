@@ -547,11 +547,14 @@ A typed `/model` goes to Claude Code as an input (decision 3), and 2.1.282 check
 the same way. The same recording shows its answer: a `<synthetic>` assistant line,
 `Set model to \`Haiku 4.5\` for this session only` when the check passed, and the
 error text (`API error: 429 ... · model not changed`) when it did not, followed by a
-`result`with`num_turns: 0`and`is_error: false`in both cases. The stream parser
-drops every`<synthetic>`line, so a refused typed`/model`looked applied. The stdout
-reader now shows the reply to a typed`/model`as an error block when it does not start
-with`Set model to` (`chat.rs::refused_model_command`). The chip stays, since it shows
-what the user typed.
+`result`with`num_turns: 0`and`is_error: false`in both cases. Every input,
+a typed`/model`included, starts with its own`system/init`line, and the reply
+comes after it. The stream parser drops every`<synthetic>`line, so a refused typed`/model`looked applied. The stdout reader now shows the reply to a typed`/model`as
+an error block when it does not start with`Set model to`
+(`chat.rs::refused_model_command`). It takes as the reply only the first
+`<synthetic>`line with text after the command's own`init`, so the error line of a
+turn stopped just before the command is not read as its answer. The chip stays,
+since it shows what the user typed.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 
