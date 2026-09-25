@@ -54,6 +54,9 @@ fn start_session_inner(
     })
     .map_err(|e| failure_before_swap(!recreated, e))?;
 
+    speedwave_runtime::session::reap_unconfirmed(&rt, &chat::claude_container_name(project))
+        .map_err(|e| failure_before_swap(!recreated, e))?;
+
     log::info!("extracting old session");
     let mut old_session = {
         let mut guard = session_arc
@@ -965,6 +968,47 @@ mod tests {
         );
         let after_stop = &body[body.find("old_session.stop()").unwrap()..];
         assert!(!after_stop.contains("kept_session_error"));
+    }
+
+    #[test]
+    fn a_surviving_kept_instance_refuses_the_start_before_the_running_session_stops() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body: String = extract_fn_body(source, "fn start_session_inner(")
+            .split_whitespace()
+            .collect();
+        let gate = body
+            .find(concat!(
+                "speedwave_runtime::session::reap_unconfirmed(&rt,",
+                "&chat::claude_container_name(project))",
+                ".map_err(|e|failure_before_swap(!recreated,e))?;"
+            ))
+            .expect("the start refuses while an earlier instance survives its reap");
+        let swap = body
+            .find("std::mem::replace(")
+            .expect("start_session_inner must swap the session");
+
+        assert!(gate < swap);
+    }
+
+    #[test]
+    fn a_start_refused_beside_a_kept_instance_says_the_running_session_was_kept() {
+        let container = chat::claude_container_name("kept-instance-refusal");
+        let (runtime, _handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+                .push_exec_piped_failure("container is not responding")
+                .push_exec_piped_failure("container is not responding")
+                .build();
+        speedwave_runtime::session::reap_instance(&runtime, &container, "leaked")
+            .expect_err("the first reap fails");
+
+        let refused = speedwave_runtime::session::reap_unconfirmed(&runtime, &container)
+            .map_err(|e| failure_before_swap(true, e))
+            .expect_err("the kept instance is still not confirmed gone");
+        speedwave_runtime::session::reap_unconfirmed(&runtime, &container)
+            .expect("a reap that succeeds lets the next start through");
+
+        assert!(refused.starts_with(MSG_SESSION_KEPT), "{refused}");
+        assert!(refused.contains("could not be stopped"), "{refused}");
     }
 
     #[test]
