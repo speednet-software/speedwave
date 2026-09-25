@@ -17,7 +17,7 @@ import {
 
 import { createCodeExecutorHandlers } from './handlers.js';
 
-import { metaToolRegistrations } from './meta-tools.js';
+import { metaToolRegistrations, metaToolSummary } from './meta-tools.js';
 
 import { initializeBridges } from './executor.js';
 
@@ -64,11 +64,12 @@ async function main() {
 
   const handlers = createCodeExecutorHandlers({ timeoutMs: TIMEOUTS.EXECUTION_MS });
 
-  for (const { tool, handler } of metaToolRegistrations(handlers)) {
+  const registrations = metaToolRegistrations(handlers);
+  for (const { tool, handler } of registrations) {
     rpcHandler.registerTool(tool, handler);
   }
 
-  console.log(`${ts()} ✅ 2 meta-tools registered: search_tools, execute_code`);
+  console.log(`${ts()} ✅ ${metaToolSummary(registrations)}`);
 
   const app = createHubApp(rpcHandler);
 
@@ -83,8 +84,7 @@ async function main() {
     console.log(`${ts()}    DELETE /            - Session termination`);
     console.log(`${ts()}    GET  /health        - Health check`);
     console.log(`${ts()} 🛠️  Meta-tools:`);
-    console.log(`${ts()}    1. search_tools     - Progressive discovery (lazy loading)`);
-    console.log(`${ts()}    2. execute_code     - JavaScript execution in sandbox`);
+    registrations.forEach(({ tool }, i) => console.log(`${ts()}    ${i + 1}. ${tool.name}`));
   });
 
   const gracefulShutdown = (signal: string) => {

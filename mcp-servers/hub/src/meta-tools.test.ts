@@ -5,6 +5,7 @@ import {
   MAX_META_TOOL_DESCRIPTION_LENGTH,
   SEARCH_TOOLS_TOOL,
   metaToolRegistrations,
+  metaToolSummary,
 } from './meta-tools.js';
 
 const CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH = 2048;
@@ -34,5 +35,16 @@ describe('metaToolRegistrations', () => {
     expect(EXECUTE_CODE_TOOL.description.length).toBeGreaterThan(
       CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH
     );
+  });
+});
+
+describe('metaToolSummary', () => {
+  it('names every registered meta-tool in registration order', () => {
+    expect(metaToolSummary(registered)).toBe('2 meta-tools registered: search_tools, execute_code');
+  });
+
+  it('follows the list it is given', () => {
+    expect(metaToolSummary(registered.slice(1))).toBe('1 meta-tools registered: execute_code');
+    expect(metaToolSummary([])).toBe('0 meta-tools registered: ');
   });
 });

@@ -167,3 +167,13 @@ export function metaToolRegistrations(handlers: {
     { tool: EXECUTE_CODE_TOOL, handler: handlers.handleExecuteCode },
   ];
 }
+
+/**
+ * The startup log line that names every registered meta-tool.
+ * @param registrations - The list `metaToolRegistrations` returns.
+ * @returns The count and the names, in registration order.
+ */
+export function metaToolSummary(registrations: ReadonlyArray<{ tool: Tool }>): string {
+  const names = registrations.map(({ tool }) => tool.name).join(', ');
+  return `${registrations.length} meta-tools registered: ${names}`;
+}
