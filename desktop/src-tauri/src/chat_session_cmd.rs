@@ -24,6 +24,12 @@ fn failure_before_swap(session_kept: bool, e: impl std::fmt::Display) -> String 
     }
 }
 
+pub(crate) fn serialize_session_starts() -> std::sync::MutexGuard<'static, ()> {
+    START_SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
@@ -31,9 +37,7 @@ fn start_session_inner(
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let _serialize = START_SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serialize = serialize_session_starts();
 
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
@@ -846,7 +850,7 @@ mod tests {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
         let guard_pos = body
-            .find("START_SERIALIZE")
+            .find("serialize_session_starts()")
             .expect("start_session_inner must acquire START_SERIALIZE");
         let work_pos = body
             .find("ensure_oauth_running")
@@ -868,9 +872,7 @@ mod tests {
             let live = live.clone();
             let max = max.clone();
             handles.push(std::thread::spawn(move || {
-                let _g = START_SERIALIZE
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _g = serialize_session_starts();
                 let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                 max.fetch_max(now, Ordering::SeqCst);
                 std::thread::sleep(std::time::Duration::from_millis(5));
