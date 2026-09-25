@@ -3811,7 +3811,7 @@ mod tests {
         let gate = body
             .find(concat!(
                 "speedwave_runtime::session::reap_unconfirmed(&rt,",
-                "&claude_container_name(&self.project_name))?;"
+                "&claude_container_name(&self.project_name)"
             ))
             .expect("the start refuses while an earlier instance survives");
         let spawn = body.find("rt.container_exec_piped(").expect("the spawn");
