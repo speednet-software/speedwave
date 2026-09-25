@@ -87,7 +87,7 @@ export interface ClaudePlanUsage {
 }
 
 /**
- * One context category of `get_context_usage` that occupies the window; the backend drops the rest.
+ * One `get_context_usage` category to draw, as the backend picks it (`drawn_categories_only`).
  * Mirror of Rust `control_channel::ContextCategory`.
  */
 export interface ClaudeContextCategory {

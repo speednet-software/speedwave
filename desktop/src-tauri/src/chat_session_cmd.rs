@@ -459,17 +459,22 @@ pub(crate) async fn get_context_usage(
 ) -> Result<ContextUsage, String> {
     check_project(&project)?;
     let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        control_query_inner(
-            &session_arc,
-            &project,
-            ControlQuery::ContextUsage,
-            control_channel::parse_context_usage,
-        )
-        .map(ContextUsage::drawn_categories_only)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || context_usage_inner(&session_arc, &project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn context_usage_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> Result<ContextUsage, String> {
+    control_query_inner(
+        session_arc,
+        project,
+        ControlQuery::ContextUsage,
+        control_channel::parse_context_usage,
+    )
+    .map(ContextUsage::drawn_categories_only)
 }
 
 #[cfg(test)]
@@ -545,6 +550,66 @@ mod tests {
             picker.join().unwrap(),
             Err(control_channel::ControlError::SessionEnded.to_string())
         );
+    }
+
+    fn answer_the_pending_query(
+        control: &control_channel::ControlChannel,
+        payload: &serde_json::Value,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let id = loop {
+            if let Some(id) = control.pending_ids().pop() {
+                break id;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the query never registered its request"
+            );
+            std::thread::yield_now();
+        };
+        let line = serde_json::json!({
+            "type": control_channel::MSG_TYPE_CONTROL_RESPONSE,
+            "response": {"subtype": "success", "request_id": id, "response": payload},
+        });
+        assert_eq!(
+            control.route_response(&line),
+            control_channel::Routed::Delivered
+        );
+    }
+
+    #[test]
+    fn context_usage_reaches_the_ui_with_only_the_rows_claude_code_marks_used() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture is valid JSON");
+        let captured = &fixture["run_A"]["get_context_usage/claude-opus-5"];
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let control = {
+            let mut session = session_arc.lock().unwrap();
+            session.set_test_stdin_sink(Vec::new());
+            session.control_channel_for_test()
+        };
+        let reader = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || context_usage_inner(&session_arc, "acme"))
+        };
+
+        answer_the_pending_query(&control, captured);
+        let usage = reader.join().unwrap().expect("context usage");
+
+        let names: Vec<&str> = usage.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "System prompt",
+                "System tools",
+                "Custom agents",
+                "Memory files",
+                "Skills"
+            ]
+        );
+        let raw = control_channel::parse_context_usage(captured).unwrap();
+        assert!(raw.categories.len() > usage.categories.len());
+        assert_eq!(usage.total_tokens, raw.total_tokens);
     }
 
     #[test]

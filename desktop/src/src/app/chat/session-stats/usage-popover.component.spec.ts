@@ -16,7 +16,6 @@ const CATEGORIES: ClaudeContextCategory[] = [
   { name: 'Skills', tokens: 4_414 },
   { name: 'Autocompact buffer', tokens: 33_000 },
   { name: 'Brand new category', tokens: 1_000 },
-  { name: 'Messages', tokens: 0 },
 ];
 
 const FIVE_HOUR: PlanLimitWindow = {
@@ -106,13 +105,6 @@ describe('UsagePopoverComponent', () => {
         'Brand new category',
       ]);
       expect(parseFloat(segments[1].style.width)).toBeCloseTo(3.1484, 4);
-    });
-
-    it('draws no empty category', () => {
-      render(null);
-
-      const text = el().querySelector('[data-testid="usage-context"]')?.textContent ?? '';
-      expect(text).not.toContain('Messages');
     });
 
     it('gives known categories their own colour, the buffer a subdued one and unknown ones a neutral one', () => {

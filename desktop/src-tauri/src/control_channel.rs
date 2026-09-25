@@ -511,10 +511,11 @@ pub(crate) struct ContextCategory {
 
 impl ContextCategory {
     fn is_drawn(&self) -> bool {
-        match self.kind {
-            Some(kind) => kind == ContextKind::Used,
-            None => self.name != FREE_SPACE_CATEGORY && !self.is_deferred,
-        }
+        self.tokens > 0
+            && match self.kind {
+                Some(kind) => kind == ContextKind::Used,
+                None => self.name != FREE_SPACE_CATEGORY && !self.is_deferred,
+            }
     }
 }
 
@@ -1554,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn a_response_without_kind_drops_free_space_and_deferred_rows_as_before() {
+    fn a_response_without_kind_drops_free_space_and_deferred_rows() {
         let usage = parse_context_usage(&serde_json::json!({
             "model": "m", "totalTokens": 50, "maxTokens": 100, "percentage": 50,
             "categories": [
@@ -1610,18 +1611,21 @@ mod tests {
     }
 
     #[test]
-    fn a_category_reaches_the_ui_with_its_name_and_tokens_only() {
-        let category = ContextCategory {
-            name: "Skills".to_string(),
-            tokens: 42,
-            is_deferred: false,
-            kind: Some(ContextKind::Used),
-        };
+    fn a_category_without_tokens_is_not_drawn_with_or_without_a_kind() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 5, "maxTokens": 100, "percentage": 5,
+            "categories": [
+                { "name": "Messages", "tokens": 0, "kind": "used" },
+                { "name": "Skills", "tokens": 0 },
+                { "name": "System prompt", "tokens": 5, "kind": "used" }
+            ]
+        }))
+        .unwrap();
 
-        assert_eq!(
-            serde_json::to_value(&category).unwrap(),
-            serde_json::json!({ "name": "Skills", "tokens": 42 })
-        );
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["System prompt"]);
     }
 
     #[test]
