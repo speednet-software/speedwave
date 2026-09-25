@@ -673,6 +673,12 @@ fn is_stopped_container_error(message: &str) -> bool {
     lower.contains("cannot exec in a stopped state")
 }
 
+/// `true` if an exec error says its container is missing or stopped, so no process runs in it.
+pub(crate) fn is_missing_or_stopped_container_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    is_missing_container_error_msg(&message) || is_stopped_container_error(&message)
+}
+
 const NO_SUCH_IMAGE_FRAGMENT: &str = "no such image";
 
 pub(crate) fn image_inspect_verdict(inspect: anyhow::Result<String>) -> anyhow::Result<bool> {
@@ -1194,10 +1200,36 @@ fn name_store_script_header(layout: &NameStoreLayout) -> String {
     )
 }
 
-fn wrap_base64_sh(script: &str) -> String {
+pub(crate) fn wrap_base64_sh(script: &str) -> String {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(script);
     format!("echo {b64} | base64 -d | sh")
+}
+
+/// Reverses [`wrap_base64_sh`]: decodes an `echo <b64> | base64 -d | sh`
+/// payload back to the script it wraps. Test-support only.
+#[cfg(any(test, feature = "test-support"))]
+#[expect(
+    clippy::expect_used,
+    reason = "test-support decoder: panics point straight at the malformed payload"
+)]
+pub fn decode_payload(cmd: &str) -> String {
+    use base64::Engine;
+    let b64 = cmd
+        .strip_prefix("echo ")
+        .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
+        .expect("payload must be `echo <b64> | base64 -d | sh`");
+    assert!(
+        b64.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
+        "payload must be pure base64 (quote-free through the WSL reparse)"
+    );
+    String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("valid base64"),
+    )
+    .expect("utf8 script")
 }
 
 /// Heal payload for an `up` name-store conflict: exact-name targets only —
@@ -1645,32 +1677,9 @@ impl Drop for TermGuard {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test code asserts via unwrap and expect"
-)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 pub(crate) mod test_support {
     use super::CommandRunner;
-
-    pub(crate) fn decode_payload(cmd: &str) -> String {
-        use base64::Engine;
-        let b64 = cmd
-            .strip_prefix("echo ")
-            .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
-            .expect("payload must be `echo <b64> | base64 -d | sh`");
-        assert!(
-            b64.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
-            "payload must be pure base64 (quote-free through the WSL reparse)"
-        );
-        String::from_utf8(
-            base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .expect("valid base64"),
-        )
-        .expect("utf8 script")
-    }
 
     /// Asserts `remote_cmd` round-trips through `shlex::split` to `expected_argv`.
     /// No `bash -n` — Git Bash on Windows mangles UTF-8 (claude-code#31295).
@@ -1813,7 +1822,7 @@ pub(crate) mod test_support {
     reason = "test code asserts via unwrap/expect"
 )]
 mod tests {
-    use super::test_support::decode_payload;
+    use super::decode_payload;
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
     use std::collections::HashMap;
@@ -2780,6 +2789,33 @@ services:
         assert!(!is_stopped_container_error("mount namespace root"));
         assert!(!is_stopped_container_error("connection refused"));
         assert!(!is_stopped_container_error(""));
+    }
+
+    #[test]
+    fn a_missing_or_stopped_container_is_told_apart_from_other_exec_failures() {
+        for gone in [
+            "reap exec in 'speedwave_acme_claude' exited with exit status: 1: \
+             Error: No such container: speedwave_acme_claude",
+            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+             msg=\"cannot exec in a stopped state\"",
+        ] {
+            assert!(
+                is_missing_or_stopped_container_error(&anyhow::anyhow!("{gone}")),
+                "{gone}"
+            );
+        }
+        for other in [
+            "reap exec in 'speedwave_acme_claude' exited with exit status: 1: ",
+            "container is not responding",
+            "command 'limactl' timed out after 9s",
+            "mount namespace root",
+            "",
+        ] {
+            assert!(
+                !is_missing_or_stopped_container_error(&anyhow::anyhow!("{other}")),
+                "{other}"
+            );
+        }
     }
 
     #[test]

@@ -185,6 +185,7 @@ pub(crate) fn rebind_chat(
     chat_state: &SharedChatSession,
 ) -> Result<(), String> {
     check_project(project)?;
+    let _serialize = crate::chat_session_cmd::serialize_session_starts();
     let mut session = chat_state
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -417,6 +418,25 @@ mod tests {
             fail_window.contains("teardown_oauth_for_project"),
             "rebind failure must retire the destination's host workers"
         );
+    }
+
+    #[test]
+    fn rebind_chat_waits_out_every_other_session_start_before_it_touches_the_session() {
+        let source = include_str!("project_cmd.rs");
+        let body = source
+            .split("pub(crate) fn rebind_chat(")
+            .nth(1)
+            .expect("rebind_chat must exist");
+        let body = &body[..body.find("\n}\n").expect("rebind_chat must end")];
+        let serialize = body
+            .find("crate::chat_session_cmd::serialize_session_starts()")
+            .expect("rebind_chat must take the start lock");
+        let session_lock = body
+            .find(".lock()")
+            .expect("rebind_chat must lock the session");
+
+        assert!(serialize < session_lock, "{body}");
+        assert!(body.contains("let _serialize ="), "{body}");
     }
 
     #[test]

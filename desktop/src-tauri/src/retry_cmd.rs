@@ -45,6 +45,7 @@ pub(crate) fn retry_last_turn_inner(
         return Err(RetryError::NoAssistantTurn);
     }
 
+    let _serialize = crate::chat_session_cmd::serialize_session_starts();
     driver.stop().map_err(RetryError::ResumeFailed)?;
     driver
         .start_with_retry(session_id, user_uuid)
@@ -228,6 +229,71 @@ mod tests {
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("nerdctl exec failed")));
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(drv.start_calls.len(), 1);
+    }
+
+    struct OrderedDriver {
+        log: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        stopped: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl SessionDriver for OrderedDriver {
+        fn stop(&mut self) -> Result<(), String> {
+            self.log.lock().unwrap().push("retry stop");
+            if let Some(stopped) = self.stopped.take() {
+                stopped.send(()).unwrap();
+            }
+            Ok(())
+        }
+        fn start_with_retry(&mut self, _session_id: &str, _user_uuid: &str) -> Result<(), String> {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.log.lock().unwrap().push("retry start");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_retry_waits_for_a_session_start_in_progress() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let start_in_progress = crate::chat_session_cmd::serialize_session_starts();
+        let mut drv = OrderedDriver {
+            log: log.clone(),
+            stopped: None,
+        };
+        let retry =
+            std::thread::spawn(move || retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv));
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        log.lock().unwrap().push("other start done");
+        drop(start_in_progress);
+
+        assert_eq!(retry.join().unwrap(), Ok(()));
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["other start done", "retry stop", "retry start"]
+        );
+    }
+
+    #[test]
+    fn a_session_start_waits_until_a_retry_has_spawned_its_session() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stopped, retry_stopped) = std::sync::mpsc::channel();
+        let mut drv = OrderedDriver {
+            log: log.clone(),
+            stopped: Some(stopped),
+        };
+        let retry =
+            std::thread::spawn(move || retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv));
+
+        retry_stopped.recv().unwrap();
+        let other_start = crate::chat_session_cmd::serialize_session_starts();
+        log.lock().unwrap().push("other start");
+        drop(other_start);
+
+        assert_eq!(retry.join().unwrap(), Ok(()));
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["retry stop", "retry start", "other start"]
+        );
     }
 
     #[test]
