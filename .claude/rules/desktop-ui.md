@@ -53,7 +53,7 @@ paths:
   - **No automatic respawn.** Never reintroduce one for an effort pick. It kills a Claude Code process's between-turn work (background tasks, monitors, subagents) and races retry, rebind and mid-turn `Error` chunks.
   - **Queued picks.** A pick made while a turn streams, or while a session starts or resumes, is queued (`chatBusy`: a stream, or `sessionStartInFlightFromState`). A model pick made during a fresh start is queued as well, so no second session starts. Queued picks are released together with a pending model pick, at any of:
     - the next turn end;
-    - a Stop the user clicks, because the interrupted turn's `result` is dropped;
+    - a Stop the user clicks, because the interrupted turn's `result` is dropped, unless a container restart began during that Stop, whose own rules then apply;
     - the end of a resume or of a fresh start;
     - a container restart that fails: the process takes them when the restart failed before it recreated the containers, and the requests fail and say so when it did not.
 

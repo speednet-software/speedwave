@@ -751,7 +751,8 @@ or while a session starts or resumes, waits. Only the latest pick is applied:
   still shown, because the session is then on neither model.
 
 A waiting pick is released at the turn end, when a Stop the user clicks succeeds
-(the interrupted turn's own `result` is dropped while nothing streams), when a resume
+(the interrupted turn's own `result` is dropped while nothing streams) and no container
+restart began during it, since that restart's own rules then apply, when a resume
 or a fresh start completes, and when a container restart fails. A restart that failed
 before it recreated the containers leaves the process running, and the process takes
 the picks; one that failed later leaves none, and the requests fail and say so.

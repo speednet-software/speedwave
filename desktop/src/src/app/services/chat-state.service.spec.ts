@@ -3844,6 +3844,48 @@ describe('ChatStateService', () => {
         expect(service.lastKnownSessionId).toBe(LIVE);
       });
 
+      it('a Stop that a container restart overtakes releases no queued pick into the stack being recreated', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('max');
+        const stopped = createDeferred<void>();
+        const restart = createDeferred<void>();
+        overrideInvoke('stop_chat', () => stopped.promise);
+        overrideInvoke('restart_integration_containers', () => restart.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const projectState = TestBed.inject(ProjectStateService);
+
+        const stopping = service.stopConversation();
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'stop_chat')).toBeGreaterThan(
+            -1
+          );
+        });
+        const restarting = projectState.restartContainers();
+        stopped.resolve();
+        await stopping;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+        restart.resolve();
+        await restarting;
+      });
+
+      it('a Stop with no restart running releases the queued pick at once', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        await service.applyEffortSelection('max');
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.stopConversation();
+
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
+      });
+
       it('a resume that stops a streaming turn also waits out a container restart begun during the stop', async () => {
         liveConversation();
         await Promise.resolve();

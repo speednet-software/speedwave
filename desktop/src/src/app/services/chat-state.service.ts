@@ -1118,7 +1118,9 @@ export class ChatStateService {
    * synchronously to re-enable input, then fires the backend stop in background.
    */
   async stopConversation(): Promise<void> {
-    if (await this.interruptTurn()) this.releasePendingPicks();
+    if ((await this.interruptTurn()) && !this.projectState.restartInFlight) {
+      this.releasePendingPicks();
+    }
   }
 
   private async interruptTurn(): Promise<boolean> {
@@ -1720,8 +1722,8 @@ export class ChatStateService {
     let settled = outlasted && sameProject();
     if (settled && this.isStreaming) {
       await this.interruptTurn();
-      const outlastedAgain = !this.projectState.restartInFlight || (await this.outlastRestart());
-      settled = outlastedAgain && sameProject();
+      if (this.projectState.restartInFlight) await this.outlastRestart();
+      settled = sameProject();
     }
     if (!settled) {
       this._resumeInProgress = false;
