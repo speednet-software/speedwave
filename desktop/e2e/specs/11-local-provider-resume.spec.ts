@@ -23,6 +23,8 @@ import {
 } from '../helpers/llm';
 import { MEMORY_ANSWER, MEMORY_RECALL_PROMPT } from '../helpers/memory-fact';
 import { localModelUnavailable } from '../helpers/preflight';
+import { pickComposerEffort } from '../helpers/applied-effort';
+import { clearEffortPinFile } from '../helpers/host-files';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
@@ -64,6 +66,23 @@ describe('Local Provider + Resume', function () {
     await waitForConversationLoaded(2);
     await sendMessageAndWait(`Again: ${MEMORY_RECALL_PROMPT}`);
     expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
+  });
+
+  it('takes an effort pick on the live local-model session, which keeps answering', async function () {
+    this.timeout(240_000);
+    try {
+      await openChat();
+      await pickComposerEffort('max');
+      expect(await $('[data-testid="effort-deferred-notice"]').isExisting()).toBe(false);
+      expect(await $('[data-testid="control-chip"][data-command="effort"]').isExisting()).toBe(
+        false
+      );
+
+      await sendMessageAndWait(`At the new effort: ${MEMORY_RECALL_PROMPT}`);
+      expect(await lastAssistantText()).toContain(MEMORY_ANSWER);
+    } finally {
+      clearEffortPinFile(E2E_PROJECT_NAME);
+    }
   });
 
   it('does not price a local model in the chat footer', async function () {

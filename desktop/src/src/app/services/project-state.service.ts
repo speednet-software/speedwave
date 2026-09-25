@@ -100,6 +100,7 @@ export class ProjectStateService {
   /** Restart requested while status was pre-ready; surfaced once we settle. */
   private pendingRestartOnSettle = false;
   private restartOwedTo: string | null = null;
+  private switchesStarted = 0;
 
   /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
@@ -124,6 +125,7 @@ export class ProjectStateService {
   private readyListeners: Array<() => void> = [];
   private restartListeners: Array<() => void> = [];
   private restartBeginListeners: Array<() => Promise<void>> = [];
+  private restartFailedListeners: Array<() => void> = [];
   private failedListeners: Array<(error: string) => void> = [];
   private settledListeners: Array<() => void> = [];
 
@@ -174,6 +176,17 @@ export class ProjectStateService {
     this.restartBeginListeners.push(cb);
     return () => {
       this.restartBeginListeners = this.restartBeginListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /**
+   * Subscribe to a container restart that began and failed, so work held for it can go on.
+   * @param cb - Listener invoked after the failure; unsubscribe via the returned function.
+   */
+  onRestartFailed(cb: () => void): () => void {
+    this.restartFailedListeners.push(cb);
+    return () => {
+      this.restartFailedListeners = this.restartFailedListeners.filter((l) => l !== cb);
     };
   }
 
@@ -497,6 +510,23 @@ export class ProjectStateService {
   }
 
   /**
+   * Marks the moment work for `project` begins: `null` unless the app is settled on it now.
+   * @param project - the project the work belongs to
+   */
+  settledMark(project: string | null): number | null {
+    return this.isSettledOn(project) ? this.switchesStarted : null;
+  }
+
+  /**
+   * True while the app is settled on `project` and no switch has started since `mark` was taken, even one that failed back.
+   * @param project - the project the work belongs to
+   * @param mark - what `settledMark` returned when the work began
+   */
+  isStillSettledOn(project: string | null, mark: number | null): boolean {
+    return mark === this.switchesStarted && this.isSettledOn(project);
+  }
+
+  /**
    * Requests the restart a save of `project` needs, now while the app is settled on it, or once a switch away from it fails back to it.
    * @param project - the project whose saved settings its running containers do not have yet
    */
@@ -604,6 +634,8 @@ export class ProjectStateService {
       this.notifyReady();
       this.notifySettled();
       this.notifyRestartComplete();
+    } else {
+      for (const cb of this.restartFailedListeners) cb();
     }
     return restartedOk ? 'restarted' : 'failed';
   }
@@ -645,6 +677,7 @@ export class ProjectStateService {
   private async setupListeners(): Promise<void> {
     try {
       await this.tauri.listen<{ project: string }>('project_switch_started', (event) => {
+        this.switchesStarted += 1;
         this.targetProject = event.payload.project;
         this.status.set('switching');
         this.error = '';

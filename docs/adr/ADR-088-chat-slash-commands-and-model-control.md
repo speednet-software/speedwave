@@ -635,6 +635,202 @@ recovers with a fresh `start_chat`, not a resume, under the old history. The not
 itself is cleared by every spawn the frontend starts (a start, a resume, a retry,
 and the send recovery), since each of those launches with the pin.
 
+**Amendment (SPEED-707, 2026-09-24: a composer pick reaches a live session as an
+`apply_flag_settings` control request).** Speedwave no longer writes `/effort` into
+a live chat process and no longer asks whether the process launched with
+`--effort`. `ChatStateService.sendEffortToSession` calls
+`chat_session_cmd.rs::apply_chat_effort`, which validates the level against
+`defaults::EFFORT_LEVELS` (`pin_cmd::validate_effort_level`), sends
+`{subtype: "apply_flag_settings", settings: {effortLevel: <level>}}` through the
+session's control channel (`control_channel.rs::ControlHandle::apply_effort`) and
+waits for the answer after it has released the session mutex, as
+`switch_chat_model` does. The Agent SDK types describe the request as merging the
+settings "into the flag settings layer, dynamically updating the active
+configuration", a layer that sits above user, project and local settings and below
+managed policy, and `effortLevel` there also accepts `max` for the session[^8].
+`PreparedSpawn::with_effort`, `ChatSession::takes_wire_effort` and
+`get_chat_takes_wire_effort` are gone.
+
+Measured on the pinned 2.1.267 and on 2.1.282 (the darwin-arm64 binaries, checked
+against their release manifests, run with the stream-json arguments of
+`chat.rs::build_claude_args` against a stub `/v1/messages`):
+
+- Fable 5 spawned without `--effort`, the hold model of this decision, with a
+  `settings.json` already in the config directory, as in the container: the first
+  request carried `output_config.effort: high`, the request after
+  `apply_flag_settings` with `low` carried `low`, and after `max` it carried `max`.
+  Each request was answered `success` at once and nothing else was written to
+  stdout. `settings.json` was left byte for byte unchanged.
+  - On 2.1.267 the config directory's `.claude.json` gained the launch-hold release
+    flags `unpinFable5LaunchEffort`, `unpinOpus47LaunchEffort` and
+    `unpinOpus48LaunchEffort`, each set to `true`. They store no level; a later
+    process started without `--effort`, such as a CLI session, simply starts without
+    the hold.
+  - On 2.1.282 `.claude.json` gained nothing.
+
+  `effort_pin` therefore stays the only level store, and every spawn still passes
+  `--effort <pin>`. This run is recorded in
+  `desktop/src-tauri/tests/fixtures/cc-<version>-apply-effort.sanitized.json`;
+  `control_channel.rs::the_apply_effort_capture_is_of_the_pinned_claude_code` fails
+  on every Claude Code bump until it is recorded again from the new binary.
+
+- A request sent before the first user message was answered `success` the same way,
+  and the first model request already carried its level. The recording holds this
+  run too (`before_first_turn`): the process launched with `--effort high` and sent
+  `low` before the first turn, whose request carried `low`.
+- Opus 5.5 on 2.1.282, spawned with `--effort high`, behaved the same.
+- `set_model` keeps the flag-layer level: after `low` was applied on Opus 4.8 and
+  the session switched to Sonnet 5, the Sonnet request carried `low`.
+- An unknown level (`turbo`) was answered `success` and changed nothing: the next
+  request still carried `max`. An unchecked pick would therefore report success for
+  a level that never applied, so the command validates the level with
+  `pin_cmd::validate_effort_level`, the check the pin write uses, before it writes
+  anything.
+- `CLAUDE_CODE_EFFORT_LEVEL` outranks the request: with the variable set to `high`,
+  the request after `apply_flag_settings` with `low` kept `high`. Speedwave never
+  sets that variable (ADR-017).
+- Routed models take every level. On both versions, with the routed env of
+  `compose/llm.rs` for `openrouter/anthropic/claude-sonnet-5` and for
+  `local/gemma-4-26b-a4b`, the first request carried `output_config.effort: high`
+  and each later one carried the level of the `apply_flag_settings` before it:
+  `low`, `medium`, `high`, `xhigh`, `max`.
+
+The request needs no launch flag, so the condition of the SPEED-650 amendment is
+removed together with the notice an unpinned project saw on its first pick. It
+also keeps effort picks away from how Claude Code treats an `/effort` input written
+during a tool-using turn. On 2.1.267 such an input never runs: the recording's
+`effort_command_mid_tool_turn` run, launched with `--effort high`, wrote
+`/effort low` at the first `init` of a turn whose first answer was a tool call, and
+no answer of its own followed that turn while the next turn still carried `high`.
+The same run on 2.1.282 answered after the turn with its own `init` and `result`
+(`num_turns: 0`), and the next turn carried `low`; an input answered that way ends
+the user's turn in the chat (the second defect of the SPEED-696 amendment). A
+`/effort` the user types still goes to Claude Code as an input.
+
+The effort control is rendered for every provider kind. This replaces the sentence
+of this decision that renders it only for Anthropic provider kinds. For an
+Anthropic provider the slider stops stay per model: the picker row, else the
+catalog entry. For a local or OpenRouter provider the slider offers every level of
+`defaults::EFFORT_LEVELS`. The composer receives that list as
+`containers_cmd.rs::ActiveProviderSummary::effort_levels`, which is now the slider
+order for every provider kind; the picker's `effort_order` field is gone. Until a
+level is pinned, the routed slider shows no position, because an unpinned routed
+session runs at the level Claude Code picks for a model id outside its catalog.
+
+The upstreams were checked on 2026-09-24 with the request shape Claude Code sends:
+streamed, with `thinking: {type: adaptive}` and `output_config.effort`. Every level
+got HTTP 200 and `end_turn` from each of:
+
+- LiteLLM's native `/v1/messages` passthrough with `gemma-4-26b-a4b`;
+- OpenRouter's `/api/v1/messages` with `openai/gpt-4o-mini`;
+- OpenRouter's `/api/v1/messages` with `anthropic/claude-sonnet-5`.
+
+e2e spec 11 picks a level on the live local session and spec 20 on the live
+OpenRouter session, and each checks that the next turn still answers.
+
+The timing rules of the SPEED-650 amendment stand: a pick made while a turn streams,
+or while a session starts or resumes, waits. Only the latest pick is applied:
+
+- Picks go to the session one at a time, in pick order. `ChatStateService.sendEffortToSession`
+  calls the command, and `applyEffortToConversation` chains the calls.
+- A pick is dropped once a newer one is made, even while the newer one is still
+  saving its pin.
+- The pins are written in pick order, the model pins too.
+- When the newest pick's pin cannot be written, the session is sent the level the
+  pin holds, so the session never keeps a level the composer no longer shows.
+- A pick belongs to the project it was made in. It counts only while the app is
+  settled on that project and no switch has started since the pick, even one that
+  failed back to the project (`ProjectStateService.settledMark` at the pick,
+  `isStillSettledOn` after every wait). A pick made before or during a switch is
+  therefore neither sent nor queued, and its error and notice never reach the other
+  project. The switch also clears the composer's selection error.
+- Model picks follow the same project rule. A newer model pick replaces or clears the
+  queued one, so a queued pick never undoes a later one. Only the newest model pick
+  reports a failed save, and only the newest pick whose pin was saved reports a failed
+  switch or re-render: a switch that fails behind a newer pick whose save failed is
+  still shown, because the session is then on neither model.
+
+A waiting pick is released at the turn end, when a Stop the user clicks succeeds
+(the interrupted turn's own `result` is dropped while nothing streams) and no container
+restart began during it, since that restart's own rules then apply, when a resume
+or a fresh start completes, and when a container restart fails. A restart that failed
+before it recreated the containers leaves the process running, and the process takes
+the picks; one that failed later leaves none, and the requests fail and say so.
+
+A released pick goes to the running process at once, also before the process has
+reported a session id: a request sent before the first user message already sets the
+first model request's level (measured above). The one exception is a routed model
+pick released when a fresh start completes: it re-renders the containers and respawns
+the session, because its model and window reach Claude Code only as container
+environment and the new session has no conversation yet.
+
+A first start that fails drops the waiting picks, and so do a resume and a New chat
+that fail to spawn, because the backend stops the earlier process before it spawns the
+new one; their pins carry them to the next spawn. The header's New chat drops them when
+it resets the chat, and its session launches with the pins. A New chat started from a
+transcript (`startNewConversation`) and a resume keep them, but only when the backend
+refused the start before it stopped the earlier process: images that are not ready, a
+sign-in check that fails or says no, or a poisoned session lock. `start_session_inner`
+prefixes exactly those failures with `chat_session_cmd::MSG_SESSION_KEPT`, so the
+frontend does not infer the order from an error text of its own, and the frontend
+strips the prefix from every error it shows. The chat returns to that process and shows
+its conversation again, with its messages, session id and effort notice restored, and
+the process takes them at its next turn end. A resume belongs to the project it began
+in: one begun while a project switch runs never reaches the backend, and one that a
+switch overtakes loads no transcript and shows neither its error nor the conversation
+it kept. A New chat started from a transcript that a switch overtakes fails with
+`NEW_CONVERSATION_PROJECT_CHANGED`, so nothing is restored or staged into the other
+project's chat, and a start, the fresh start after a container restart included,
+reports its failure only while the app is settled on the project it started for. A
+resume begun while a turn streams stops that turn first, so a conversation the backend
+keeps shows the turn stopped rather than streaming without end, and then waits out a
+container restart that began during that stop. The fresh start after a container
+restart drops them even then, since the restart
+already ended the earlier process. A pick made while a resume waits out a container
+restart is dropped when the resume begins, since the resumed process launches with the
+pins. The Stop a container restart begins with releases nothing: the restart resumes
+the conversation in a process that launches with the pins.
+
+A pick in a chat without a session id restarts the idle session, even when the chat
+shows messages, so the session launches with the pin; a routed pick re-renders the
+containers first. Without a session id the chat cannot tell a live process from none,
+and a conversation without one cannot be resumed. Restart now in such a chat restarts
+it the same way. This includes a turn the user stopped before Claude Code reported its
+session id: the next pick replaces that process and the messages it shows. Telling a
+live process from a dead one there would take a liveness signal besides the session id,
+for the moment between a send and Claude Code's `system/init`.
+
+A routed pick skips the re-render and the respawn when the running process was
+launched right after a re-render for the same model and nothing has switched its model
+since, because that process already runs it; a direct pick and a released one follow
+the same rule. `ChatStateService` records the launch only for the newest pick and only
+for the session generation it started, and clears it when that start does not
+complete, on a live switch and on a container restart. A live switch changes the model and the configuration but renders
+nothing, so a process started after it, such as a New chat's, runs with containers
+rendered for an earlier model, and its soft-impose then moves it to the configured one.
+
+Any failure of the request keeps the pin and shows the notice with Restart now,
+which is the notice's only remaining role. The failures are:
+
+- a rejection;
+- a timeout (`control_channel::APPLY_EFFORT_TIMEOUT`, 10 s);
+- a session with no live process;
+- a session another command holds (`chat session is busy`).
+
+A request made after the process's output has ended fails at once, because the
+stdout reader closes the control channel when the stream ends. A timed-out request
+may still be applied late. The notice therefore says that the level is saved for new
+sessions and that this session did not confirm it, never that the session keeps its
+old level. No automatic respawn is added, for the reasons above.
+
+Two limits remain:
+
+- A `CLAUDE_CODE_EFFORT_LEVEL` the user puts into the project's `claude.env`
+  outranks every pick, as measured above. Each pick is then answered `success` and
+  changes nothing, and no notice says so.
+- An upstream that rejects a level fails every turn with its error until the user
+  picks another level. Only the three upstreams above were checked.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the
@@ -659,6 +855,15 @@ place, so this fact is currently inert for the effort feature itself - it
 is recorded here because it is the actual, verified behavior of the
 forwarding path, correcting an unverified guess before it could calcify
 into an assumed invariant elsewhere.
+
+**Amendment (SPEED-707, 2026-09-24: effort does reach routed upstreams).** The
+claim that no effort-carrying body is generated for a non-Anthropic route was
+never true. Measured on 2.1.267 and 2.1.282, Claude Code puts
+`output_config.effort` into every request for a routed model id: its default
+`high`, or the level of the `--effort <pin>` a project saved while it used an
+Anthropic provider. Since SPEED-707 the composer also offers every effort level for
+local and OpenRouter providers (decision 5, SPEED-707 amendment). The forwarding
+facts above are what carry the level to the upstream unchanged.
 
 ### 7. Anthropic-native entries stop storing a configured model
 
@@ -938,3 +1143,5 @@ stays selectable without typing its id.
 [^6]: Claude Code settings - "Claude Code reads some keys only once, at session start, so an edit to one of them doesn't reach the running session," naming `model` among them; `/model` in `-p` mode "applies to the current session only and isn't saved as your default." https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
 
 [^7]: `@anthropic-ai/claude-agent-sdk` 0.3.267, the SDK release for Claude Code 2.1.267: `Query.setModel(model?)` "Change the model used for subsequent responses. Only available in streaming input mode", and `SDKControlSetModelRequest` (`subtype: 'set_model'`), whose `model` field reads "Omitted, null, or 'default' resets to the session default model". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
+
+[^8]: `@anthropic-ai/claude-agent-sdk` 0.3.267: `Query.applyFlagSettings(settings)` "Merge the provided settings into the flag settings layer, dynamically updating the active configuration. ... Flag settings sit above user/project/local settings and below managed policy settings in the precedence order", with "`effortLevel` additionally accepts `'max'`, which is session-scoped"; the request type `SDKControlApplyFlagSettingsRequest` (`subtype: 'apply_flag_settings'`, `settings`). https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts

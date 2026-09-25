@@ -3,21 +3,12 @@
  */
 
 import { waitForShellReady } from './shell';
+import { invokeOr } from './tauri-invoke';
 
 /** Returns the slug of the active project from `__TAURI_INTERNALS__`. */
 export async function activeProjectSlug(): Promise<string | null> {
-  return browser.executeAsync((done: (slug: string | null) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: {
-          invoke: (cmd: string) => Promise<{ active_project: string | null }>;
-        };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('list_projects')
-      .then((r) => done(r.active_project))
-      .catch(() => done(null));
-  });
+  const projects = await invokeOr<{ active_project: string | null } | null>(null, 'list_projects');
+  return projects?.active_project ?? null;
 }
 
 /** Opens the project switcher and switches to `slug`, waiting for the SSOT signal. */
@@ -43,14 +34,5 @@ export async function switchToProject(slug: string, timeoutMs = 180_000): Promis
 
 /** Reads whether a project's containers are running, via the Tauri command. */
 export async function containersRunning(project: string): Promise<boolean> {
-  return browser.executeAsync((proj: string, done: (r: boolean) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<boolean> };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('check_containers_running', { project: proj })
-      .then((r) => done(r))
-      .catch(() => done(false));
-  }, project);
+  return invokeOr<boolean>(false, 'check_containers_running', { project });
 }

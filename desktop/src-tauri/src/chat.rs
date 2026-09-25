@@ -1540,7 +1540,6 @@ impl AwaitedResult {
 pub struct PreparedSpawn {
     pub args: Vec<String>,
     pub container: String,
-    pub with_effort: bool,
 }
 
 pub struct ChatSession {
@@ -1553,7 +1552,6 @@ pub struct ChatSession {
     drain_handles: Vec<std::thread::JoinHandle<()>>,
     session_log_path: Option<std::path::PathBuf>,
     instance_id: Option<String>,
-    launched_with_effort: bool,
     stopping: Arc<std::sync::atomic::AtomicBool>,
     awaited_result: AwaitedResult,
     model_settled: ModelSettled,
@@ -1571,7 +1569,6 @@ impl ChatSession {
             drain_handles: Vec::new(),
             session_log_path: None,
             instance_id: None,
-            launched_with_effort: false,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             awaited_result: AwaitedResult::new(),
             model_settled: ModelSettled::default(),
@@ -1602,11 +1599,6 @@ impl ChatSession {
         })
     }
 
-    pub(crate) fn takes_wire_effort(&mut self) -> bool {
-        self.launched_with_effort
-            && matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(None)))
-    }
-
     pub(crate) fn session_info_state(&self) -> SessionInfoState {
         self.session_info
             .lock()
@@ -1633,10 +1625,9 @@ impl ChatSession {
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
         let mut flags = resolved.flags.clone();
-        let launch_effort = launch_effort_level(user_config, project_name);
-        if let Some(level) = &launch_effort {
+        if let Some(level) = launch_effort_level(user_config, project_name) {
             flags.push("--effort".to_string());
-            flags.push(level.clone());
+            flags.push(level);
         }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
@@ -1645,11 +1636,7 @@ impl ChatSession {
         #[cfg(feature = "e2e")]
         crate::e2e_support::record_spawn_args(&args);
 
-        Ok(PreparedSpawn {
-            args,
-            container,
-            with_effort: launch_effort.is_some(),
-        })
+        Ok(PreparedSpawn { args, container })
     }
 
     pub fn start(
@@ -1677,11 +1664,7 @@ impl ChatSession {
         self.reap_instance();
 
         let instance_id = speedwave_runtime::session::new_instance_id();
-        let PreparedSpawn {
-            args,
-            container,
-            with_effort,
-        } = Self::prepare_args(
+        let PreparedSpawn { args, container } = Self::prepare_args(
             &self.project_name,
             &user_config,
             &instance_id,
@@ -1723,7 +1706,6 @@ impl ChatSession {
             .spawn()?;
 
         self.instance_id = Some(instance_id);
-        self.launched_with_effort = with_effort;
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -2025,7 +2007,7 @@ impl ChatSession {
             if let Some(entry) = http_collator.flush() {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
-            control_for_reader.fail_all();
+            control_for_reader.close();
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if awaited_for_reader.is_awaited() && !stopping {
@@ -2148,21 +2130,28 @@ impl ChatSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_test_process(&mut self, child: Child, launched_with_effort: bool) {
-        self.child = Some(child);
-        self.launched_with_effort = launched_with_effort;
+    pub(crate) fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
+        self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
+        self.child = Some(spawn_test_child());
     }
 
     #[cfg(test)]
-    fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
-        self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
-        self.child = Some(spawn_test_child(TestChild::Blocked));
+    fn set_test_stdin_capture(&mut self) -> std::thread::JoinHandle<Vec<u8>> {
+        let (stdin, capture) = test_capturing_stdin();
+        self.shared_stdin = Some(Arc::new(Mutex::new(stdin)));
+        self.child = Some(spawn_test_child());
+        capture
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_channel_for_test(&self) -> ControlChannel {
+        self.control.clone()
     }
 
     #[cfg(test)]
     fn set_test_stdin_broken_pipe(&mut self) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_broken_pipe_stdin())));
-        self.child = Some(spawn_test_child(TestChild::Blocked));
+        self.child = Some(spawn_test_child());
     }
 
     pub fn submit_question_answer(
@@ -2330,7 +2319,7 @@ impl ChatSession {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared_stdin = None;
-        self.control.fail_all();
+        self.control.close();
         *self
             .session_info
             .lock()
@@ -2456,18 +2445,18 @@ fn write_and_emit_drained_message(
 }
 
 #[cfg(test)]
-fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
-    let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
+fn test_stdin_pipe() -> (std::io::PipeReader, std::process::ChildStdin) {
+    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
     #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
+    let stdin = std::process::ChildStdin::from(std::os::fd::OwnedFd::from(writer));
     #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
+    let stdin = std::process::ChildStdin::from(std::os::windows::io::OwnedHandle::from(writer));
+    (reader, stdin)
+}
+
+#[cfg(test)]
+fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
+    let (mut reader, stdin) = test_stdin_pipe();
     std::thread::spawn(move || {
         let mut drained = buf;
         let _ = std::io::Read::read_to_end(&mut reader, &mut drained);
@@ -2476,58 +2465,43 @@ fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
+fn test_capturing_stdin() -> (std::process::ChildStdin, std::thread::JoinHandle<Vec<u8>>) {
+    let (mut reader, stdin) = test_stdin_pipe();
+    let capture = std::thread::spawn(move || {
+        let mut written = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut written);
+        written
+    });
+    (stdin, capture)
+}
+
+#[cfg(test)]
 fn test_broken_pipe_stdin() -> std::process::ChildStdin {
-    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
+    let (reader, stdin) = test_stdin_pipe();
     drop(reader);
-    #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
-    #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
     stdin
 }
 
 #[cfg(test)]
-pub(crate) enum TestChild {
-    Blocked,
-    Exited,
-}
-
-#[cfg(test)]
-pub(crate) fn spawn_test_child(kind: TestChild) -> Child {
+fn spawn_test_child() -> Child {
     #[cfg(unix)]
     let mut command = {
         let mut c = std::process::Command::new("sh");
-        c.arg("-c").arg(match kind {
-            TestChild::Blocked => "read line",
-            TestChild::Exited => "exit 0",
-        });
+        c.arg("-c").arg("read line");
         c
     };
     #[cfg(windows)]
     let mut command = {
         let mut c = std::process::Command::new("cmd");
-        c.arg("/C").arg(match kind {
-            TestChild::Blocked => "pause",
-            TestChild::Exited => "exit 0",
-        });
+        c.arg("/C").arg("pause");
         c
     };
-    let mut child = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn test child");
-    if matches!(kind, TestChild::Exited) {
-        child.wait().expect("wait for the exiting test child");
-    }
-    child
+        .expect("spawn test child")
 }
 
 #[cfg(test)]
@@ -3436,7 +3410,7 @@ mod tests {
         let src = include_str!("chat.rs");
         let prod = src.split("\nmod tests {").next().unwrap_or(src);
         assert!(
-            prod.contains("control_for_reader.fail_all();"),
+            prod.contains("control_for_reader.close();"),
             "a dead process must fail waiting control requests instead of letting them time out"
         );
     }
@@ -4185,7 +4159,7 @@ mod tests {
         let orphaned = control
             .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
             .expect("written");
-        control.fail_all();
+        control.close();
         let started = std::time::Instant::now();
 
         report_soft_impose(answered, "local/llama-3.1-70b");
@@ -4291,6 +4265,188 @@ mod tests {
     #[test]
     fn a_session_without_a_process_has_no_model_switch() {
         assert!(ChatSession::new("proj").model_switch().is_err());
+    }
+
+    fn answer_the_pending_request(
+        control: ControlChannel,
+        answer: fn(&str) -> serde_json::Value,
+    ) -> std::thread::JoinHandle<control_channel::Routed> {
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(id) = control.pending_ids().pop() {
+                    return control.route_response(&answer(&id));
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the effort pick never registered a waiter"
+                );
+                std::thread::yield_now();
+            }
+        })
+    }
+
+    fn lines_written_until_stdin_closed(
+        capture: std::thread::JoinHandle<Vec<u8>>,
+    ) -> Vec<serde_json::Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !capture.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stdin was never closed: a handle to it is still alive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let text = String::from_utf8(capture.join().unwrap()).unwrap();
+        assert!(
+            text.is_empty() || text.ends_with('\n'),
+            "every write to stdin is a whole line: {text:?}"
+        );
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_effort_pick_on_a_live_session_is_an_apply_flag_settings_request_resolved_by_its_answer() {
+        let mut session = ChatSession::new("proj");
+        let capture = session.set_test_stdin_capture();
+        let answerer = answer_the_pending_request(session.control.clone(), |id| {
+            serde_json::json!({
+                "type": "control_response",
+                "response": { "subtype": "success", "request_id": id },
+            })
+        });
+
+        let applied = session
+            .control_handle()
+            .expect("a live session")
+            .apply_effort("low");
+
+        assert_eq!(applied, Ok(()));
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(
+            !session.model_settled.is_settled(),
+            "an effort pick leaves the soft-impose armed"
+        );
+        assert!(session.control.pending_ids().is_empty());
+        drop(session);
+        let written = lines_written_until_stdin_closed(capture);
+        assert_eq!(written.len(), 1, "one request, no /effort input");
+        assert_eq!(written[0]["type"], "control_request");
+        assert_eq!(
+            written[0]["request"],
+            serde_json::json!({
+                "subtype": "apply_flag_settings",
+                "settings": { "effortLevel": "low" },
+            })
+        );
+    }
+
+    #[test]
+    fn an_effort_pick_after_the_process_output_ended_fails_at_once_and_writes_nothing() {
+        let mut session = ChatSession::new("proj");
+        let capture = session.set_test_stdin_capture();
+        let handle = session.control_handle().expect("stdin is still open");
+        session.control.close();
+        let started = std::time::Instant::now();
+
+        let applied = handle.apply_effort("low");
+
+        assert_eq!(applied, Err(control_channel::ControlError::SessionEnded));
+        assert!(started.elapsed() < control_channel::APPLY_EFFORT_TIMEOUT / 2);
+        drop(handle);
+        drop(session);
+        assert!(lines_written_until_stdin_closed(capture).is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_claude_code_rejects_fails_with_its_text() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        let answerer = answer_the_pending_request(session.control.clone(), |id| {
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": id,
+                    "error": "effortLevel is not supported",
+                },
+            })
+        });
+
+        let applied = session
+            .control_handle()
+            .expect("a live session")
+            .apply_effort("max");
+
+        assert_eq!(
+            applied,
+            Err(control_channel::ControlError::Rejected(
+                "effortLevel is not supported".to_string()
+            ))
+        );
+        answerer.join().unwrap();
+    }
+
+    #[test]
+    fn an_unanswered_effort_pick_times_out_and_forgets_its_waiter() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+
+        let applied = session
+            .control_handle()
+            .expect("a live session")
+            .apply_effort_within("high", std::time::Duration::from_millis(30));
+
+        assert_eq!(
+            applied,
+            Err(control_channel::ControlError::Timeout {
+                subtype: "apply_flag_settings",
+                timeout: std::time::Duration::from_millis(30),
+            })
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_that_cannot_reach_the_process_reports_the_write_failure() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_broken_pipe();
+
+        let applied = session
+            .control_handle()
+            .expect("a session with a pipe")
+            .apply_effort("low");
+
+        assert!(
+            matches!(applied, Err(control_channel::ControlError::Write(_))),
+            "{applied:?}"
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_on_a_stopped_session_fails_its_waiter_at_once() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        let handle = session.control_handle().expect("a live session");
+        let control = session.control.clone();
+        let stopper = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while control.pending_ids().is_empty() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            control.close();
+        });
+        let started = std::time::Instant::now();
+
+        let applied = handle.apply_effort("low");
+
+        stopper.join().unwrap();
+        assert_eq!(applied, Err(control_channel::ControlError::SessionEnded));
+        assert!(started.elapsed() < control_channel::APPLY_EFFORT_TIMEOUT / 2);
     }
 
     #[test]
@@ -7024,7 +7180,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_args_reports_whether_it_passes_an_effort() {
+    fn a_resumed_spawn_carries_the_pin_and_never_an_unknown_level() {
         let session_id = "11111111-2222-3333-4444-555555555555";
         let mut user_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -7044,39 +7200,24 @@ mod tests {
         let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert!(!spawn.with_effort);
+        assert!(!spawn.args.contains(&"--effort".to_string()));
 
         user_config.projects[0].effort_pin = Some("low".to_string());
         let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert!(spawn.with_effort);
         let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(spawn.args[pos + 1], "low");
+        assert!(spawn.args.contains(&"--resume".to_string()));
 
         user_config.projects[0].effort_pin = Some("turbo".to_string());
         let spawn =
             ChatSession::prepare_args("myproject", &user_config, "inst", Some(session_id), None)
                 .unwrap();
-        assert!(!spawn.with_effort, "an unknown pin is never launched");
-        assert!(!spawn.args.contains(&"--effort".to_string()));
-    }
-
-    #[test]
-    fn only_a_live_process_launched_with_effort_takes_the_wire() {
-        assert!(!ChatSession::new("myproject").takes_wire_effort());
-
-        let mut pinned = ChatSession::new("myproject");
-        pinned.set_test_process(spawn_test_child(TestChild::Blocked), true);
-        assert!(pinned.takes_wire_effort());
-
-        let mut unpinned = ChatSession::new("myproject");
-        unpinned.set_test_process(spawn_test_child(TestChild::Blocked), false);
-        assert!(!unpinned.takes_wire_effort());
-
-        let mut exited = ChatSession::new("myproject");
-        exited.set_test_process(spawn_test_child(TestChild::Exited), true);
-        assert!(!exited.takes_wire_effort());
+        assert!(
+            !spawn.args.contains(&"--effort".to_string()),
+            "an unknown pin is never launched"
+        );
     }
 
     #[test]

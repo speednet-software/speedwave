@@ -55,14 +55,20 @@ pub(crate) fn ensure_effort_pin_migrated_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
+pub(crate) fn validate_effort_level(level: &str) -> Result<(), String> {
+    if speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
+        Ok(())
+    } else {
+        Err(format!("unknown effort level: {level}"))
+    }
+}
+
 fn set_effort_pin_in(
     data_dir: &std::path::Path,
     project_name: &str,
     level: &str,
 ) -> Result<(), String> {
-    if !speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
-        return Err(format!("unknown effort level: {level}"));
-    }
+    validate_effort_level(level)?;
     config::with_config_lock_in(data_dir, || {
         let config_path = data_dir.join("config.json");
         let mut user_config = config::load_user_config_from(&config_path)?;
@@ -306,6 +312,20 @@ mod tests {
         user_config_with_project(tmp.path(), "proj");
         let err = set_effort_pin_in(tmp.path(), "proj", "ultra").unwrap_err();
         assert!(err.contains("unknown effort level"));
+    }
+
+    #[test]
+    fn effort_levels_are_exactly_the_ssot_list() {
+        for level in speedwave_runtime::defaults::EFFORT_LEVELS {
+            assert_eq!(validate_effort_level(level), Ok(()), "{level}");
+        }
+        for bad in ["", "turbo", "High", " low", "low\n", "auto", "ultracode"] {
+            assert_eq!(
+                validate_effort_level(bad),
+                Err(format!("unknown effort level: {bad}")),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

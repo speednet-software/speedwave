@@ -1652,6 +1652,52 @@ describe('ProjectStateService', () => {
     });
   });
 
+  describe('settledMark and isStillSettledOn', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('a mark taken while settled holds until a switch starts', () => {
+      const mark = service.settledMark('test');
+
+      expect(mark).not.toBeNull();
+      expect(service.isStillSettledOn('test', mark)).toBe(true);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.isStillSettledOn('test', mark)).toBe(false);
+    });
+
+    it('a mark stays spent after a switch that failed back, while a new one holds', () => {
+      const before = service.settledMark('test');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      expect(service.isSettledOn('test')).toBe(true);
+      expect(service.isStillSettledOn('test', before)).toBe(false);
+      const after = service.settledMark('test');
+      expect(service.isStillSettledOn('test', after)).toBe(true);
+    });
+
+    it('a mark taken during a switch or for another project never holds', () => {
+      expect(service.settledMark('other')).toBeNull();
+      expect(service.isStillSettledOn('other', service.settledMark('other'))).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      const during = service.settledMark('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      expect(during).toBeNull();
+      expect(service.isStillSettledOn('test', during)).toBe(false);
+    });
+
+    it('a mark holds only for the project it was taken for', () => {
+      const mark = service.settledMark('test');
+
+      expect(service.isStillSettledOn('other', mark)).toBe(false);
+      expect(service.isStillSettledOn(null, mark)).toBe(false);
+    });
+  });
+
   describe('requestRestartFor', () => {
     beforeEach(async () => {
       await service.init();
@@ -1854,6 +1900,39 @@ describe('ProjectStateService', () => {
 
       expect(order.indexOf('begin')).toBeLessThan(order.indexOf('invoke'));
       expect(order.indexOf('ready')).toBeLessThan(order.indexOf('complete'));
+    });
+
+    it('restartContainers runs the restart-failed listeners only when the restart fails', async () => {
+      const failed = vi.fn();
+      const complete = vi.fn();
+      service.onRestartFailed(failed);
+      service.onRestartComplete(complete);
+
+      await expect(service.restartContainers()).resolves.toBe('restarted');
+      expect(failed).not.toHaveBeenCalled();
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+      await expect(service.restartContainers()).resolves.toBe('failed');
+
+      expect(failed).toHaveBeenCalledTimes(1);
+      expect(complete).toHaveBeenCalledTimes(1);
+    });
+
+    it('an unsubscribed restart-failed listener is not run', async () => {
+      const failed = vi.fn();
+      const unsubscribe = service.onRestartFailed(failed);
+      unsubscribe();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+
+      await expect(service.restartContainers()).resolves.toBe('failed');
+
+      expect(failed).not.toHaveBeenCalled();
     });
 
     it('restartContainers clears a stale auth_required after switching to a no-auth provider', async () => {

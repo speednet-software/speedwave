@@ -7,6 +7,8 @@ import { ClaudeControlService } from '../../../services/claude-control.service';
 import type { ActiveProviderSummary, AnthropicModel } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 describe('ActiveProviderSummary', () => {
   it('shape matches the Rust mirror fields, including base_url', () => {
     const sample: ActiveProviderSummary = {
@@ -14,6 +16,7 @@ describe('ActiveProviderSummary', () => {
       kind: 'local',
       model: 'my-ollama/llama3.3',
       base_url: 'http://host.docker.internal:11434',
+      effort_levels: EFFORT_LEVELS,
     };
     expect(sample.base_url).toBe('http://host.docker.internal:11434');
   });
@@ -49,10 +52,10 @@ describe('ModelSelectorComponent', () => {
     kind: 'anthropic_oauth',
     model: 'claude-sonnet-5',
     base_url: null,
+    effort_levels: EFFORT_LEVELS,
   };
 
   const picker: ModelPicker = {
-    effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
     rows: [
       {
         id: 'claude-sonnet-5',
@@ -139,6 +142,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openrouter/anthropic/claude-sonnet-5',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
@@ -159,6 +163,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openai/o4-mini',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
@@ -251,7 +256,6 @@ describe('ModelSelectorComponent', () => {
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker')
         return Promise.resolve({
-          effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
           rows: [
             {
               id: 'claude-nova-1',
@@ -741,6 +745,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'local',
       model: 'my-ollama/llama3.3',
       base_url: 'http://host.docker.internal:11434',
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummary);
@@ -762,6 +767,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'local',
       model: 'my-ollama/llama3.3',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummaryNoUrl);
@@ -795,6 +801,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openrouter/model-a',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
@@ -814,6 +821,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'local',
       model: 'my-ollama/model-a',
       base_url: 'http://host.docker.internal:11434',
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummary);
@@ -835,6 +843,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'local',
       model: 'my-litellm/gemma-4-26b-a4b',
       base_url: 'https://litellm.example',
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummary);
@@ -875,6 +884,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'local',
       model: 'my-ollama/llama3.3',
       base_url: 'http://host.docker.internal:11434',
+      effort_levels: EFFORT_LEVELS,
     };
     let discoverCalls = 0;
     tauriInvoke.mockImplementation((cmd: string) => {
@@ -901,6 +911,7 @@ describe('ModelSelectorComponent', () => {
     const otherLocalSummary: ActiveProviderSummary = {
       ...localSummary,
       base_url: 'http://host.docker.internal:22222',
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(otherLocalSummary);
@@ -927,6 +938,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openai/o4-mini',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     let reachable = true;
     tauriInvoke.mockImplementation((cmd: string) => {
@@ -973,6 +985,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openai/o4-mini',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     let reachable = true;
     tauriInvoke.mockImplementation((cmd: string) => {
@@ -1015,6 +1028,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openai/o4-mini',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
@@ -1071,29 +1085,204 @@ describe('ModelSelectorComponent', () => {
     ]);
   });
 
-  it('renders the effort segment only for anthropic provider kinds', async () => {
+  it('renders the effort segment for an anthropic provider kind', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeTruthy();
   });
 
-  it('hides the effort segment for non-anthropic provider kinds', async () => {
-    tauriInvoke.mockImplementation((cmd: string) => {
-      if (cmd === 'get_active_provider_summary')
-        return Promise.resolve({
-          provider_id: 'openrouter',
-          kind: 'open_router',
-          model: 'some-model',
-          base_url: null,
-        });
-      if (cmd === 'list_anthropic_models') return Promise.resolve([]);
-      return Promise.reject(new Error(`unexpected: ${cmd}`));
+  describe('routed provider kinds', () => {
+    const invoked: string[] = [];
+
+    async function openRoutedEffortPopover(
+      kind: 'open_router' | 'local',
+      pin: string | null
+    ): Promise<void> {
+      invoked.length = 0;
+      tauriInvoke.mockImplementation((cmd: string) => {
+        invoked.push(cmd);
+        if (cmd === 'get_active_provider_summary')
+          return Promise.resolve({
+            provider_id: kind === 'local' ? 'local' : 'openrouter',
+            kind,
+            model: 'some-model',
+            base_url: kind === 'local' ? 'http://host.docker.internal:4000' : null,
+            effort_levels: EFFORT_LEVELS,
+          });
+        if (cmd === 'get_effort_pin') return Promise.resolve(pin);
+        return Promise.reject(new Error(`unexpected: ${cmd}`));
+      });
+      fixture.componentRef.setInput('projectId', `proj-${kind}`);
+      fixture.detectChanges();
+      await settle();
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+      fixture.detectChanges();
+    }
+
+    function stops(): string[] {
+      return fixture.debugElement
+        .queryAll(By.css('[data-testid^="effort-stop-"]'))
+        .map((el) =>
+          (el.nativeElement.getAttribute('data-testid') as string).replace('effort-stop-', '')
+        );
+    }
+
+    it('renders no effort popover while there are no stops to show', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_active_provider_summary'
+          ? Promise.resolve({
+              provider_id: 'local',
+              kind: 'local',
+              model: 'some-model',
+              base_url: 'http://host.docker.internal:4000',
+              effort_levels: [],
+            })
+          : cmd === 'get_effort_pin'
+            ? Promise.resolve(null)
+            : Promise.reject(new Error(`unexpected: ${cmd}`))
+      );
+      fixture.componentRef.setInput('projectId', 'proj-no-stops');
+      fixture.detectChanges();
+      await settle();
+      (
+        fixture.componentInstance as unknown as { effortOpen: { set(v: boolean): void } }
+      ).effortOpen.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeFalsy();
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))).toBeFalsy();
     });
-    fixture.componentRef.setInput('projectId', 'proj-non-anthropic');
-    fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
-    expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
+
+    function mockProviderSummaries(levelsByProject: Record<string, string[]>): void {
+      tauriInvoke.mockImplementation((cmd: string, args?: { project?: string }) => {
+        if (cmd === 'get_active_provider_summary') {
+          return Promise.resolve({
+            provider_id: 'local',
+            kind: 'local',
+            model: 'some-model',
+            base_url: 'http://host.docker.internal:4000',
+            effort_levels: levelsByProject[args?.project ?? ''] ?? [],
+          });
+        }
+        if (cmd === 'get_effort_pin') return Promise.resolve(null);
+        return Promise.reject(new Error(`unexpected: ${cmd}`));
+      });
+    }
+
+    function effortPopover(): unknown {
+      return fixture.debugElement.query(By.css('[data-testid="effort-popover"]'));
+    }
+
+    it('keeps the effort popover closed when its stops disappear and come back', async () => {
+      mockProviderSummaries({ 'proj-stops': EFFORT_LEVELS, 'proj-none': [] });
+      fixture.componentRef.setInput('projectId', 'proj-stops');
+      fixture.detectChanges();
+      await settle();
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+      fixture.detectChanges();
+      expect(effortPopover()).toBeTruthy();
+
+      fixture.componentRef.setInput('projectId', 'proj-none');
+      fixture.detectChanges();
+      await settle();
+      expect(effortPopover()).toBeFalsy();
+
+      fixture.componentRef.setInput('projectId', 'proj-stops');
+      fixture.detectChanges();
+      await settle();
+
+      expect(stops()).toEqual([]);
+      expect(effortPopover()).toBeFalsy();
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeTruthy();
+    });
+
+    it('closes the effort popover when the project changes', async () => {
+      mockProviderSummaries({ 'proj-a': EFFORT_LEVELS, 'proj-b': EFFORT_LEVELS });
+      fixture.componentRef.setInput('projectId', 'proj-a');
+      fixture.detectChanges();
+      await settle();
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+      fixture.detectChanges();
+      expect(effortPopover()).toBeTruthy();
+
+      fixture.componentRef.setInput('projectId', 'proj-b');
+      fixture.detectChanges();
+      await settle();
+
+      expect(effortPopover()).toBeFalsy();
+    });
+
+    function expectHandleWithoutPosition(): void {
+      const handle = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
+        .nativeElement as HTMLElement;
+      expect(handle.className).toContain('opacity-0');
+      expect(handle.classList).toContain('pointer-events-none');
+      expect(handle.getAttribute('aria-valuetext')).toBe('Default');
+    }
+
+    for (const kind of ['open_router', 'local'] as const) {
+      it(`${kind}: offers every effort level from the summary, in order, and reads its pin`, async () => {
+        await openRoutedEffortPopover(kind, null);
+
+        expect(stops()).toEqual(EFFORT_LEVELS);
+        expect(invoked).toContain('get_effort_pin');
+      });
+    }
+
+    it('shows the pin on the segment and as the active stop', async () => {
+      await openRoutedEffortPopover('local', 'xhigh');
+
+      const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+      expect(segment.nativeElement.textContent.trim()).toBe('Xhigh');
+      const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
+      expect(slider.nativeElement.getAttribute('aria-valuetext')).toBe('Xhigh');
+    });
+
+    it('without a pin shows Default and no handle, since the level Claude Code uses is its own', async () => {
+      await openRoutedEffortPopover('open_router', null);
+
+      const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+      expect(segment.nativeElement.textContent.trim()).toBe('Default');
+      expectHandleWithoutPosition();
+    });
+
+    it('a stop click emits effortSelected with the routed pick', async () => {
+      await openRoutedEffortPopover('open_router', null);
+      const emitted: string[] = [];
+      fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
+
+      fixture.debugElement.query(By.css('[data-testid="effort-stop-max"]')).nativeElement.click();
+      fixture.detectChanges();
+
+      expect(emitted).toEqual(['max']);
+      const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+      expect(segment.nativeElement.textContent.trim()).toBe('Max');
+    });
+
+    it('never borrows the Anthropic catalog default for a routed model named like a Claude id', async () => {
+      await settle();
+      tauriInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_active_provider_summary')
+          return Promise.resolve({
+            provider_id: 'local',
+            kind: 'local',
+            model: 'local/claude-sonnet-5',
+            base_url: 'http://host.docker.internal:4000',
+            effort_levels: EFFORT_LEVELS,
+          });
+        if (cmd === 'get_effort_pin') return Promise.resolve(null);
+        return Promise.reject(new Error(`unexpected: ${cmd}`));
+      });
+      fixture.componentRef.setInput('projectId', 'proj-local-claude-alias');
+      fixture.detectChanges();
+      await settle();
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+      fixture.detectChanges();
+
+      expect(stops()).toEqual(EFFORT_LEVELS);
+      expectHandleWithoutPosition();
+    });
   });
 
   it('shows the current pin, capitalized, on the segment', async () => {
@@ -1293,6 +1482,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openrouter/some-model',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary')
@@ -1320,6 +1510,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'anthropic_oauth',
       model: 'claude-sonnet-5',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     });
     await fixture.whenStable();
     fixture.detectChanges();
@@ -1333,6 +1524,7 @@ describe('ModelSelectorComponent', () => {
       kind: 'open_router',
       model: 'openrouter/some-model',
       base_url: null,
+      effort_levels: EFFORT_LEVELS,
     };
     await fixture.whenStable();
     fixture.detectChanges();
@@ -1382,6 +1574,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     kind: 'anthropic_oauth',
     model: null,
     base_url: null,
+    effort_levels: EFFORT_LEVELS,
   };
 
   const catalog: AnthropicModel[] = [
@@ -1402,7 +1595,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
   beforeEach(async () => {
     modelHint = null;
     pickerRows = {
-      effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
       rows: [
         {
           id: 'claude-fable-5',
@@ -1477,7 +1669,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
 
   it('shows the plan default by name once Claude Code reports the default row', async () => {
     pickerRows = {
-      effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
       rows: [
         {
           id: 'claude-fable-5',
@@ -1517,6 +1708,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
           kind: 'open_router',
           model: 'x-ai/grok-4.3',
           base_url: null,
+          effort_levels: EFFORT_LEVELS,
         };
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
@@ -1628,8 +1820,6 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
     } as AnthropicModel,
   ];
 
-  const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
-
   function rowsFromCatalog(): ModelPickerRow[] {
     return catalog.map((m) => ({
       id: m.id,
@@ -1657,11 +1847,11 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
           kind: 'anthropic_oauth',
           model,
           base_url: null,
+          effort_levels: EFFORT_LEVELS,
         });
       if (cmd === 'list_anthropic_models') return Promise.resolve(catalog);
       if (cmd === 'get_effort_pin') return Promise.resolve(pin);
-      if (cmd === 'list_model_picker' && rows)
-        return Promise.resolve({ rows, effort_order: EFFORT_ORDER });
+      if (cmd === 'list_model_picker' && rows) return Promise.resolve({ rows });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
   }

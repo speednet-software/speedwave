@@ -1327,13 +1327,15 @@ describe('ChatComponent', () => {
     });
   });
 
-  describe('deferred effort notice (SPEED-650)', () => {
+  describe('deferred effort notice after a pick the live session did not take', () => {
     async function deferEffort(level: string): Promise<void> {
       projectState.activeProject.set('test');
       projectState.status.set('ready');
       const base = mockTauri.invokeHandler;
-      mockTauri.invokeHandler = async (cmd, args) =>
-        cmd === 'get_chat_takes_wire_effort' ? false : base(cmd, args);
+      mockTauri.invokeHandler = async (cmd, args) => {
+        if (cmd === 'apply_chat_effort') throw new Error('no active session');
+        return base(cmd, args);
+      };
       chatState.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-fable-5', session_id: 'sess-held' },
@@ -1358,11 +1360,13 @@ describe('ChatComponent', () => {
       expect(notice()).toBeNull();
     });
 
-    it('names the deferred level and warns that restarting stops background tasks', async () => {
+    it('names the saved level, says the session did not confirm it and warns that restarting stops background tasks', async () => {
       await deferEffort('max');
 
-      const text = (notice().nativeElement as HTMLElement).textContent ?? '';
-      expect(text).toContain('Effort Max applies from the next session');
+      const text = ((notice().nativeElement as HTMLElement).textContent ?? '').replace(/\s+/g, ' ');
+      expect(text).toContain('Effort Max is saved for new sessions');
+      expect(text).toContain('this session did not confirm it');
+      expect(text).not.toContain('keeps its current effort');
       expect(text).toContain("stops this session's background tasks");
     });
 
