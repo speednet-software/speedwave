@@ -1706,6 +1706,18 @@ fn probe_session_info(
     Some(status)
 }
 
+fn announce_pending_session_info(
+    slot: &Mutex<SessionInfoState>,
+    emit: impl FnOnce(SessionInfoState),
+) {
+    let slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *slot == SessionInfoState::Pending {
+        emit(SessionInfoState::Pending);
+    }
+}
+
 fn end_session_info(slot: &Mutex<SessionInfoState>, emit: Option<&SessionInfoEmitter>) {
     let mut slot = slot
         .lock()
@@ -2314,7 +2326,7 @@ impl ChatSession {
             let project = self.project_name.clone();
             let slot = self.session_info.clone();
             let stopping = self.stopping.clone();
-            emit(SessionInfoState::Pending);
+            announce_pending_session_info(&slot, |status| emit(status));
             let h = std::thread::spawn(move || {
                 probe_session_info(
                     || handle.query(ControlQuery::Initialize),
@@ -3989,6 +4001,43 @@ mod tests {
         );
         assert!(new_reported.lock().unwrap().is_empty());
         assert_eq!(successor.session_info_state(), SessionInfoState::Pending);
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_the_pending_announcement_leaves_the_session_unavailable() {
+        let (s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let emit = s.session_info_emitter.clone().expect("emitter");
+
+        end_session_info(&s.session_info, s.session_info_emitter.as_ref());
+        announce_pending_session_info(&s.session_info, |status| emit(status));
+
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn a_stream_that_ends_after_the_pending_announcement_is_reported_after_it() {
+        let (s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let emit = s.session_info_emitter.clone().expect("emitter");
+
+        announce_pending_session_info(&s.session_info, |status| emit(status));
+        end_session_info(&s.session_info, s.session_info_emitter.as_ref());
+
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Pending, SessionInfoState::Unavailable]
+        );
+    }
+
+    #[test]
+    fn start_announces_pending_only_through_the_slot_lock() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        assert!(prod.contains("announce_pending_session_info(&slot, |status| emit(status));"));
+        assert_eq!(prod.matches("emit(SessionInfoState::Pending)").count(), 1);
     }
 
     #[test]
