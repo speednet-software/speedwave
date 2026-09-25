@@ -1039,6 +1039,42 @@ mod tests {
     }
 
     #[test]
+    fn every_session_replacement_stops_the_old_session_before_the_new_one_starts() {
+        for (source, func, stop, start) in [
+            (
+                include_str!("chat_session_cmd.rs"),
+                "fn start_session_inner(",
+                "old_session.stop()",
+                "start_then_await_first_turn(",
+            ),
+            (
+                include_str!("retry_cmd.rs"),
+                "fn retry_last_turn_inner(",
+                "driver.stop()",
+                ".start_with_retry(",
+            ),
+            (
+                include_str!("project_cmd.rs"),
+                "fn rebind_chat(",
+                "session.stop()",
+                "session.start(",
+            ),
+        ] {
+            let body = extract_fn_body(source, func);
+            let stopped = body
+                .find(stop)
+                .unwrap_or_else(|| panic!("{func} stops the old session"));
+            let started = body
+                .find(start)
+                .unwrap_or_else(|| panic!("{func} starts the new session"));
+            assert!(
+                stopped < started,
+                "{func}: the old session must report its info unavailable before the new one reports pending"
+            );
+        }
+    }
+
+    #[test]
     fn a_surviving_kept_instance_refuses_the_start_before_the_running_session_stops() {
         let source = include_str!("chat_session_cmd.rs");
         let body: String = extract_fn_body(source, "fn start_session_inner(")

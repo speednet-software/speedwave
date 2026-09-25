@@ -416,6 +416,15 @@ describe('ModelSelectorComponent', () => {
     await settle();
   }
 
+  async function openByBadge(): Promise<void> {
+    const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
+    expect(badge.nativeElement.disabled).toBe(false);
+    badge.nativeElement.click();
+    await settle();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+  }
+
   const opusOnly: ModelPicker = { ...picker, rows: [picker.rows[1]] };
 
   const errorRow = () => fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'));
@@ -463,9 +472,7 @@ describe('ModelSelectorComponent', () => {
     fixture.componentRef.setInput('sessionAwaited', true);
     fixture.detectChanges();
     await settle();
-    await fixture.componentInstance.openCombobox();
-    await fixture.componentInstance.whenOptionsSettled();
-    fixture.detectChanges();
+    await openByBadge();
 
     expect(loadingRow()).toBeTruthy();
     expect(loadingRow().query(By.css('[data-testid="model-selector-spinner"]'))).toBeTruthy();
@@ -491,9 +498,7 @@ describe('ModelSelectorComponent', () => {
     fixture.componentRef.setInput('sessionAwaited', true);
     fixture.detectChanges();
     await settle();
-    await fixture.componentInstance.openCombobox();
-    await fixture.componentInstance.whenOptionsSettled();
-    fixture.detectChanges();
+    await openByBadge();
     expect(loadingRow()).toBeTruthy();
 
     fixture.componentRef.setInput('sessionAwaited', false);
@@ -588,60 +593,47 @@ describe('ModelSelectorComponent', () => {
     expect(loadingRow()).toBeFalsy();
   });
 
-  it('shows a spinner without Retry in a pending list, and re-reads a stuck pending state on open', async () => {
+  it('shows a spinner without Retry while the session info is pending, and the error with Retry once the session is reported gone', async () => {
     let state: unknown = { state: 'unavailable' };
     mockSessionLifecycle(
       () => state,
       () => null
     );
-    fixture.componentRef.setInput('projectId', 'proj-stuck');
+    fixture.componentRef.setInput('projectId', 'proj-stopped');
     fixture.detectChanges();
     await settle();
-    await fixture.componentInstance.openCombobox();
-    await fixture.componentInstance.whenOptionsSettled();
+    await openByBadge();
     state = { state: 'pending' };
-    await reportSessionInfo('proj-stuck');
+    await reportSessionInfo('proj-stopped');
     expect(loadingRow().query(By.css('[data-testid="model-selector-spinner"]'))).toBeTruthy();
     expect(loadingRow().query(By.css('[data-testid="model-selector-retry"]'))).toBeFalsy();
 
     state = { state: 'unavailable' };
-    fixture.componentInstance.open.set(false);
-    fixture.detectChanges();
-    await fixture.componentInstance.openCombobox();
-    await fixture.componentInstance.whenOptionsSettled();
-    await settle();
+    await reportSessionInfo('proj-stopped');
 
     expect(loadingRow()).toBeFalsy();
     expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
     expect(errorRow().query(By.css('[data-testid="model-selector-retry"]'))).toBeTruthy();
   });
 
-  it('re-reads the session info when an awaited session stops being awaited', async () => {
-    let state: unknown = { state: 'pending' };
-    mockSessionLifecycle(
-      () => state,
+  it('reads no session info when a session stops being awaited', async () => {
+    const invoke = mockSessionLifecycle(
+      () => ({ state: 'unavailable' }),
       () => null
     );
-    fixture.componentRef.setInput('projectId', 'proj-start-failed');
+    fixture.componentRef.setInput('projectId', 'proj-awaited-edge');
     fixture.componentRef.setInput('sessionAwaited', true);
     fixture.detectChanges();
     await settle();
-    await reportSessionInfo('proj-start-failed');
-    await fixture.componentInstance.openCombobox();
-    await fixture.componentInstance.whenOptionsSettled();
-    fixture.detectChanges();
-    expect(loadingRow()).toBeTruthy();
+    const reads = (): number =>
+      invoke.mock.calls.filter(([cmd]) => cmd === 'get_chat_session_info').length;
+    const before = reads();
 
-    state = { state: 'unavailable' };
     fixture.componentRef.setInput('sessionAwaited', false);
     fixture.detectChanges();
     await settle();
 
-    expect(TestBed.inject(ClaudeControlService).sessionInfoState('proj-start-failed')).toEqual({
-      state: 'unavailable',
-    });
-    expect(loadingRow()).toBeFalsy();
-    expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
+    expect(reads()).toBe(before);
   });
 
   it('shows the rows of the project it belongs to after a project switch with the list open', async () => {

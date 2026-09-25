@@ -374,8 +374,6 @@ export class ModelSelectorComponent {
 
   private lastSessionModel = '';
 
-  private wasAwaited = false;
-
   private lastModelError = '';
 
   /** Reloads the active-provider summary whenever the project id changes. */
@@ -400,15 +398,6 @@ export class ModelSelectorComponent {
       const id = this.projectId();
       if (!this.isAnthropic() || !id) return;
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
-    });
-    effect(() => {
-      const awaited = this.sessionAwaited();
-      const ended = this.wasAwaited && !awaited;
-      this.wasAwaited = awaited;
-      const id = untracked(() => this.projectId());
-      if (ended && id && untracked(() => this.isAnthropic())) {
-        void this.control.refreshSessionInfo(id);
-      }
     });
     effect(() => {
       const live = this.sessionModel();
@@ -542,7 +531,7 @@ export class ModelSelectorComponent {
     try {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
-        if (force || this.pickerPending()) await this.control.refreshSessionInfo(projectId);
+        if (force) await this.control.refreshSessionInfo(projectId);
         await this.anthropicModels.list();
         const picker = await this.picker.refresh(projectId);
         if (!latest()) return;
