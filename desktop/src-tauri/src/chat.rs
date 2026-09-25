@@ -1687,18 +1687,34 @@ fn probe_session_info(
     query: impl FnOnce() -> Result<serde_json::Value, control_channel::ControlError>,
     slot: &Mutex<SessionInfoState>,
     stopping: &std::sync::atomic::AtomicBool,
-    report: impl FnOnce(&SessionInfoState),
+    prepare: impl FnOnce(&SessionInfoState),
+    emit: impl FnOnce(SessionInfoState),
 ) -> Option<SessionInfoState> {
     let status = control_channel::session_info_state_from(query());
-    let mut slot = slot
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if stopping.load(std::sync::atomic::Ordering::SeqCst) {
         return None;
     }
+    prepare(&status);
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) || *slot != SessionInfoState::Pending {
+        return None;
+    }
     *slot = status.clone();
-    report(&status);
+    emit(status.clone());
     Some(status)
+}
+
+fn end_session_info(slot: &Mutex<SessionInfoState>, emit: Option<&SessionInfoEmitter>) {
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reported = *slot != SessionInfoState::Unavailable;
+    *slot = SessionInfoState::Unavailable;
+    if let Some(emit) = emit.filter(|_| reported) {
+        emit(SessionInfoState::Unavailable);
+    }
 }
 
 #[derive(Clone)]
@@ -2006,6 +2022,8 @@ impl ChatSession {
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
+        let info_for_reader = self.session_info.clone();
+        let info_emitter_for_reader = self.session_info_emitter.clone();
         self.awaited_result = AwaitedResult::new();
         let awaited_for_reader = self.awaited_result.clone();
         self.model_settled = ModelSettled::default();
@@ -2255,6 +2273,7 @@ impl ChatSession {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
             control_for_reader.close();
+            end_session_info(&info_for_reader, info_emitter_for_reader.as_ref());
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if awaited_for_reader.is_awaited() && !stopping {
@@ -2312,8 +2331,8 @@ impl ChatSession {
                             provider_kind,
                             info,
                         );
-                        emit(status.clone());
                     },
+                    |status| emit(status),
                 );
             });
             self.drain_handles.push(h);
@@ -2569,18 +2588,6 @@ impl ChatSession {
         Ok(())
     }
 
-    fn end_session_info(&self) {
-        let mut slot = self
-            .session_info
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let reported = *slot != SessionInfoState::Unavailable;
-        *slot = SessionInfoState::Unavailable;
-        if let Some(emit) = self.session_info_emitter.as_ref().filter(|_| reported) {
-            emit(SessionInfoState::Unavailable);
-        }
-    }
-
     fn reap_instance(&mut self) {
         if self.instance_id.is_some() {
             self.reap_instance_with(&runtime::detect_runtime());
@@ -2602,7 +2609,7 @@ impl ChatSession {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared_stdin = None;
         self.control.close();
-        self.end_session_info();
+        end_session_info(&self.session_info, self.session_info_emitter.as_ref());
         self.reap_instance();
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -3744,7 +3751,8 @@ mod tests {
             || Ok(fixture["run_A"]["initialize"].clone()),
             &slot,
             &stopping,
-            |status| reported = Some(status.clone()),
+            |_| {},
+            |status| reported = Some(status),
         )
         .expect("a live session reports its status");
         assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 6));
@@ -3766,6 +3774,7 @@ mod tests {
             &slot,
             &stopping,
             |_| {},
+            |_| {},
         );
         assert_eq!(status, Some(SessionInfoState::Unavailable));
         assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
@@ -3775,16 +3784,58 @@ mod tests {
     fn probe_session_info_of_a_stopped_session_reports_nothing() {
         let slot = Mutex::new(SessionInfoState::Unavailable);
         let stopping = std::sync::atomic::AtomicBool::new(true);
+        let mut prepared = false;
         let mut reported = false;
         let status = probe_session_info(
             || Err(control_channel::ControlError::SessionEnded),
             &slot,
             &stopping,
+            |_| prepared = true,
+            |_| reported = true,
+        );
+        assert_eq!(status, None);
+        assert!(!prepared);
+        assert!(!reported);
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn the_probe_prepares_its_report_without_holding_the_info_lock() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let mut free_while_preparing = false;
+        let mut locked_while_emitting = false;
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+            |_| free_while_preparing = slot.try_lock().is_ok(),
+            |_| locked_while_emitting = slot.try_lock().is_err(),
+        );
+        assert!(status.is_some());
+        assert!(free_while_preparing);
+        assert!(locked_while_emitting);
+    }
+
+    #[test]
+    fn a_stop_during_the_probes_preparation_reports_nothing() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let mut reported = false;
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+            |_| stopping.store(true, std::sync::atomic::Ordering::SeqCst),
             |_| reported = true,
         );
         assert_eq!(status, None);
         assert!(!reported);
-        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Pending);
     }
 
     fn session_reporting_into(
@@ -3850,10 +3901,11 @@ mod tests {
                 || Ok(fixture["run_A"]["initialize"].clone()),
                 &slot,
                 &stopping,
+                |_| {},
                 |status| {
                     in_report.send(()).expect("signal");
                     released.recv().expect("release");
-                    emit(status.clone());
+                    emit(status);
                 },
             )
         });
@@ -3887,13 +3939,69 @@ mod tests {
             || Err(control_channel::ControlError::SessionEnded),
             &slot,
             &stopping,
-            |status| emit(status.clone()),
+            |_| {},
+            |status| emit(status),
         );
         assert_eq!(status, None);
         assert_eq!(
             *reported.lock().unwrap(),
             vec![SessionInfoState::Unavailable]
         );
+    }
+
+    #[test]
+    fn a_process_that_ends_on_its_own_reports_its_info_unavailable_and_a_late_probe_nothing() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let (s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let emit = s.session_info_emitter.clone().expect("emitter");
+
+        end_session_info(&s.session_info, s.session_info_emitter.as_ref());
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &s.session_info,
+            &s.stopping,
+            |_| {},
+            |status| emit(status),
+        );
+
+        assert_eq!(status, None);
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn the_end_of_a_replaced_sessions_stream_reports_nothing_and_leaves_its_successor_alone() {
+        let (mut old, old_reported) = session_reporting_into(SessionInfoState::Pending);
+        let old_reader_slot = old.session_info.clone();
+        let old_reader_emitter = old.session_info_emitter.clone();
+        old.stop().expect("stop");
+        let (successor, new_reported) = session_reporting_into(SessionInfoState::Pending);
+
+        end_session_info(&old_reader_slot, old_reader_emitter.as_ref());
+
+        assert_eq!(
+            *old_reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert!(new_reported.lock().unwrap().is_empty());
+        assert_eq!(successor.session_info_state(), SessionInfoState::Pending);
+    }
+
+    #[test]
+    fn stdout_reader_ends_the_session_info_when_the_stream_closes() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let closed = prod
+            .find("control_for_reader.close();")
+            .expect("the reader closes the control channel at EOF");
+        let ended = prod
+            .find("end_session_info(&info_for_reader, info_emitter_for_reader.as_ref());")
+            .expect("the reader reports the end of its session's info at EOF");
+        assert!(closed < ended);
     }
 
     #[test]
