@@ -24,6 +24,10 @@ export interface ClaudeSessionInfo {
 export type ClaudeSessionInfoState =
   { state: 'unavailable' } | { state: 'pending' } | { state: 'ready'; info: ClaudeSessionInfo };
 
+/** What became of a model pick sent to the live session. Mirror of Rust `control_channel::ModelSwitchOutcome`. */
+export type ModelSwitchOutcome =
+  { outcome: 'confirmed' } | { outcome: 'unconfirmed' } | { outcome: 'refused'; reason: string };
+
 /** Tauri event the backend emits when a session's info state changes. */
 export const CLAUDE_SESSION_INFO_EVENT = 'chat_session_info';
 

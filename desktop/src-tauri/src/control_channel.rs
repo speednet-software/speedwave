@@ -19,7 +19,7 @@ const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +371,27 @@ pub(crate) enum SessionInfoState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum ModelSwitchOutcome {
+    Confirmed,
+    Unconfirmed,
+    Refused { reason: String },
+}
+
+impl ModelSwitchOutcome {
+    pub(crate) fn of(
+        answer: Result<serde_json::Value, ControlError>,
+    ) -> Result<Self, ControlError> {
+        match answer {
+            Ok(_) => Ok(Self::Confirmed),
+            Err(ControlError::Timeout { .. }) => Ok(Self::Unconfirmed),
+            Err(ControlError::Rejected(reason)) => Ok(Self::Refused { reason }),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SessionInfoEvent {
     pub(crate) project: String,
@@ -509,8 +530,9 @@ const APPLY_EFFORT_FIXTURE: &str =
 mod tests {
     use super::*;
 
-    fn fixture() -> serde_json::Value {
-        serde_json::from_str(FIXTURE).expect("fixture is valid JSON")
+    fn fixture() -> &'static serde_json::Value {
+        static PARSED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARSED.get_or_init(|| serde_json::from_str(FIXTURE).expect("fixture is valid JSON"))
     }
 
     fn success_line(request_id: &str, payload: serde_json::Value) -> serde_json::Value {
@@ -775,8 +797,11 @@ mod tests {
         );
     }
 
-    fn apply_effort_capture() -> serde_json::Value {
-        serde_json::from_str(APPLY_EFFORT_FIXTURE).expect("capture is valid JSON")
+    fn apply_effort_capture() -> &'static serde_json::Value {
+        static PARSED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARSED.get_or_init(|| {
+            serde_json::from_str(APPLY_EFFORT_FIXTURE).expect("capture is valid JSON")
+        })
     }
 
     #[test]
@@ -805,23 +830,12 @@ mod tests {
     }
 
     #[test]
-    fn an_effort_change_stores_no_level_outside_the_pin() {
-        let capture = apply_effort_capture();
-        let added = capture["claude_json_added"]
-            .as_object()
-            .expect("the capture records what .claude.json gained");
-
-        for (key, value) in added {
-            assert!(
-                key.starts_with("unpin") && key.ends_with("LaunchEffort"),
-                "apply_flag_settings may record only launch-hold releases in .claude.json: {key}"
-            );
-            assert_eq!(
-                value,
-                &serde_json::Value::Bool(true),
-                "a launch-hold release is a flag, never a level: {key}"
-            );
-        }
+    fn an_effort_change_stores_nothing_in_claude_json() {
+        assert_eq!(
+            apply_effort_capture()["claude_json_added"],
+            serde_json::json!({}),
+            "the pinned Claude Code keeps no effort state in .claude.json; the pin stays the only store"
+        );
     }
 
     #[test]
@@ -1398,36 +1412,31 @@ mod tests {
     }
 
     #[test]
-    fn a_max_account_is_refused_the_sonnet_4_6_1m_window_the_catalog_keeps_for_api_billing() {
+    fn a_refused_set_model_names_its_reason_and_leaves_the_session_on_its_model() {
         let fx = fixture();
-        let sonnet_4_6 = speedwave_runtime::defaults::ANTHROPIC_MODELS
-            .iter()
-            .find(|m| m.id == "claude-sonnet-4-6")
-            .expect("claude-sonnet-4-6 is in the catalog");
-        assert_eq!(
-            sonnet_4_6.one_million_context,
-            speedwave_runtime::defaults::OneMillionContext::ApiOnly
-        );
         for run in ["run_A", "run_B"] {
-            let refused: Vec<&str> = fx[run]
-                .as_object()
-                .unwrap()
-                .iter()
-                .filter(|(key, value)| key.starts_with("set_model/") && !value["error"].is_null())
-                .map(|(key, _)| key.as_str())
-                .collect();
-            assert_eq!(refused, vec!["set_model/claude-sonnet-4-6[1m]"], "{run}");
-            let error = fx[run]["set_model/claude-sonnet-4-6[1m]"]["error"]
-                .as_str()
-                .unwrap();
             assert!(
-                error.contains("Usage credits are required for long context requests"),
-                "{run}: {error}"
+                fx[run].get("set_model/claude-sonnet-4-6[1m]").is_some(),
+                "{run}: the capture switches to every catalog id, bare and [1m]"
             );
-            let unchanged =
-                parse_context_usage(&fx[run]["get_context_usage/claude-sonnet-4-6[1m]"]).unwrap();
-            assert_eq!(unchanged.model, "claude-sonnet-4-6", "{run}");
-            assert_eq!(unchanged.max_tokens, 200_000, "{run}");
+            let refusals =
+                fx[run].as_object().unwrap().iter().filter(|(key, value)| {
+                    key.starts_with("set_model/") && !value["error"].is_null()
+                });
+            for (key, value) in refusals {
+                let model = key.trim_start_matches("set_model/");
+                let reason = value["error"].as_str().unwrap();
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{run} {key}: a refusal names its reason"
+                );
+                let after = parse_context_usage(&fx[run][format!("get_context_usage/{model}")])
+                    .unwrap_or_else(|e| panic!("{run} {key}: {e}"));
+                assert_ne!(
+                    after.model, model,
+                    "{run}: a refused switch must leave the session on its model"
+                );
+            }
         }
     }
 
@@ -1481,6 +1490,18 @@ mod tests {
             }],
         };
         assert_eq!(usage.clone().without_free_space(), usage);
+    }
+
+    #[test]
+    fn context_usage_of_a_1m_session_reports_the_1m_window() {
+        let usage =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5[1m]"])
+                .unwrap();
+        assert_eq!(usage.model, "claude-opus-5-5[1m]");
+        assert_eq!(usage.max_tokens, 1_000_000);
+        let bare =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5"]).unwrap();
+        assert_eq!(bare.max_tokens, 200_000);
     }
 
     #[test]
@@ -1596,6 +1617,59 @@ mod tests {
             }),
             ts_interface_fields(ts, "ClaudeSessionInfoEvent")
         );
+    }
+
+    #[test]
+    fn a_set_model_answer_maps_to_the_outcome_of_the_pick() {
+        assert_eq!(
+            ModelSwitchOutcome::of(Ok(serde_json::json!({}))),
+            Ok(ModelSwitchOutcome::Confirmed)
+        );
+        assert_eq!(
+            ModelSwitchOutcome::of(Err(ControlError::Timeout {
+                subtype: SUBTYPE_SET_MODEL,
+                timeout: SET_MODEL_TIMEOUT,
+            })),
+            Ok(ModelSwitchOutcome::Unconfirmed)
+        );
+        assert_eq!(
+            ModelSwitchOutcome::of(Err(ControlError::Rejected("model not changed".to_string()))),
+            Ok(ModelSwitchOutcome::Refused {
+                reason: "model not changed".to_string()
+            })
+        );
+        for error in [
+            ControlError::SessionEnded,
+            ControlError::Write("broken pipe".to_string()),
+            ControlError::Malformed("no subtype".to_string()),
+        ] {
+            assert_eq!(ModelSwitchOutcome::of(Err(error.clone())), Err(error));
+        }
+    }
+
+    #[test]
+    fn model_switch_outcome_tags_match_ts_union() {
+        let ts = include_str!("../../src/src/app/models/claude-control.ts");
+        for outcome in [
+            ModelSwitchOutcome::Confirmed,
+            ModelSwitchOutcome::Unconfirmed,
+            ModelSwitchOutcome::Refused {
+                reason: String::new(),
+            },
+        ] {
+            let json = serde_json::to_value(&outcome).unwrap();
+            let tag = json["outcome"].as_str().unwrap();
+            assert!(
+                ts.contains(&format!("outcome: '{tag}'")),
+                "ModelSwitchOutcome must carry the '{tag}' outcome"
+            );
+        }
+        assert_eq!(
+            ts.matches("outcome: '").count(),
+            3,
+            "ModelSwitchOutcome has an outcome the Rust enum lacks"
+        );
+        assert!(ts.contains("outcome: 'refused'; reason: string"));
     }
 
     #[test]

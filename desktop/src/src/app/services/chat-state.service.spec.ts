@@ -3,6 +3,8 @@ import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
   MODEL_SWITCH_NOT_APPLIED,
+  MODEL_SWITCH_UNCONFIRMED,
+  modelSwitchRefused,
   NEW_CONVERSATION_AUTH,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
@@ -27,6 +29,7 @@ import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-ta
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
+import type { ModelSwitchOutcome } from '../models/claude-control';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 describe('ChatStateService', () => {
@@ -37,6 +40,14 @@ describe('ChatStateService', () => {
   beforeEach(() => {
     mockTauri = new MockTauriService();
     mockLogger = makeMockLogger();
+    const invoke = mockTauri.invoke.bind(mockTauri);
+    mockTauri.invoke = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      const answer = await invoke<T>(cmd, args);
+      if (cmd === 'switch_chat_model' && answer === undefined) {
+        return { outcome: 'confirmed' } as T;
+      }
+      return answer;
+    };
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -3368,31 +3379,32 @@ describe('ChatStateService', () => {
         expect(projectState.error).toBe('switch failed');
       });
 
-      it('a model pick saved across a project switch that failed back adds no chip and no error', async () => {
+      it('a model switch confirmed across a project switch that failed back is saved, with no chip and no error', async () => {
         const projectState = TestBed.inject(ProjectStateService);
         await projectState.init();
         liveConversation();
-        const pin = createDeferred<void>();
-        overrideInvoke('set_model_pin', () => pin.promise);
+        const answer = createDeferred<ModelSwitchOutcome>();
+        overrideInvoke('switch_chat_model', () => answer.promise);
         await Promise.resolve();
         const messagesBefore = service.messagesFromState().length;
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const pick = service.applyModelSelection(haikuPick);
         await vi.waitFor(() => {
-          expect(
-            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_model_pin')
-          ).toBeGreaterThan(-1);
+          expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
         });
         mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
         mockTauri.dispatchEvent('project_switch_failed', {
           project: 'test',
           error: 'switch failed',
         });
-        pin.resolve();
+        answer.resolve({ outcome: 'confirmed' });
         await pick;
 
-        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+        expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+          projectId: 'test',
+          model: 'claude-haiku-4-5',
+        });
         expect(service.messagesFromState()).toHaveLength(messagesBefore);
         expect(service.modelSelectionError()).toBe('');
       });
@@ -4002,49 +4014,57 @@ describe('ChatStateService', () => {
         expect(service.deferredEffort()).toBe('low');
       });
 
-      it("an older model pick's failed switch is reported when the newest pick could not be saved", async () => {
+      it("an older model pick's failed switch is not reported, the newer pick's failed save is", async () => {
         liveConversation();
         await Promise.resolve();
-        const olderSwitch = createDeferred<void>();
-        overrideInvoke('switch_chat_model', () => olderSwitch.promise);
-        let saves = 0;
-        overrideInvoke('set_model_pin', () =>
-          ++saves === 2 ? Promise.reject(new Error('settings.json is locked')) : Promise.resolve()
+        const olderSwitch = createDeferred<ModelSwitchOutcome>();
+        let switches = 0;
+        overrideInvoke('switch_chat_model', () =>
+          ++switches === 1 ? olderSwitch.promise : Promise.resolve({ outcome: 'confirmed' })
         );
+        overrideInvoke('set_model_pin', rejected('settings.json is locked'));
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const older = service.applyModelSelection(haikuPick);
-        await vi.waitFor(() => expect(saves).toBe(1));
-        await service.applyModelSelection({
+        await vi.waitFor(() => expect(switches).toBe(1));
+        const newer = service.applyModelSelection({
           ...haikuPick,
           catalogId: 'claude-sonnet-5',
           wireId: 'claude-sonnet-5',
         });
-        expect(service.modelSelectionError()).toContain('settings.json is locked');
-        olderSwitch.reject(new Error('claude-haiku-4-5 is not available on this plan'));
+        olderSwitch.reject(new Error('chat session is busy'));
         await older;
+        await newer;
 
-        expect(service.modelSelectionError()).toContain('not available on this plan');
+        const pinned = invokeSpy.mock.calls
+          .filter(([cmd]) => cmd === 'set_model_pin')
+          .map(([, args]) => (args as { model: string }).model);
+        expect(pinned).toEqual(['claude-sonnet-5']);
+        expect(service.modelSelectionError()).toContain('settings.json is locked');
       });
 
-      it("an older model pick's failed switch shows no error once a newer pick was saved", async () => {
+      it("an older model pick's failed switch shows no error once a newer pick waits behind it", async () => {
         liveConversation();
         await Promise.resolve();
-        const olderSwitch = createDeferred<void>();
+        const olderSwitch = createDeferred<ModelSwitchOutcome>();
         let switches = 0;
         overrideInvoke('switch_chat_model', () =>
-          ++switches === 1 ? olderSwitch.promise : Promise.resolve()
+          ++switches === 1 ? olderSwitch.promise : Promise.resolve({ outcome: 'confirmed' })
         );
 
         const older = service.applyModelSelection(haikuPick);
         await vi.waitFor(() => expect(switches).toBe(1));
-        await service.applyModelSelection({
+        const newer = service.applyModelSelection({
           ...haikuPick,
           catalogId: 'claude-sonnet-5',
           wireId: 'claude-sonnet-5',
         });
+        expect(switches).toBe(1);
         olderSwitch.reject(new Error('claude-haiku-4-5 is not available on this plan'));
         await older;
+        await newer;
 
+        expect(switches).toBe(2);
         expect(service.modelSelectionError()).toBe('');
       });
 
@@ -4071,14 +4091,9 @@ describe('ChatStateService', () => {
         expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
       });
 
-      it("an older model pick's failed save shows no error once a newer pick went through", async () => {
+      it('a model pick superseded before its switch starts is neither switched nor saved', async () => {
         liveConversation();
         await Promise.resolve();
-        const firstSave = createDeferred<void>();
-        let saves = 0;
-        overrideInvoke('set_model_pin', () =>
-          ++saves === 1 ? firstSave.promise : Promise.resolve()
-        );
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const older = service.applyModelSelection(haikuPick);
@@ -4087,15 +4102,16 @@ describe('ChatStateService', () => {
           catalogId: 'claude-sonnet-5',
           wireId: 'claude-sonnet-5',
         });
-        firstSave.reject(new Error('settings.json is locked'));
         await older;
         await newer;
 
+        const models = (command: string): string[] =>
+          invokeSpy.mock.calls
+            .filter(([cmd]) => cmd === command)
+            .map(([, args]) => (args as { model: string }).model);
+        expect(models('switch_chat_model')).toEqual(['claude-sonnet-5']);
+        expect(models('set_model_pin')).toEqual(['claude-sonnet-5']);
         expect(service.modelSelectionError()).toBe('');
-        const switched = invokeSpy.mock.calls
-          .filter(([cmd]) => cmd === 'switch_chat_model')
-          .map(([, args]) => (args as { model: string }).model);
-        expect(switched).toEqual(['claude-sonnet-5']);
       });
 
       it('a fresh chat whose effort request fails offers a Restart now that respawns it', async () => {
@@ -4191,8 +4207,14 @@ describe('ChatStateService', () => {
         const pin = createDeferred<void>();
         overrideInvoke('set_model_pin', () => pin.promise);
         await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const pick = service.applyModelSelection(haikuPick);
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_model_pin')
+          ).toBeGreaterThan(-1);
+        });
         TestBed.inject(ProjectStateService).activeProject.set('other');
         pin.reject(new Error('config is locked'));
         await pick;
@@ -4200,24 +4222,240 @@ describe('ChatStateService', () => {
         expect(service.modelSelectionError()).toBe('');
       });
 
-      it('a model pick whose project changed while its pin was saved is not switched on the new project', async () => {
+      it('a model pick whose project changed while its switch ran is saved for its own project and adds no chip', async () => {
         liveConversation();
-        const pin = createDeferred<void>();
-        overrideInvoke('set_model_pin', () => pin.promise);
+        const answer = createDeferred<ModelSwitchOutcome>();
+        overrideInvoke('switch_chat_model', () => answer.promise);
         await Promise.resolve();
+        const messagesBefore = service.messagesFromState().length;
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
 
         const pick = service.applyModelSelection(haikuPick);
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
+        });
         TestBed.inject(ProjectStateService).activeProject.set('other');
-        pin.resolve();
+        answer.resolve({ outcome: 'confirmed' });
         await pick;
 
         expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
           projectId: 'test',
           model: 'claude-haiku-4-5',
         });
-        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+        expect(service.messagesFromState()).toHaveLength(messagesBefore);
         expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      it('a model pick made after the project changed is neither switched nor saved', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        TestBed.inject(ProjectStateService).status.set('switching');
+
+        await service.applyModelSelection(haikuPick);
+
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_model_pin')).toBe(-1);
+      });
+
+      describe('a live model pick Claude Code does not accept (SPEED-709)', () => {
+        const sonnetPick = {
+          ...haikuPick,
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+        };
+        const answered = (outcome: ModelSwitchOutcome) => async () => outcome;
+        const pinWrites = (calls: unknown[][]): string[] =>
+          calls
+            .filter(([cmd]) => cmd === 'set_model_pin')
+            .map(([, args]) => (args as { model: string }).model);
+
+        it('a refused pick is not saved, shows the reason and gives the badge back to the launch model', async () => {
+          liveConversation();
+          await Promise.resolve();
+          overrideInvoke(
+            'switch_chat_model',
+            answered({ outcome: 'refused', reason: 'API Error: 429 Usage credits are required' })
+          );
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          const messagesBefore = service.messagesFromState().length;
+
+          await service.applyModelSelection(haikuPick);
+
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual([]);
+          expect(service.modelSelectionError()).toBe(
+            modelSwitchRefused('API Error: 429 Usage credits are required')
+          );
+          expect(service.refusedModelPick()).toEqual({
+            catalogId: 'claude-haiku-4-5',
+            running: null,
+          });
+          expect(service.messagesFromState()).toHaveLength(messagesBefore);
+        });
+
+        it('a refused pick gives the badge back to the pick the session confirmed last', async () => {
+          liveConversation();
+          await Promise.resolve();
+          let switches = 0;
+          overrideInvoke('switch_chat_model', async () =>
+            ++switches === 1
+              ? { outcome: 'confirmed' }
+              : { outcome: 'refused', reason: 'model not changed' }
+          );
+
+          await service.applyModelSelection(sonnetPick);
+          await service.applyModelSelection(haikuPick);
+
+          expect(service.refusedModelPick()).toEqual({
+            catalogId: 'claude-haiku-4-5',
+            running: 'claude-sonnet-5',
+          });
+        });
+
+        it('a pick confirmed in an earlier session is not what a refusal gives back', async () => {
+          liveConversation();
+          await Promise.resolve();
+          let switches = 0;
+          overrideInvoke('switch_chat_model', async () =>
+            ++switches === 1
+              ? { outcome: 'confirmed' }
+              : { outcome: 'refused', reason: 'model not changed' }
+          );
+          await service.applyModelSelection(sonnetPick);
+          service.resetForNewConversation();
+          service.seedSessionId('sess-next');
+
+          await service.applyModelSelection(haikuPick);
+
+          expect(service.refusedModelPick()).toEqual({
+            catalogId: 'claude-haiku-4-5',
+            running: null,
+          });
+        });
+
+        it('a refused routed pick leaves the provider config alone', async () => {
+          liveConversation();
+          await Promise.resolve();
+          overrideInvoke(
+            'switch_chat_model',
+            answered({ outcome: 'refused', reason: 'model not found' })
+          );
+          const setProviderModel = vi.spyOn(
+            TestBed.inject(AnthropicModelsService),
+            'setProviderModel'
+          );
+
+          await service.applyModelSelection({
+            catalogId: 'llama4',
+            wireId: 'my-ollama/llama4',
+            providerId: 'my-ollama',
+            kind: 'local',
+            isDefault: false,
+            contextTokens: null,
+          });
+
+          expect(setProviderModel).not.toHaveBeenCalled();
+          expect(service.modelSelectionError()).toBe(modelSwitchRefused('model not found'));
+        });
+
+        it('an unconfirmed pick is saved, adds no chip and says the session did not confirm it', async () => {
+          liveConversation();
+          await Promise.resolve();
+          overrideInvoke('switch_chat_model', answered({ outcome: 'unconfirmed' }));
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          const messagesBefore = service.messagesFromState().length;
+
+          await service.applyModelSelection(haikuPick);
+
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual(['claude-haiku-4-5']);
+          expect(service.modelSelectionError()).toBe(MODEL_SWITCH_UNCONFIRMED);
+          expect(service.messagesFromState()).toHaveLength(messagesBefore);
+          expect(service.refusedModelPick()).toBeNull();
+        });
+
+        it('a pick the session could not take is saved for the next spawn and says why', async () => {
+          liveConversation();
+          await Promise.resolve();
+          overrideInvoke(
+            'switch_chat_model',
+            rejected('chat session ended before the control response')
+          );
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+          await service.applyModelSelection(haikuPick);
+
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual(['claude-haiku-4-5']);
+          expect(service.modelSelectionError()).toContain('chat session ended');
+          expect(service.refusedModelPick()).toBeNull();
+        });
+
+        it('a pick released at the turn end and refused there is not saved', async () => {
+          liveConversation();
+          await Promise.resolve();
+          overrideInvoke(
+            'switch_chat_model',
+            answered({ outcome: 'refused', reason: 'model not changed' })
+          );
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          service.isStreaming = true;
+          await service.applyModelSelection(haikuPick);
+          expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+
+          service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+
+          await vi.waitFor(() => {
+            expect(service.modelSelectionError()).toBe(modelSwitchRefused('model not changed'));
+          });
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual([]);
+        });
+
+        it('a pick a New chat drops is saved before the new session starts', async () => {
+          liveConversation();
+          await Promise.resolve();
+          const pin = createDeferred<void>();
+          overrideInvoke('set_model_pin', () => pin.promise);
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          service.isStreaming = true;
+          await service.applyModelSelection(haikuPick);
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual([]);
+
+          service.resetForNewConversation();
+          await service.init();
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual(['claude-haiku-4-5']);
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBe(-1);
+          pin.resolve();
+
+          await vi.waitFor(() => {
+            expect(
+              indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')
+            ).toBeGreaterThan(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_model_pin'));
+          });
+        });
+
+        it('a New chat made while a live switch waits for Claude Code starts once the switch is saved', async () => {
+          liveConversation();
+          await Promise.resolve();
+          const answer = createDeferred<ModelSwitchOutcome>();
+          overrideInvoke('switch_chat_model', () => answer.promise);
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          const pick = service.applyModelSelection(haikuPick);
+          await vi.waitFor(() => {
+            expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
+          });
+
+          service.resetForNewConversation();
+          await service.init();
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBe(-1);
+          answer.resolve({ outcome: 'confirmed' });
+          await pick;
+
+          await vi.waitFor(() => {
+            expect(
+              indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')
+            ).toBeGreaterThan(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_model_pin'));
+          });
+          expect(service.messagesFromState().some((m) => m.blocks[0]?.type === 'chip')).toBe(false);
+        });
       });
 
       it('a model switch answered after the project changed adds no chip and no error there', async () => {
@@ -4456,7 +4694,7 @@ describe('ChatStateService', () => {
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
     });
 
-    it('picking the Default row clears the pin and switches the live session to the account default', async () => {
+    it('picking the Default row switches the live session to the account default, then clears the pin', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -4477,8 +4715,8 @@ describe('ChatStateService', () => {
       const commands = invokeSpy.mock.calls.map(([cmd]) => cmd);
       expect(commands).toContain('clear_model_pin');
       expect(commands).not.toContain('set_model_pin');
-      expect(commands.indexOf('clear_model_pin')).toBeLessThan(
-        commands.indexOf('switch_chat_model')
+      expect(commands.indexOf('switch_chat_model')).toBeLessThan(
+        commands.indexOf('clear_model_pin')
       );
       const sent = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect((sent?.[1] as { model?: string } | undefined)?.model).toBe('default');
@@ -8277,7 +8515,7 @@ describe('ChatStateService', () => {
       expect(service.modelSelectionError()).toBe('');
     });
 
-    it('awaits setProviderModel BEFORE sending the wire command for a live non-anthropic selection', async () => {
+    it('writes a live routed pick through only after Claude Code accepted the switch', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const anthropicModels = TestBed.inject(AnthropicModelsService);
@@ -8312,13 +8550,15 @@ describe('ChatStateService', () => {
         isDefault: false,
         contextTokens: null,
       });
-      await vi.waitFor(() => expect(calls).toEqual(['setProviderModel-start']));
+      await vi.waitFor(() =>
+        expect(calls).toEqual(['switch_chat_model', 'setProviderModel-start'])
+      );
       resolveSet();
       await pending;
       expect(calls).toEqual([
+        'switch_chat_model',
         'setProviderModel-start',
         'setProviderModel-resolved',
-        'switch_chat_model',
       ]);
       expect(invokeSpy).not.toHaveBeenCalledWith('set_model_pin', expect.anything());
       expect(
@@ -8346,7 +8586,7 @@ describe('ChatStateService', () => {
       expect(service.modelSelectionError()).toContain('locked config');
     });
 
-    it('persists the model pin BEFORE sending the wire command for a live anthropic selection', async () => {
+    it('persists the model pin only after Claude Code accepted the live switch', async () => {
       const service = TestBed.inject(ChatStateService);
       const anthropicModels = TestBed.inject(AnthropicModelsService);
       const setProviderModelSpy = vi.spyOn(anthropicModels, 'setProviderModel');
@@ -8362,7 +8602,10 @@ describe('ChatStateService', () => {
             };
           });
         }
-        if (cmd === 'switch_chat_model') calls.push('switch_chat_model');
+        if (cmd === 'switch_chat_model') {
+          calls.push('switch_chat_model');
+          return { outcome: 'confirmed' };
+        }
         return undefined;
       });
       service.handleStreamChunk({
@@ -8378,14 +8621,14 @@ describe('ChatStateService', () => {
         isDefault: false,
         contextTokens: null,
       });
-      await vi.waitFor(() => expect(calls).toEqual(['set_model_pin-start']));
+      await vi.waitFor(() => expect(calls).toEqual(['switch_chat_model', 'set_model_pin-start']));
       resolvePin();
       await pending;
-      expect(calls).toEqual(['set_model_pin-start', 'set_model_pin-resolved', 'switch_chat_model']);
+      expect(calls).toEqual(['switch_chat_model', 'set_model_pin-start', 'set_model_pin-resolved']);
       expect(setProviderModelSpy).not.toHaveBeenCalled();
     });
 
-    it('blocks the wire and surfaces an error when the model pin write fails on a live session', async () => {
+    it('reports a model pin write that fails after the live session switched', async () => {
       const service = TestBed.inject(ChatStateService);
       const switched: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -8407,7 +8650,7 @@ describe('ChatStateService', () => {
         contextTokens: null,
       });
 
-      expect(switched).toEqual([]);
+      expect(switched).toEqual(['switch_chat_model']);
       expect(service.modelSelectionError()).toContain('unknown Anthropic model');
     });
 
@@ -8469,7 +8712,7 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    it('a still-session-less streaming pick persists the pin, respawns nothing and switches at the turn end', async () => {
+    it('a still-session-less streaming pick waits unsaved, respawns nothing, and at the turn end switches, then saves the pin', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('test');
       service.isStreaming = true;
@@ -8484,11 +8727,9 @@ describe('ChatStateService', () => {
         contextTokens: null,
       });
 
-      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
-        projectId: 'test',
-        model: 'claude-sonnet-5',
-      });
-      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      const commands = (): string[] => invokeSpy.mock.calls.map(([cmd]) => cmd as string);
+      expect(commands()).not.toContain('set_model_pin');
+      expect(commands()).not.toContain('start_chat');
       expect(service.pendingModelOverride()).toBe('claude-sonnet-5');
 
       service.handleStreamChunk({
@@ -8496,12 +8737,19 @@ describe('ChatStateService', () => {
         data: { session_id: 'sess-first' },
       } as never);
       await vi.waitFor(() => {
-        expect(invokeSpy).toHaveBeenCalledWith('switch_chat_model', {
-          project: 'test',
+        expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+          projectId: 'test',
           model: 'claude-sonnet-5',
         });
       });
-      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(invokeSpy).toHaveBeenCalledWith('switch_chat_model', {
+        project: 'test',
+        model: 'claude-sonnet-5',
+      });
+      expect(commands().indexOf('switch_chat_model')).toBeLessThan(
+        commands().indexOf('set_model_pin')
+      );
+      expect(commands()).not.toContain('start_chat');
       expect(service.pendingModelOverride()).toBeNull();
     });
 
@@ -8531,7 +8779,7 @@ describe('ChatStateService', () => {
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
     });
 
-    it('a mid-stream pick on a live session persists the pin immediately and wires it after the turn ends', async () => {
+    it('a mid-stream pick on a live session waits unsaved for the turn end, then switches and saves the pin', async () => {
       const service = TestBed.inject(ChatStateService);
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
@@ -8550,10 +8798,7 @@ describe('ChatStateService', () => {
         isDefault: false,
         contextTokens: null,
       });
-      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
-        projectId: expect.any(String),
-        model: 'claude-haiku-4-5',
-      });
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'set_model_pin')).toHaveLength(0);
       let modelSend = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSend).toBeUndefined();
       expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
@@ -8569,6 +8814,12 @@ describe('ChatStateService', () => {
             JSON.stringify(args).includes('"model":"claude-haiku-4-5"')
         );
         expect(modelSend).toBeDefined();
+      });
+      await vi.waitFor(() => {
+        expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+          projectId: expect.any(String),
+          model: 'claude-haiku-4-5',
+        });
       });
       expect(service.pendingModelOverride()).toBeNull();
     });
@@ -8722,7 +8973,7 @@ describe('ChatStateService', () => {
       ).toHaveLength(0);
     });
 
-    it('a still-session-less streaming routed pick writes through, leaves the running turn alone and switches at its end', async () => {
+    it('a still-session-less streaming routed pick leaves the running turn alone, and at its end switches, then writes through', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       service.isStreaming = true;
@@ -8737,12 +8988,7 @@ describe('ChatStateService', () => {
         contextTokens: null,
       });
 
-      expect(invokeSpy).toHaveBeenCalledWith('set_provider_model', {
-        projectId: 'proj',
-        providerId: 'my-ollama',
-        model: 'llama4',
-        contextTokens: null,
-      });
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'set_provider_model')).toHaveLength(0);
       expect(
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')
       ).toHaveLength(0);
@@ -8754,10 +9000,16 @@ describe('ChatStateService', () => {
         data: { session_id: 'sess-first' },
       } as never);
       await vi.waitFor(() => {
-        expect(invokeSpy).toHaveBeenCalledWith('switch_chat_model', {
-          project: 'proj',
-          model: 'my-ollama/llama4',
+        expect(invokeSpy).toHaveBeenCalledWith('set_provider_model', {
+          projectId: 'proj',
+          providerId: 'my-ollama',
+          model: 'llama4',
+          contextTokens: null,
         });
+      });
+      expect(invokeSpy).toHaveBeenCalledWith('switch_chat_model', {
+        project: 'proj',
+        model: 'my-ollama/llama4',
       });
       expect(
         invokeSpy.mock.calls.filter(([cmd]) => cmd === 'restart_integration_containers')

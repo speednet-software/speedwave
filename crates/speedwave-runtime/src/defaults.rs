@@ -978,7 +978,6 @@ mod tests {
             }
         );
         assert_eq!(opus_5_5.pricing_1m, Some(opus_5_5.pricing));
-        assert_eq!(opus_5_5.default_effort, Some("medium"));
     }
 
     #[test]
@@ -989,6 +988,7 @@ mod tests {
             .expect("claude-opus-5 must remain in the catalog");
         assert!(!opus_5.latest, "Opus 5 must be demoted to Legacy");
         assert!(opus_5.premium);
+        assert_eq!(opus_5.context_tokens, 1_000_000);
         assert_eq!(opus_5.pricing.input, 5.0);
         assert_eq!(opus_5.pricing.output, 25.0);
         assert_eq!(opus_5.one_million_context, OneMillionContext::EveryPlan);

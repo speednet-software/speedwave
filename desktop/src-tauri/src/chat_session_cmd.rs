@@ -1,6 +1,7 @@
 use crate::chat::{self, ChatSession, SharedChatSession};
 use crate::control_channel::{
-    self, ContextUsage, ControlHandle, ControlQuery, PlanUsage, SessionInfoState,
+    self, ContextUsage, ControlHandle, ControlQuery, ModelSwitchOutcome, PlanUsage,
+    SessionInfoState,
 };
 use crate::reconcile::SharedOauth;
 use crate::types::check_project;
@@ -290,10 +291,20 @@ fn switch_model_inner(
     session_arc: &SharedChatSession,
     project: &str,
     model: &str,
-) -> Result<(), String> {
+) -> Result<ModelSwitchOutcome, String> {
     let switch = live_session_input(session_arc, project, ChatSession::model_switch)?;
     log::info!("switching the chat session to {model}");
-    switch.apply(model).map_err(|e| e.to_string())
+    let outcome = switch.apply(model).map_err(|e| e.to_string())?;
+    match &outcome {
+        ModelSwitchOutcome::Confirmed => log::info!("Claude Code switched the session to {model}"),
+        ModelSwitchOutcome::Unconfirmed => {
+            log::warn!("Claude Code did not answer the switch to {model} in time");
+        }
+        ModelSwitchOutcome::Refused { reason } => {
+            log::warn!("Claude Code refused the switch to {model}: {reason}");
+        }
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -301,7 +312,7 @@ pub(crate) async fn switch_chat_model(
     project: String,
     model: String,
     state: tauri::State<'_, SharedChatSession>,
-) -> Result<(), String> {
+) -> Result<ModelSwitchOutcome, String> {
     check_project(&project)?;
     validate_model_pick(&model)?;
     let session_arc = state.inner().clone();
@@ -412,9 +423,11 @@ mod tests {
         );
     }
 
-    fn assert_the_pick_leaves_the_session_free_while_it_waits(
-        pick: fn(&SharedChatSession) -> Result<(), String>,
-    ) {
+    fn assert_the_pick_leaves_the_session_free_while_it_waits<T>(
+        pick: fn(&SharedChatSession) -> Result<T, String>,
+    ) where
+        T: std::fmt::Debug + PartialEq + Send + 'static,
+    {
         let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
         let control = {
             let mut session = session_arc.lock().unwrap();

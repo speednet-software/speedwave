@@ -437,8 +437,8 @@ The three captures were recorded again from the 2.1.282 binary and are now named
   `chat.rs::set_model_checks_a_catalog_id_with_a_one_token_request_and_default_with_none`). On a Max account `set_model` with `claude-sonnet-4-6[1m]` was refused with
   `API error: 429 Usage credits are required for long context requests · model not
 changed` (ADR-089, SPEED-709 amendment). A refused composer pick keeps the
-  session on its model and shows the error in the composer
-  (`chat-state.service.ts::switchLiveModel`), and a refused soft-impose is logged.
+  session on its model, is not saved, and shows the error in the composer (next
+  amendment).
 - **The account default moved.** The default row's `set_model` with `default` now
   confirms `claude-opus-5-5[1m]` in the stub run (`cc-2.1.282-model-picks.sanitized.ndjson`),
   where 2.1.267 confirmed `claude-opus-5[1m]`.
@@ -462,6 +462,36 @@ changed` (ADR-089, SPEED-709 amendment). A refused composer pick keeps the
   on Pro and Team Standard plans from Sonnet to Opus, matching Max, Team Premium, and
   Enterprise"[^10]. A project without a model pin on such an account moves from
   Sonnet to Opus 5.5 with this bump.
+
+**Amendment (SPEED-709, 2026-09-25: a live model pick is saved once Claude Code
+accepts it).** Decision 3 saved a pick before the switch. Since `set_model` can
+refuse a switch (previous amendment), that order left the pin or the provider config
+on a model the session had refused, and the next spawn launched with it; a model that
+needs usage credits then fails every turn. A pick that goes to a running process is
+now sent first and saved after Claude Code's answer
+(`chat-state.service.ts::sendModelToSession`). `switch_chat_model` answers
+`control_channel::ModelSwitchOutcome`:
+
+- `confirmed`: the pick is saved and the `/model` chip is added.
+- `refused`: nothing is saved. The composer shows Claude Code's reason, and the badge
+  goes back to the pick the session confirmed last in the same conversation, or to
+  the model the session reported before.
+- `unconfirmed`: no answer within `control_channel::SET_MODEL_TIMEOUT`, raised from
+  10 s to 60 s because the answer now waits for the one-token request, which takes as
+  long as the upstream needs to load the model. The pick is saved, since a late answer
+  may still apply it, and the composer says the session did not confirm it.
+- An error (no live process, a session another command holds, a failed write): the
+  pick is saved for the next spawn and the error is shown.
+
+A pick that reaches no running process is still saved before it is taken: an idle
+chat saves it and respawns, a routed pick after a compose re-render. A pick queued
+while a turn streams or a session starts is saved when it is taken, or when it is
+dropped, so the next spawn still launches with it; every spawn first waits for the
+model picks in flight (`ChatStateService.modelPicksSettled`). Model picks go to the
+session one at a time, in pick order. A pick that a newer one supersedes before its
+turn is neither sent nor saved, and only the newest pick reports an error. Effort
+picks keep their order (decision 5): `apply_flag_settings` does not check the level
+with a model request, so it cannot refuse one.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 

@@ -20,6 +20,7 @@ import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
+import type { RefusedModelPick } from '../../../services/chat-state.service';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
@@ -263,6 +264,8 @@ export class ModelSelectorComponent {
 
   readonly sessionModel = input('');
 
+  readonly refusedPick = input<RefusedModelPick | null>(null);
+
   readonly modelSelected = output<ModelSelection>();
 
   readonly effortSelected = output<string>();
@@ -414,6 +417,13 @@ export class ModelSelectorComponent {
       this.projectId();
       this.showEffortSegment();
       untracked(() => this.effortOpen.set(false));
+    });
+    effect(() => {
+      const refused = this.refusedPick();
+      if (!refused) return;
+      untracked(() => {
+        if (this.lastPicked() === refused.catalogId) this.lastPicked.set(refused.running ?? '');
+      });
     });
     effect(() => {
       const err = this.modelError();

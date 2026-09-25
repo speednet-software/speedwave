@@ -16,7 +16,7 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
-import type { ClaudeContextUsage } from '../models/claude-control';
+import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
@@ -119,6 +119,14 @@ interface EffortPick extends ProjectPick {
 interface ModelPick extends ProjectPick {
   wireId: string;
   routed: boolean;
+  sel: ModelSelectionInput;
+  clearsPin: boolean;
+}
+
+/** A model pick Claude Code refused, and the pick the session still runs (`null`: its launch model). */
+export interface RefusedModelPick {
+  catalogId: string;
+  running: string | null;
 }
 
 type PinSave = { saved: true } | { saved: false; error: unknown };
@@ -146,6 +154,17 @@ function withoutSessionKeptMarker(message: string): string {
 
 export const MODEL_SWITCH_NOT_APPLIED =
   'The containers were not restarted, so the model is not in use yet. Pick it again in a moment.';
+
+export const MODEL_SWITCH_UNCONFIRMED =
+  'The session did not confirm the model switch in time. The model is saved for new sessions and may still apply to this one.';
+
+/**
+ * The composer error for a model switch Claude Code refused; the session keeps its model.
+ * @param reason - Claude Code's own error text.
+ */
+export function modelSwitchRefused(reason: string): string {
+  return `Claude Code did not switch the model, so this session keeps its model: ${reason}`;
+}
 
 /**
  * Returns null for anything but the two known backend phrasings.
@@ -220,12 +239,17 @@ export class ChatStateService {
   private _effortSave: Promise<void> = Promise.resolve();
   private _effortApply: Promise<void> = Promise.resolve();
   private _modelRequest = 0;
-  private _savedModelRequest = 0;
   private _modelSave: Promise<void> = Promise.resolve();
+  private _modelApply: Promise<void> = Promise.resolve();
+  private _modelWork = 0;
   private _launchedFor: { wireId: string; generation: number } | null = null;
+  private _confirmedModel: { catalogId: string; generation: number } | null = null;
   readonly pendingModelOverride: Signal<string | null> = computed(
     () => this._pendingModelPick()?.wireId ?? null
   );
+  private readonly _refusedModelPick = signal<RefusedModelPick | null>(null);
+  /** The latest model pick Claude Code refused, for the composer badge to take back. */
+  readonly refusedModelPick: Signal<RefusedModelPick | null> = this._refusedModelPick.asReadonly();
   private readonly _deferredEffort = signal<string | null>(null);
   /** Effort level saved for new sessions that the live one did not confirm. */
   readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
@@ -234,13 +258,35 @@ export class ChatStateService {
     if (this.isStreaming) return;
     const model = this._pendingModelPick();
     const effort = this._pendingEffort;
-    this.dropPendingPicks();
+    this.clearPendingPicks();
     void this.takeReleasedPicks(model, effort);
   }
 
-  private dropPendingPicks(): void {
+  private clearPendingPicks(): void {
     this._pendingModelPick.set(null);
     this._pendingEffort = null;
+  }
+
+  private dropPendingPicks(): void {
+    const model = this._pendingModelPick();
+    this.clearPendingPicks();
+    if (model) void this.persistModelPick(model);
+  }
+
+  private trackModelWork<T>(work: Promise<T>): Promise<T> {
+    this._modelWork += 1;
+    const done = (): void => {
+      this._modelWork -= 1;
+    };
+    work.then(done, done);
+    return work;
+  }
+
+  private async modelPicksSettled(): Promise<void> {
+    while (this._modelWork > 0) {
+      await this._modelApply;
+      await this._modelSave;
+    }
   }
 
   private async takeReleasedPicks(
@@ -316,10 +362,6 @@ export class ChatStateService {
 
   private isNewestModelPick(pick: ModelPick): boolean {
     return this.isNewestOf(pick, this._modelRequest);
-  }
-
-  private isNewestSavedModelPick(pick: ModelPick): boolean {
-    return this.isNewestOf(pick, this._savedModelRequest);
   }
 
   private async saveEffortPin(project: string | null, level: string): Promise<PinSave> {
@@ -399,8 +441,10 @@ export class ChatStateService {
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
   /**
-   * Persists a composer model pick (Anthropic: `settings.json` pin; routed: config write-through),
-   * then takes it: wire switch, queued override, or an idle respawn that a routed pick precedes with a compose re-render.
+   * Takes a composer model pick: a live session gets it as a `set_model` control request and
+   * the pick is persisted (Anthropic: `settings.json` pin; routed: config write-through) once
+   * Claude Code accepts it; a busy chat queues it; an idle chat persists it and respawns, a
+   * routed pick after a compose re-render.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -414,26 +458,28 @@ export class ChatStateService {
       project,
       mark: this.projectState.settledMark(project),
       request: ++this._modelRequest,
+      sel,
+      clearsPin,
     };
-    const saving = this._modelSave.then(() => this.saveModelPick(sel, pick, clearsPin));
-    this._modelSave = saving.then(() => undefined);
-    const outcome = await saving;
-    if (outcome.saved) {
-      this._savedModelRequest = pick.request;
-      await this.takeModelPick(pick, false);
-    } else if (this.isNewestModelPick(pick)) {
-      this.reportSelectionFailure('model selection persist', outcome.error);
-    }
+    await this.takeModelPick(pick, false);
   }
 
-  private async saveModelPick(
-    sel: ModelSelectionInput,
-    pick: ModelPick,
-    clearsPin: boolean
-  ): Promise<PinSave> {
+  private async persistModelPick(pick: ModelPick): Promise<boolean> {
+    const saving = this.trackModelWork(this._modelSave.then(() => this.saveModelPick(pick)));
+    this._modelSave = saving.then(() => undefined);
+    const outcome = await saving;
+    if (outcome.saved) return true;
+    if (this.isNewestModelPick(pick)) {
+      this.reportSelectionFailure('model selection persist', outcome.error);
+    }
+    return false;
+  }
+
+  private async saveModelPick(pick: ModelPick): Promise<PinSave> {
     const projectId = pick.project ?? '';
+    const sel = pick.sel;
     try {
-      if (clearsPin) {
+      if (pick.clearsPin) {
         await this.tauri.invoke('clear_model_pin', { projectId });
       } else if (!pick.routed) {
         await this.tauri.invoke('set_model_pin', { projectId, model: sel.wireId });
@@ -464,6 +510,7 @@ export class ChatStateService {
       return;
     }
     if (pick.routed && this.launchedFor(pick.wireId)) return;
+    if (!(await this.persistModelPick(pick))) return;
     if (pick.routed && !(await this.rerenderContainersForModel(pick))) return;
     if (!this.stillSettledFor(pick) || this.chatBusy() || this.hasLiveSession()) return;
     await this.respawnIdleSession(pick.routed && this.isNewestModelPick(pick) ? pick.wireId : null);
@@ -480,25 +527,61 @@ export class ChatStateService {
     return this.projectState.isStillSettledOn(project, mark);
   }
 
-  private async switchLiveModel(pick: ModelPick): Promise<void> {
+  private switchLiveModel(pick: ModelPick): Promise<void> {
+    const switching = this.trackModelWork(
+      this._modelApply.then(() => this.sendModelToSession(pick))
+    );
+    this._modelApply = switching.catch(() => undefined);
+    return switching;
+  }
+
+  private async sendModelToSession(pick: ModelPick): Promise<void> {
+    if (!this.isNewestModelPick(pick)) return;
     const generation = this._sessionGeneration;
     const sameConversation = (): boolean =>
       generation === this._sessionGeneration && this.stillSettledFor(pick);
     this._launchedFor = null;
+    let answer: ModelSwitchOutcome;
     try {
-      await this.tauri.invoke('switch_chat_model', {
+      answer = await this.tauri.invoke<ModelSwitchOutcome>('switch_chat_model', {
         project: pick.project ?? '',
         model: pick.wireId,
       });
     } catch (e: unknown) {
-      if (sameConversation() && this.isNewestSavedModelPick(pick)) {
+      if (!this.isNewestModelPick(pick)) return;
+      const saved = await this.persistModelPick(pick);
+      if (saved && sameConversation() && this.isNewestModelPick(pick)) {
         this.reportSelectionFailure('model switch', e);
       }
       return;
     }
+    if (answer.outcome === 'refused') {
+      this.takeBackRefusedPick(pick, answer.reason);
+      return;
+    }
+    const saved = await this.persistModelPick(pick);
     if (!sameConversation()) return;
-    this.appendControlChip('model', pick.wireId);
-    this.notifyChange();
+    if (answer.outcome === 'confirmed') {
+      this._confirmedModel = { catalogId: pick.sel.catalogId, generation };
+      this.appendControlChip('model', pick.wireId);
+      this.notifyChange();
+    } else if (saved && this.isNewestModelPick(pick)) {
+      this._modelSelectionError.set(MODEL_SWITCH_UNCONFIRMED);
+    }
+  }
+
+  private takeBackRefusedPick(pick: ModelPick, reason: string): void {
+    this.log.warn(`model switch to ${pick.wireId} refused: ${reason}`);
+    if (!this.isNewestModelPick(pick)) return;
+    this._modelSelectionError.set(modelSwitchRefused(reason));
+    const confirmed = this._confirmedModel;
+    this._refusedModelPick.set({
+      catalogId: pick.sel.catalogId,
+      running:
+        confirmed !== null && confirmed.generation === this._sessionGeneration
+          ? confirmed.catalogId
+          : null,
+    });
   }
 
   private appendControlChip(command: string, argument: string, uuid?: string | null): void {
@@ -525,7 +608,7 @@ export class ChatStateService {
     if (outcome === 'restarted') return true;
     if (outcome === 'failed') {
       this.projectState.requestRestartFor(pick.project);
-      if (this.isNewestSavedModelPick(pick)) {
+      if (this.isNewestModelPick(pick)) {
         this.reportSelectionFailure(
           'compose re-render for the picked model',
           this.projectState.restartError
@@ -533,7 +616,7 @@ export class ChatStateService {
       }
       return false;
     }
-    if (this.isNewestSavedModelPick(pick)) {
+    if (this.isNewestModelPick(pick)) {
       this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
     }
     return false;
@@ -834,6 +917,7 @@ export class ChatStateService {
       let outcome: StartOutcome = 'failed';
       let sessionKept = false;
       try {
+        if (this._modelWork > 0) await this.modelPicksSettled();
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
         outcome = current(gen) ? 'started' : 'skipped';
@@ -990,6 +1074,7 @@ export class ChatStateService {
             this.startingSession = true;
             this._deferredEffort.set(null);
             try {
+              if (this._modelWork > 0) await this.modelPicksSettled();
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {
               if (generation === this._sessionGeneration) this.startingSession = false;
@@ -1742,6 +1827,7 @@ export class ChatStateService {
     try {
       if (!project) return;
 
+      if (this._modelWork > 0) await this.modelPicksSettled();
       await this.tauri.invoke('resume_conversation', { project, sessionId });
       if (gen !== this._sessionGeneration || !sameProject()) return;
       const transcript = await this.tauri

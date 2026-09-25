@@ -1300,10 +1300,12 @@ pub(crate) struct ModelSwitch {
 }
 
 impl ModelSwitch {
-    pub(crate) fn apply(&self, model: &str) -> Result<(), control_channel::ControlError> {
-        send_model_pick(&self.stdin, &self.control, &self.settled, model)?
-            .wait(control_channel::SET_MODEL_TIMEOUT)
-            .map(|_| ())
+    pub(crate) fn apply(
+        &self,
+        model: &str,
+    ) -> Result<control_channel::ModelSwitchOutcome, control_channel::ControlError> {
+        let pending = send_model_pick(&self.stdin, &self.control, &self.settled, model)?;
+        control_channel::ModelSwitchOutcome::of(pending.wait(control_channel::SET_MODEL_TIMEOUT))
     }
 }
 
@@ -4240,7 +4242,36 @@ mod tests {
 
         let applied = switch.apply("claude-haiku-4-5");
 
-        assert_eq!(applied, Ok(()));
+        assert_eq!(applied, Ok(control_channel::ModelSwitchOutcome::Confirmed));
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_claude_code_refuses_comes_back_refused_with_its_reason() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        let switch = session.model_switch().expect("a live session");
+        let answerer = answer_the_pending_request(session.control.clone(), |id| {
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": id,
+                    "error": "API Error: 429 Usage credits are required for long context requests",
+                },
+            })
+        });
+
+        let applied = switch.apply("claude-sonnet-4-6[1m]");
+
+        assert_eq!(
+            applied,
+            Ok(control_channel::ModelSwitchOutcome::Refused {
+                reason: "API Error: 429 Usage credits are required for long context requests"
+                    .to_string(),
+            })
+        );
         assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
         assert!(session.model_settled.is_settled());
     }
@@ -4621,6 +4652,15 @@ mod tests {
         );
     }
 
+    fn turn_end_count(lines: &[serde_json::Value]) -> usize {
+        let mut parser = StreamParser::new();
+        lines
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count()
+    }
+
     #[test]
     fn a_typed_model_command_answers_as_an_input_of_its_own() {
         let lines = capture_lines(MODEL_PICKS_CAPTURE);
@@ -4635,12 +4675,7 @@ mod tests {
                 other => format!("{other} {}", l["subtype"].as_str().unwrap_or("")),
             })
             .collect();
-        let mut parser = StreamParser::new();
-        let turn_ends = lines
-            .iter()
-            .flat_map(|l| parser.parse_line(l).0)
-            .filter(|c| matches!(c, StreamChunk::Result { .. }))
-            .count();
+        let turn_ends = turn_end_count(&lines);
 
         assert_eq!(
             tail,
@@ -4660,12 +4695,7 @@ mod tests {
             .filter(|l| l["type"] == "result")
             .map(|l| l["num_turns"].as_u64().unwrap())
             .collect();
-        let mut parser = StreamParser::new();
-        let turn_ends = lines
-            .iter()
-            .flat_map(|l| parser.parse_line(l).0)
-            .filter(|c| matches!(c, StreamChunk::Result { .. }))
-            .count();
+        let turn_ends = turn_end_count(&lines);
 
         assert_eq!(
             results,
