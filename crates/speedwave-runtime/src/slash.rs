@@ -525,7 +525,9 @@ fn run_discovery_with_timeout(
             Err(anyhow::Error::new(e).context("claude -p: read failed"))
         }
         Err(_) => {
-            reap_in_container_bounded(runtime, container, &instance_id);
+            if let Err(e) = crate::session::reap_instance(runtime, container, &instance_id) {
+                log::warn!("discovery reap in '{container}' failed: {e}");
+            }
             let _ = child.kill();
             let _ = child.wait();
             if rx.recv_timeout(Duration::from_secs(2)).is_ok() {
@@ -555,41 +557,6 @@ fn spawn_background_joiner(reader: std::thread::JoinHandle<()>, container: Strin
         #[cfg(test)]
         background_joins_completed().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
-}
-
-fn reap_in_container_bounded(
-    runtime: &crate::runtime::LockedRuntime,
-    container: &str,
-    instance_id: &str,
-) {
-    let reap_argv = crate::session::kill_by_instance_command(instance_id);
-    let argv: Vec<&str> = reap_argv.iter().map(String::as_str).collect();
-    let Ok(mut cmd) = runtime.container_exec_piped(container, &argv) else {
-        log::warn!("discovery reap: exec build failed for '{container}'");
-        return;
-    };
-    let Ok(mut reap) = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        log::warn!("discovery reap: spawn failed for '{container}'");
-        return;
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match reap.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = reap.kill();
-                let _ = reap.wait();
-                log::warn!("discovery reap: bounded kill after 5s for '{container}'");
-                return;
-            }
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

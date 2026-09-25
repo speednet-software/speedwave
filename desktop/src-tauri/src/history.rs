@@ -808,7 +808,9 @@ where
     D: serde::Deserializer<'de>,
     T: serde::Deserialize<'de>,
 {
-    T::deserialize(deserializer).map(Some)
+    Option::<T>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("null in a field Claude Code allows only to omit"))
 }
 
 fn is_count(value: f64) -> bool {
@@ -886,10 +888,31 @@ impl CostState {
                 .iter()
                 .all(|(model, usage)| is_model_usage_key(model) && usage.is_valid())
     }
+
+    fn usage(&self) -> crate::chat::TurnUsage {
+        let total = |count: fn(&CostStateModelUsage) -> f64| -> u64 {
+            self.model_usage.values().map(count).sum::<f64>().round() as u64
+        };
+        crate::chat::TurnUsage {
+            input_tokens: total(|u| u.input_tokens),
+            output_tokens: total(|u| u.output_tokens),
+            cache_read_tokens: total(|u| u.cache_read_input_tokens),
+            cache_write_tokens: total(|u| u.cache_creation_input_tokens),
+        }
+    }
+
+    fn dominant_model(&self) -> Option<&str> {
+        self.model_usage
+            .iter()
+            .max_by(|(_, a), (_, b)| a.output_tokens.total_cmp(&b.output_tokens))
+            .map(|(model, _)| model.as_str())
+    }
 }
 
-fn cost_state_restores(parsed: &serde_json::Value, session_id: &str) -> bool {
-    CostState::deserialize(parsed).is_ok_and(|state| state.restores(session_id))
+fn restored_cost_state(parsed: &serde_json::Value, session_id: &str) -> Option<CostState> {
+    CostState::deserialize(parsed)
+        .ok()
+        .filter(|state| state.restores(session_id))
 }
 
 fn snapshot_reads(line: &str) -> bool {
@@ -941,14 +964,12 @@ fn compute_resume_snapshot_impl(
 
         match parsed["type"].as_str().unwrap_or("") {
             COST_STATE_LINE => {
-                if cost_state_restores(&parsed, session_id) {
-                    latest_cost = parsed["totalCostUSD"].as_f64();
-                    latest_cumulative = Some(ResumeSnapshot::with_usage(
-                        crate::chat::extract_cumulative_usage(&parsed).unwrap_or_default(),
-                    ));
-                    latest_modelusage_model = crate::chat::dominant_model_by_output_tokens(
-                        parsed["modelUsage"].as_object(),
-                    );
+                if let Some(state) = restored_cost_state(&parsed, session_id) {
+                    latest_cost = Some(state.total_cost_usd);
+                    latest_cumulative = Some(ResumeSnapshot::with_usage(state.usage()));
+                    if let Some(model) = state.dominant_model() {
+                        latest_modelusage_model = Some(model.to_string());
+                    }
                 }
             }
             "system" => {
@@ -2879,7 +2900,14 @@ mod tests {
     }
 
     fn model_usage_sum(line: &serde_json::Value) -> crate::chat::TurnUsage {
-        crate::chat::extract_cumulative_usage(line).expect("the line carries modelUsage")
+        let models = line["modelUsage"].as_object().unwrap();
+        let total = |key: &str| models.values().map(|m| m[key].as_u64().unwrap()).sum();
+        crate::chat::TurnUsage {
+            input_tokens: total("inputTokens"),
+            output_tokens: total("outputTokens"),
+            cache_read_tokens: total("cacheReadInputTokens"),
+            cache_write_tokens: total("cacheCreationInputTokens"),
+        }
     }
 
     fn usage_between(
@@ -3179,6 +3207,107 @@ mod tests {
 
         assert_eq!(snapshot.total_cost, Some(0.42));
         assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+    }
+
+    #[test]
+    fn a_cost_state_line_with_trailing_nul_bytes_is_skipped_as_claude_code_skips_it() {
+        let earlier = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.25,
+            serde_json::json!({ "m": model_usage_entry(4, 2, 0, 0) }),
+        );
+        let later = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({ "m": model_usage_entry(7, 3, 5, 1) }),
+        );
+
+        let snapshot = snapshot_of_lines(&[earlier, format!("{later}\0\0")]);
+
+        assert_eq!(snapshot.total_cost, Some(0.25));
+        assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (4, 2));
+    }
+
+    #[test]
+    fn token_counts_written_as_json_floats_are_restored() {
+        let line = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({
+                "claude-opus-5-5": {
+                    "inputTokens": 7.0,
+                    "outputTokens": 20.0,
+                    "cacheReadInputTokens": 5e0,
+                    "cacheCreationInputTokens": 1,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.42,
+                },
+            }),
+        );
+        assert!(line.contains(r#""outputTokens":20.0"#));
+
+        let snapshot = snapshot_of_lines(&[line]);
+
+        assert_eq!(
+            snapshot.usage(),
+            crate::chat::TurnUsage {
+                input_tokens: 7,
+                output_tokens: 20,
+                cache_read_tokens: 5,
+                cache_write_tokens: 1,
+            }
+        );
+        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn the_model_with_the_most_output_tokens_wins_even_when_its_count_is_a_json_float() {
+        let line = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({
+                "claude-haiku-4-5": model_usage_entry(1, 3, 0, 0),
+                "claude-fable-5": {
+                    "inputTokens": 1,
+                    "outputTokens": 9.0,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.4,
+                },
+            }),
+        );
+
+        let snapshot = snapshot_of_lines(&[line]);
+
+        assert_eq!(snapshot.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(snapshot.output_tokens, 12);
+    }
+
+    #[test]
+    fn a_later_cost_state_without_model_usage_keeps_the_model_seen_before() {
+        let snapshot = snapshot_of_lines(&[
+            cost_state_line(
+                SNAPSHOT_SESSION,
+                0.25,
+                serde_json::json!({ "claude-opus-5-5": model_usage_entry(4, 2, 0, 0) }),
+            ),
+            cost_state_line(SNAPSHOT_SESSION, 0.5, serde_json::json!({})),
+        ]);
+
+        assert_eq!(snapshot.total_cost, Some(0.5));
+        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn a_cost_state_line_at_the_cost_cap_still_restores() {
+        let snapshot = snapshot_of_lines(&[cost_state_line(
+            SNAPSHOT_SESSION,
+            MAX_RESTORED_COST_USD,
+            serde_json::json!({ "m": model_usage_entry(4, 2, 0, 0) }),
+        )]);
+
+        assert_eq!(snapshot.total_cost, Some(MAX_RESTORED_COST_USD));
     }
 
     #[test]

@@ -68,7 +68,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let guard = CliSessionGuard::acquire(tmp.path()).unwrap();
         drop(guard);
-        assert!(!any_cli_session_active(tmp.path()));
+        assert!(released(tmp.path()));
     }
 
     #[test]
@@ -82,7 +82,7 @@ mod tests {
             "second session still live"
         );
         drop(second);
-        assert!(!any_cli_session_active(tmp.path()));
+        assert!(released(tmp.path()));
     }
 
     #[test]
@@ -112,6 +112,45 @@ mod tests {
             .path()
             .join(crate::consts::CLI_SESSION_LOCK_FILE)
             .is_file());
-        assert!(!any_cli_session_active(tmp.path()));
+        assert!(released(tmp.path()));
+    }
+
+    #[test]
+    fn released_waits_out_a_lock_held_for_a_moment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let guard = CliSessionGuard::acquire(tmp.path()).unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(guard);
+        });
+
+        assert!(released(tmp.path()));
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn released_reports_a_lock_that_stays_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = CliSessionGuard::acquire(tmp.path()).unwrap();
+
+        assert!(!released_within(
+            tmp.path(),
+            std::time::Duration::from_millis(50)
+        ));
+    }
+
+    fn released(data_dir: &Path) -> bool {
+        released_within(data_dir, std::time::Duration::from_secs(5))
+    }
+
+    fn released_within(data_dir: &Path, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while any_cli_session_active(data_dir) {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
     }
 }

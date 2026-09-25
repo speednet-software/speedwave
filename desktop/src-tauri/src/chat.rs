@@ -1145,7 +1145,7 @@ fn compute_turn_usage_from_result(
     Some(delta)
 }
 
-pub(crate) fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
+fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     let model_usage = parsed["modelUsage"].as_object()?;
     if model_usage.is_empty() {
         return None;
@@ -1172,7 +1172,7 @@ pub(crate) fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<Tur
     }
 }
 
-pub(crate) fn dominant_model_by_output_tokens(
+fn dominant_model_by_output_tokens(
     model_usage: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
     model_usage.and_then(|mu| {
@@ -1632,13 +1632,6 @@ pub fn claude_container_name(project: &str) -> String {
 
 fn claude_container_name_with_prefix(prefix: &str, project: &str) -> String {
     format!("{prefix}_{project}_claude")
-}
-
-fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
-    (
-        claude_container_name(project),
-        speedwave_runtime::session::kill_by_instance_command(id),
-    )
 }
 
 fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
@@ -2550,16 +2543,10 @@ impl ChatSession {
         let Some(id) = self.instance_id.take() else {
             return;
         };
-        let (container, argv) = reap_exec_plan(&self.project_name, &id);
+        let container = claude_container_name(&self.project_name);
         let rt = runtime::detect_runtime();
-        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        match rt.container_exec_piped(&container, &argv_refs) {
-            Ok(mut cmd) => {
-                if let Err(e) = cmd.status() {
-                    log::warn!("kill exec for orphaned instance failed: {e}");
-                }
-            }
-            Err(e) => log::warn!("could not build kill exec for orphaned instance: {e}"),
+        if let Err(e) = speedwave_runtime::session::reap_instance(&rt, &container, &id) {
+            log::warn!("kill exec for orphaned instance failed: {e}");
         }
     }
 
@@ -3778,17 +3765,23 @@ mod tests {
     }
 
     #[test]
-    fn reap_exec_plan_targets_project_container_with_marker() {
-        let (container, argv) = reap_exec_plan("acme", "inst-123");
+    fn a_session_is_reaped_in_its_projects_claude_container_by_the_bounded_reap() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("fn reap_instance(&mut self)")
+            .expect("the session reap");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("its end")];
+
         assert!(
-            container.ends_with("_acme_claude"),
-            "must target the project's claude container, got: {container}"
+            body.contains("claude_container_name(&self.project_name)"),
+            "{body}"
         );
-        assert_eq!(argv[0], "sh");
-        assert_eq!(argv[1], "-c");
-        let script = speedwave_runtime::runtime::decode_payload(&argv[2]);
-        assert!(script.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
-        assert!(script.contains("kill"));
+        assert!(
+            body.contains("speedwave_runtime::session::reap_instance("),
+            "{body}"
+        );
+        assert!(!body.contains(".status()"), "{body}");
     }
 
     #[test]

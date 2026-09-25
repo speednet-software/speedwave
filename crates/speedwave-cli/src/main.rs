@@ -1049,15 +1049,8 @@ fn reap_instance(
     container: &str,
     instance_id: &str,
 ) {
-    let argv = speedwave_runtime::session::kill_by_instance_command(instance_id);
-    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    match runtime.container_exec_piped(container, &argv_refs) {
-        Ok(mut cmd) => {
-            if let Err(e) = cmd.output() {
-                log::debug!("session reap failed: {e}");
-            }
-        }
-        Err(e) => log::debug!("session reap unavailable: {e}"),
+    if let Err(e) = speedwave_runtime::session::reap_instance(runtime, container, instance_id) {
+        log::debug!("session reap failed: {e}");
     }
 }
 
