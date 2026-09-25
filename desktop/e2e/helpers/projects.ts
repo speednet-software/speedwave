@@ -11,19 +11,25 @@ export async function activeProjectSlug(): Promise<string | null> {
   return projects?.active_project ?? null;
 }
 
+/** Opens the project switcher, looking up the pill and the dropdown on every attempt. */
+export async function openProjectSwitcher(
+  timeoutMsg = 'project-switcher-dropdown never opened'
+): Promise<void> {
+  const dropdownOpen = () => $('[data-testid="project-switcher-dropdown"]').isExisting();
+  await browser.waitUntil(
+    async () => {
+      if (await dropdownOpen()) return true;
+      await (await $('[data-testid="project-pill"]')).click();
+      return await dropdownOpen();
+    },
+    { timeout: 30_000, interval: 500, timeoutMsg }
+  );
+}
+
 /** Opens the project switcher and switches to `slug`, waiting for the SSOT signal. */
 export async function switchToProject(slug: string, timeoutMs = 180_000): Promise<void> {
   await waitForShellReady();
-  const pill = await $('[data-testid="project-pill"]');
-  const dropdown = await $('[data-testid="project-switcher-dropdown"]');
-  await browser.waitUntil(
-    async () => {
-      if (await dropdown.isExisting()) return true;
-      await pill.click();
-      return await dropdown.isExisting();
-    },
-    { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' }
-  );
+  await openProjectSwitcher();
   await (await $(`[data-testid="project-switcher-item-${slug}"]`)).click();
   await browser.waitUntil(async () => (await activeProjectSlug()) === slug, {
     timeout: timeoutMs,
