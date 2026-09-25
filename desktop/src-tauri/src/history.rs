@@ -921,6 +921,48 @@ fn snapshot_reads(line: &str) -> bool {
         .any(|marker| line.contains(marker))
 }
 
+const RESUME_SCAN_CHUNK_BYTES: usize = 64 * 1024;
+
+fn joined_line<'a>(head: &'a [u8], tail: &mut Vec<Vec<u8>>) -> std::borrow::Cow<'a, [u8]> {
+    if tail.is_empty() {
+        return std::borrow::Cow::Borrowed(head);
+    }
+    let mut line = head.to_vec();
+    for piece in tail.drain(..).rev() {
+        line.extend_from_slice(&piece);
+    }
+    std::borrow::Cow::Owned(line)
+}
+
+fn for_each_line_from_end(
+    file: &mut fs::File,
+    chunk_bytes: usize,
+    mut visit: impl FnMut(&[u8]) -> std::ops::ControlFlow<()>,
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut end = file.metadata()?.len();
+    let mut tail: Vec<Vec<u8>> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(chunk_bytes.max(1) as u64);
+        let mut chunk = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk)?;
+        end = start;
+        let mut line_end = chunk.len();
+        while let Some(newline) = chunk[..line_end].iter().rposition(|&b| b == b'\n') {
+            let line = joined_line(&chunk[newline + 1..line_end], &mut tail);
+            if visit(&line).is_break() {
+                return Ok(());
+            }
+            line_end = newline;
+        }
+        chunk.truncate(line_end);
+        tail.push(chunk);
+    }
+    let _ = visit(&joined_line(&[], &mut tail));
+    Ok(())
+}
+
 fn compute_resume_snapshot_impl(
     data_dir: &Path,
     project: &str,
@@ -929,84 +971,79 @@ fn compute_resume_snapshot_impl(
     validate_session_id_impl(session_id)?;
 
     let path = sessions_dir_impl(data_dir, project).join(format!("{session_id}.jsonl"));
-    let file = fs::File::open(&path)
+    let mut file = fs::File::open(&path)
         .map_err(|e| anyhow::anyhow!("cannot read session {session_id}: {e}"))?;
 
-    let mut reader = BufReader::new(file);
+    resume_snapshot_from_end(&mut file, session_id, RESUME_SCAN_CHUNK_BYTES)
+}
 
-    let mut latest_cumulative: Option<ResumeSnapshot> = None;
-    let mut latest_cost: Option<f64> = None;
-    let mut latest_modelusage_model: Option<String> = None;
-    let mut latest_init_model: Option<String> = None;
-    let mut last_context_usage: Option<crate::chat::TurnUsage> = None;
+fn resume_snapshot_from_end(
+    file: &mut fs::File,
+    session_id: &str,
+    chunk_bytes: usize,
+) -> anyhow::Result<ResumeSnapshot> {
+    use std::ops::ControlFlow;
+
+    let mut cost_state: Option<CostState> = None;
+    let mut cost_state_model: Option<String> = None;
+    let mut context_usage: Option<crate::chat::TurnUsage> = None;
     let mut tracker = crate::session_model::SessionModelTracker::default();
 
-    let mut raw_line = Vec::new();
-    loop {
-        raw_line.clear();
-        let read = reader
-            .read_until(b'\n', &mut raw_line)
-            .map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        let decoded = String::from_utf8_lossy(&raw_line);
+    for_each_line_from_end(file, chunk_bytes, |raw_line| {
+        let decoded = String::from_utf8_lossy(raw_line);
         let line = decoded
             .trim_end_matches(['\n', '\r'])
             .trim_start_matches('\0');
         if !snapshot_reads(line) {
-            continue;
+            return ControlFlow::Continue(());
         }
-        let parsed: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            return ControlFlow::Continue(());
         };
 
         match parsed["type"].as_str().unwrap_or("") {
-            COST_STATE_LINE => {
+            COST_STATE_LINE if cost_state_model.is_none() => {
                 if let Some(state) = restored_cost_state(&parsed, session_id) {
-                    latest_cost = Some(state.total_cost_usd);
-                    latest_cumulative = Some(ResumeSnapshot::with_usage(state.usage()));
-                    if let Some(model) = state.dominant_model() {
-                        latest_modelusage_model = Some(model.to_string());
-                    }
+                    cost_state_model = state.dominant_model().map(str::to_string);
+                    cost_state.get_or_insert(state);
                 }
             }
-            "system" => {
+            "system" if tracker.resolve().is_none() => {
                 if parsed["subtype"].as_str() == Some("init") {
                     if let Some(model) = parsed["model"].as_str() {
-                        if !model.is_empty() {
-                            latest_init_model = Some(model.to_string());
-                            tracker.observe_init(model);
-                        }
+                        tracker.observe_init(model);
                     }
                 }
             }
-            "assistant" => {
-                if !crate::chat::is_sidechain_event(&parsed) {
+            "assistant" if !crate::chat::is_sidechain_event(&parsed) => {
+                if tracker.resolve().is_none() {
                     if let Some(model) = parsed["message"]["model"].as_str() {
                         tracker.observe_assistant(model);
                     }
-                    if let Some(u) = crate::chat::turn_usage_from_jsonl(&parsed["message"]["usage"])
-                    {
-                        if u != crate::chat::TurnUsage::default() {
-                            last_context_usage = Some(u);
-                        }
-                    }
+                }
+                if context_usage.is_none() {
+                    context_usage = crate::chat::turn_usage_from_jsonl(&parsed["message"]["usage"])
+                        .filter(|u| *u != crate::chat::TurnUsage::default());
                 }
             }
             _ => {}
         }
-    }
 
-    let mut snap = latest_cumulative.unwrap_or_default();
-    snap.total_cost = latest_cost;
-    snap.model = tracker
-        .resolve()
-        .map(str::to_string)
-        .or(latest_modelusage_model)
-        .or(latest_init_model);
-    snap.context_usage = last_context_usage;
+        if cost_state.is_some() && tracker.resolve().is_some() && context_usage.is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
+
+    let mut snap = cost_state
+        .as_ref()
+        .map(|state| ResumeSnapshot::with_usage(state.usage()))
+        .unwrap_or_default();
+    snap.total_cost = cost_state.map(|state| state.total_cost_usd);
+    snap.model = tracker.resolve().map(str::to_string).or(cost_state_model);
+    snap.context_usage = context_usage;
     Ok(snap)
 }
 
@@ -3041,6 +3078,185 @@ mod tests {
 
         assert_eq!(snapshot.total_cost, Some(0.42));
         assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+    }
+
+    fn snapshot_of_bytes(bytes: &[u8], session_id: &str, chunk_bytes: usize) -> ResumeSnapshot {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session.jsonl");
+        fs::write(&path, bytes).unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        resume_snapshot_from_end(&mut file, session_id, chunk_bytes).unwrap()
+    }
+
+    fn lines_from_end(bytes: &[u8], chunk_bytes: usize, take: usize) -> Vec<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lines.jsonl");
+        fs::write(&path, bytes).unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        let mut seen = Vec::new();
+        for_each_line_from_end(&mut file, chunk_bytes, |line| {
+            seen.push(String::from_utf8_lossy(line).into_owned());
+            if seen.len() == take {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+        seen
+    }
+
+    #[test]
+    fn lines_are_read_from_the_last_to_the_first_across_chunk_boundaries() {
+        for chunk_bytes in [1, 2, 3, 4, 5, 64] {
+            assert_eq!(
+                lines_from_end(b"a\nbb\n\nccc", chunk_bytes, usize::MAX),
+                ["ccc", "", "bb", "a"],
+                "chunk of {chunk_bytes} bytes"
+            );
+            assert_eq!(
+                lines_from_end(b"a\nbb\n", chunk_bytes, usize::MAX),
+                ["", "bb", "a"],
+                "chunk of {chunk_bytes} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn the_backward_read_stops_where_the_visitor_asks() {
+        assert_eq!(
+            lines_from_end(b"first\nsecond\nthird", 4, 2),
+            ["third", "second"]
+        );
+    }
+
+    #[test]
+    fn an_empty_file_yields_one_empty_line() {
+        assert_eq!(lines_from_end(b"", 8, usize::MAX), [""]);
+    }
+
+    #[test]
+    fn the_resume_snapshot_is_the_same_for_every_chunk_size() {
+        let mut transcript = format!("{RESUME_TRANSCRIPT_AFTER}\n").into_bytes();
+        transcript.extend_from_slice(b"\0\0{\"type\":\"assistant\",\"isSidechain\":true}\r\n");
+        let whole = snapshot_of_bytes(&transcript, RESUMED_SESSION, transcript.len());
+        let last = last_cost_state(RESUME_TRANSCRIPT_AFTER);
+        assert_eq!(whole.total_cost, last["totalCostUSD"].as_f64());
+        assert_eq!(whole.usage(), model_usage_sum(&last));
+        assert!(whole.context_usage.is_some());
+
+        for chunk_bytes in [1, 2, 3, 7, 64, 1_000, RESUME_SCAN_CHUNK_BYTES] {
+            assert_eq!(
+                snapshot_of_bytes(&transcript, RESUMED_SESSION, chunk_bytes),
+                whole,
+                "chunk of {chunk_bytes} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cost_state_line_longer_than_a_chunk_is_read_whole() {
+        let line = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({ "claude-opus-5-5": model_usage_entry(7, 3, 5, 1) }),
+        );
+        let bytes = format!("{line}\n{}\n{line}", r#"{"type":"user"}"#).into_bytes();
+
+        let snapshot = snapshot_of_bytes(&bytes, SNAPSHOT_SESSION, 16);
+
+        assert_eq!(snapshot.total_cost, Some(0.42));
+        assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn the_last_cost_state_line_far_from_the_end_of_a_transcript_is_restored() {
+        let mut lines = vec![cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({ "claude-opus-5-5": model_usage_entry(7, 3, 5, 1) }),
+        )];
+        lines.extend((0..12_000).map(|i| {
+            format!(r#"{{"type":"user","message":{{"role":"user","content":"line {i}"}}}}"#)
+        }));
+        lines.push(
+            r#"{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":2,"output_tokens":9}}}"#
+                .to_string(),
+        );
+        assert!(lines.iter().map(String::len).sum::<usize>() > 4 * RESUME_SCAN_CHUNK_BYTES);
+
+        let snapshot = snapshot_of_lines(&lines);
+
+        assert_eq!(snapshot.total_cost, Some(0.42));
+        assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+        assert_eq!(snapshot.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(snapshot.context_usage.map(|u| u.output_tokens), Some(9));
+    }
+
+    #[test]
+    fn the_last_valid_cost_state_line_wins_over_an_invalid_one_after_it() {
+        let valid = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.25,
+            serde_json::json!({ "claude-opus-5-5": model_usage_entry(4, 2, 0, 0) }),
+        );
+        let negative = cost_state_line(
+            SNAPSHOT_SESSION,
+            -1.0,
+            serde_json::json!({ "claude-fable-5": model_usage_entry(9, 9, 0, 0) }),
+        );
+        let other_session = cost_state_line(
+            RESUMED_SESSION,
+            0.9,
+            serde_json::json!({ "claude-fable-5": model_usage_entry(9, 9, 0, 0) }),
+        );
+        let bytes = [valid, negative, other_session].join("\n").into_bytes();
+
+        for chunk_bytes in [5, RESUME_SCAN_CHUNK_BYTES] {
+            let snapshot = snapshot_of_bytes(&bytes, SNAPSHOT_SESSION, chunk_bytes);
+
+            assert_eq!(
+                snapshot.total_cost,
+                Some(0.25),
+                "chunk of {chunk_bytes} bytes"
+            );
+            assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (4, 2));
+            assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+        }
+    }
+
+    #[test]
+    fn a_transcript_reads_the_same_with_or_without_a_trailing_newline() {
+        let lines = [
+            r#"{"type":"system","subtype":"init","model":"claude-opus-5-5"}"#.to_string(),
+            cost_state_line(
+                SNAPSHOT_SESSION,
+                0.42,
+                serde_json::json!({ "claude-opus-5-5": model_usage_entry(7, 3, 5, 1) }),
+            ),
+        ];
+        let without = lines.join("\n");
+        let with = format!("{without}\n");
+
+        let snapshot = snapshot_of_bytes(without.as_bytes(), SNAPSHOT_SESSION, 7);
+
+        assert_eq!(snapshot.total_cost, Some(0.42));
+        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            snapshot_of_bytes(with.as_bytes(), SNAPSHOT_SESSION, 7),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn an_empty_transcript_starts_from_an_empty_snapshot() {
+        for chunk_bytes in [1, RESUME_SCAN_CHUNK_BYTES] {
+            assert_eq!(
+                snapshot_of_bytes(b"", SNAPSHOT_SESSION, chunk_bytes),
+                ResumeSnapshot::default()
+            );
+        }
     }
 
     #[test]
