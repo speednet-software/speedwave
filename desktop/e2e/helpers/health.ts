@@ -21,7 +21,7 @@ export interface HealthReport {
 
 export async function getHealth(project: string): Promise<HealthReport | { error: string }> {
   const result = await invokeCommand<HealthReport>('get_health', { project });
-  return result.ok ? result.value : { error: result.error };
+  return result.ok ? result.value : { error: result.reason };
 }
 
 export async function waitForHealthy(project: string): Promise<void> {
