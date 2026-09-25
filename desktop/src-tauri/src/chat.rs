@@ -7194,7 +7194,13 @@ mod tests {
     #[test]
     fn prepare_args_never_appends_a_model_flag_even_with_a_model_pin_file() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
+        speedwave_runtime::claude_settings::set_model_pin(
+            tmp.path(),
+            "proj",
+            "claude-sonnet-5",
+            &[],
+        )
+        .unwrap();
         let user_config = single_project_user_config();
         let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None)
             .unwrap()

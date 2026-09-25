@@ -135,19 +135,29 @@ export interface ModelSelection {
             </div>
           }
           <div class="max-h-72 overflow-y-auto py-1">
-            @if (loading()) {
+            @if (listLoading()) {
               <div
                 data-testid="model-selector-loading"
-                class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+                class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
               >
                 Loading models...
+                @if (pickerPending()) {
+                  <button
+                    type="button"
+                    data-testid="model-selector-retry"
+                    class="hover-bg rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink)]"
+                    (click)="fetchOptions(true)"
+                  >
+                    Retry
+                  </button>
+                }
               </div>
-            } @else if (error()) {
+            } @else if (listError()) {
               <div
                 data-testid="model-selector-error"
                 class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
               >
-                {{ error() }}
+                {{ listError() }}
                 <button
                   type="button"
                   data-testid="model-selector-retry"
@@ -263,9 +273,11 @@ export class ModelSelectorComponent {
   protected readonly stale = signal(false);
   protected readonly summary = signal<ActiveProviderSummary | null>(null);
   private summaryProjectId: string | null = null;
-  private readonly options = signal<ModelOption[]>([]);
+  private readonly discoveredOptions = signal<ModelOption[]>([]);
 
   private optionsFetch: Promise<void> = Promise.resolve();
+
+  private fetchGeneration = 0;
 
   private probedKey = '';
 
@@ -286,6 +298,19 @@ export class ModelSelectorComponent {
       this.showEffortControl() &&
       this.control.sessionInfoState(this.projectId()).state === 'pending'
   );
+
+  private readonly options = computed<ModelOption[]>(() => {
+    if (!this.showEffortControl()) return this.discoveredOptions();
+    const projectId = this.projectId();
+    const held = this.picker.picker(projectId);
+    return held ? this.anthropicOptionsFrom(held, projectId) : [];
+  });
+
+  protected readonly listLoading = computed(
+    () => this.loading() || (this.pickerPending() && this.options().length === 0)
+  );
+
+  protected readonly listError = computed(() => (this.options().length === 0 ? this.error() : ''));
 
   protected readonly badgeTitle = computed<string>(() => {
     if (this.streaming()) return 'Model locked while a turn is streaming';
@@ -480,25 +505,28 @@ export class ModelSelectorComponent {
    * Fetches the option list for the active provider kind (badge combobox source).
    * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
    * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
-   * @param force - Re-issue the discovery probe even when this instance already probed.
+   * Anthropic rows are the `ModelPickerService` rows; only the latest fetch writes the state.
+   * @param force - Re-issue the discovery probe (or re-read the session info) even when held.
    */
   async fetchOptions(force = false): Promise<void> {
     const summary = this.summary();
     if (!summary) return;
+    const generation = ++this.fetchGeneration;
+    const latest = (): boolean => generation === this.fetchGeneration;
     this.loading.set(true);
     this.error.set('');
     this.stale.set(false);
     try {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
+        if (force) await this.control.refreshSessionInfo(projectId);
         await this.anthropicModels.list();
         const picker = await this.picker.refresh(projectId);
+        if (!latest()) return;
         if (!picker) {
-          this.options.set([]);
           this.error.set(MODEL_LIST_UNAVAILABLE);
           return;
         }
-        this.options.set(this.anthropicOptionsFrom(picker, projectId));
       } else {
         const isOpenRouter = summary.kind === 'open_router';
         if (!isOpenRouter && !summary.base_url) {
@@ -509,26 +537,27 @@ export class ModelSelectorComponent {
         const key = `${provider}|${baseUrl}`;
         const held = this.discovered.cached(provider, baseUrl);
         if (!force && this.probedKey === key && held) {
-          this.options.set(this.discoveredOptionsFrom(held));
+          this.discoveredOptions.set(this.discoveredOptionsFrom(held));
         } else {
           const res = await this.discovered.refresh(provider, baseUrl);
+          if (!latest()) return;
           if (!res) {
-            this.options.set([]);
+            this.discoveredOptions.set([]);
             this.error.set(LOAD_FAILED);
             return;
           }
           if (res.fresh) this.probedKey = key;
           this.stale.set(!res.fresh);
-          this.options.set(this.discoveredOptionsFrom(res.models));
+          this.discoveredOptions.set(this.discoveredOptionsFrom(res.models));
         }
       }
       if (this.options().length === 0) this.error.set('No models available.');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: fetch failed: ${msg}`);
-      this.error.set(LOAD_FAILED);
+      if (latest()) this.error.set(LOAD_FAILED);
     } finally {
-      this.loading.set(false);
+      if (latest()) this.loading.set(false);
     }
   }
 

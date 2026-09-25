@@ -8,7 +8,6 @@ mod auth_commands;
 mod bridges;
 mod chat;
 mod chat_session_cmd;
-mod claude_settings;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
