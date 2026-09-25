@@ -222,7 +222,7 @@ export interface ModelSelection {
           </div>
         </div>
       }
-      @if (effortOpen()) {
+      @if (effortOpen() && showEffortSegment()) {
         <button
           type="button"
           data-testid="effort-popover-backdrop"

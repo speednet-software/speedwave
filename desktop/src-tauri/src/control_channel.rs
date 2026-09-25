@@ -830,6 +830,10 @@ mod tests {
         let before = &capture["before_first_turn"];
 
         assert_eq!(before["response"]["response"]["subtype"], "success");
+        assert_ne!(
+            before["applied"], capture["requests"][0],
+            "the recording must apply a level other than the launch level"
+        );
         assert_eq!(before["requests"], serde_json::json!([before["applied"]]));
     }
 

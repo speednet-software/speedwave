@@ -1127,6 +1127,33 @@ describe('ModelSelectorComponent', () => {
         );
     }
 
+    it('renders no effort popover while there are no stops to show', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_active_provider_summary'
+          ? Promise.resolve({
+              provider_id: 'local',
+              kind: 'local',
+              model: 'some-model',
+              base_url: 'http://host.docker.internal:4000',
+              effort_levels: [],
+            })
+          : cmd === 'get_effort_pin'
+            ? Promise.resolve(null)
+            : Promise.reject(new Error(`unexpected: ${cmd}`))
+      );
+      fixture.componentRef.setInput('projectId', 'proj-no-stops');
+      fixture.detectChanges();
+      await settle();
+      (
+        fixture.componentInstance as unknown as { effortOpen: { set(v: boolean): void } }
+      ).effortOpen.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeFalsy();
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))).toBeFalsy();
+    });
+
     function expectHandleWithoutPosition(): void {
       const handle = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
         .nativeElement as HTMLElement;

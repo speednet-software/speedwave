@@ -744,26 +744,36 @@ or while a session starts or resumes, waits. Only the latest pick is applied:
   therefore neither sent nor queued, and its error and notice never reach the other
   project. The switch also clears the composer's selection error.
 - Model picks follow the same project rule. A newer model pick replaces or clears the
-  queued one, so a queued pick never undoes a later one.
+  queued one, so a queued pick never undoes a later one, and only the newest model
+  pick reports an error.
 
 A waiting pick is released at the turn end, when a Stop the user clicks succeeds
 (the interrupted turn's own `result` is dropped while nothing streams), when a resume
-or a fresh start completes, and when a container restart fails, since the process
-the restart would have replaced keeps running. A released pick goes to the process at
-once, also before the process has reported a session id: a request sent before the
-first user message already sets the first model request's level (measured above).
-A model pick queued while a fresh session started is taken as a pick in a chat with
-no conversation: an Anthropic model goes to the new process as `set_model`, while a
-routed one re-renders the containers and respawns the session, because its model and
-window reach Claude Code only as container environment. A start or a resume that
-fails drops the waiting picks; their pins carry them to the next spawn. The Stop a
-container restart begins with releases nothing: the restart resumes the conversation
-in a process that launches with the pins.
+or a fresh start completes, and when a container restart fails. A restart that failed
+before it recreated the containers leaves the process running, and the process takes
+the picks; one that failed later leaves none, and the requests fail and say so.
 
-A pick in a chat with neither a session id nor a conversation still restarts the
-idle session, so the session launches with the pin. Before the first message the
-chat has no session id that tells a live process from none, and a session without a
-conversation has no work a restart could lose. Restart now in such a chat restarts
+A released pick goes to the running process at once, also before the process has
+reported a session id: a request sent before the first user message already sets the
+first model request's level (measured above). The one exception is a routed model
+pick released when a fresh start completes: it re-renders the containers and respawns
+the session, because its model and window reach Claude Code only as container
+environment and the new session has no conversation yet. That re-render is skipped
+when the containers were just rendered for the same model and no other restart came
+between, since the fresh process already launched with it.
+
+A first start that fails drops the waiting picks, and so does a resume that fails;
+their pins carry them to the next spawn. A New chat that fails keeps them: the chat
+returns to the earlier session, which is still running when the start failed before
+replacing it, and takes them at its next turn end. A pick made while a resume waits out
+a container restart is dropped when the resume begins, since the resumed process
+launches with the pins. The Stop a container restart begins with releases nothing: the
+restart resumes the conversation in a process that launches with the pins.
+
+A pick in a chat without a session id restarts the idle session, even when the chat
+shows messages, so the session launches with the pin; a routed pick re-renders the
+containers first. Without a session id the chat cannot tell a live process from none,
+and a conversation without one cannot be resumed. Restart now in such a chat restarts
 it the same way.
 
 Any failure of the request keeps the pin and shows the notice with Restart now,

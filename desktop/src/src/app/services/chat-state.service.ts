@@ -71,18 +71,19 @@ export type {
 
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
 
-interface EffortPick {
-  level: string;
-  request: number;
+interface ProjectPick {
   project: string | null;
   mark: number | null;
+  request: number;
 }
 
-interface ModelPick {
+interface EffortPick extends ProjectPick {
+  level: string;
+}
+
+interface ModelPick extends ProjectPick {
   wireId: string;
   routed: boolean;
-  project: string | null;
-  mark: number | null;
 }
 
 type PinSave = { saved: true } | { saved: false; error: unknown };
@@ -174,7 +175,9 @@ export class ChatStateService {
   private _effortRequest = 0;
   private _effortSave: Promise<void> = Promise.resolve();
   private _effortApply: Promise<void> = Promise.resolve();
+  private _modelRequest = 0;
   private _modelSave: Promise<void> = Promise.resolve();
+  private _renderedFor: string | null = null;
   readonly pendingModelOverride: Signal<string | null> = computed(
     () => this._pendingModelPick()?.wireId ?? null
   );
@@ -182,12 +185,12 @@ export class ChatStateService {
   /** Effort level saved for new sessions that the live one did not confirm. */
   readonly deferredEffort: Signal<string | null> = this._deferredEffort.asReadonly();
 
-  private releasePendingPicks(freshProcess = false): void {
+  private releasePendingPicks(): void {
     if (this.isStreaming) return;
     const model = this._pendingModelPick();
     const effort = this._pendingEffort;
     this.dropPendingPicks();
-    void this.takeReleasedPicks(model, effort, freshProcess);
+    void this.takeReleasedPicks(model, effort);
   }
 
   private dropPendingPicks(): void {
@@ -197,11 +200,10 @@ export class ChatStateService {
 
   private async takeReleasedPicks(
     model: ModelPick | null,
-    effort: EffortPick | null,
-    freshProcess: boolean
+    effort: EffortPick | null
   ): Promise<void> {
     const generation = this._sessionGeneration;
-    if (model) await this.takeModelPick(model, freshProcess);
+    if (model) await this.takeModelPick(model, true);
     if (effort && generation === this._sessionGeneration) {
       await this.applyEffortToConversation(effort);
     }
@@ -236,7 +238,7 @@ export class ChatStateService {
   private async takeEffortPick(effort: EffortPick, respawnIdle: boolean): Promise<void> {
     if (this.chatBusy()) {
       this._pendingEffort = effort;
-    } else if (this.holdsSession()) {
+    } else if (this.hasLiveSession()) {
       await this.applyEffortToConversation(effort);
     } else if (respawnIdle) {
       await this.respawnIdleSession();
@@ -247,6 +249,10 @@ export class ChatStateService {
     this.resetForNewConversation();
     this.initialized = true;
     await this.startChatSession();
+  }
+
+  private isNewestModelPick(pick: ModelPick): boolean {
+    return pick.request === this._modelRequest && this.stillSettledFor(pick);
   }
 
   private async saveEffortPin(project: string | null, level: string): Promise<PinSave> {
@@ -286,14 +292,8 @@ export class ChatStateService {
     return effort.request === this._effortRequest && this.stillSettledFor(effort);
   }
 
-  private stillSettledFor({
-    project,
-    mark,
-  }: {
-    project: string | null;
-    mark: number | null;
-  }): boolean {
-    return this.projectState.isStillSettledOn(project, mark);
+  private stillSettledFor(pick: ProjectPick): boolean {
+    return this.projectState.isStillSettledOn(pick.project, pick.mark);
   }
 
   private async sendEffortToSession(effort: EffortPick): Promise<void> {
@@ -323,7 +323,7 @@ export class ChatStateService {
     const sessionId = this._lastKnownSessionId;
     if (sessionId !== null) {
       await this.resumeConversation(sessionId);
-    } else if (!this.hasConversation()) {
+    } else {
       await this.respawnIdleSession();
     }
   }
@@ -346,13 +346,14 @@ export class ChatStateService {
       routed: !isAnthropic,
       project,
       mark: this.projectState.settledMark(project),
+      request: ++this._modelRequest,
     };
     const saving = this._modelSave.then(() => this.saveModelPick(sel, pick, clearsPin));
     this._modelSave = saving.then(() => undefined);
     const outcome = await saving;
     if (outcome.saved) {
-      await this.takeModelPick(pick);
-    } else if (this.stillSettledFor(pick)) {
+      await this.takeModelPick(pick, false);
+    } else if (this.isNewestModelPick(pick)) {
       this.reportSelectionFailure('model selection persist', outcome.error);
     }
   }
@@ -382,19 +383,24 @@ export class ChatStateService {
     }
   }
 
-  private async takeModelPick(pick: ModelPick, freshProcess = false): Promise<void> {
+  private async takeModelPick(pick: ModelPick, released: boolean): Promise<void> {
     if (!this.stillSettledFor(pick)) return;
     if (this.chatBusy()) {
       this._pendingModelPick.set(pick);
       return;
     }
     this._pendingModelPick.set(null);
-    if (this.holdsSession() || (freshProcess && !pick.routed)) {
+    const toRunningProcess = released && (!pick.routed || this.hasConversation());
+    if (this.hasLiveSession() || toRunningProcess) {
       await this.switchLiveModel(pick);
       return;
     }
-    if (pick.routed && !(await this.rerenderContainersForModel(pick))) return;
-    if (!this.stillSettledFor(pick) || this.chatBusy() || this.holdsSession()) return;
+    if (pick.routed && pick.wireId === this._renderedFor) return;
+    if (pick.routed) {
+      if (!(await this.rerenderContainersForModel(pick))) return;
+      this._renderedFor = pick.wireId;
+    }
+    if (!this.stillSettledFor(pick) || this.chatBusy() || this.hasLiveSession()) return;
     await this.respawnIdleSession();
   }
 
@@ -419,7 +425,9 @@ export class ChatStateService {
         model: pick.wireId,
       });
     } catch (e: unknown) {
-      if (sameConversation()) this.reportSelectionFailure('model switch', e);
+      if (sameConversation() && this.isNewestModelPick(pick)) {
+        this.reportSelectionFailure('model switch', e);
+      }
       return;
     }
     if (!sameConversation()) return;
@@ -451,7 +459,7 @@ export class ChatStateService {
     if (outcome === 'restarted') return true;
     if (outcome === 'failed') {
       this.projectState.requestRestartFor(pick.project);
-      if (this.stillSettledFor(pick)) {
+      if (this.isNewestModelPick(pick)) {
         this.reportSelectionFailure(
           'compose re-render for the picked model',
           this.projectState.restartError
@@ -459,16 +467,12 @@ export class ChatStateService {
       }
       return false;
     }
-    if (this.stillSettledFor(pick)) this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
+    if (this.isNewestModelPick(pick)) this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
     return false;
   }
 
   private hasLiveSession(): boolean {
     return this._lastKnownSessionId !== null;
-  }
-
-  private holdsSession(): boolean {
-    return this.hasLiveSession() || this.hasConversation();
   }
 
   private readonly _sessionStats = signal<SessionStats | null>(null);
@@ -745,7 +749,7 @@ export class ChatStateService {
     }
   }
 
-  private async startChatSession(): Promise<StartOutcome> {
+  private async startChatSession(keepPicksOnFailure = false): Promise<StartOutcome> {
     const project = this.projectState.activeProject();
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
@@ -783,8 +787,8 @@ export class ChatStateService {
           this.startingSession = false;
         }
       }
-      if (outcome === 'started') this.releasePendingPicks(true);
-      else if (outcome !== 'skipped') this.dropPendingPicks();
+      if (outcome === 'started') this.releasePendingPicks();
+      else if (outcome !== 'skipped' && !keepPicksOnFailure) this.dropPendingPicks();
       return outcome;
     }
     return 'skipped';
@@ -805,7 +809,7 @@ export class ChatStateService {
     this.initialized = true;
     this._sessionGeneration += 1;
     const gen = this._sessionGeneration;
-    const outcome = await this.startChatSession();
+    const outcome = await this.startChatSession(priorSessionId !== null);
     if (outcome === 'started') return;
     if (gen === this._sessionGeneration) {
       this.initialized = false;
@@ -824,7 +828,7 @@ export class ChatStateService {
     const chatInput: ChatInput = typeof input === 'string' ? chatInputFromText(input) : input;
     const wireBlocks: WireContentBlock[] = chatInputToBlocks(chatInput);
     const hasContent = wireBlocks.length > 0;
-    if (!hasContent || this.isStreaming || this.sessionStartInFlightFromState()) return;
+    if (!hasContent || this.chatBusy()) return;
     if (chatInput.attachments.length === 0 && isBlankOrSlashOnly(chatInput.text)) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
@@ -1511,6 +1515,7 @@ export class ChatStateService {
         this._activeKind = null;
         this.clearSessionTracking();
         this.dropPendingPicks();
+        this._renderedFor = null;
         this._deferredEffort.set(null);
         this._modelSelectionError.set('');
         this.notifyChange();
@@ -1522,6 +1527,7 @@ export class ChatStateService {
 
   private setupRestartResumeListeners(): void {
     this.projectState.onRestartBegin(async () => {
+      this._renderedFor = null;
       await this.interruptTurn();
     });
     this.projectState.onRestartFailed(() => {
