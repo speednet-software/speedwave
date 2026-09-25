@@ -9,6 +9,12 @@ use crate::{setup_wizard, MSG_NOT_AUTHENTICATED};
 
 static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub(crate) const MSG_SESSION_KEPT: &str = "the running chat session was kept";
+
+fn kept_session_error(e: impl std::fmt::Display) -> String {
+    format!("{MSG_SESSION_KEPT}: {e}")
+}
+
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
@@ -22,7 +28,7 @@ fn start_session_inner(
 
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
 
-    containers_cmd::ensure_images_ready()?;
+    containers_cmd::ensure_images_ready().map_err(kept_session_error)?;
 
     if oauth_just_started {
         containers_cmd::recreate_project_containers_if_running(project);
@@ -38,13 +44,14 @@ fn start_session_inner(
         }
         Ok(())
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(kept_session_error)?;
 
     log::info!("extracting old session");
     let mut old_session = {
         let mut guard = session_arc
             .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+            .map_err(|e| format!("Lock poisoned: {e}"))
+            .map_err(kept_session_error)?;
         std::mem::replace(&mut *guard, ChatSession::new(project))
     };
     log::info!("stopping old session (outside lock)");
@@ -790,6 +797,56 @@ mod tests {
         assert!(
             compose_pos < auth_pos,
             "compose lock must be acquired BEFORE check_claude_auth"
+        );
+    }
+
+    #[test]
+    fn every_failure_before_the_old_session_stops_says_it_was_kept() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let before_stop = &body[..body
+            .find("std::mem::replace(")
+            .expect("start_session_inner must swap the session")];
+        let closure_start = before_stop
+            .find("rt.transaction(")
+            .expect("start_session_inner must check auth under the compose lock");
+        let closure_end = closure_start
+            + before_stop[closure_start..]
+                .find("})")
+                .expect("the transaction closure must close")
+            + 2;
+        let outside_closure = format!(
+            "{}{}",
+            &before_stop[..closure_start],
+            &before_stop[closure_end..]
+        );
+
+        assert!(outside_closure.contains("?;"));
+        assert_eq!(
+            outside_closure.matches("?;").count(),
+            outside_closure
+                .matches(".map_err(kept_session_error)?;")
+                .count(),
+            "a failure before the swap leaves the running session in place and must say so"
+        );
+        let after_stop = &body[body.find("old_session.stop()").unwrap()..];
+        assert!(!after_stop.contains("kept_session_error"));
+    }
+
+    #[test]
+    fn a_kept_session_error_keeps_the_sign_in_wording_the_frontend_matches() {
+        let refused = kept_session_error(crate::MSG_NOT_AUTHENTICATED);
+
+        assert!(refused.starts_with(MSG_SESSION_KEPT), "{refused}");
+        assert!(refused.contains("not authenticated"), "{refused}");
+    }
+
+    #[test]
+    fn session_kept_marker_matches_ts() {
+        let ts = include_str!("../../src/src/app/services/chat-state.service.ts");
+        assert!(
+            ts.contains(&format!("SESSION_KEPT_MARKER = '{MSG_SESSION_KEPT}'")),
+            "chat-state.service.ts must match the backend's kept-session prefix"
         );
     }
 

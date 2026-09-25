@@ -100,6 +100,9 @@ export const NEW_CONVERSATION_STREAMING =
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
 
+/** Prefix of a start the backend refused before it stopped the running session. Mirror of Rust `chat_session_cmd::MSG_SESSION_KEPT`. */
+export const SESSION_KEPT_MARKER = 'the running chat session was kept';
+
 export const MODEL_SWITCH_NOT_APPLIED =
   'The containers were not restarted, so the model is not in use yet. Pick it again in a moment.';
 
@@ -248,10 +251,13 @@ export class ChatStateService {
 
   private async respawnIdleSession(launchedFor: string | null = null): Promise<void> {
     this.resetForNewConversation();
-    this._launchedFor =
-      launchedFor === null ? null : { wireId: launchedFor, generation: this._sessionGeneration };
+    const generation = this._sessionGeneration;
+    this._launchedFor = launchedFor === null ? null : { wireId: launchedFor, generation };
     this.initialized = true;
-    await this.startChatSession();
+    const outcome = await this.startChatSession();
+    if (outcome !== 'started' && this._launchedFor?.generation === generation) {
+      this._launchedFor = null;
+    }
   }
 
   private launchedFor(wireId: string): boolean {
@@ -263,12 +269,16 @@ export class ChatStateService {
     );
   }
 
+  private isNewestOf(pick: ProjectPick, newest: number): boolean {
+    return pick.request === newest && this.stillSettledFor(pick);
+  }
+
   private isNewestModelPick(pick: ModelPick): boolean {
-    return pick.request === this._modelRequest && this.stillSettledFor(pick);
+    return this.isNewestOf(pick, this._modelRequest);
   }
 
   private isNewestSavedModelPick(pick: ModelPick): boolean {
-    return pick.request === this._savedModelRequest && this.stillSettledFor(pick);
+    return this.isNewestOf(pick, this._savedModelRequest);
   }
 
   private async saveEffortPin(project: string | null, level: string): Promise<PinSave> {
@@ -305,7 +315,7 @@ export class ChatStateService {
   }
 
   private isCurrentEffortPick(effort: EffortPick): boolean {
-    return effort.request === this._effortRequest && this.stillSettledFor(effort);
+    return this.isNewestOf(effort, this._effortRequest);
   }
 
   private stillSettledFor(pick: ProjectPick): boolean {
@@ -766,7 +776,7 @@ export class ChatStateService {
     }
   }
 
-  private async startChatSession(keepPicksOnRefusal = false): Promise<StartOutcome> {
+  private async startChatSession(keepPicksForKeptSession = false): Promise<StartOutcome> {
     const project = this.projectState.activeProject();
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
@@ -778,6 +788,7 @@ export class ChatStateService {
       const gen = this._sessionGeneration;
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       let outcome: StartOutcome = 'failed';
+      let sessionKept = false;
       try {
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
@@ -788,6 +799,7 @@ export class ChatStateService {
           outcome = 'skipped';
         } else {
           const msg = String(err);
+          sessionKept = msg.includes(SESSION_KEPT_MARKER);
           if (isNotAuthenticatedError(msg)) {
             this.projectState.status.set('auth_required');
             this.notifyChange();
@@ -805,7 +817,7 @@ export class ChatStateService {
         }
       }
       if (outcome === 'started') this.releasePendingPicks();
-      else if (outcome !== 'skipped' && !(keepPicksOnRefusal && outcome === 'auth')) {
+      else if (outcome !== 'skipped' && !(keepPicksForKeptSession && sessionKept)) {
         this.dropPendingPicks();
       }
       return outcome;
@@ -818,10 +830,10 @@ export class ChatStateService {
    * into an empty chat. Refuses before clearing; a failed start clears first, then throws.
    */
   async startNewConversation(): Promise<void> {
-    await this.replaceConversation(this.hasLiveSession());
+    await this.replaceConversation(true);
   }
 
-  private async replaceConversation(priorProcessRuns: boolean): Promise<void> {
+  private async replaceConversation(priorProcessMayRun: boolean): Promise<void> {
     await this.ensureListeners();
     const blocked = this.isStreaming
       ? NEW_CONVERSATION_STREAMING
@@ -833,7 +845,7 @@ export class ChatStateService {
     this.initialized = true;
     this._sessionGeneration += 1;
     const gen = this._sessionGeneration;
-    const outcome = await this.startChatSession(priorProcessRuns);
+    const outcome = await this.startChatSession(priorProcessMayRun && priorSessionId !== null);
     if (outcome === 'started') return;
     if (gen === this._sessionGeneration) {
       this.initialized = false;

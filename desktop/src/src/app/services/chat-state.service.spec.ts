@@ -8,6 +8,7 @@ import {
   NEW_CONVERSATION_FAILED,
   NEW_CONVERSATION_NO_PROJECT,
   NEW_CONVERSATION_STREAMING,
+  SESSION_KEPT_MARKER,
   historyFitsTarget,
   isNotAuthenticatedError,
   mapContextOverflowError,
@@ -3611,7 +3612,7 @@ describe('ChatStateService', () => {
 
         await service.applyModelSelection(haikuPick);
         expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
-        start.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+        start.reject(new Error(`${SESSION_KEPT_MARKER}: Claude is not authenticated.`));
         await expect(starting).rejects.toThrow();
         expect(service.lastKnownSessionId).toBe(LIVE);
         expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
@@ -3645,7 +3646,7 @@ describe('ChatStateService', () => {
         });
 
         await service.applyEffortSelection('max');
-        start.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+        start.reject(new Error(`${SESSION_KEPT_MARKER}: Claude is not authenticated.`));
         await expect(starting).rejects.toThrow();
         expect(service.lastKnownSessionId).toBe(LIVE);
         expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
@@ -3701,10 +3702,35 @@ describe('ChatStateService', () => {
 
         await service.applyModelSelection(haikuPick);
         expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
-        start.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+        start.reject(new Error(`${SESSION_KEPT_MARKER}: Claude is not authenticated.`));
         await fresh;
 
         expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      it('a pick queued while a new conversation waits for images the backend kept the session for reaches it at its next turn end', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const start = createDeferred<void>();
+        overrideInvoke('start_chat', () => start.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const starting = service.startNewConversation();
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
+            -1
+          );
+        });
+
+        await service.applyEffortSelection('max');
+        start.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await expect(starting).rejects.toThrow(NEW_CONVERSATION_FAILED);
+        expect(service.lastKnownSessionId).toBe(LIVE);
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
       });
 
       it('a new conversation that fails keeps the effort notice of the session it returns to', async () => {
@@ -8462,6 +8488,43 @@ describe('ChatStateService', () => {
         catalogId: 'qwen3',
         wireId: 'my-ollama/qwen3',
       };
+
+      it('a routed pick whose respawn fails to start is re-rendered when it is picked again', async () => {
+        let starts = 0;
+        mockTauri.invokeHandler = (cmd: string) => {
+          calls.push(cmd);
+          if (cmd === 'start_chat' && ++starts === 1) {
+            return Promise.reject(new Error('failed to spawn claude'));
+          }
+          return Promise.resolve(undefined);
+        };
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(1));
+        await new Promise((r) => setTimeout(r, 0));
+
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(2));
+
+        expect(count('restart_integration_containers')).toBe(2);
+      });
+
+      it("an older routed pick's failed re-render is reported when the newest pick could not be saved", async () => {
+        let saves = 0;
+        vi.spyOn(TestBed.inject(AnthropicModelsService), 'setProviderModel').mockImplementation(
+          async () => {
+            if (++saves === 2) throw new Error('config is locked');
+          }
+        );
+        const first = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('restart_integration_containers'));
+        await service.applyModelSelection(otherRoutedPick);
+        expect(service.modelSelectionError()).toContain('config is locked');
+
+        pendingRestart.reject(new Error('compose failed'));
+        await first;
+
+        expect(service.modelSelectionError()).toContain('compose failed');
+      });
 
       it('a direct repeat of a routed pick right after its respawn restarts nothing again', async () => {
         everyCommandAnswers();

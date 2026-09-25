@@ -768,8 +768,12 @@ New chat that fails to spawn, because the backend stops the earlier process befo
 spawns the new one; their pins carry them to the next spawn. The header's New chat
 drops them when it resets the chat, and its session launches with the pins. Only a New
 chat started from a transcript (`startNewConversation`) keeps them, and only when the
-sign-in check refuses it: the check runs before the backend stops the earlier process,
-so the chat returns to that process, which takes them at its next turn end. The fresh
+backend refused the start before it stopped the earlier process: images that are not
+ready, a sign-in check that fails or says no, or a poisoned session lock.
+`start_session_inner` prefixes exactly those failures with
+`chat_session_cmd::MSG_SESSION_KEPT`, so the frontend does not infer the order from an
+error text of its own. The chat returns to that process, which takes them at its next
+turn end. The fresh
 start after a container restart drops them even then, since the restart already ended
 the earlier process. A New chat that fails also restores the effort notice together
 with the session id the chat returns to. A pick made while a resume waits out
@@ -790,8 +794,8 @@ A routed pick skips the re-render and the respawn when the running process was
 launched right after a re-render for the same model and nothing has switched its model
 since, because that process already runs it; a direct pick and a released one follow
 the same rule. `ChatStateService` records the launch only for the newest pick and only
-for the session generation it started, and clears it on a live switch and on a
-container restart. A live switch changes the model and the configuration but renders
+for the session generation it started, and clears it when that start does not
+complete, on a live switch and on a container restart. A live switch changes the model and the configuration but renders
 nothing, so a process started after it, such as a New chat's, runs with containers
 rendered for an earlier model, and its soft-impose then moves it to the configured one.
 

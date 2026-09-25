@@ -830,6 +830,10 @@ mod tests {
         let before = &capture["before_first_turn"];
 
         assert_eq!(before["response"]["response"]["subtype"], "success");
+        assert!(
+            before["launched"].is_string(),
+            "the recording names the level its process launched with"
+        );
         assert_ne!(
             before["applied"], before["launched"],
             "the recording must apply a level other than the one its process launched with"
