@@ -1154,6 +1154,65 @@ describe('ModelSelectorComponent', () => {
       expect(fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))).toBeFalsy();
     });
 
+    function mockProviderSummaries(levelsByProject: Record<string, string[]>): void {
+      tauriInvoke.mockImplementation((cmd: string, args?: { project?: string }) => {
+        if (cmd === 'get_active_provider_summary') {
+          return Promise.resolve({
+            provider_id: 'local',
+            kind: 'local',
+            model: 'some-model',
+            base_url: 'http://host.docker.internal:4000',
+            effort_levels: levelsByProject[args?.project ?? ''] ?? [],
+          });
+        }
+        if (cmd === 'get_effort_pin') return Promise.resolve(null);
+        return Promise.reject(new Error(`unexpected: ${cmd}`));
+      });
+    }
+
+    function effortPopover(): unknown {
+      return fixture.debugElement.query(By.css('[data-testid="effort-popover"]'));
+    }
+
+    it('keeps the effort popover closed when its stops disappear and come back', async () => {
+      mockProviderSummaries({ 'proj-stops': EFFORT_LEVELS, 'proj-none': [] });
+      fixture.componentRef.setInput('projectId', 'proj-stops');
+      fixture.detectChanges();
+      await settle();
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+      fixture.detectChanges();
+      expect(effortPopover()).toBeTruthy();
+
+      fixture.componentRef.setInput('projectId', 'proj-none');
+      fixture.detectChanges();
+      await settle();
+      expect(effortPopover()).toBeFalsy();
+
+      fixture.componentRef.setInput('projectId', 'proj-stops');
+      fixture.detectChanges();
+      await settle();
+
+      expect(stops()).toEqual([]);
+      expect(effortPopover()).toBeFalsy();
+      expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeTruthy();
+    });
+
+    it('closes the effort popover when the project changes', async () => {
+      mockProviderSummaries({ 'proj-a': EFFORT_LEVELS, 'proj-b': EFFORT_LEVELS });
+      fixture.componentRef.setInput('projectId', 'proj-a');
+      fixture.detectChanges();
+      await settle();
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+      fixture.detectChanges();
+      expect(effortPopover()).toBeTruthy();
+
+      fixture.componentRef.setInput('projectId', 'proj-b');
+      fixture.detectChanges();
+      await settle();
+
+      expect(effortPopover()).toBeFalsy();
+    });
+
     function expectHandleWithoutPosition(): void {
       const handle = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
         .nativeElement as HTMLElement;

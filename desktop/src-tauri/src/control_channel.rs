@@ -831,8 +831,8 @@ mod tests {
 
         assert_eq!(before["response"]["response"]["subtype"], "success");
         assert_ne!(
-            before["applied"], capture["requests"][0],
-            "the recording must apply a level other than the launch level"
+            before["applied"], before["launched"],
+            "the recording must apply a level other than the one its process launched with"
         );
         assert_eq!(before["requests"], serde_json::json!([before["applied"]]));
     }

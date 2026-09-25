@@ -176,8 +176,9 @@ export class ChatStateService {
   private _effortSave: Promise<void> = Promise.resolve();
   private _effortApply: Promise<void> = Promise.resolve();
   private _modelRequest = 0;
+  private _savedModelRequest = 0;
   private _modelSave: Promise<void> = Promise.resolve();
-  private _renderedFor: string | null = null;
+  private _launchedFor: { wireId: string; generation: number } | null = null;
   readonly pendingModelOverride: Signal<string | null> = computed(
     () => this._pendingModelPick()?.wireId ?? null
   );
@@ -245,14 +246,29 @@ export class ChatStateService {
     }
   }
 
-  private async respawnIdleSession(): Promise<void> {
+  private async respawnIdleSession(launchedFor: string | null = null): Promise<void> {
     this.resetForNewConversation();
+    this._launchedFor =
+      launchedFor === null ? null : { wireId: launchedFor, generation: this._sessionGeneration };
     this.initialized = true;
     await this.startChatSession();
   }
 
+  private launchedFor(wireId: string): boolean {
+    const launched = this._launchedFor;
+    return (
+      launched !== null &&
+      launched.wireId === wireId &&
+      launched.generation === this._sessionGeneration
+    );
+  }
+
   private isNewestModelPick(pick: ModelPick): boolean {
     return pick.request === this._modelRequest && this.stillSettledFor(pick);
+  }
+
+  private isNewestSavedModelPick(pick: ModelPick): boolean {
+    return pick.request === this._savedModelRequest && this.stillSettledFor(pick);
   }
 
   private async saveEffortPin(project: string | null, level: string): Promise<PinSave> {
@@ -352,6 +368,7 @@ export class ChatStateService {
     this._modelSave = saving.then(() => undefined);
     const outcome = await saving;
     if (outcome.saved) {
+      this._savedModelRequest = pick.request;
       await this.takeModelPick(pick, false);
     } else if (this.isNewestModelPick(pick)) {
       this.reportSelectionFailure('model selection persist', outcome.error);
@@ -395,13 +412,10 @@ export class ChatStateService {
       await this.switchLiveModel(pick);
       return;
     }
-    if (pick.routed && pick.wireId === this._renderedFor) return;
-    if (pick.routed) {
-      if (!(await this.rerenderContainersForModel(pick))) return;
-      this._renderedFor = pick.wireId;
-    }
+    if (pick.routed && this.launchedFor(pick.wireId)) return;
+    if (pick.routed && !(await this.rerenderContainersForModel(pick))) return;
     if (!this.stillSettledFor(pick) || this.chatBusy() || this.hasLiveSession()) return;
-    await this.respawnIdleSession();
+    await this.respawnIdleSession(pick.routed && this.isNewestModelPick(pick) ? pick.wireId : null);
   }
 
   private async outlastRestart(): Promise<boolean> {
@@ -419,13 +433,14 @@ export class ChatStateService {
     const generation = this._sessionGeneration;
     const sameConversation = (): boolean =>
       generation === this._sessionGeneration && this.stillSettledFor(pick);
+    this._launchedFor = null;
     try {
       await this.tauri.invoke('switch_chat_model', {
         project: pick.project ?? '',
         model: pick.wireId,
       });
     } catch (e: unknown) {
-      if (sameConversation() && this.isNewestModelPick(pick)) {
+      if (sameConversation() && this.isNewestSavedModelPick(pick)) {
         this.reportSelectionFailure('model switch', e);
       }
       return;
@@ -459,7 +474,7 @@ export class ChatStateService {
     if (outcome === 'restarted') return true;
     if (outcome === 'failed') {
       this.projectState.requestRestartFor(pick.project);
-      if (this.isNewestModelPick(pick)) {
+      if (this.isNewestSavedModelPick(pick)) {
         this.reportSelectionFailure(
           'compose re-render for the picked model',
           this.projectState.restartError
@@ -467,7 +482,9 @@ export class ChatStateService {
       }
       return false;
     }
-    if (this.isNewestModelPick(pick)) this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
+    if (this.isNewestSavedModelPick(pick)) {
+      this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
+    }
     return false;
   }
 
@@ -749,7 +766,7 @@ export class ChatStateService {
     }
   }
 
-  private async startChatSession(keepPicksOnFailure = false): Promise<StartOutcome> {
+  private async startChatSession(keepPicksOnRefusal = false): Promise<StartOutcome> {
     const project = this.projectState.activeProject();
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
@@ -788,7 +805,9 @@ export class ChatStateService {
         }
       }
       if (outcome === 'started') this.releasePendingPicks();
-      else if (outcome !== 'skipped' && !keepPicksOnFailure) this.dropPendingPicks();
+      else if (outcome !== 'skipped' && !(keepPicksOnRefusal && outcome === 'auth')) {
+        this.dropPendingPicks();
+      }
       return outcome;
     }
     return 'skipped';
@@ -799,21 +818,27 @@ export class ChatStateService {
    * into an empty chat. Refuses before clearing; a failed start clears first, then throws.
    */
   async startNewConversation(): Promise<void> {
+    await this.replaceConversation(this.hasLiveSession());
+  }
+
+  private async replaceConversation(priorProcessRuns: boolean): Promise<void> {
     await this.ensureListeners();
     const blocked = this.isStreaming
       ? NEW_CONVERSATION_STREAMING
       : this.newConversationBlockedReason();
     if (blocked) throw new Error(blocked);
     const priorSessionId = this._lastKnownSessionId;
+    const priorDeferredEffort = this._deferredEffort();
     this.resetForNewConversation();
     this.initialized = true;
     this._sessionGeneration += 1;
     const gen = this._sessionGeneration;
-    const outcome = await this.startChatSession(priorSessionId !== null);
+    const outcome = await this.startChatSession(priorProcessRuns);
     if (outcome === 'started') return;
     if (gen === this._sessionGeneration) {
       this.initialized = false;
       this._lastKnownSessionId = priorSessionId;
+      this._deferredEffort.set(priorDeferredEffort);
     }
     if (outcome === 'auth') throw new Error(NEW_CONVERSATION_AUTH);
     throw new Error(outcome === 'skipped' ? NEW_CONVERSATION_BUSY : NEW_CONVERSATION_FAILED);
@@ -1515,7 +1540,7 @@ export class ChatStateService {
         this._activeKind = null;
         this.clearSessionTracking();
         this.dropPendingPicks();
-        this._renderedFor = null;
+        this._launchedFor = null;
         this._deferredEffort.set(null);
         this._modelSelectionError.set('');
         this.notifyChange();
@@ -1527,7 +1552,7 @@ export class ChatStateService {
 
   private setupRestartResumeListeners(): void {
     this.projectState.onRestartBegin(async () => {
-      this._renderedFor = null;
+      this._launchedFor = null;
       await this.interruptTurn();
     });
     this.projectState.onRestartFailed(() => {
@@ -1565,7 +1590,7 @@ export class ChatStateService {
 
   private async startFreshSession(): Promise<void> {
     try {
-      await this.startNewConversation();
+      await this.replaceConversation(false);
     } catch (err) {
       const content = `Could not start a new conversation: ${err instanceof Error ? err.message : String(err)}`;
       this.log.error(`[chat-state] startFreshSession failed: ${String(err)}`);

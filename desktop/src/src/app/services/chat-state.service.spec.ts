@@ -3596,7 +3596,7 @@ describe('ChatStateService', () => {
         expect(service.pendingModelOverride()).toBeNull();
       });
 
-      it('a model pick queued while a new conversation fails to start never undoes a later pick', async () => {
+      it('a model pick queued while sign-in refuses a new conversation never undoes a later pick', async () => {
         liveConversation();
         await Promise.resolve();
         const start = createDeferred<void>();
@@ -3611,7 +3611,7 @@ describe('ChatStateService', () => {
 
         await service.applyModelSelection(haikuPick);
         expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
-        start.reject(new Error('failed to spawn claude'));
+        start.reject(new Error('Claude is not authenticated. Please authenticate first.'));
         await expect(starting).rejects.toThrow();
         expect(service.lastKnownSessionId).toBe(LIVE);
         expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
@@ -3631,7 +3631,7 @@ describe('ChatStateService', () => {
         expect(switched).toEqual(['claude-sonnet-5']);
       });
 
-      it('an effort pick queued while a new conversation fails to start reaches the earlier session at its next turn end', async () => {
+      it('an effort pick queued while sign-in refuses a new conversation reaches the earlier session at its next turn end', async () => {
         liveConversation();
         await Promise.resolve();
         const start = createDeferred<void>();
@@ -3655,6 +3655,115 @@ describe('ChatStateService', () => {
         await vi.waitFor(() => {
           expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
         });
+      });
+
+      it('a pick queued while a new conversation fails to spawn is dropped: the earlier process is already stopped', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const start = createDeferred<void>();
+        overrideInvoke('start_chat', () => start.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const starting = service.startNewConversation();
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
+            -1
+          );
+        });
+
+        await service.applyEffortSelection('max');
+        await service.applyModelSelection(haikuPick);
+        start.reject(new Error('failed to spawn claude'));
+        await expect(starting).rejects.toThrow(NEW_CONVERSATION_FAILED);
+
+        expect(service.lastKnownSessionId).toBe(LIVE);
+        expect(service.pendingModelOverride()).toBeNull();
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+        await new Promise((r) => setTimeout(r, 0));
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+        expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
+      });
+
+      it('the fresh start after a container restart drops the picks when sign-in refuses it: the restart ended the earlier session', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const start = createDeferred<void>();
+        overrideInvoke('start_chat', () => start.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const fresh = (
+          service as unknown as { startFreshSession(): Promise<void> }
+        ).startFreshSession();
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'start_chat')).toBeGreaterThan(
+            -1
+          );
+        });
+
+        await service.applyModelSelection(haikuPick);
+        expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+        start.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+        await fresh;
+
+        expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      it('a new conversation that fails keeps the effort notice of the session it returns to', async () => {
+        liveConversation(rejected('chat session ended before the response'));
+        await Promise.resolve();
+        await service.applyEffortSelection('low');
+        expect(service.deferredEffort()).toBe('low');
+        overrideInvoke('start_chat', rejected('failed to spawn claude'));
+
+        await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
+
+        expect(service.lastKnownSessionId).toBe(LIVE);
+        expect(service.deferredEffort()).toBe('low');
+      });
+
+      it("an older model pick's failed switch is reported when the newest pick could not be saved", async () => {
+        liveConversation();
+        await Promise.resolve();
+        const olderSwitch = createDeferred<void>();
+        overrideInvoke('switch_chat_model', () => olderSwitch.promise);
+        let saves = 0;
+        overrideInvoke('set_model_pin', () =>
+          ++saves === 2 ? Promise.reject(new Error('settings.json is locked')) : Promise.resolve()
+        );
+
+        const older = service.applyModelSelection(haikuPick);
+        await vi.waitFor(() => expect(saves).toBe(1));
+        await service.applyModelSelection({
+          ...haikuPick,
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+        });
+        expect(service.modelSelectionError()).toContain('settings.json is locked');
+        olderSwitch.reject(new Error('claude-haiku-4-5 is not available on this plan'));
+        await older;
+
+        expect(service.modelSelectionError()).toContain('not available on this plan');
+      });
+
+      it("an older model pick's failed switch shows no error once a newer pick was saved", async () => {
+        liveConversation();
+        await Promise.resolve();
+        const olderSwitch = createDeferred<void>();
+        let switches = 0;
+        overrideInvoke('switch_chat_model', () =>
+          ++switches === 1 ? olderSwitch.promise : Promise.resolve()
+        );
+
+        const older = service.applyModelSelection(haikuPick);
+        await vi.waitFor(() => expect(switches).toBe(1));
+        await service.applyModelSelection({
+          ...haikuPick,
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+        });
+        olderSwitch.reject(new Error('claude-haiku-4-5 is not available on this plan'));
+        await older;
+
+        expect(service.modelSelectionError()).toBe('');
       });
 
       it('a pick queued while a first session fails to start is dropped: the next spawn launches with the pin', async () => {
@@ -8335,6 +8444,92 @@ describe('ChatStateService', () => {
         expect(callsAfterRestart().filter((c) => c === 'start_chat')).toHaveLength(1);
         expect(calls).not.toContain('switch_chat_model');
         expect(service.pendingModelOverride()).toBeNull();
+      });
+
+      function everyCommandAnswers(): void {
+        mockTauri.invokeHandler = (cmd: string) => {
+          calls.push(cmd);
+          return Promise.resolve(undefined);
+        };
+      }
+
+      function count(cmd: string): number {
+        return calls.filter((c) => c === cmd).length;
+      }
+
+      const otherRoutedPick = {
+        ...routedPick,
+        catalogId: 'qwen3',
+        wireId: 'my-ollama/qwen3',
+      };
+
+      it('a direct repeat of a routed pick right after its respawn restarts nothing again', async () => {
+        everyCommandAnswers();
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(1));
+
+        await service.applyModelSelection(routedPick);
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(count('restart_integration_containers')).toBe(1);
+        expect(count('start_chat')).toBe(1);
+        expect(calls).not.toContain('switch_chat_model');
+      });
+
+      it('a routed pick after a live switch and a New chat re-renders again: the new process launched with another model', async () => {
+        everyCommandAnswers();
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(1));
+        service.seedSessionId('sess-routed');
+        await service.applyModelSelection(otherRoutedPick);
+        expect(count('switch_chat_model')).toBe(1);
+
+        service.resetForNewConversation();
+        await service.init();
+        await vi.waitFor(() => expect(count('start_chat')).toBe(2));
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(3));
+
+        expect(count('restart_integration_containers')).toBe(2);
+        expect(calls.lastIndexOf('start_chat')).toBeGreaterThan(
+          calls.lastIndexOf('restart_integration_containers')
+        );
+      });
+
+      it('a re-render that ends after a project switch started leaves no record: back on the project the same pick re-renders', async () => {
+        const pick = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('restart_integration_containers'));
+        mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+        mockTauri.dispatchEvent('project_switch_failed', {
+          project: 'test',
+          error: 'switch failed',
+        });
+        pendingRestart.resolve();
+        await pick;
+        expect(callsAfterRestart()).not.toContain('start_chat');
+        TestBed.inject(ProjectStateService).status.set('ready');
+        everyCommandAnswers();
+
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(1));
+
+        expect(count('restart_integration_containers')).toBe(2);
+      });
+
+      it('a routed pick that respawns after a newer pick leaves no record: its repeat re-renders', async () => {
+        const first = service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(calls).toContain('restart_integration_containers'));
+        await service.applyModelSelection(otherRoutedPick);
+        expect(service.modelSelectionError()).toBe(MODEL_SWITCH_NOT_APPLIED);
+        pendingRestart.resolve();
+        await first;
+        await vi.waitFor(() => expect(count('start_chat')).toBe(1));
+        everyCommandAnswers();
+
+        await service.applyModelSelection(routedPick);
+        await vi.waitFor(() => expect(count('start_chat')).toBe(2));
+
+        expect(count('restart_integration_containers')).toBe(2);
       });
 
       it('a re-render that succeeds after a project switch started respawns nothing', async () => {

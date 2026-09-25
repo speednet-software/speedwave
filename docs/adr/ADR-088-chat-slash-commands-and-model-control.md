@@ -676,7 +676,8 @@ against their release manifests, run with the stream-json arguments of
 
 - A request sent before the first user message was answered `success` the same way,
   and the first model request already carried its level. The recording holds this
-  run too (`before_first_turn`).
+  run too (`before_first_turn`): the process launched with `--effort high` and sent
+  `low` before the first turn, whose request carried `low`.
 - Opus 5.5 on 2.1.282, spawned with `--effort high`, behaved the same.
 - `set_model` keeps the flag-layer level: after `low` was applied on Opus 4.8 and
   the session switched to Sonnet 5, the Sonnet request carried `low`.
@@ -744,8 +745,10 @@ or while a session starts or resumes, waits. Only the latest pick is applied:
   therefore neither sent nor queued, and its error and notice never reach the other
   project. The switch also clears the composer's selection error.
 - Model picks follow the same project rule. A newer model pick replaces or clears the
-  queued one, so a queued pick never undoes a later one, and only the newest model
-  pick reports an error.
+  queued one, so a queued pick never undoes a later one. Only the newest model pick
+  reports a failed save, and only the newest pick whose pin was saved reports a failed
+  switch or re-render: a switch that fails behind a newer pick whose save failed is
+  still shown, because the session is then on neither model.
 
 A waiting pick is released at the turn end, when a Stop the user clicks succeeds
 (the interrupted turn's own `result` is dropped while nothing streams), when a resume
@@ -758,14 +761,18 @@ reported a session id: a request sent before the first user message already sets
 first model request's level (measured above). The one exception is a routed model
 pick released when a fresh start completes: it re-renders the containers and respawns
 the session, because its model and window reach Claude Code only as container
-environment and the new session has no conversation yet. That re-render is skipped
-when the containers were just rendered for the same model and no other restart came
-between, since the fresh process already launched with it.
+environment and the new session has no conversation yet.
 
-A first start that fails drops the waiting picks, and so does a resume that fails;
-their pins carry them to the next spawn. A New chat that fails keeps them: the chat
-returns to the earlier session, which is still running when the start failed before
-replacing it, and takes them at its next turn end. A pick made while a resume waits out
+A first start that fails drops the waiting picks, and so do a resume that fails and a
+New chat that fails to spawn, because the backend stops the earlier process before it
+spawns the new one; their pins carry them to the next spawn. The header's New chat
+drops them when it resets the chat, and its session launches with the pins. Only a New
+chat started from a transcript (`startNewConversation`) keeps them, and only when the
+sign-in check refuses it: the check runs before the backend stops the earlier process,
+so the chat returns to that process, which takes them at its next turn end. The fresh
+start after a container restart drops them even then, since the restart already ended
+the earlier process. A New chat that fails also restores the effort notice together
+with the session id the chat returns to. A pick made while a resume waits out
 a container restart is dropped when the resume begins, since the resumed process
 launches with the pins. The Stop a container restart begins with releases nothing: the
 restart resumes the conversation in a process that launches with the pins.
@@ -774,7 +781,19 @@ A pick in a chat without a session id restarts the idle session, even when the c
 shows messages, so the session launches with the pin; a routed pick re-renders the
 containers first. Without a session id the chat cannot tell a live process from none,
 and a conversation without one cannot be resumed. Restart now in such a chat restarts
-it the same way.
+it the same way. This includes a turn the user stopped before Claude Code reported its
+session id: the next pick replaces that process and the messages it shows. Telling a
+live process from a dead one there would take a liveness signal besides the session id,
+for the moment between a send and Claude Code's `system/init`.
+
+A routed pick skips the re-render and the respawn when the running process was
+launched right after a re-render for the same model and nothing has switched its model
+since, because that process already runs it; a direct pick and a released one follow
+the same rule. `ChatStateService` records the launch only for the newest pick and only
+for the session generation it started, and clears it on a live switch and on a
+container restart. A live switch changes the model and the configuration but renders
+nothing, so a process started after it, such as a New chat's, runs with containers
+rendered for an earlier model, and its soft-impose then moves it to the configured one.
 
 Any failure of the request keeps the pin and shows the notice with Restart now,
 which is the notice's only remaining role. The failures are:

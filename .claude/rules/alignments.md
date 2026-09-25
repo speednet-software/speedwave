@@ -58,7 +58,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
   - Claude Code's answers to `apply_flag_settings` with `low`, `max` and `turbo`;
   - the `output_config.effort` of each turn after them;
   - whether a `settings.json` already in the config directory changed, and which keys `.claude.json` gained, with their values;
-  - a request sent before the first user message and the effort of that first turn;
+  - a request sent before the first user message by a process launched with `--effort high`, that launch level, and the effort of the first turn;
   - an `/effort` input written during a tool-using turn: the `num_turns` of every `result` and the effort of each request.
 
   The tests over it pin six facts: an effort change applies from the next model request; it applies before the first turn too; it writes no settings; it stores no level in `.claude.json` (only `unpin…LaunchEffort` flags set to `true`); an unknown level is answered `success` without effect, which is why `apply_chat_effort` validates the level first; and what an `/effort` input written mid-turn does, which is why no effort change is such an input.

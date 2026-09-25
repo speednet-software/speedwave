@@ -7,6 +7,7 @@ import {
   input,
   output,
   signal,
+  untracked,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { TooltipDirective } from '../../../shared/tooltip.directive';
@@ -408,6 +409,11 @@ export class ModelSelectorComponent {
         this.lastPicked.set('');
         if (id && !this.summary()?.model) void this.loadModelHint(id);
       }
+    });
+    effect(() => {
+      this.projectId();
+      this.showEffortSegment();
+      untracked(() => this.effortOpen.set(false));
     });
     effect(() => {
       const err = this.modelError();
