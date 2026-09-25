@@ -107,6 +107,50 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('sessionAwaitedFromState', () => {
+    it('follows no project status on its own', () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      for (const status of ['loading', 'starting', 'switching', 'ready', 'error'] as const) {
+        projectState.status.set(status);
+        expect(service.sessionAwaitedFromState()).toBe(false);
+      }
+    });
+
+    it('is true from the first init until the session it starts is up', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const started = createDeferred<void>();
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'start_chat' ? started.promise : base(cmd, args);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      const initing = service.init();
+      expect(service.sessionAwaitedFromState()).toBe(true);
+      await vi.waitFor(() => {
+        expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'start_chat')).toBe(true);
+      });
+      await initing;
+      expect(service.sessionAwaitedFromState()).toBe(true);
+
+      started.resolve();
+      await vi.waitFor(() => expect(service.sessionAwaitedFromState()).toBe(false));
+      await service.init();
+      expect(service.sessionAwaitedFromState()).toBe(false);
+    });
+
+    it('is true while a container restart runs on a ready project', () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      projectState.status.set('ready');
+
+      projectState.restarting = true;
+      expect(service.sessionAwaitedFromState()).toBe(true);
+
+      projectState.restarting = false;
+      expect(service.sessionAwaitedFromState()).toBe(false);
+    });
+  });
+
   describe('init', () => {
     it('surfaces a non-auth startChatSession failure to projectState and the logger', async () => {
       const projectState = TestBed.inject(ProjectStateService);
@@ -1200,6 +1244,7 @@ describe('ChatStateService', () => {
 
       expect(service.messages).toHaveLength(0);
       expect(service.sessionStartInFlightFromState()).toBe(true);
+      expect(service.sessionAwaitedFromState()).toBe(true);
 
       pendingNewStart.resolve();
       await vi.waitFor(() => {
@@ -8292,6 +8337,37 @@ describe('ChatStateService', () => {
       expect(mockLogger.info).toHaveBeenCalledWith(
         '[chat-state] restart resume decision: history_tokens=25229 window_tokens=unknown fits=true decider=true'
       );
+    });
+
+    it('keeps a session awaited from the end of a restart until its resume ends, the resume-or-fresh dialog included', async () => {
+      service.seedSessionId('sess-awaited');
+      (service as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const config = createDeferred<unknown>();
+      const answer = createDeferred<'resume' | 'fresh'>();
+      const resumed = createDeferred<void>();
+      const decider = vi.fn(() => answer.promise);
+      service.setResumeDecider(decider);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') return config.promise;
+        if (cmd === 'resume_conversation') return resumed.promise;
+        if (cmd === 'get_conversation') return { session_id: 'sess-awaited', messages: [] };
+        return undefined;
+      };
+      expect(projectState.restarting).toBe(false);
+      expect(service.sessionAwaitedFromState()).toBe(false);
+
+      projectState.notifyRestartComplete();
+      expect(service.sessionAwaitedFromState()).toBe(true);
+      config.resolve({ provider: 'anthropic', context_tokens: 8192 });
+      await vi.waitFor(() => expect(decider).toHaveBeenCalledTimes(1));
+      expect(service.sessionAwaitedFromState()).toBe(true);
+      answer.resolve('resume');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.sessionAwaitedFromState()).toBe(true);
+
+      resumed.resolve();
+      await vi.waitFor(() => expect(service.sessionAwaitedFromState()).toBe(false));
     });
 
     it('logs the restart resume decision when a known window is too small and the decider is asked', async () => {

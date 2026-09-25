@@ -421,6 +421,24 @@ describe('ChatComponent', () => {
       expect(composer.componentInstance.sendBlocked()()).toBe(false);
     });
 
+    it('hands the composer whether a chat session is on its way', async () => {
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+      await vi.waitFor(() => {
+        fixture.detectChanges();
+        expect(composer.componentInstance.sessionAwaited()).toBe(false);
+      });
+
+      const endStartingSession = chatState.beginStartingSession();
+      fixture.detectChanges();
+      expect(composer.componentInstance.sessionAwaited()).toBe(true);
+
+      endStartingSession();
+      fixture.detectChanges();
+      expect(composer.componentInstance.sessionAwaited()).toBe(false);
+    });
+
     it('binds composerContextLabel to the composer contextLabel input, formatted from session stats', () => {
       projectState.status.set('ready');
       chatState._setState({

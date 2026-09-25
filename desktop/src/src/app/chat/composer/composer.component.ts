@@ -232,6 +232,7 @@ const PLAN_MODE_PREFIX =
             [modelError]="modelError()"
             [refusedPick]="refusedModelPick()"
             [sessionModel]="model()"
+            [sessionAwaited]="sessionAwaited()"
             (modelSelected)="modelSelected.emit($event)"
             (effortSelected)="effortSelected.emit($event)"
           />
@@ -322,6 +323,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly placeholder = input('message speedwave...');
 
   readonly model = input('');
+
+  readonly sessionAwaited = input(false);
 
   readonly projectId = input('');
 

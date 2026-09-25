@@ -894,6 +894,18 @@ export class ChatStateService {
     () => this.startingSessionSignal() || this.resumeInProgressSignal()
   );
 
+  private readonly firstStartDueSignal = signal(false);
+  private readonly restartResumesSignal = signal(0);
+
+  /** Whether a chat session for the active project is on its way: a start, a resume or a restart. */
+  readonly sessionAwaitedFromState: Signal<boolean> = computed(
+    () =>
+      this.sessionStartInFlightFromState() ||
+      this.projectState.restarting ||
+      this.firstStartDueSignal() ||
+      this.restartResumesSignal() > 0
+  );
+
   private readonly _loadingTranscript = signal<boolean>(false);
   readonly loadingTranscriptFromState: Signal<boolean> = this._loadingTranscript.asReadonly();
 
@@ -989,19 +1001,24 @@ export class ChatStateService {
     this.log.debug(
       `[chat-state] init: listenerSetup=${this.listenerSetup !== null} initialized=${this.initialized}`
     );
-    await this.ensureListeners();
-    if (!this.initialized) {
-      this.initialized = true;
-      if (this.projectState.status() === 'ready') {
-        void this.startChatSession();
-      } else {
-        const gen = this._sessionGeneration;
-        const unsub = this.projectState.onProjectReady(() => {
-          unsub();
-          if (gen !== this._sessionGeneration) return;
+    this.firstStartDueSignal.set(!this.initialized);
+    try {
+      await this.ensureListeners();
+      if (!this.initialized) {
+        this.initialized = true;
+        if (this.projectState.status() === 'ready') {
           void this.startChatSession();
-        });
+        } else {
+          const gen = this._sessionGeneration;
+          const unsub = this.projectState.onProjectReady(() => {
+            unsub();
+            if (gen !== this._sessionGeneration) return;
+            void this.startChatSession();
+          });
+        }
       }
+    } finally {
+      this.firstStartDueSignal.set(false);
     }
   }
 
@@ -1875,6 +1892,15 @@ export class ChatStateService {
   private async decideResumeAfterRestart(): Promise<void> {
     const id = this._lastKnownSessionId;
     if (!id) return;
+    this.restartResumesSignal.update((n) => n + 1);
+    try {
+      await this.resumeAfterRestart(id);
+    } finally {
+      this.restartResumesSignal.update((n) => n - 1);
+    }
+  }
+
+  private async resumeAfterRestart(id: string): Promise<void> {
     await this.refreshLlmConfigCache();
     if (this._lastKnownSessionId !== id) return;
     const historyTokens = this._lastContextTokens;
@@ -1884,16 +1910,16 @@ export class ChatStateService {
       `[chat-state] restart resume decision: history_tokens=${historyTokens ?? 'unknown'} window_tokens=${windowTokens ?? 'unknown'} fits=${fits} decider=${this._resumeDecider !== null}`
     );
     if (fits) {
-      void this.resumeConversation(id);
+      await this.resumeConversation(id);
       return;
     }
     if (this._resumeDecider) {
       const choice = await this._resumeDecider();
       if (this._lastKnownSessionId !== id) return;
-      if (choice === 'resume') void this.resumeConversation(id);
-      else void this.startFreshSession();
+      if (choice === 'resume') await this.resumeConversation(id);
+      else await this.startFreshSession();
     } else {
-      void this.resumeConversation(id);
+      await this.resumeConversation(id);
     }
   }
 

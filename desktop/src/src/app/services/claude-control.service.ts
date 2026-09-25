@@ -21,6 +21,7 @@ export class ClaudeControlService {
   private readonly tauri = inject(TauriService);
   private readonly log = inject(LoggerService);
   private readonly states = signal<ReadonlyMap<string, ClaudeSessionInfoState>>(new Map());
+  private readonly pushes = new Map<string, number>();
 
   /** Subscribes to the backend's session-info event. */
   constructor() {
@@ -30,9 +31,15 @@ export class ClaudeControlService {
   private async listen(): Promise<void> {
     try {
       await this.tauri.listen<ClaudeSessionInfoEvent>(CLAUDE_SESSION_INFO_EVENT, (event) => {
-        this.apply(event.payload.project, event.payload.status);
+        const { project, status } = event.payload;
+        this.pushes.set(project, this.pushCount(project) + 1);
+        this.apply(project, status);
       });
     } catch {}
+  }
+
+  private pushCount(project: string): number {
+    return this.pushes.get(project) ?? 0;
   }
 
   private apply(project: string, status: ClaudeSessionInfoState): void {
@@ -59,15 +66,17 @@ export class ClaudeControlService {
   }
 
   /**
-   * Pulls the current session-info state, for a consumer created after the event fired.
+   * Pulls the current session-info state, for a consumer created after the event fired; an event
+   * that arrives while the pull runs is newer, so the pulled state is then dropped.
    * @param project - Project the chat session belongs to.
    */
   async refreshSessionInfo(project: string): Promise<void> {
+    const pushed = this.pushCount(project);
     try {
       const status = await this.tauri.invoke<ClaudeSessionInfoState>('get_chat_session_info', {
         project,
       });
-      this.apply(project, status);
+      if (this.pushCount(project) === pushed) this.apply(project, status);
     } catch (e: unknown) {
       this.log.debug(`get_chat_session_info failed: ${describe(e)}`);
     }

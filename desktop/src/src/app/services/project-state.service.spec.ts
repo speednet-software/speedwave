@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { computed } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import {
   ProjectStateService,
@@ -1863,6 +1864,24 @@ describe('ProjectStateService', () => {
       service.requestRestart();
 
       expect(service.needsRestart).toBe(true);
+    });
+
+    it('reports a restart in flight to a computed reader', async () => {
+      const readsRestarting = computed(() => service.restarting);
+      const invoked = createDeferred<void>();
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'restart_integration_containers' ? invoked.promise : base(cmd, args);
+      expect(readsRestarting()).toBe(false);
+
+      const restart = service.restartContainers('test');
+      await vi.waitFor(() => {
+        expect(readsRestarting()).toBe(true);
+      });
+      invoked.resolve();
+      await restart;
+
+      expect(readsRestarting()).toBe(false);
     });
 
     it('restartContainers invokes Tauri command and clears needsRestart', async () => {

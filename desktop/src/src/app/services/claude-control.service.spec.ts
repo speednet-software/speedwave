@@ -76,6 +76,41 @@ describe('ClaudeControlService', () => {
     logger = makeMockLogger();
   });
 
+  it('keeps an event that arrives while a pull runs, over the older state the pull read', async () => {
+    let answer: (status: ClaudeSessionInfoState) => void = () => undefined;
+    mockTauri.invokeHandler = (cmd: string) =>
+      cmd === 'get_chat_session_info'
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve(undefined);
+    const service = createService();
+    await awaitListener();
+
+    const pulling = service.refreshSessionInfo('p');
+    emit('p', { state: 'ready', info: INFO });
+    answer({ state: 'pending' });
+    await pulling;
+
+    expect(service.sessionInfoState('p')).toEqual({ state: 'ready', info: INFO });
+  });
+
+  it('applies a pull when only another project reported meanwhile', async () => {
+    let answer: (status: ClaudeSessionInfoState) => void = () => undefined;
+    mockTauri.invokeHandler = (cmd: string) =>
+      cmd === 'get_chat_session_info'
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve(undefined);
+    const service = createService();
+    await awaitListener();
+
+    const pulling = service.refreshSessionInfo('p');
+    emit('q', { state: 'pending' });
+    answer({ state: 'ready', info: INFO });
+    await pulling;
+
+    expect(service.sessionInfoState('p')).toEqual({ state: 'ready', info: INFO });
+    expect(service.sessionInfoState('q')).toEqual({ state: 'pending' });
+  });
+
   it('reports unavailable for a project it has heard nothing about', async () => {
     const service = createService();
     await awaitListener();

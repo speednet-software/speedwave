@@ -79,6 +79,7 @@
             #composer
             [streaming]="chat.isStreamingFromState()"
             [sendBlocked]="chat.sessionStartInFlightFromState"
+            [sessionAwaited]="chat.sessionAwaitedFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [projectId]="projectState.activeProject() ?? ''"
