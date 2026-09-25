@@ -1060,9 +1060,6 @@ fn reap_warning(
     instance_id: &str,
 ) -> Option<String> {
     let e = speedwave_runtime::session::reap_instance(runtime, container, instance_id).err()?;
-    if speedwave_runtime::runtime::is_missing_or_stopped_container_error(&e) {
-        return None;
-    }
     Some(format!(
         "Warning: Claude Code may still be running in '{container}': {}",
         redact_err(&e)

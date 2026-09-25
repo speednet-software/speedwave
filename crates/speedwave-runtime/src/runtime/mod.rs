@@ -674,7 +674,7 @@ fn is_stopped_container_error(message: &str) -> bool {
 }
 
 /// `true` if an exec error says its container is missing or stopped, so no process runs in it.
-pub fn is_missing_or_stopped_container_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_missing_or_stopped_container_error(err: &anyhow::Error) -> bool {
     let message = err.to_string();
     is_missing_container_error_msg(&message) || is_stopped_container_error(&message)
 }

@@ -124,6 +124,21 @@ fn reap_instance_within(
     id: &str,
     deadline: Duration,
 ) -> anyhow::Result<()> {
+    match run_reap(runtime, container, id, deadline) {
+        Err(e) if crate::runtime::is_missing_or_stopped_container_error(&e) => {
+            log::debug!("nothing to reap in '{container}', it is missing or stopped: {e}");
+            Ok(())
+        }
+        reaped => reaped,
+    }
+}
+
+fn run_reap(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+    id: &str,
+    deadline: Duration,
+) -> anyhow::Result<()> {
     let argv = kill_by_instance_command(id);
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     let mut cmd = runtime.container_exec_piped(container, &argv)?;
@@ -402,27 +417,98 @@ mod tests {
         );
     }
 
+    fn is_kept(container: &str) -> bool {
+        unconfirmed().iter().any(|(c, _)| c == container)
+    }
+
     #[test]
-    fn a_reap_in_a_container_that_is_gone_reports_why() {
+    fn a_reap_in_a_missing_or_stopped_container_is_done_and_keeps_nothing() {
         for (container, stderr) in [
             (
                 "reap-missing_claude",
-                "Error: No such container: reap-missing_claude",
+                "time=\"2026-09-25T12:00:00Z\" level=fatal msg=\"no such container reap-missing_claude\"",
             ),
-            ("reap-stopped_claude", "cannot exec in a stopped state"),
+            (
+                "reap-stopped_claude",
+                "level=fatal msg=\"cannot exec in a stopped state\"",
+            ),
         ] {
-            let (runtime, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            let (runtime, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
                 .push_exec_piped_failure(stderr)
                 .build();
 
-            let err = reap_instance(&runtime, container, "abc-123")
-                .expect_err("a reap in a gone container fails");
+            reap_instance(&runtime, container, "abc-123").expect("no process runs there");
 
-            assert!(
-                crate::runtime::is_missing_or_stopped_container_error(&err),
-                "{err}"
-            );
+            assert_eq!(handles.exec_calls.lock().expect("exec calls").len(), 1);
+            assert!(!is_kept(container), "{container}");
         }
+    }
+
+    #[test]
+    fn a_kept_instance_whose_container_is_gone_is_dropped_and_lets_the_start_through() {
+        let container = "unconfirmed-container-gone_claude";
+        let (failing, _) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container is not responding")
+            .build();
+        reap_instance_recorded(&failing, container, "leaked", Duration::from_secs(5))
+            .expect_err("the first reap fails");
+        assert!(is_kept(container));
+        let (gone, gone_handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure(&format!(
+                "level=fatal msg=\"no such container {container}\""
+            ))
+            .build();
+
+        reap_unconfirmed_within(&gone, container, Duration::from_secs(5))
+            .expect("an instance in a missing container is gone");
+        let (later, later_handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container is not responding")
+            .build();
+        reap_unconfirmed_within(&later, container, Duration::from_secs(5))
+            .expect("nothing is left to reap");
+
+        assert!(!is_kept(container));
+        assert_eq!(gone_handles.exec_calls.lock().expect("exec calls").len(), 1);
+        assert!(later_handles
+            .exec_calls
+            .lock()
+            .expect("exec calls")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_reap_that_fails_for_another_reason_is_still_kept_and_refuses_the_start() {
+        let container = "unconfirmed-other-failure_claude";
+        let (runtime, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("permission denied")
+            .push_exec_piped_failure("permission denied")
+            .build();
+
+        reap_instance_recorded(&runtime, container, "leaked", Duration::from_secs(5))
+            .expect_err("the reap fails");
+        assert!(is_kept(container));
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
+            .expect_err("the instance is still not confirmed gone");
+
+        assert!(is_kept(container));
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
+            .expect("a reap that succeeds lets the start through");
+        assert!(!is_kept(container));
+    }
+
+    #[test]
+    fn a_reap_that_times_out_is_still_kept() {
+        let container = "unconfirmed-timeout-kept_claude";
+        let (runtime, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .build();
+
+        reap_instance_recorded(&runtime, container, "leaked", Duration::from_millis(200))
+            .expect_err("the stalled reap times out");
+
+        assert!(is_kept(container));
+        reap_unconfirmed_within(&runtime, container, Duration::from_millis(200))
+            .expect("the next reap confirms the instance gone");
     }
 
     #[test]
