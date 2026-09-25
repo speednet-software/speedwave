@@ -4357,6 +4357,69 @@ describe('ChatStateService', () => {
           });
         });
 
+        it('a refusal answered after the chat moved to another conversation of the project leaves that conversation alone', async () => {
+          liveConversation();
+          await Promise.resolve();
+          const answer = createDeferred<ModelSwitchOutcome>();
+          overrideInvoke('switch_chat_model', () => answer.promise);
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          const pick = service.applyModelSelection(haikuPick);
+          await vi.waitFor(() => {
+            expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
+          });
+
+          service.resetForNewConversation();
+          service.seedSessionId('sess-next');
+          answer.resolve({ outcome: 'refused', reason: 'model not changed' });
+          await pick;
+
+          expect(service.modelSelectionError()).toBe('');
+          expect(service.refusedModelPick()).toBeNull();
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual([]);
+        });
+
+        it('a refusal after the session reported another model gives the badge back to what it reported', async () => {
+          liveConversation();
+          await Promise.resolve();
+          let switches = 0;
+          overrideInvoke('switch_chat_model', async () =>
+            ++switches === 1
+              ? { outcome: 'confirmed' }
+              : { outcome: 'refused', reason: 'model not changed' }
+          );
+          await service.applyModelSelection(sonnetPick);
+          service.handleStreamChunk({
+            chunk_type: 'SystemInit',
+            data: { model: 'claude-fable-5', session_id: LIVE },
+          });
+
+          await service.applyModelSelection(haikuPick);
+
+          expect(service.refusedModelPick()).toEqual({
+            catalogId: 'claude-haiku-4-5',
+            running: null,
+          });
+        });
+
+        it('a spawn waits for every model pick in flight, whichever chain it is on', async () => {
+          const work = createDeferred<void>();
+          const internals = service as unknown as {
+            trackModelWork<T>(promise: Promise<T>): Promise<T>;
+            modelPicksSettled(): Promise<void>;
+          };
+          void internals.trackModelWork(work.promise);
+          let settled = false;
+          const waiting = internals.modelPicksSettled().then(() => {
+            settled = true;
+          });
+          await new Promise((r) => setTimeout(r, 0));
+
+          expect(settled).toBe(false);
+          work.resolve();
+          await waiting;
+          expect(settled).toBe(true);
+        });
+
         it('a refused routed pick leaves the provider config alone', async () => {
           liveConversation();
           await Promise.resolve();

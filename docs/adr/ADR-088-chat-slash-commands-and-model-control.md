@@ -484,10 +484,13 @@ now sent first and saved after Claude Code's answer
 - `confirmed`: the pick is saved and the `/model` chip is added.
 - `refused`: nothing is saved. The composer shows Claude Code's reason, and the badge
   goes back to the pick the session confirmed last in the same conversation, or to
-  the model the session reported before.
+  the model the session reported before. A `system/init` reported after that
+  confirmation replaces it, since it names the model the turn runs on (a typed
+  `/model` switches the model without naming its id). A refusal answered after the
+  chat moved to another conversation is only logged.
 - `unconfirmed`: no answer within `control_channel::SET_MODEL_TIMEOUT`, raised from
   10 s to 15 s. Claude Code gives its one-token request about 5 s: against a stub that
-  answered after 20 s, after 70 s or never, `set_model` answered 5.3 s after it was sent
+  answered after 20 s, after 70 s or never, `set_model` answered 5.4 s after it was sent
   with `Couldn't confirm model "<id>" with the API. Try again, or run /model to see
 available models.` and `error_code: check_failed`, which is a refusal. A model the
   upstream must load first, as a local server does on its first request, can therefore
@@ -517,8 +520,12 @@ server that swaps models on one GPU then serves two models at once, and the chec
 can be refused, which only a log line recorded. The session start therefore reads
 the claude service's `ANTHROPIC_MODEL` from the rendered compose
 (`compose::rendered_service_env_in`) and, when it differs from the configured model,
-sends `set_model` before the first user message and waits for the answer inside
-`ChatSession::start`. The recording `cc-2.1.282-set-model-check.sanitized.json`
+sends `set_model` before the first user message. A thread of its own waits for the
+answer and then opens the session's first-turn gate (`chat.rs::FirstTurnGate`):
+`start_chat` and `resume_conversation` wait on it before they return and
+`send_message` before it writes, each with the session mutex released, since no Tauri
+command holds that mutex while it waits (ADR-089). The recording
+`cc-2.1.282-set-model-check.sanitized.json`
 shows the switch applied there: the one-token check went to the new model, the
 first `init` reported it, and the first turn's request carried it; a refused check
 (404, `error_code: catalog_unknown`) left the launch model. The first-turn gap of the
@@ -1088,8 +1095,11 @@ Claude Code can't verify 1M support" and budgets the window at 200K unless the
 `[1m]` variant is chosen[^1]. `defaults.rs::anthropic_default_models_env` pins
 `ANTHROPIC_DEFAULT_OPUS_MODEL` to the latest catalog Opus with `[1m]`
 (`claude-opus-5-5[1m]`), so subagents with `model: opus` and the plan phase of
-`opusplan` keep the 1M window every plan includes. The catalog policy moves the same
-way (ADR-089, SPEED-709 amendment of decision 5).
+`opusplan` keep the 1M window every plan includes. The suffix follows the catalog's
+`one_million_context` policy rather than the window size: `[1m]` only for
+`EveryPlan`, the bare id for `Never`, and no pin for a latest model whose window
+depends on the plan. The catalog policy moves the same way (ADR-089, SPEED-709
+amendment of decision 5).
 
 **Amendment (2026-09-24: the self-heal carries a stored model into the pin
 before clearing it).** Decision 7 was written while an Anthropic pick was

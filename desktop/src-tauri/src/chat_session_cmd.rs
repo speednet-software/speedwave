@@ -60,14 +60,21 @@ fn start_session_inner(
     drop(old_session);
 
     log::info!("starting new session");
-    let mut session = session_arc
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
-    let result = session
-        .start(app_handle, resume_session_id)
-        .map_err(|e| e.to_string());
-    log::info!("session.start result={result:?}");
-    result
+    let first_turn = {
+        let mut session = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let result = session
+            .start(app_handle, resume_session_id)
+            .map_err(|e| e.to_string());
+        log::info!("session.start result={result:?}");
+        result?;
+        session.first_turn_gate()
+    };
+    if !first_turn.wait(control_channel::SET_MODEL_TIMEOUT) {
+        log::warn!("the new session's model switch did not settle before the first turn");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -105,14 +112,27 @@ pub(crate) async fn send_message(
     );
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let mut session = lock_session_for_input(&session_arc)?;
-        log::info!("lock acquired, sending message");
-        session
-            .send_message(&app_handle, &blocks)
-            .map_err(|e| e.to_string())
+        after_first_turn(&session_arc, |session| {
+            log::info!("lock acquired, sending message");
+            session
+                .send_message(&app_handle, &blocks)
+                .map_err(|e| e.to_string())
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn after_first_turn<T>(
+    session_arc: &SharedChatSession,
+    input: impl FnOnce(&mut ChatSession) -> Result<T, String>,
+) -> Result<T, String> {
+    let first_turn = lock_session_for_input(session_arc)?.first_turn_gate();
+    if !first_turn.wait(control_channel::SET_MODEL_TIMEOUT) {
+        log::warn!("sending before the session's model switch settled");
+    }
+    let mut session = lock_session_for_input(session_arc)?;
+    input(&mut session)
 }
 
 #[tauri::command]
@@ -946,13 +966,76 @@ mod tests {
         let spawn_pos = body
             .find("spawn_blocking")
             .expect("send_message must use spawn_blocking");
-        let lock_pos = body
-            .find("lock_session_for_input(")
-            .expect("send_message must acquire the session lock via lock_session_for_input");
+        let input_pos = body
+            .find("after_first_turn(")
+            .expect("send_message must write through after_first_turn");
         assert!(
-            lock_pos > spawn_pos,
+            input_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
         );
+        let input = extract_fn_body(source, "fn after_first_turn<");
+        assert!(
+            input.contains("lock_session_for_input("),
+            "after_first_turn must acquire the session lock via lock_session_for_input"
+        );
+    }
+
+    #[test]
+    fn a_message_waits_for_the_first_turn_without_holding_the_session() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sender = {
+            let session_arc = session_arc.clone();
+            let sent = sent.clone();
+            std::thread::spawn(move || {
+                after_first_turn(&session_arc, |_| {
+                    sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert!(!sent.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            session_arc.try_lock().is_ok(),
+            "the wait must not hold the session"
+        );
+        gate.release();
+        sender.join().unwrap().unwrap();
+        assert!(sent.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_message_to_a_session_without_a_model_switch_goes_at_once() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let started = std::time::Instant::now();
+
+        after_first_turn(&session_arc, |_| Ok(())).unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn start_session_inner_waits_for_the_first_turn_after_it_releases_the_session() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let scope = body
+            .find("let first_turn = {")
+            .expect("the start runs in its own lock scope");
+        let start = body
+            .find(".start(app_handle, resume_session_id)")
+            .expect("the start");
+        let gate = body
+            .find("session.first_turn_gate()")
+            .expect("the gate is read under the lock");
+        let scope_end = scope + body[scope..].find("\n    };").expect("the lock scope ends");
+        let wait = body.find("first_turn.wait(").expect("the wait");
+
+        assert!(scope < start && start < gate && gate < scope_end && scope_end < wait);
     }
 
     #[test]

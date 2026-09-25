@@ -411,21 +411,25 @@ pub fn base_env() -> HashMap<String, String> {
 /// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
 pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
-/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{SONNET,HAIKU}_MODEL` from the `ANTHROPIC_MODELS`
-/// SSOT (`[1m]` where supported). Opus is plan-dependent and Fable resolves natively: both omitted.
+/// Alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from `ANTHROPIC_MODELS` (Fable resolves
+/// natively); `[1m]` only where every plan has that window, and a plan-dependent one is not pinned.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
+    default_models_env_from(ANTHROPIC_MODELS)
+}
+
+fn default_models_env_from(catalog: &[AnthropicModelInfo]) -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
-        let Some(latest) = ANTHROPIC_MODELS
+        let Some(latest) = catalog
             .iter()
             .find(|m| m.family.starts_with(family_prefix) && m.latest)
         else {
             continue;
         };
-        let suffix = if latest.context_tokens >= 1_000_000 {
-            "[1m]"
-        } else {
-            ""
+        let suffix = match latest.one_million_context {
+            OneMillionContext::EveryPlan => "[1m]",
+            OneMillionContext::Never => "",
+            OneMillionContext::PaidPlansAndApi | OneMillionContext::ApiOnly => continue,
         };
         env.insert(
             format!("ANTHROPIC_DEFAULT_{alias}_MODEL"),
@@ -624,6 +628,48 @@ mod tests {
         );
     }
 
+    fn latest_opus_with(one_million_context: OneMillionContext) -> Vec<AnthropicModelInfo> {
+        let mut catalog = ANTHROPIC_MODELS.to_vec();
+        let opus = catalog
+            .iter_mut()
+            .find(|m| m.family.starts_with("Opus") && m.latest)
+            .expect("the catalog has a latest Opus");
+        opus.one_million_context = one_million_context;
+        catalog
+    }
+
+    #[test]
+    fn a_plan_dependent_1m_window_is_never_pinned_to_an_alias() {
+        for policy in [
+            OneMillionContext::PaidPlansAndApi,
+            OneMillionContext::ApiOnly,
+        ] {
+            let env = default_models_env_from(&latest_opus_with(policy));
+
+            assert!(
+                !env.contains_key("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+                "a pinned `[1m]` alias forces a plan without the window onto usage credits: {env:?}"
+            );
+            assert!(env.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL"));
+        }
+    }
+
+    #[test]
+    fn a_model_without_a_1m_window_is_pinned_bare() {
+        let catalog = latest_opus_with(OneMillionContext::Never);
+        let opus = catalog
+            .iter()
+            .find(|m| m.family.starts_with("Opus") && m.latest)
+            .expect("the catalog has a latest Opus");
+
+        let env = default_models_env_from(&catalog);
+
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").map(String::as_str),
+            Some(opus.id)
+        );
+    }
+
     #[test]
     fn anthropic_default_models_env_appends_1m_suffix_for_million_token_models() {
         let env = anthropic_default_models_env();
@@ -650,11 +696,11 @@ mod tests {
             );
             assert!(entry.latest, "{var} must point at a `latest: true` entry");
             let has_suffix = value.ends_with("[1m]");
-            let expected_suffix = entry.context_tokens >= 1_000_000;
+            let expected_suffix = entry.one_million_context == OneMillionContext::EveryPlan;
             assert_eq!(
                 has_suffix, expected_suffix,
-                "{var}={value}: [1m] suffix must mirror context_tokens >= 1M (was {})",
-                entry.context_tokens
+                "{var}={value}: [1m] must mirror a 1M window on every plan (was {:?})",
+                entry.one_million_context
             );
         }
     }
@@ -663,15 +709,20 @@ mod tests {
     fn anthropic_default_models_env_covers_every_latest_family() {
         let env = anthropic_default_models_env();
         for prefix in ["Opus", "Sonnet", "Haiku"] {
-            let has_latest = ANTHROPIC_MODELS
-                .iter()
-                .any(|m| m.family.starts_with(prefix) && m.latest);
+            let pinnable = ANTHROPIC_MODELS.iter().any(|m| {
+                m.family.starts_with(prefix)
+                    && m.latest
+                    && matches!(
+                        m.one_million_context,
+                        OneMillionContext::EveryPlan | OneMillionContext::Never
+                    )
+            });
             let alias = prefix.to_uppercase();
             let var = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
             assert_eq!(
                 env.contains_key(&var),
-                has_latest,
-                "{var} presence must mirror SSOT having a `latest: true` {prefix} entry"
+                pinnable,
+                "{var} presence must mirror a `latest: true` {prefix} entry with a plan-independent window"
             );
         }
     }

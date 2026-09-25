@@ -1265,6 +1265,38 @@ impl ModelSettled {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct FirstTurnGate(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+impl FirstTurnGate {
+    fn open() -> Self {
+        Self(Arc::new((Mutex::new(true), std::sync::Condvar::new())))
+    }
+
+    fn closed() -> Self {
+        Self(Arc::new((Mutex::new(false), std::sync::Condvar::new())))
+    }
+
+    pub(crate) fn release(&self) {
+        let (open, changed) = &*self.0;
+        *open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+
+    pub(crate) fn wait(&self, limit: std::time::Duration) -> bool {
+        let (open, changed) = &*self.0;
+        let guard = open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (guard, _) = changed
+            .wait_timeout_while(guard, limit, |open| !*open)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard
+    }
+}
+
 fn settles_model(text: &str) -> bool {
     matches!(
         speedwave_runtime::slash::parse_control_command(text),
@@ -1401,11 +1433,11 @@ fn refused_model_command(line: &serde_json::Value, settled: &ModelSettled) -> Op
     if line["type"] != "assistant" || line["message"]["model"] != "<synthetic>" {
         return None;
     }
+    let blocks = line["message"]["content"].as_array()?;
     if !settled.take_command_reply() {
         return None;
     }
-    let text = line["message"]["content"]
-        .as_array()?
+    let text = blocks
         .iter()
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
@@ -1652,6 +1684,7 @@ pub struct ChatSession {
     stopping: Arc<std::sync::atomic::AtomicBool>,
     awaited_result: AwaitedResult,
     model_settled: ModelSettled,
+    first_turn_gate: FirstTurnGate,
 }
 
 impl ChatSession {
@@ -1669,11 +1702,22 @@ impl ChatSession {
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             awaited_result: AwaitedResult::new(),
             model_settled: ModelSettled::default(),
+            first_turn_gate: FirstTurnGate::open(),
         }
     }
 
     pub fn project_name(&self) -> &str {
         &self.project_name
+    }
+
+    pub(crate) fn first_turn_gate(&self) -> FirstTurnGate {
+        self.first_turn_gate.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_first_turn(&mut self) -> FirstTurnGate {
+        self.first_turn_gate = FirstTurnGate::closed();
+        self.first_turn_gate.clone()
     }
 
     pub(crate) fn control_handle(&self) -> anyhow::Result<ControlHandle> {
@@ -1790,12 +1834,16 @@ impl ChatSession {
 
         let provider_kind = soft_impose_cfg.kind;
         let asks_claude_code_for_session_info = provider_kind.is_anthropic();
-        let rendered_model = speedwave_runtime::compose::rendered_service_env_in(
-            consts::data_dir(),
-            &self.project_name,
-            "claude",
-            "ANTHROPIC_MODEL",
-        );
+        let rendered_model = if asks_claude_code_for_session_info {
+            None
+        } else {
+            speedwave_runtime::compose::rendered_service_env_in(
+                consts::data_dir(),
+                &self.project_name,
+                "claude",
+                "ANTHROPIC_MODEL",
+            )
+        };
         let spawn_impose = spawn_soft_impose_target(&soft_impose_cfg, rendered_model.as_deref());
 
         let mut cmd = rt.container_exec_piped(
@@ -2160,7 +2208,13 @@ impl ChatSession {
             if let Some(pending) =
                 send_soft_impose(&stdin, &self.control, &self.model_settled, &model)
             {
-                report_soft_impose(&impose_app_handle, &self.project_name, pending, &model);
+                let gate = FirstTurnGate::closed();
+                self.first_turn_gate = gate.clone();
+                let project = self.project_name.clone();
+                std::thread::spawn(move || {
+                    report_soft_impose(&impose_app_handle, &project, pending, &model);
+                    gate.release();
+                });
             }
         }
 
@@ -4864,6 +4918,40 @@ mod tests {
     }
 
     #[test]
+    fn a_synthetic_line_without_content_blocks_leaves_the_typed_model_waiting() {
+        let settled = ModelSettled::default();
+        settled.settle_by_command();
+        let shapeless = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "<synthetic>", "content": "not a block list" },
+        });
+
+        assert_eq!(refused_model_command(&shapeless, &settled), None);
+        assert!(settled.command_awaits_reply());
+        assert_eq!(
+            refused_model_command(&synthetic_line("model not changed"), &settled),
+            Some("model not changed".to_string())
+        );
+    }
+
+    #[test]
+    fn an_anthropic_session_reads_no_rendered_model_for_the_soft_impose() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start_with_retry(")
+            .expect("ChatSession::start_with_retry");
+        let start: String = source[from..].split_whitespace().collect();
+        let gated = start
+            .find("letrendered_model=ifasks_claude_code_for_session_info{None}else{")
+            .expect("the rendered model is read only for a routed provider");
+        let read = start
+            .find("speedwave_runtime::compose::rendered_service_env_in(")
+            .expect("the rendered model read");
+
+        assert!(gated < read);
+    }
+
+    #[test]
     fn the_spawn_soft_imposes_the_configured_model_only_when_the_rendered_one_differs() {
         let cfg = SoftImposeConfig {
             kind: config::LlmProviderKind::Local,
@@ -4908,6 +4996,67 @@ mod tests {
             .find("if let Some(model) = spawn_impose {")
             .expect("start soft-imposes a rendered model that differs");
         assert!(reader < imposed);
+    }
+
+    #[test]
+    fn the_spawn_soft_impose_is_awaited_off_the_thread_that_holds_the_session() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start_with_retry(")
+            .expect("ChatSession::start_with_retry");
+        let to = from
+            + source[from..]
+                .find("    pub fn send_message(")
+                .expect("the next method");
+        let start: String = source[from..to].split_whitespace().collect();
+        let imposed = start
+            .find("ifletSome(model)=spawn_impose{")
+            .expect("the spawn-time soft-impose");
+        let closed = start
+            .find("letgate=FirstTurnGate::closed();self.first_turn_gate=gate.clone();")
+            .expect("the first turn waits for the switch");
+        let awaited = start
+            .find(concat!(
+                "std::thread::spawn(move||{",
+                "report_soft_impose(&impose_app_handle,&project,pending,&model);",
+                "gate.release();});"
+            ))
+            .expect("the answer is awaited on its own thread");
+
+        assert!(imposed < closed && closed < awaited);
+    }
+
+    #[test]
+    fn a_new_session_lets_its_first_turn_go_at_once() {
+        let session = ChatSession::new("test-project");
+
+        assert!(session
+            .first_turn_gate()
+            .wait(std::time::Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn a_held_first_turn_goes_once_the_switch_is_answered() {
+        let gate = FirstTurnGate::closed();
+        let releaser = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                gate.release();
+            })
+        };
+
+        assert!(gate.wait(std::time::Duration::from_secs(5)));
+        releaser.join().unwrap();
+    }
+
+    #[test]
+    fn a_held_first_turn_stops_waiting_at_its_limit() {
+        let gate = FirstTurnGate::closed();
+        let started = std::time::Instant::now();
+
+        assert!(!gate.wait(std::time::Duration::from_millis(30)));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
     }
 
     #[test]
@@ -7015,28 +7164,60 @@ mod tests {
         assert_eq!(req.tool_use_id, "toolu_bash1");
     }
 
-    const SAFETY_CHECK_REQUEST: &str = r#"{"type":"control_request","request_id":"55cf","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"rm -rf \"$(echo /tmp/x)\"","description":"cleanup"},"decision_reason":"Dangerous rm operation on statically-unresolvable target: command substitution output","decision_reason_type":"safetyCheck","classifier_approvable":false,"tool_use_id":"toolu_stub_rm","suppress_always_allow_rule":true}}"#;
+    const SAFETY_CHECK_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.282-safety-check.sanitized.json");
+
+    fn safety_check_capture() -> serde_json::Value {
+        serde_json::from_str(SAFETY_CHECK_CAPTURE).unwrap()
+    }
+
+    #[test]
+    fn the_safety_check_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            safety_check_capture()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the safety-check request with the new Claude Code pin"
+        );
+    }
 
     #[test]
     fn a_tool_call_claude_codes_safety_check_holds_is_declined_with_its_reason() {
-        let req = try_parse_control_request_str(SAFETY_CHECK_REQUEST).unwrap();
-        assert_eq!(
-            req.safety_check.as_deref(),
-            Some("Dangerous rm operation on statically-unresolvable target: command substitution output")
-        );
+        let capture = safety_check_capture();
+        let request = &capture["control_request"];
+        let reason = request["request"]["decision_reason"].as_str().unwrap();
+        assert_eq!(request["request"]["decision_reason_type"], "safetyCheck");
+        let req = try_parse_control_request_str(&request.to_string()).unwrap();
+        assert_eq!(req.safety_check.as_deref(), Some(reason));
 
         let resp = build_tool_permission_response(&req);
 
         assert_eq!(resp["response"]["subtype"], "success");
-        assert_eq!(resp["response"]["request_id"], "55cf");
+        assert_eq!(resp["response"]["request_id"], request["request_id"]);
         assert_eq!(resp["response"]["response"]["behavior"], "deny");
         let message = resp["response"]["response"]["message"].as_str().unwrap();
         assert!(message.starts_with(SAFETY_CHECK_DECLINED), "{message}");
-        assert!(
-            message.contains("statically-unresolvable target"),
-            "{message}"
-        );
+        assert!(message.contains(reason), "{message}");
         assert!(resp["response"]["response"].get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn claude_code_hands_a_declined_call_to_the_model_as_a_failed_tool_result() {
+        let capture = safety_check_capture();
+        let sent = &capture["control_response"]["response"]["response"];
+        assert_eq!(sent["behavior"], "deny");
+        let results = capture["tool_results"].as_array().unwrap();
+
+        let [result] = results.as_slice() else {
+            panic!("one tool call, one result: {results:?}");
+        };
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["content"], sent["message"]);
+        assert_eq!(
+            result["tool_use_id"],
+            capture["control_request"]["request"]["tool_use_id"]
+        );
+        assert_eq!(capture["result"]["is_error"], false);
+        assert_eq!(capture["target_absent_after"], true);
     }
 
     #[test]

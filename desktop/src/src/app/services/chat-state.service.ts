@@ -247,7 +247,7 @@ export class ChatStateService {
   private _savedModelRequest = 0;
   private _modelSave: Promise<void> = Promise.resolve();
   private _modelApply: Promise<void> = Promise.resolve();
-  private _modelWork = 0;
+  private readonly _modelWork = new Set<Promise<unknown>>();
   private _launchedFor: { wireId: string; generation: number } | null = null;
   private _confirmedModel: { catalogId: string; generation: number } | null = null;
   readonly pendingModelOverride: Signal<string | null> = computed(
@@ -280,18 +280,17 @@ export class ChatStateService {
   }
 
   private trackModelWork<T>(work: Promise<T>): Promise<T> {
-    this._modelWork += 1;
+    this._modelWork.add(work);
     const done = (): void => {
-      this._modelWork -= 1;
+      this._modelWork.delete(work);
     };
     work.then(done, done);
     return work;
   }
 
   private async modelPicksSettled(): Promise<void> {
-    while (this._modelWork > 0) {
-      await this._modelApply;
-      await this._modelSave;
+    while (this._modelWork.size > 0) {
+      await Promise.allSettled([...this._modelWork]);
     }
   }
 
@@ -569,7 +568,8 @@ export class ChatStateService {
       return;
     }
     if (answer.outcome === 'refused') {
-      this.takeBackRefusedPick(pick, answer.reason);
+      this.log.warn(`model switch to ${pick.wireId} refused: ${answer.reason}`);
+      if (sameConversation()) this.takeBackRefusedPick(pick, answer.reason);
       return;
     }
     const saved = await this.persistModelPick(pick);
@@ -584,7 +584,6 @@ export class ChatStateService {
   }
 
   private takeBackRefusedPick(pick: ModelPick, reason: string): void {
-    this.log.warn(`model switch to ${pick.wireId} refused: ${reason}`);
     if (!this.isNewestModelPick(pick)) return;
     this._modelSelectionError.set(modelSwitchRefused(reason));
     const confirmed = this._confirmedModel;
@@ -931,7 +930,7 @@ export class ChatStateService {
       let outcome: StartOutcome = 'failed';
       let sessionKept = false;
       try {
-        if (this._modelWork > 0) await this.modelPicksSettled();
+        if (this._modelWork.size > 0) await this.modelPicksSettled();
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
         outcome = current(gen) ? 'started' : 'skipped';
@@ -1088,7 +1087,7 @@ export class ChatStateService {
             this.startingSession = true;
             this._deferredEffort.set(null);
             try {
-              if (this._modelWork > 0) await this.modelPicksSettled();
+              if (this._modelWork.size > 0) await this.modelPicksSettled();
               await this.tauri.invoke('start_chat', { project: result.active_project });
             } finally {
               if (generation === this._sessionGeneration) this.startingSession = false;
@@ -1350,7 +1349,10 @@ export class ChatStateService {
       }
 
       case 'SystemInit':
-        if (chunk.data.model) this._model = chunk.data.model;
+        if (chunk.data.model) {
+          this._model = chunk.data.model;
+          this._confirmedModel = null;
+        }
         if (chunk.data.session_id) {
           this.seedSessionId(chunk.data.session_id);
           void this.flushDeferredQueue(chunk.data.session_id);
@@ -1841,7 +1843,7 @@ export class ChatStateService {
     try {
       if (!project) return;
 
-      if (this._modelWork > 0) await this.modelPicksSettled();
+      if (this._modelWork.size > 0) await this.modelPicksSettled();
       await this.tauri.invoke('resume_conversation', { project, sessionId });
       if (gen !== this._sessionGeneration || !sameProject()) return;
       const transcript = await this.tauri

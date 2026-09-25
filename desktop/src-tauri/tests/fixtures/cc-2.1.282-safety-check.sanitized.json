@@ -1,0 +1,50 @@
+{
+  "claude_code_version": "2.1.282",
+  "launched_with": ["--dangerously-skip-permissions", "--permission-prompt-tool", "stdio"],
+  "control_request": {
+    "type": "control_request",
+    "request_id": "34059d87-f268-4a71-9aca-f287a321ce9f",
+    "request": {
+      "subtype": "can_use_tool",
+      "tool_name": "Bash",
+      "display_name": "Bash",
+      "input": {
+        "command": "rm -rf \"$(echo /tmp/speedwave-safety-check-capture-absent)\"",
+        "description": "cleanup"
+      },
+      "description": "cleanup",
+      "permission_suggestions": [],
+      "decision_reason": "Dangerous rm operation on statically-unresolvable target: command substitution output",
+      "decision_reason_type": "safetyCheck",
+      "classifier_approvable": false,
+      "tool_use_id": "toolu_stub_rm",
+      "suppress_always_allow_rule": true
+    }
+  },
+  "control_response": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "34059d87-f268-4a71-9aca-f287a321ce9f",
+      "response": {
+        "behavior": "deny",
+        "message": "Speedwave declines this call. Claude Code's reason: Dangerous rm operation on statically-unresolvable target: command substitution output"
+      }
+    }
+  },
+  "tool_results": [
+    {
+      "type": "tool_result",
+      "content": "Speedwave declines this call. Claude Code's reason: Dangerous rm operation on statically-unresolvable target: command substitution output",
+      "is_error": true,
+      "tool_use_id": "toolu_stub_rm"
+    }
+  ],
+  "result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "num_turns": 2
+  },
+  "target_absent_after": true
+}
