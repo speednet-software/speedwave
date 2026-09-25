@@ -524,7 +524,10 @@ sends `set_model` before the first user message. A thread of its own waits for t
 answer and then opens the session's first-turn gate (`chat.rs::FirstTurnGate`):
 `start_chat` and `resume_conversation` wait on it before they return and
 `send_message` before it writes, each with the session mutex released, since no Tauri
-command holds that mutex while it waits (ADR-089). The recording
+command holds that mutex while it waits (ADR-089). A message whose session was replaced
+during that wait, by a resume clicked in the history for one, is refused with
+`chat_session_cmd::MSG_SESSION_REPLACED` rather than written into the new session. The
+recording
 `cc-2.1.282-set-model-check.sanitized.json`
 shows the switch applied there: the one-token check went to the new model, the
 first `init` reported it, and the first turn's request carried it; a refused check

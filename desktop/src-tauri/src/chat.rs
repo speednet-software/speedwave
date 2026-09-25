@@ -1285,6 +1285,10 @@ impl FirstTurnGate {
         changed.notify_all();
     }
 
+    pub(crate) fn is(&self, other: &FirstTurnGate) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     pub(crate) fn wait(&self, limit: std::time::Duration) -> bool {
         let (open, changed) = &*self.0;
         let guard = open

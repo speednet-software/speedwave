@@ -132,6 +132,10 @@ fn after_first_turn<T>(
         log::warn!("sending before the session's model switch settled");
     }
     let mut session = lock_session_for_input(session_arc)?;
+    if !session.first_turn_gate().is(&first_turn) {
+        log::info!("the chat session was replaced while a message waited for its first turn");
+        return Err(MSG_SESSION_REPLACED.to_string());
+    }
     input(&mut session)
 }
 
@@ -199,6 +203,7 @@ pub(crate) async fn resume_conversation(
 }
 
 const MSG_SESSION_BUSY: &str = "chat session is busy";
+const MSG_SESSION_REPLACED: &str = "the chat session was replaced before the message was written";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
 
 const INPUT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
@@ -625,7 +630,39 @@ mod tests {
                 !MSG_SESSION_BUSY.contains(trigger),
                 "the send retry restarts the session on '{trigger}', which would replace a live conversation"
             );
+            assert!(
+                !MSG_SESSION_REPLACED.contains(trigger),
+                "the send retry restarts the session on '{trigger}', which would resend into the conversation that replaced it"
+            );
         }
+    }
+
+    #[test]
+    fn a_message_that_waited_while_the_session_was_replaced_is_not_written_into_the_new_one() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sender = {
+            let session_arc = session_arc.clone();
+            let written = written.clone();
+            std::thread::spawn(move || {
+                after_first_turn(&session_arc, |_| {
+                    written.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        *session_arc.lock().unwrap() = ChatSession::new("test-project");
+        gate.release();
+
+        assert_eq!(
+            sender.join().unwrap(),
+            Err(MSG_SESSION_REPLACED.to_string())
+        );
+        assert!(!written.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
