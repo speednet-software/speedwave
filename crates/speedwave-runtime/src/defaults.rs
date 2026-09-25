@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(
             env.get("CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH")
                 .map(String::as_str),
-            Some("8192")
+            Some(MCP_DESCRIPTION_MAX_LENGTH.to_string().as_str())
         );
         assert_eq!(
             MCP_DESCRIPTION_LENGTH_ENV,

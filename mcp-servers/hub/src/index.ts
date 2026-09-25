@@ -17,7 +17,7 @@ import {
 
 import { createCodeExecutorHandlers } from './handlers.js';
 
-import { EXECUTE_CODE_TOOL, SEARCH_TOOLS_TOOL } from './meta-tools.js';
+import { metaToolRegistrations } from './meta-tools.js';
 
 import { initializeBridges } from './executor.js';
 
@@ -64,8 +64,9 @@ async function main() {
 
   const handlers = createCodeExecutorHandlers({ timeoutMs: TIMEOUTS.EXECUTION_MS });
 
-  rpcHandler.registerTool(SEARCH_TOOLS_TOOL, handlers.handleSearchTools);
-  rpcHandler.registerTool(EXECUTE_CODE_TOOL, handlers.handleExecuteCode);
+  for (const { tool, handler } of metaToolRegistrations(handlers)) {
+    rpcHandler.registerTool(tool, handler);
+  }
 
   console.log(`${ts()} ✅ 2 meta-tools registered: search_tools, execute_code`);
 

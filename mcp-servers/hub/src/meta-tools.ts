@@ -1,4 +1,4 @@
-import { Tool, TIMEOUTS } from '@speedwave/mcp-shared';
+import { Tool, ToolHandler, TIMEOUTS } from '@speedwave/mcp-shared';
 
 import { DETAIL_LEVELS } from './search-tools.js';
 
@@ -152,4 +152,18 @@ return { total: results.length, failed: errors.length };
   ],
 };
 
-export const META_TOOLS: readonly Tool[] = [SEARCH_TOOLS_TOOL, EXECUTE_CODE_TOOL];
+/**
+ * The hub's meta-tools with their handlers, the one list the hub registers.
+ * @param handlers - The handlers `createCodeExecutorHandlers` built.
+ * @param handlers.handleSearchTools - Handler of `search_tools`.
+ * @param handlers.handleExecuteCode - Handler of `execute_code`.
+ */
+export function metaToolRegistrations(handlers: {
+  handleSearchTools: ToolHandler;
+  handleExecuteCode: ToolHandler;
+}): ReadonlyArray<{ tool: Tool; handler: ToolHandler }> {
+  return [
+    { tool: SEARCH_TOOLS_TOOL, handler: handlers.handleSearchTools },
+    { tool: EXECUTE_CODE_TOOL, handler: handlers.handleExecuteCode },
+  ];
+}

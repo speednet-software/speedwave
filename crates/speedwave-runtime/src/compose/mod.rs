@@ -2501,16 +2501,24 @@ services:
 
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let env = get_service_env_seq(&doc, "claude");
+        let expected = crate::defaults::MCP_DESCRIPTION_MAX_LENGTH.to_string();
         assert_eq!(
             find_env_value(&env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").as_deref(),
-            Some("8192")
+            Some(expected.as_str())
         );
-        let hub_env = get_service_env_seq(&doc, "mcp-hub");
-        assert!(
-            !hub_env.is_empty(),
-            "the hub service must render its environment"
-        );
-        assert!(find_env_value(&hub_env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").is_none());
+        let services = doc["services"].as_mapping().unwrap();
+        assert!(services.len() > 1);
+        for (name, _) in services {
+            let name = name.as_str().unwrap();
+            if name == "claude" {
+                continue;
+            }
+            let service_env = get_service_env_seq(&doc, name);
+            assert!(
+                find_env_value(&service_env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").is_none(),
+                "{name} must not get the MCP description limit"
+            );
+        }
     }
 
     #[test]

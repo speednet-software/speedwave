@@ -1,21 +1,29 @@
 import { describe, it, expect } from 'vitest';
+import type { ToolHandler } from '@speedwave/mcp-shared';
 import {
   EXECUTE_CODE_TOOL,
   MAX_META_TOOL_DESCRIPTION_LENGTH,
-  META_TOOLS,
   SEARCH_TOOLS_TOOL,
+  metaToolRegistrations,
 } from './meta-tools.js';
 
 const CLAUDE_CODE_DEFAULT_DESCRIPTION_LENGTH = 2048;
 
-describe('META_TOOLS', () => {
-  it('are the two tools the hub registers, each under its own name', () => {
-    expect(META_TOOLS).toEqual([SEARCH_TOOLS_TOOL, EXECUTE_CODE_TOOL]);
+const handleSearchTools: ToolHandler = async () => ({ content: [] });
+const handleExecuteCode: ToolHandler = async () => ({ content: [] });
+const registered = metaToolRegistrations({ handleSearchTools, handleExecuteCode });
+
+describe('metaToolRegistrations', () => {
+  it('registers each of the two meta-tools with its own handler', () => {
+    expect(registered).toEqual([
+      { tool: SEARCH_TOOLS_TOOL, handler: handleSearchTools },
+      { tool: EXECUTE_CODE_TOOL, handler: handleExecuteCode },
+    ]);
     expect(SEARCH_TOOLS_TOOL.name).toBe('search_tools');
     expect(EXECUTE_CODE_TOOL.name).toBe('execute_code');
   });
 
-  for (const tool of META_TOOLS) {
+  for (const { tool } of registered) {
     it(`${tool.name} has a description that fits MAX_META_TOOL_DESCRIPTION_LENGTH`, () => {
       expect(tool.description.length).toBeGreaterThan(0);
       expect(tool.description.length).toBeLessThanOrEqual(MAX_META_TOOL_DESCRIPTION_LENGTH);
