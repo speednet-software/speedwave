@@ -11,7 +11,7 @@ import { type UnlistenFn } from '@tauri-apps/api/event';
 import { warn as pluginLogWarn } from '@tauri-apps/plugin-log';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { TauriService } from './tauri.service';
-import { ProjectStateService } from './project-state.service';
+import { ProjectStateService, type ProjectStatus } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
@@ -229,6 +229,15 @@ export interface ModelSelectionInput {
 }
 
 const DEFAULT_MODEL_ALIAS = 'default';
+
+const SESSION_BRING_UP_STATUSES: ReadonlySet<ProjectStatus> = new Set<ProjectStatus>([
+  'loading',
+  'system_check',
+  'checking',
+  'starting',
+  'rebuilding',
+  'switching',
+]);
 
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
@@ -892,6 +901,14 @@ export class ChatStateService {
 
   readonly sessionStartInFlightFromState: Signal<boolean> = computed(
     () => this.startingSessionSignal() || this.resumeInProgressSignal()
+  );
+
+  /** Whether a chat session for the active project is on its way: a start, a restart or bring-up. */
+  readonly sessionAwaitedFromState: Signal<boolean> = computed(
+    () =>
+      this.sessionStartInFlightFromState() ||
+      this.projectState.restarting ||
+      SESSION_BRING_UP_STATUSES.has(this.projectState.status())
   );
 
   private readonly _loadingTranscript = signal<boolean>(false);

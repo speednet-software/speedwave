@@ -23,6 +23,7 @@ import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
 import type { RefusedModelPick } from '../../../services/chat-state.service';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
+import { SpinIconComponent } from '../../../shared/spin-icon.component';
 
 const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
 const LOAD_FAILED = 'Failed to load models.';
@@ -57,7 +58,7 @@ export interface ModelSelection {
  */
 @Component({
   selector: 'app-model-selector',
-  imports: [FormsModule, TooltipDirective, EffortSliderComponent],
+  imports: [FormsModule, TooltipDirective, EffortSliderComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
   template: `
@@ -142,17 +143,8 @@ export interface ModelSelection {
                 data-testid="model-selector-loading"
                 class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
               >
+                <app-spin-icon testId="model-selector-spinner" class="h-3 w-3" />
                 Loading models...
-                @if (pickerPending()) {
-                  <button
-                    type="button"
-                    data-testid="model-selector-retry"
-                    class="hover-bg rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink)]"
-                    (click)="fetchOptions(true)"
-                  >
-                    Retry
-                  </button>
-                }
               </div>
             } @else if (listError()) {
               <div
@@ -264,6 +256,8 @@ export class ModelSelectorComponent {
 
   readonly sessionModel = input('');
 
+  readonly sessionAwaited = input(false);
+
   readonly refusedPick = input<RefusedModelPick | null>(null);
 
   readonly modelSelected = output<ModelSelection>();
@@ -303,6 +297,8 @@ export class ModelSelectorComponent {
     () => this.isAnthropic() && this.control.sessionInfoState(this.projectId()).state === 'pending'
   );
 
+  protected readonly awaitingSession = computed(() => this.isAnthropic() && this.sessionAwaited());
+
   private readonly options = computed<ModelOption[]>(() => {
     if (!this.isAnthropic()) return this.discoveredOptions();
     const projectId = this.projectId();
@@ -311,7 +307,9 @@ export class ModelSelectorComponent {
   });
 
   protected readonly listLoading = computed(
-    () => this.loading() || (this.pickerPending() && this.options().length === 0)
+    () =>
+      this.loading() ||
+      ((this.pickerPending() || this.awaitingSession()) && this.options().length === 0)
   );
 
   protected readonly listError = computed(() => (this.options().length === 0 ? this.error() : ''));
@@ -376,6 +374,8 @@ export class ModelSelectorComponent {
 
   private lastSessionModel = '';
 
+  private wasAwaited = false;
+
   private lastModelError = '';
 
   /** Reloads the active-provider summary whenever the project id changes. */
@@ -400,6 +400,15 @@ export class ModelSelectorComponent {
       const id = this.projectId();
       if (!this.isAnthropic() || !id) return;
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
+    });
+    effect(() => {
+      const awaited = this.sessionAwaited();
+      const ended = this.wasAwaited && !awaited;
+      this.wasAwaited = awaited;
+      const id = untracked(() => this.projectId());
+      if (ended && id && untracked(() => this.isAnthropic())) {
+        void this.control.refreshSessionInfo(id);
+      }
     });
     effect(() => {
       const live = this.sessionModel();
@@ -533,7 +542,7 @@ export class ModelSelectorComponent {
     try {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
-        if (force) await this.control.refreshSessionInfo(projectId);
+        if (force || this.pickerPending()) await this.control.refreshSessionInfo(projectId);
         await this.anthropicModels.list();
         const picker = await this.picker.refresh(projectId);
         if (!latest()) return;

@@ -452,6 +452,72 @@ describe('ModelSelectorComponent', () => {
     expect(loadingRow()).toBeFalsy();
   });
 
+  it('shows the loader, not the error, while a chat session is on its way, then its rows', async () => {
+    let state: unknown = { state: 'unavailable' };
+    let reported: ModelPicker | null = null;
+    mockSessionLifecycle(
+      () => state,
+      () => reported
+    );
+    fixture.componentRef.setInput('projectId', 'proj-awaited');
+    fixture.componentRef.setInput('sessionAwaited', true);
+    fixture.detectChanges();
+    await settle();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    expect(loadingRow()).toBeTruthy();
+    expect(loadingRow().query(By.css('[data-testid="model-selector-spinner"]'))).toBeTruthy();
+    expect(loadingRow().query(By.css('[data-testid="model-selector-retry"]'))).toBeFalsy();
+    expect(errorRow()).toBeFalsy();
+
+    reported = picker;
+    state = { state: 'ready', info: { models: [], account: {} } };
+    fixture.componentRef.setInput('sessionAwaited', false);
+    await reportSessionInfo('proj-awaited');
+
+    expect(optionIds()).toEqual(['claude-sonnet-5', 'claude-opus-4-1']);
+    expect(loadingRow()).toBeFalsy();
+    expect(errorRow()).toBeFalsy();
+  });
+
+  it('says the model list is unavailable once an awaited session stops being awaited without rows', async () => {
+    mockSessionLifecycle(
+      () => ({ state: 'unavailable' }),
+      () => null
+    );
+    fixture.componentRef.setInput('projectId', 'proj-never-came');
+    fixture.componentRef.setInput('sessionAwaited', true);
+    fixture.detectChanges();
+    await settle();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(loadingRow()).toBeTruthy();
+
+    fixture.componentRef.setInput('sessionAwaited', false);
+    fixture.detectChanges();
+
+    expect(loadingRow()).toBeFalsy();
+    expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
+  });
+
+  it('keeps the badge usable while a chat session is on its way', async () => {
+    mockSessionLifecycle(
+      () => ({ state: 'unavailable' }),
+      () => null
+    );
+    fixture.componentRef.setInput('projectId', 'proj-awaited-badge');
+    fixture.componentRef.setInput('sessionAwaited', true);
+    fixture.detectChanges();
+    await settle();
+
+    const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
+    expect(badge.nativeElement.disabled).toBe(false);
+    expect(badge.nativeElement.getAttribute('title')).toBe('Change model');
+  });
+
   it('keeps an open list on its held rows while the session respawns, then shows the new rows', async () => {
     let state: unknown = { state: 'ready', info: { models: [], account: {} } };
     let reported: ModelPicker | null = picker;
@@ -522,7 +588,7 @@ describe('ModelSelectorComponent', () => {
     expect(loadingRow()).toBeFalsy();
   });
 
-  it('offers Retry in a pending list and leaves the loader when the session is gone', async () => {
+  it('shows a spinner without Retry in a pending list, and re-reads a stuck pending state on open', async () => {
     let state: unknown = { state: 'unavailable' };
     mockSessionLifecycle(
       () => state,
@@ -535,15 +601,45 @@ describe('ModelSelectorComponent', () => {
     await fixture.componentInstance.whenOptionsSettled();
     state = { state: 'pending' };
     await reportSessionInfo('proj-stuck');
-    const retry = loadingRow().query(By.css('[data-testid="model-selector-retry"]'));
-    expect(retry).toBeTruthy();
+    expect(loadingRow().query(By.css('[data-testid="model-selector-spinner"]'))).toBeTruthy();
+    expect(loadingRow().query(By.css('[data-testid="model-selector-retry"]'))).toBeFalsy();
 
     state = { state: 'unavailable' };
-    retry.nativeElement.click();
-    await settle();
+    fixture.componentInstance.open.set(false);
+    fixture.detectChanges();
+    await fixture.componentInstance.openCombobox();
     await fixture.componentInstance.whenOptionsSettled();
     await settle();
 
+    expect(loadingRow()).toBeFalsy();
+    expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
+    expect(errorRow().query(By.css('[data-testid="model-selector-retry"]'))).toBeTruthy();
+  });
+
+  it('re-reads the session info when an awaited session stops being awaited', async () => {
+    let state: unknown = { state: 'pending' };
+    mockSessionLifecycle(
+      () => state,
+      () => null
+    );
+    fixture.componentRef.setInput('projectId', 'proj-start-failed');
+    fixture.componentRef.setInput('sessionAwaited', true);
+    fixture.detectChanges();
+    await settle();
+    await reportSessionInfo('proj-start-failed');
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(loadingRow()).toBeTruthy();
+
+    state = { state: 'unavailable' };
+    fixture.componentRef.setInput('sessionAwaited', false);
+    fixture.detectChanges();
+    await settle();
+
+    expect(TestBed.inject(ClaudeControlService).sessionInfoState('proj-start-failed')).toEqual({
+      state: 'unavailable',
+    });
     expect(loadingRow()).toBeFalsy();
     expect(errorRow().nativeElement.textContent).toContain('Model list unavailable.');
   });
@@ -1106,6 +1202,34 @@ describe('ModelSelectorComponent', () => {
     expect(
       fixture.debugElement.queryAll(By.css('[data-testid^="model-selector-option-"]')).length
     ).toBe(0);
+  });
+
+  it("shows a routed provider's failure even while a chat session is on its way", async () => {
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openai/o4-mini',
+      base_url: null,
+      effort_levels: EFFORT_LEVELS,
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      if (cmd === 'discover_llm_models') return Promise.reject(new Error('unreachable'));
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or-awaited');
+    fixture.componentRef.setInput('sessionAwaited', true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+
+    const error = fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'));
+    expect(error.nativeElement.textContent).toContain('Failed to load models.');
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
+    ).toBeFalsy();
   });
 
   it('emits exactly one modelSelected event carrying catalogId, wireId, providerId, kind and the row window', async () => {

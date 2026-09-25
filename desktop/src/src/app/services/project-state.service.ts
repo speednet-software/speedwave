@@ -94,7 +94,18 @@ export class ProjectStateService {
   readonly status = signal<ProjectStatus>('loading');
   error = '';
   needsRestart = false;
-  restarting = false;
+  private readonly restartingSignal = signal(false);
+  /** Whether a container restart runs (signal read). */
+  get restarting(): boolean {
+    return this.restartingSignal();
+  }
+  /**
+   * Marks a container restart as running or finished.
+   * @param v - Whether a restart runs.
+   */
+  set restarting(v: boolean) {
+    this.restartingSignal.set(v);
+  }
   restartInFlight: Promise<void> | null = null;
   restartError = '';
   /** Restart requested while status was pre-ready; surfaced once we settle. */

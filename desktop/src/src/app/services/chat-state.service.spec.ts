@@ -20,7 +20,7 @@ import {
   stateBlocksToMessageBlocks,
   toChatMessages,
 } from './chat-state.service';
-import { ProjectStateService } from './project-state.service';
+import { ProjectStateService, type ProjectStatus } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
@@ -104,6 +104,41 @@ describe('ChatStateService', () => {
       expect(service.loadingTranscriptFromState()).toBe(true);
       service.endTranscriptLoad();
       expect(service.loadingTranscriptFromState()).toBe(false);
+    });
+  });
+
+  describe('sessionAwaitedFromState', () => {
+    it('is true while the project is brought up and false once nothing brings a session', () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      const bringUp = [
+        'loading',
+        'system_check',
+        'checking',
+        'starting',
+        'rebuilding',
+        'switching',
+      ];
+      const settled = ['ready', 'auth_required', 'no_provider', 'check_failed', 'error'];
+
+      for (const status of bringUp) {
+        projectState.status.set(status as ProjectStatus);
+        expect(service.sessionAwaitedFromState()).toBe(true);
+      }
+      for (const status of settled) {
+        projectState.status.set(status as ProjectStatus);
+        expect(service.sessionAwaitedFromState()).toBe(false);
+      }
+    });
+
+    it('is true while a container restart runs on a ready project', () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      projectState.status.set('ready');
+
+      projectState.restarting = true;
+      expect(service.sessionAwaitedFromState()).toBe(true);
+
+      projectState.restarting = false;
+      expect(service.sessionAwaitedFromState()).toBe(false);
     });
   });
 
@@ -1200,6 +1235,7 @@ describe('ChatStateService', () => {
 
       expect(service.messages).toHaveLength(0);
       expect(service.sessionStartInFlightFromState()).toBe(true);
+      expect(service.sessionAwaitedFromState()).toBe(true);
 
       pendingNewStart.resolve();
       await vi.waitFor(() => {
