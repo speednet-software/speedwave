@@ -155,6 +155,25 @@ pub(crate) fn clear_model_pin(project_id: String) -> Result<(), String> {
     claude_settings::clear_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
 }
 
+#[tauri::command]
+pub(crate) fn get_model_pin(project_id: String) -> Result<Option<String>, String> {
+    let project_name = resolve_project_name(&project_id)?;
+    Ok(claude_settings::get_model_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+    ))
+}
+
+#[tauri::command]
+pub(crate) fn restore_model_pin(project_id: String, model: Option<String>) -> Result<(), String> {
+    let project_name = resolve_project_name(&project_id)?;
+    claude_settings::restore_model_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+        model.as_deref(),
+    )
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -261,6 +280,15 @@ mod tests {
             resolve_project_name("").unwrap_err()
         );
         assert!(clear_model_pin("../escape".to_string()).is_err());
+    }
+
+    #[test]
+    fn get_and_restore_model_pin_reject_an_invalid_project() {
+        let err = resolve_project_name("").unwrap_err();
+        assert_eq!(get_model_pin(String::new()).unwrap_err(), err);
+        assert_eq!(restore_model_pin(String::new(), None).unwrap_err(), err);
+        assert!(get_model_pin("../escape".to_string()).is_err());
+        assert!(restore_model_pin("../escape".to_string(), Some("opus".to_string())).is_err());
     }
 
     #[test]

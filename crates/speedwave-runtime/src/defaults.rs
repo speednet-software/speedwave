@@ -185,6 +185,16 @@ pub const CLAUDE_CODE_MODEL_ALIASES: &[&str] = &[
     "default", "best", "fable", "sonnet", "opus", "haiku", "opusplan",
 ];
 
+/// A settings.json `model` value `containers/entrypoint.sh`'s foreign-model guard keeps: a
+/// `claude-*` id, or a Claude Code alias with an optional `[1m]`.
+pub fn is_claude_code_model_setting(value: &str) -> bool {
+    let claude_id = value.strip_prefix("claude-").is_some_and(|rest| {
+        !rest.is_empty() && !rest.contains(['\n', '\r', '\u{2028}', '\u{2029}'])
+    });
+    let alias = value.strip_suffix(ONE_MILLION_SUFFIX).unwrap_or(value);
+    claude_id || CLAUDE_CODE_MODEL_ALIASES.contains(&alias)
+}
+
 const CLAUDE_CODE_FAMILY_ALIASES: &[(&str, &str)] = &[
     ("opus", "Opus"),
     ("sonnet", "Sonnet"),
@@ -1349,6 +1359,35 @@ mod tests {
             "entrypoint.sh's foreign-model guard must read {expected} — \
              rebuild it from CLAUDE_CODE_MODEL_ALIASES"
         );
+    }
+
+    #[test]
+    fn claude_code_model_setting_keeps_what_the_entrypoint_guard_keeps() {
+        for alias in CLAUDE_CODE_MODEL_ALIASES {
+            assert!(is_claude_code_model_setting(alias), "{alias}");
+            assert!(
+                is_claude_code_model_setting(&format!("{alias}[1m]")),
+                "{alias}[1m]"
+            );
+        }
+        for kept in [
+            "claude-fable-5",
+            "claude-opus-4-8[1m]",
+            "claude-opus-4-1-20250805",
+        ] {
+            assert!(is_claude_code_model_setting(kept), "{kept}");
+        }
+        for foreign in [
+            "",
+            "claude-",
+            "claude-a\nb",
+            "Opus",
+            "opus[1m][1m]",
+            "gpt-5",
+            "llama3.3",
+        ] {
+            assert!(!is_claude_code_model_setting(foreign), "{foreign:?}");
+        }
     }
 
     #[test]

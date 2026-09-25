@@ -3798,6 +3798,24 @@ describe('ChatStateService', () => {
           .map(([, args]) => (args as { model: string }).model);
       }
 
+      function pinStore(initial: string | null): () => string | null {
+        let pin = initial;
+        const base = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd, args) => {
+          if (cmd === 'get_model_pin') return pin;
+          if (cmd === 'set_model_pin' || cmd === 'restore_model_pin') {
+            pin = (args as { model: string | null }).model;
+            return undefined;
+          }
+          if (cmd === 'clear_model_pin') {
+            pin = null;
+            return undefined;
+          }
+          return base(cmd, args);
+        };
+        return () => pin;
+      }
+
       it('a pick queued while a turn streamed survives a resume the backend kept and reaches that session at its next turn end', async () => {
         liveConversation();
         await Promise.resolve();
@@ -3857,6 +3875,7 @@ describe('ChatStateService', () => {
       it('a resume the backend carried out drops the picks queued while a turn streamed: the resumed process launches with their pins', async () => {
         liveConversation();
         await Promise.resolve();
+        const pin = pinStore('claude-fable-5');
         await queueWhileStreaming();
         const { resumed, resuming, invokeSpy } = resumeStarting();
         await vi.waitFor(() => {
@@ -3886,6 +3905,191 @@ describe('ChatStateService', () => {
         await new Promise((r) => setTimeout(r, 0));
         expect(indexOfCall(calls, switchedModel)).toBe(-1);
         expect(indexOfCall(calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+        expect(indexOfCall(calls, (cmd) => cmd === 'restore_model_pin')).toBe(-1);
+        expect(pin()).toBe('claude-haiku-4-5');
+      });
+
+      const sonnetPick = { ...haikuPick, catalogId: 'claude-sonnet-5', wireId: 'claude-sonnet-5' };
+
+      async function keptResumeOfAQueuedHaikuPick(): Promise<{
+        pin: () => string | null;
+        invokeSpy: ReturnType<typeof vi.spyOn>;
+      }> {
+        liveConversation();
+        await Promise.resolve();
+        const pin = pinStore(null);
+        await service.applyModelSelection(sonnetPick);
+        expect(pin()).toBe('claude-sonnet-5');
+        await queueWhileStreaming();
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+        expect(pin()).toBe('claude-haiku-4-5');
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+        await vi.waitFor(() => expect(pin()).toBe('claude-sonnet-5'));
+        expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+        return { pin, invokeSpy };
+      }
+
+      function turnEnds(): void {
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: LIVE } } as never);
+      }
+
+      it('a restored pick Claude Code refuses after a kept resume leaves the pin and the badge on the model the session runs', async () => {
+        const { pin, invokeSpy } = await keptResumeOfAQueuedHaikuPick();
+        overrideInvoke('switch_chat_model', async () => ({
+          outcome: 'refused',
+          reason: 'model not available',
+        }));
+
+        turnEnds();
+
+        await vi.waitFor(() => {
+          expect(service.refusedModelPick()).toEqual({
+            catalogId: 'claude-haiku-4-5',
+            running: 'claude-sonnet-5',
+          });
+        });
+        await vi.waitFor(() => {
+          expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('max'))).toBeGreaterThan(-1);
+        });
+        expect(pin()).toBe('claude-sonnet-5');
+        expect(service.modelSelectionError()).toBe(modelSwitchRefused('model not available'));
+      });
+
+      it('a restored pick Claude Code confirms after a kept resume saves its pin again', async () => {
+        const { pin, invokeSpy } = await keptResumeOfAQueuedHaikuPick();
+
+        turnEnds();
+
+        await vi.waitFor(() => expect(pin()).toBe('claude-haiku-4-5'));
+        expect(switchedModels(invokeSpy.mock.calls)).toEqual(['claude-haiku-4-5']);
+        expect(service.refusedModelPick()).toBeNull();
+      });
+
+      it('the write-back after a kept resume never undoes a switch the session confirmed after the resume began', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const pin = pinStore(null);
+        const sonnetAnswer = createDeferred<ModelSwitchOutcome>();
+        let asked = false;
+        overrideInvoke('switch_chat_model', () => {
+          asked = true;
+          return sonnetAnswer.promise;
+        });
+        const switching = service.applyModelSelection(sonnetPick);
+        await vi.waitFor(() => expect(asked).toBe(true));
+        await queueWhileStreaming();
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => expect(pin()).toBe('claude-haiku-4-5'));
+
+        sonnetAnswer.resolve({ outcome: 'confirmed' });
+        await switching;
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+        expect(pin()).toBe('claude-sonnet-5');
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'restore_model_pin')).toBe(-1);
+        expect(pin()).toBe('claude-sonnet-5');
+      });
+
+      it('a routed pick refused after a kept resume leaves the provider on the model the session runs', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const provider: { model: string; contextTokens: number | null } = {
+          model: 'qwen3',
+          contextTokens: 8192,
+        };
+        const base = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd, args) => {
+          if (cmd === 'get_llm_config') {
+            return {
+              provider: 'my-ollama',
+              model: provider.model,
+              base_url: null,
+              default_base_url: null,
+              providers: [
+                {
+                  id: 'my-ollama',
+                  kind: 'local',
+                  model: provider.model,
+                  context_tokens: provider.contextTokens,
+                },
+              ],
+            };
+          }
+          if (cmd === 'set_provider_model') {
+            const written = args as { model: string; contextTokens: number | null };
+            provider.model = written.model;
+            provider.contextTokens = written.contextTokens;
+            return undefined;
+          }
+          return base(cmd, args);
+        };
+        service.isStreaming = true;
+        await service.applyModelSelection({
+          catalogId: 'llama4',
+          wireId: 'my-ollama/llama4',
+          providerId: 'my-ollama',
+          kind: 'local',
+          isDefault: false,
+          contextTokens: 262_144,
+        });
+        const { resumed, resuming } = resumeStarting();
+        await vi.waitFor(() => expect(provider.model).toBe('llama4'));
+
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+        await vi.waitFor(() => expect(provider).toEqual({ model: 'qwen3', contextTokens: 8192 }));
+        overrideInvoke('switch_chat_model', async () => ({
+          outcome: 'refused',
+          reason: 'model is still loading',
+        }));
+        turnEnds();
+
+        await vi.waitFor(() => {
+          expect(service.modelSelectionError()).toBe(modelSwitchRefused('model is still loading'));
+        });
+        expect(provider).toEqual({ model: 'qwen3', contextTokens: 8192 });
+      });
+
+      it('a New chat the backend kept writes back the pin its reset saved for a queued pick', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const pin = pinStore('opus');
+        service.isStreaming = true;
+        await service.applyModelSelection(haikuPick);
+        service.handleStreamChunk({ chunk_type: 'Error', data: { content: 'upstream hiccup' } });
+        expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+        overrideInvoke(
+          'start_chat',
+          rejected(`${SESSION_KEPT_MARKER}: container images are still building`)
+        );
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
+
+        await vi.waitFor(() => expect(pin()).toBe('opus'));
+        const calls = invokeSpy.mock.calls;
+        const pinned = indexOfCall(
+          calls,
+          (cmd, args) =>
+            cmd === 'set_model_pin' && (args as { model: string }).model === 'claude-haiku-4-5'
+        );
+        expect(pinned).toBeGreaterThan(-1);
+        expect(pinned).toBeLessThan(indexOfCall(calls, (cmd) => cmd === 'start_chat'));
+        expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
       });
 
       it('a resume that fails after the running session stopped drops the queued picks', async () => {
@@ -4074,6 +4278,7 @@ describe('ChatStateService', () => {
             clearsPin: false,
           },
           pendingEffort: { level: 'max', project: 'test', mark: 0, request: 1 },
+          confirmedModel: 'claude-sonnet-5',
         };
 
         internals.restoreConversationView(view);
