@@ -20,9 +20,9 @@ const REAP_EXIT_WAIT_TENTHS: u32 = 30;
 
 /// Busybox-safe `sh -c` body stopping only process(es) whose environ carries
 /// `SPW_SESSION_INSTANCE_ID=<id>`: TERM, a bounded wait for their exit, then KILL.
-pub fn kill_by_instance_command(id: &str) -> Vec<String> {
+fn reap_script(id: &str) -> String {
     let marker = format!("{SESSION_INSTANCE_ENV}={id}");
-    let script = format!(
+    format!(
         "m='{marker}'; \
 signal() {{ for d in /proc/[0-9]*; do \
 grep -qa \"$m\" \"$d/environ\" 2>/dev/null && kill \"$1\" \"${{d#/proc/}}\" 2>/dev/null; \
@@ -33,8 +33,21 @@ done; return 1; }}; \
 signal -TERM; i=0; \
 while [ \"$i\" -lt {REAP_EXIT_WAIT_TENTHS} ] && alive; do sleep 0.1; i=$((i + 1)); done; \
 signal -KILL; true"
-    );
-    vec!["sh".to_string(), "-c".to_string(), script]
+    )
+}
+
+/// `sh -c <payload>` reaping the instance `id`, base64-wrapped
+/// ([`crate::runtime::wrap_base64_sh`]) so the script survives the
+/// `wsl.exe -d <distro> -- ...` interop boundary, which re-parses the argv
+/// through the distro's default shell and would otherwise expand every `$`
+/// in [`reap_script`] against an unrelated environment.
+pub fn kill_by_instance_command(id: &str) -> Vec<String> {
+    let script = reap_script(id);
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        crate::runtime::wrap_base64_sh(&script),
+    ]
 }
 
 #[cfg(test)]
@@ -61,14 +74,16 @@ mod tests {
         let cmd = kill_by_instance_command("abc-123");
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
-        assert!(cmd[2].contains("SPW_SESSION_INSTANCE_ID=abc-123"));
-        assert!(cmd[2].contains("/proc/[0-9]*"));
-        assert!(cmd[2].contains("kill"));
+        let script = crate::runtime::decode_payload(&cmd[2]);
+        assert!(script.contains("SPW_SESSION_INSTANCE_ID=abc-123"));
+        assert!(script.contains("/proc/[0-9]*"));
+        assert!(script.contains("kill"));
     }
 
     #[test]
     fn kill_command_waits_for_the_instance_to_exit_before_it_kills_what_is_left() {
-        let script = &kill_by_instance_command("abc-123")[2];
+        let cmd = kill_by_instance_command("abc-123");
+        let script = crate::runtime::decode_payload(&cmd[2]);
         let term = script.find("signal -TERM").expect("a TERM first");
         let wait = script.find("while").expect("a wait for the exit");
         let kill = script.find("signal -KILL").expect("a KILL for survivors");
@@ -80,27 +95,53 @@ mod tests {
     }
 
     #[test]
-    fn kill_command_waits_at_most_three_seconds() {
+    fn kill_command_waits_thirty_polls_of_a_tenth_of_a_second() {
         assert_eq!(REAP_EXIT_WAIT_TENTHS, 30);
     }
 
     #[test]
-    fn kill_command_is_valid_posix_shell() {
-        let script = &kill_by_instance_command("abc-123")[2];
-        let words = shlex::split(script).expect("the script tokenizes as shell words");
+    fn reap_script_tokenizes_as_shell_words() {
+        let script = reap_script("abc-123");
+        let words = shlex::split(&script).expect("the script tokenizes as shell words");
         assert!(words
             .iter()
             .any(|w| w == "m=SPW_SESSION_INSTANCE_ID=abc-123;"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reap_script_passes_a_real_shell_syntax_check() {
+        let script = reap_script("abc-123");
+        let status = std::process::Command::new("sh")
+            .args(["-n", "-c", &script])
+            .status()
+            .expect("sh must be available to syntax-check the script");
+        assert!(status.success(), "sh -n rejected the reap script: {script}");
+    }
+
     #[test]
     fn kill_command_does_not_match_a_different_instance() {
         let cmd = kill_by_instance_command("aaaa");
-        assert!(!cmd[2].contains("SPW_SESSION_INSTANCE_ID=bbbb"));
+        let script = crate::runtime::decode_payload(&cmd[2]);
+        assert!(!script.contains("SPW_SESSION_INSTANCE_ID=bbbb"));
     }
 
     #[test]
     fn env_name_is_the_documented_constant() {
         assert_eq!(SESSION_INSTANCE_ENV, "SPW_SESSION_INSTANCE_ID");
+    }
+
+    #[test]
+    fn kill_command_argv_survives_the_wsl_interop_reparse() {
+        let cmd = kill_by_instance_command("abc-123");
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        let payload = &cmd[2];
+        assert!(
+            !payload.contains('$') && !payload.contains('`') && !payload.contains('\\'),
+            "the wrapped payload must carry no shell-expansion characters: {payload}"
+        );
+        let decoded = crate::runtime::decode_payload(payload);
+        assert_eq!(decoded, reap_script("abc-123"));
     }
 }

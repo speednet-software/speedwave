@@ -781,7 +781,11 @@ struct CostState {
     total_duration: f64,
     start_time: f64,
     model_usage: std::collections::BTreeMap<String, CostStateModelUsage>,
-    #[serde(rename = "hasUnknownModelCost")]
+    #[serde(
+        rename = "hasUnknownModelCost",
+        default,
+        deserialize_with = "zod_optional_not_nullable"
+    )]
     _has_unknown_model_cost: Option<bool>,
 }
 
@@ -790,12 +794,21 @@ struct CostState {
 struct CostStateModelUsage {
     input_tokens: f64,
     output_tokens: f64,
+    #[serde(default, deserialize_with = "zod_optional_not_nullable")]
     thinking_tokens: Option<f64>,
     cache_read_input_tokens: f64,
     cache_creation_input_tokens: f64,
     web_search_requests: f64,
     #[serde(rename = "costUSD")]
     cost_usd: f64,
+}
+
+fn zod_optional_not_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn is_count(value: f64) -> bool {
@@ -896,7 +909,7 @@ fn compute_resume_snapshot_impl(
     let file = fs::File::open(&path)
         .map_err(|e| anyhow::anyhow!("cannot read session {session_id}: {e}"))?;
 
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
 
     let mut latest_cumulative: Option<ResumeSnapshot> = None;
     let mut latest_cost: Option<f64> = None;
@@ -905,12 +918,23 @@ fn compute_resume_snapshot_impl(
     let mut last_context_usage: Option<crate::chat::TurnUsage> = None;
     let mut tracker = crate::session_model::SessionModelTracker::default();
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
-        if !snapshot_reads(&line) {
+    let mut raw_line = Vec::new();
+    loop {
+        raw_line.clear();
+        let read = reader
+            .read_until(b'\n', &mut raw_line)
+            .map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        let decoded = String::from_utf8_lossy(&raw_line);
+        let line = decoded
+            .trim_end_matches(['\n', '\r'])
+            .trim_start_matches('\0');
+        if !snapshot_reads(line) {
             continue;
         }
-        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -2794,6 +2818,16 @@ mod tests {
             .expect("the capture holds a cost-state line")
     }
 
+    fn last_assistant_model(transcript: &str) -> String {
+        transcript
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|l| l["type"] == "assistant")
+            .filter_map(|l| l["message"]["model"].as_str().map(str::to_string))
+            .last()
+            .expect("the capture holds an assistant model")
+    }
+
     fn resumed_result() -> serde_json::Value {
         RESUME_STDOUT
             .lines()
@@ -2938,7 +2972,10 @@ mod tests {
 
         assert_eq!(snapshot.total_cost, exit_state["totalCostUSD"].as_f64());
         assert_eq!(snapshot.usage(), model_usage_sum(&exit_state));
-        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some(last_assistant_model(RESUME_TRANSCRIPT).as_str())
+        );
     }
 
     #[test]
@@ -3064,6 +3101,121 @@ mod tests {
     }
 
     #[test]
+    fn a_cost_state_line_missing_optional_fields_still_restores() {
+        let line = serde_json::json!({
+            "type": "cost-state",
+            "sessionId": SNAPSHOT_SESSION,
+            "totalCostUSD": 0.42,
+            "totalAPIDuration": 436,
+            "totalAPIDurationWithoutRetries": 434,
+            "totalToolDuration": 0,
+            "totalLinesAdded": 0,
+            "totalLinesRemoved": 0,
+            "totalDuration": 792,
+            "startTime": 1_790_282_904_783_u64,
+            "modelUsage": {
+                "m": {
+                    "inputTokens": 7,
+                    "outputTokens": 3,
+                    "cacheReadInputTokens": 5,
+                    "cacheCreationInputTokens": 1,
+                    "webSearchRequests": 0,
+                    "costUSD": 0.0,
+                }
+            },
+        })
+        .to_string();
+        assert!(!line.contains("thinkingTokens"));
+        assert!(!line.contains("hasUnknownModelCost"));
+
+        let snapshot = snapshot_of_lines(&[line]);
+
+        assert_eq!(snapshot.total_cost, Some(0.42));
+        assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+    }
+
+    #[test]
+    fn a_cost_state_line_with_null_has_unknown_model_cost_is_not_restored() {
+        let mut line: serde_json::Value = serde_json::from_str(&cost_state_line(
+            SNAPSHOT_SESSION,
+            0.25,
+            serde_json::json!({ "m": model_usage_entry(4, 2, 0, 0) }),
+        ))
+        .unwrap();
+        line["hasUnknownModelCost"] = serde_json::Value::Null;
+        assert!(line.to_string().contains(r#""hasUnknownModelCost":null"#));
+
+        let snapshot = snapshot_of_lines(&[line.to_string()]);
+
+        assert_eq!(snapshot.total_cost, None);
+    }
+
+    #[test]
+    fn a_cost_state_line_with_null_thinking_tokens_is_not_restored() {
+        let mut line: serde_json::Value = serde_json::from_str(&cost_state_line(
+            SNAPSHOT_SESSION,
+            0.25,
+            serde_json::json!({ "m": model_usage_entry(4, 2, 0, 0) }),
+        ))
+        .unwrap();
+        line["modelUsage"]["m"]["thinkingTokens"] = serde_json::Value::Null;
+        assert!(line.to_string().contains(r#""thinkingTokens":null"#));
+
+        let snapshot = snapshot_of_lines(&[line.to_string()]);
+
+        assert_eq!(snapshot.total_cost, None);
+    }
+
+    #[test]
+    fn a_cost_state_line_with_leading_nul_bytes_still_restores() {
+        let valid = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({ "m": model_usage_entry(7, 3, 5, 1) }),
+        );
+        let padded = format!("\0\0\0{valid}");
+
+        let snapshot = snapshot_of_lines(&[padded]);
+
+        assert_eq!(snapshot.total_cost, Some(0.42));
+        assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+    }
+
+    #[test]
+    fn a_torn_non_utf8_line_is_skipped_after_a_valid_cost_state() {
+        let valid = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({ "m": model_usage_entry(7, 3, 5, 1) }),
+        );
+        let torn_source = cost_state_line(
+            SNAPSHOT_SESSION,
+            99.0,
+            serde_json::json!({ "m": model_usage_entry(1, 1, 1, 1) }),
+        );
+        let marker = torn_source
+            .find(COST_STATE_LINE)
+            .expect("the source line names its type");
+        let mut torn = torn_source.into_bytes();
+        torn.truncate(marker + COST_STATE_LINE.len() + 2);
+        torn.push(0xFF);
+        torn.push(0xFE);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let path = dir.join(format!("{SNAPSHOT_SESSION}.jsonl"));
+        let mut bytes = valid.into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&torn);
+        fs::write(&path, &bytes).unwrap();
+
+        let snapshot = compute_resume_snapshot_impl(tmp.path(), "proj", SNAPSHOT_SESSION).unwrap();
+
+        assert_eq!(snapshot.total_cost, Some(0.42));
+        assert_eq!((snapshot.input_tokens, snapshot.output_tokens), (7, 3));
+    }
+
+    #[test]
     fn cost_and_tokens_come_from_the_same_cost_state_line() {
         let snapshot = snapshot_of_lines(&[
             cost_state_line(
@@ -3094,7 +3246,10 @@ mod tests {
         assert_eq!(snapshot.output_tokens, 0);
         assert_eq!(snapshot.cache_read_tokens, 0);
         assert_eq!(snapshot.cache_write_tokens, 0);
-        assert_eq!(snapshot.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some(last_assistant_model(&without).as_str())
+        );
     }
 
     #[test]

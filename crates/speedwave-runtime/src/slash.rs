@@ -1507,10 +1507,13 @@ mod tests {
         );
         let calls = handles.exec_calls.lock().unwrap();
         assert_eq!(calls.len(), 2, "spawn + reap expected, got {calls:?}");
-        let reap_argv = calls[1].argv.join(" ");
+        let reap_argv = &calls[1].argv;
+        assert_eq!(reap_argv[0], "sh");
+        assert_eq!(reap_argv[1], "-c");
+        let reap_script = crate::runtime::decode_payload(&reap_argv[2]);
         assert!(
-            reap_argv.contains("SPW_SESSION_INSTANCE_ID"),
-            "reap must target the marker: {reap_argv}"
+            reap_script.contains("SPW_SESSION_INSTANCE_ID"),
+            "reap must target the marker: {reap_script}"
         );
     }
 

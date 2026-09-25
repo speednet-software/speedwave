@@ -3784,9 +3784,11 @@ mod tests {
             container.ends_with("_acme_claude"),
             "must target the project's claude container, got: {container}"
         );
-        let joined = argv.join(" ");
-        assert!(joined.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
-        assert!(joined.contains("kill"));
+        assert_eq!(argv[0], "sh");
+        assert_eq!(argv[1], "-c");
+        let script = speedwave_runtime::runtime::decode_payload(&argv[2]);
+        assert!(script.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
+        assert!(script.contains("kill"));
     }
 
     #[test]
