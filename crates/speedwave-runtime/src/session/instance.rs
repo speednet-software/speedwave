@@ -20,9 +20,11 @@ pub fn new_instance_id() -> String {
 
 const REAP_EXIT_WAIT_TENTHS: u32 = 30;
 
-/// How long [`reap_instance`] lets one reap exec run: the script's exit wait plus 5 s.
+const REAP_KILL_WAIT_TENTHS: u32 = 10;
+
+/// How long [`reap_instance`] lets one reap exec run: the script's two waits plus 5 s.
 pub const REAP_DEADLINE: Duration =
-    Duration::from_millis(REAP_EXIT_WAIT_TENTHS as u64 * 100 + 5_000);
+    Duration::from_millis((REAP_EXIT_WAIT_TENTHS + REAP_KILL_WAIT_TENTHS) as u64 * 100 + 5_000);
 
 fn reap_script(id: &str) -> String {
     let marker = format!("{SESSION_INSTANCE_ENV}={id}");
@@ -34,10 +36,13 @@ done; }}; \
 alive() {{ for p in $1; do \
 grep -qa \"$m\" \"/proc/$p/environ\" 2>/dev/null && return 0; \
 done; return 1; }}; \
+settle() {{ i=0; \
+while [ \"$i\" -lt \"$2\" ] && alive \"$1\"; do sleep 0.1; i=$((i + 1)); done; }}; \
 pids=$(marked); [ -n \"$pids\" ] || exit 0; \
-kill -TERM $pids 2>/dev/null; i=0; \
-while [ \"$i\" -lt {REAP_EXIT_WAIT_TENTHS} ] && alive \"$pids\"; do sleep 0.1; i=$((i + 1)); done; \
-left=$(marked); [ -z \"$left\" ] || kill -KILL $left 2>/dev/null; true"
+kill -TERM $pids 2>/dev/null; settle \"$pids\" {REAP_EXIT_WAIT_TENTHS}; \
+left=$(marked); [ -n \"$left\" ] || exit 0; \
+kill -KILL $left 2>/dev/null; settle \"$left\" {REAP_KILL_WAIT_TENTHS}; \
+[ -z \"$(marked)\" ]"
     )
 }
 
@@ -64,8 +69,8 @@ pub fn reap_instance(
     reap_instance_recorded(runtime, container, id, REAP_DEADLINE)
 }
 
-/// Reaps again each instance of `container` an earlier [`reap_instance`] could not confirm
-/// gone, and fails while one survives, so no new session starts beside a leaked process.
+/// Reaps again the instances of `container` an earlier [`reap_instance`] could not confirm
+/// gone and fails at the first one it still cannot, leaving the rest kept and untried.
 pub fn reap_unconfirmed(
     runtime: &crate::runtime::LockedRuntime,
     container: &str,
@@ -167,15 +172,27 @@ mod tests {
         let cmd = kill_by_instance_command("abc-123");
         let script = crate::runtime::decode_payload(&cmd[2]);
         let term = script.find("kill -TERM $pids").expect("a TERM first");
-        let wait = script.find("while").expect("a wait for the exit");
+        let wait = script
+            .find(&format!("settle \"$pids\" {REAP_EXIT_WAIT_TENTHS};"))
+            .expect("a wait for the exit");
         let kill = script
             .find("kill -KILL $left")
             .expect("a KILL for survivors");
 
         assert!(term < wait && wait < kill, "{script}");
-        assert!(script.contains("&& alive \"$pids\"; do sleep 0.1;"));
-        assert!(script.contains(&format!("-lt {REAP_EXIT_WAIT_TENTHS} ]")));
-        assert!(script.ends_with("true"));
+        assert!(script.contains("-lt \"$2\" ] && alive \"$1\"; do sleep 0.1;"));
+    }
+
+    #[test]
+    fn a_reap_fails_while_a_marked_process_outlives_the_kill() {
+        let script = reap_script("abc-123");
+        let kill = script.find("kill -KILL $left").expect("a KILL");
+        let wait = script
+            .find(&format!("settle \"$left\" {REAP_KILL_WAIT_TENTHS};"))
+            .expect("a wait after the KILL");
+
+        assert!(kill < wait, "{script}");
+        assert!(script.ends_with("[ -z \"$(marked)\" ]"), "{script}");
     }
 
     #[test]
@@ -192,7 +209,9 @@ mod tests {
     #[test]
     fn the_kill_scans_again_for_processes_started_during_the_wait() {
         let script = reap_script("abc-123");
-        let wait = script.find("while").expect("a wait for the exit");
+        let wait = script
+            .find("settle \"$pids\"")
+            .expect("a wait for the exit");
         let rescan = script.find("left=$(marked)").expect("a second scan");
 
         assert!(wait < rescan, "{script}");
@@ -212,26 +231,137 @@ mod tests {
     }
 
     #[test]
+    fn a_reap_whose_term_stopped_everything_ends_before_the_kill() {
+        let script = reap_script("abc-123");
+        let done = script
+            .find("[ -n \"$left\" ] || exit 0")
+            .expect("an exit once nothing is left");
+
+        assert!(
+            done < script.find("kill -KILL").expect("a KILL"),
+            "{script}"
+        );
+    }
+
+    #[test]
     fn kill_command_waits_thirty_polls_of_a_tenth_of_a_second() {
         assert_eq!(REAP_EXIT_WAIT_TENTHS, 30);
     }
 
     #[test]
-    fn the_reap_deadline_outlasts_the_scripts_own_wait() {
-        let wait = Duration::from_millis(u64::from(REAP_EXIT_WAIT_TENTHS) * 100);
+    fn the_kill_is_given_ten_polls_of_a_tenth_of_a_second() {
+        assert_eq!(REAP_KILL_WAIT_TENTHS, 10);
+    }
 
-        assert_eq!(REAP_DEADLINE, wait + Duration::from_secs(5));
+    #[test]
+    fn the_reap_deadline_outlasts_the_scripts_own_waits() {
+        let waits =
+            Duration::from_millis(u64::from(REAP_EXIT_WAIT_TENTHS + REAP_KILL_WAIT_TENTHS) * 100);
+
+        assert_eq!(REAP_DEADLINE, waits + Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    fn run_reap_script_over(proc_root: &std::path::Path, id: &str) -> std::process::ExitStatus {
+        let root = proc_root.to_str().expect("a UTF-8 temp path");
+        let script = reap_script(id).replace("/proc", root);
+        std::process::Command::new("sh")
+            .args(["-c", &script])
+            .status()
+            .expect("sh must be available to run the reap script")
+    }
+
+    #[cfg(unix)]
+    fn plant_proc_entry(proc_root: &std::path::Path, pid: u32, id: &str) {
+        let dir = proc_root.join(pid.to_string());
+        std::fs::create_dir(&dir).expect("the fake /proc entry");
+        let environ = format!("HOME=/home/speedwave\0{SESSION_INSTANCE_ENV}={id}\0");
+        std::fs::write(dir.join("environ"), environ).expect("the fake environ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reap_with_no_marked_process_exits_zero() {
+        let proc_root = tempfile::tempdir().expect("a fake /proc");
+
+        assert!(run_reap_script_over(proc_root.path(), "abc-123").success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reap_leaves_a_process_of_another_instance_running() {
+        let proc_root = tempfile::tempdir().expect("a fake /proc");
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a process of another instance");
+        plant_proc_entry(proc_root.path(), other.id(), "other-instance");
+
+        let status = run_reap_script_over(proc_root.path(), "abc-123");
+        let still_running = other.try_wait().expect("its status").is_none();
+        other.kill().expect("stop the other process");
+        other.wait().expect("reap the other process");
+
+        assert!(status.success());
+        assert!(still_running);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reap_whose_process_exits_on_term_exits_zero() {
+        let proc_root = tempfile::tempdir().expect("a fake /proc");
+        let ready = proc_root.path().join("ready");
+        let mut claude = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "trap 'rm -rf \"$ROOT/$$\"; exit 0' TERM; mkdir \"$ROOT/$$\"; \
+                 printf '%s' \"$MARK\" > \"$ROOT/$$/environ\"; : > \"$ROOT/ready\"; \
+                 while :; do sleep 0.1; done",
+            ])
+            .env("ROOT", proc_root.path())
+            .env("MARK", format!("{SESSION_INSTANCE_ENV}=abc-123"))
+            .spawn()
+            .expect("a marked process");
+        let planted_by = std::time::Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && std::time::Instant::now() < planted_by {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "the marked process never planted its entry");
+
+        let status = run_reap_script_over(proc_root.path(), "abc-123");
+        let exited = claude.wait().expect("the marked process exits");
+
+        assert!(status.success());
+        assert!(exited.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reap_fails_when_a_marked_process_is_still_there_after_the_kill() {
+        let proc_root = tempfile::tempdir().expect("a fake /proc");
+        let mut survivor = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a marked process");
+        plant_proc_entry(proc_root.path(), survivor.id(), "abc-123");
+
+        let status = run_reap_script_over(proc_root.path(), "abc-123");
+        survivor.kill().ok();
+        survivor.wait().expect("reap the marked process");
+
+        assert!(!status.success(), "a survivor must fail the reap");
     }
 
     #[test]
     fn reap_instance_runs_the_reap_in_the_given_container() {
+        let container = "reap-runs_claude";
         let (runtime, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
 
-        reap_instance(&runtime, "proj_claude", "abc-123").expect("the reap exec succeeds");
+        reap_instance(&runtime, container, "abc-123").expect("the reap exec succeeds");
 
         let calls = handles.exec_calls.lock().expect("exec calls");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].container, "proj_claude");
+        assert_eq!(calls[0].container, container);
         assert_eq!(calls[0].argv, kill_by_instance_command("abc-123"));
     }
 
@@ -244,7 +374,7 @@ mod tests {
 
         let err = reap_instance_within(
             &runtime,
-            "proj_claude",
+            "reap-deadline_claude",
             "abc-123",
             Duration::from_millis(200),
         )
@@ -256,14 +386,15 @@ mod tests {
 
     #[test]
     fn reap_instance_reports_an_exec_that_fails() {
+        let container = "reap-exec-fails_claude";
         let (runtime, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
-            .push_exec_piped_failure("container is not running")
+            .push_exec_piped_failure("container is not responding")
             .build();
 
-        let err = reap_instance(&runtime, "proj_claude", "abc-123")
-            .expect_err("a failed exec is reported");
+        let err =
+            reap_instance(&runtime, container, "abc-123").expect_err("a failed exec is reported");
 
-        assert!(err.to_string().contains("proj_claude"), "{err}");
+        assert!(err.to_string().contains(container), "{err}");
     }
 
     #[test]
@@ -272,7 +403,7 @@ mod tests {
             .with_exec_piped_error("no runtime")
             .build();
 
-        let err = reap_instance(&runtime, "proj_claude", "abc-123")
+        let err = reap_instance(&runtime, "reap-cannot-start_claude", "abc-123")
             .expect_err("an exec that cannot be built is reported");
 
         assert!(err.to_string().contains("no runtime"), "{err}");
@@ -313,6 +444,39 @@ mod tests {
         assert!(err.to_string().contains("could not be stopped"), "{err}");
         reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
             .expect("a later reap that succeeds lets the start through");
+    }
+
+    #[test]
+    fn the_first_kept_instance_that_survives_refuses_the_start_without_trying_the_rest() {
+        let container = "unconfirmed-first-fails_claude";
+        let (failing, _) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container is not responding")
+            .push_exec_piped_failure("container is not responding")
+            .build();
+        for id in ["first", "second"] {
+            reap_instance_recorded(&failing, container, id, Duration::from_secs(5))
+                .expect_err("the reap fails");
+        }
+        let (runtime, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container is not responding")
+            .build();
+
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
+            .expect_err("the first kept instance is still not confirmed gone");
+        let tried: Vec<Vec<String>> = handles
+            .exec_calls
+            .lock()
+            .expect("exec calls")
+            .iter()
+            .map(|c| c.argv.clone())
+            .collect();
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
+            .expect("both instances are reaped once the exec succeeds");
+
+        assert_eq!(tried, vec![kill_by_instance_command("first")]);
+        let calls = handles.exec_calls.lock().expect("exec calls");
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert_eq!(calls[2].argv, kill_by_instance_command("second"));
     }
 
     #[test]
