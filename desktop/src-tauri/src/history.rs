@@ -3285,6 +3285,42 @@ mod tests {
     }
 
     #[test]
+    fn float_counts_are_summed_across_models_and_then_rounded() {
+        let entry = |output: f64| {
+            serde_json::json!({
+                "inputTokens": 0,
+                "outputTokens": output,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "webSearchRequests": 0,
+                "costUSD": 0.0,
+            })
+        };
+        let line = cost_state_line(
+            SNAPSHOT_SESSION,
+            0.42,
+            serde_json::json!({ "a": entry(1.4), "b": entry(1.4) }),
+        );
+
+        let snapshot = snapshot_of_lines(&[line]);
+
+        assert_eq!(snapshot.output_tokens, 3);
+    }
+
+    #[test]
+    fn an_optional_field_rejects_null_even_when_its_type_would_take_it() {
+        #[derive(Deserialize)]
+        struct Probe {
+            #[serde(default, deserialize_with = "zod_optional_not_nullable")]
+            _value: Option<serde_json::Value>,
+        }
+
+        assert!(serde_json::from_str::<Probe>(r#"{"_value":null}"#).is_err());
+        assert!(serde_json::from_str::<Probe>(r#"{"_value":1}"#).is_ok());
+        assert!(serde_json::from_str::<Probe>("{}").is_ok());
+    }
+
+    #[test]
     fn a_later_cost_state_without_model_usage_keeps_the_model_seen_before() {
         let snapshot = snapshot_of_lines(&[
             cost_state_line(

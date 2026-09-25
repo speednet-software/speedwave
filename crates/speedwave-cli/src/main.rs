@@ -1050,7 +1050,10 @@ fn reap_instance(
     instance_id: &str,
 ) {
     if let Err(e) = speedwave_runtime::session::reap_instance(runtime, container, instance_id) {
-        log::debug!("session reap failed: {e}");
+        err!(
+            "Warning: Claude Code may still be running in '{container}': {}",
+            redact_err(&e)
+        );
     }
 }
 

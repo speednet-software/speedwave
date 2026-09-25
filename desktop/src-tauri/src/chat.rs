@@ -1159,7 +1159,7 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
             ("cacheReadInputTokens", &mut total.cache_read_tokens),
             ("cacheCreationInputTokens", &mut total.cache_write_tokens),
         ] {
-            if let Some(n) = stats[key].as_u64() {
+            if let Some(n) = model_usage_count(&stats[key]) {
                 *target = target.saturating_add(n);
                 any_field = true;
             }
@@ -1177,8 +1177,17 @@ fn dominant_model_by_output_tokens(
 ) -> Option<String> {
     model_usage.and_then(|mu| {
         mu.iter()
-            .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
+            .max_by_key(|(_, stats)| model_usage_count(&stats["outputTokens"]).unwrap_or(0))
             .map(|(k, _)| k.clone())
+    })
+}
+
+fn model_usage_count(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n.round() as u64)
     })
 }
 
@@ -1852,7 +1861,11 @@ impl ChatSession {
         .map_err(|e| anyhow::anyhow!(e))?;
         let user_config = config::load_user_config()?;
 
-        self.reap_instance();
+        self.reap_instance_with(&rt);
+        speedwave_runtime::session::reap_unconfirmed(
+            &rt,
+            &claude_container_name(&self.project_name),
+        )?;
 
         let instance_id = speedwave_runtime::session::new_instance_id();
         let PreparedSpawn { args, container } = Self::prepare_args(
@@ -2540,12 +2553,17 @@ impl ChatSession {
     }
 
     fn reap_instance(&mut self) {
+        if self.instance_id.is_some() {
+            self.reap_instance_with(&runtime::detect_runtime());
+        }
+    }
+
+    fn reap_instance_with(&mut self, rt: &runtime::LockedRuntime) {
         let Some(id) = self.instance_id.take() else {
             return;
         };
         let container = claude_container_name(&self.project_name);
-        let rt = runtime::detect_runtime();
-        if let Err(e) = speedwave_runtime::session::reap_instance(&rt, &container, &id) {
+        if let Err(e) = speedwave_runtime::session::reap_instance(rt, &container, &id) {
             log::warn!("kill exec for orphaned instance failed: {e}");
         }
     }
@@ -3765,23 +3783,40 @@ mod tests {
     }
 
     #[test]
-    fn a_session_is_reaped_in_its_projects_claude_container_by_the_bounded_reap() {
-        let source = include_str!("chat.rs");
-        let start = source
-            .find("fn reap_instance(&mut self)")
-            .expect("the session reap");
-        let body = &source[start..];
-        let body = &body[..body.find("\n    }\n").expect("its end")];
+    fn a_session_is_reaped_in_its_projects_claude_container() {
+        let (rt, handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut session = ChatSession::new("acme");
+        session.instance_id = Some("inst-123".to_string());
 
-        assert!(
-            body.contains("claude_container_name(&self.project_name)"),
-            "{body}"
+        session.reap_instance_with(&rt);
+
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].container, claude_container_name("acme"));
+        assert_eq!(
+            calls[0].argv,
+            speedwave_runtime::session::kill_by_instance_command("inst-123")
         );
-        assert!(
-            body.contains("speedwave_runtime::session::reap_instance("),
-            "{body}"
-        );
-        assert!(!body.contains(".status()"), "{body}");
+        assert!(session.instance_id.is_none());
+    }
+
+    #[test]
+    fn a_start_reaps_every_unconfirmed_instance_before_it_spawns() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start_with_retry(")
+            .expect("start_with_retry");
+        let body: String = source[from..].split_whitespace().collect();
+        let gate = body
+            .find(concat!(
+                "speedwave_runtime::session::reap_unconfirmed(&rt,",
+                "&claude_container_name(&self.project_name))?;"
+            ))
+            .expect("the start refuses while an earlier instance survives");
+        let spawn = body.find("rt.container_exec_piped(").expect("the spawn");
+
+        assert!(gate < spawn);
     }
 
     #[test]
@@ -9136,6 +9171,43 @@ mod tests {
         assert_eq!(cumulative.output_tokens, 4);
         assert_eq!(cumulative.cache_read_tokens, 10);
         assert_eq!(cumulative.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn extract_cumulative_usage_counts_json_float_counts() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "modelUsage": {
+                    "claude-opus-4-7": {"inputTokens":7.0,"outputTokens":20.0,"cacheReadInputTokens":5,"cacheCreationInputTokens":-1.0}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let cumulative = extract_cumulative_usage(&parsed).unwrap();
+
+        assert_eq!(
+            (
+                cumulative.input_tokens,
+                cumulative.output_tokens,
+                cumulative.cache_read_tokens,
+                cumulative.cache_write_tokens
+            ),
+            (7, 20, 5, 0)
+        );
+    }
+
+    #[test]
+    fn the_dominant_model_counts_a_json_float_output_count() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{"claude-haiku-4-5": {"outputTokens": 3}, "claude-fable-5": {"outputTokens": 9.0}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dominant_model_by_output_tokens(parsed.as_object()).as_deref(),
+            Some("claude-fable-5")
+        );
     }
 
     #[test]

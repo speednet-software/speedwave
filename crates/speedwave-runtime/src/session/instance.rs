@@ -52,14 +52,65 @@ pub fn kill_by_instance_command(id: &str) -> Vec<String> {
     ]
 }
 
-/// Runs [`kill_by_instance_command`] for `id` in `container`; the exec is killed
-/// once it outlives [`REAP_DEADLINE`].
+static UNCONFIRMED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Runs [`kill_by_instance_command`] for `id` in `container` within [`REAP_DEADLINE`]; an
+/// instance it cannot confirm gone is kept for [`reap_unconfirmed`].
 pub fn reap_instance(
     runtime: &crate::runtime::LockedRuntime,
     container: &str,
     id: &str,
 ) -> anyhow::Result<()> {
-    reap_instance_within(runtime, container, id, REAP_DEADLINE)
+    reap_instance_recorded(runtime, container, id, REAP_DEADLINE)
+}
+
+/// Reaps again each instance of `container` an earlier [`reap_instance`] could not confirm
+/// gone, and fails while one survives, so no new session starts beside a leaked process.
+pub fn reap_unconfirmed(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+) -> anyhow::Result<()> {
+    reap_unconfirmed_within(runtime, container, REAP_DEADLINE)
+}
+
+fn reap_instance_recorded(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+    id: &str,
+    deadline: Duration,
+) -> anyhow::Result<()> {
+    let reaped = reap_instance_within(runtime, container, id, deadline);
+    if reaped.is_err() {
+        unconfirmed().push((container.to_string(), id.to_string()));
+    }
+    reaped
+}
+
+fn reap_unconfirmed_within(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+    deadline: Duration,
+) -> anyhow::Result<()> {
+    let pending: Vec<String> = unconfirmed()
+        .iter()
+        .filter(|(c, _)| c == container)
+        .map(|(_, id)| id.clone())
+        .collect();
+    for id in pending {
+        reap_instance_within(runtime, container, &id, deadline).map_err(|e| {
+            anyhow::anyhow!(
+                "an earlier Claude Code process in '{container}' could not be stopped: {e}"
+            )
+        })?;
+        unconfirmed().retain(|(c, i)| !(c == container && *i == id));
+    }
+    Ok(())
+}
+
+fn unconfirmed() -> std::sync::MutexGuard<'static, Vec<(String, String)>> {
+    UNCONFIRMED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn reap_instance_within(
@@ -225,6 +276,63 @@ mod tests {
             .expect_err("an exec that cannot be built is reported");
 
         assert!(err.to_string().contains("no runtime"), "{err}");
+    }
+
+    #[test]
+    fn an_instance_whose_reap_timed_out_is_reaped_again_before_the_next_start() {
+        let container = "unconfirmed-timeout_claude";
+        let (runtime, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .build();
+        reap_instance_recorded(&runtime, container, "leaked", Duration::from_millis(200))
+            .expect_err("the stalled reap times out");
+
+        reap_unconfirmed_within(&runtime, container, Duration::from_millis(200))
+            .expect("the second reap confirms the instance gone");
+        reap_unconfirmed_within(&runtime, container, Duration::from_millis(200))
+            .expect("nothing is left to reap");
+
+        let calls = handles.exec_calls.lock().expect("exec calls");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[1].argv, kill_by_instance_command("leaked"));
+    }
+
+    #[test]
+    fn a_start_is_refused_while_an_earlier_instance_survives_its_reap() {
+        let container = "unconfirmed-survivor_claude";
+        let (runtime, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container is not responding")
+            .push_exec_piped_failure("container is not responding")
+            .build();
+        reap_instance_recorded(&runtime, container, "leaked", Duration::from_secs(5))
+            .expect_err("the first reap fails");
+
+        let err = reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
+            .expect_err("the instance is still not confirmed gone");
+
+        assert!(err.to_string().contains("could not be stopped"), "{err}");
+        reap_unconfirmed_within(&runtime, container, Duration::from_secs(5))
+            .expect("a later reap that succeeds lets the start through");
+    }
+
+    #[test]
+    fn an_unconfirmed_instance_blocks_only_its_own_container() {
+        let (failing, _) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+            .push_exec_piped_failure("container is not responding")
+            .build();
+        reap_instance_recorded(
+            &failing,
+            "unconfirmed-one_claude",
+            "leaked",
+            Duration::from_secs(5),
+        )
+        .expect_err("the reap fails");
+        let (runtime, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+
+        reap_unconfirmed_within(&runtime, "unconfirmed-other_claude", Duration::from_secs(5))
+            .expect("another container has nothing to reap");
+
+        assert!(handles.exec_calls.lock().expect("exec calls").is_empty());
     }
 
     #[test]

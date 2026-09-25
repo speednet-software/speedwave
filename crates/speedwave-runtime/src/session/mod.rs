@@ -7,7 +7,7 @@ pub mod queue;
 
 pub use cli_lock::{any_cli_session_active, CliSessionGuard};
 pub use instance::{
-    instance_env_argv, kill_by_instance_command, new_instance_id, reap_instance,
+    instance_env_argv, kill_by_instance_command, new_instance_id, reap_instance, reap_unconfirmed,
     SESSION_INSTANCE_ENV,
 };
 pub use queue::{QueueStats, QueuedMessageService};
