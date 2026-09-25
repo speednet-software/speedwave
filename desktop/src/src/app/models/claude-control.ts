@@ -86,11 +86,13 @@ export interface ClaudePlanUsage {
   rate_limits: ClaudeRateLimits | null;
 }
 
-/** One context category of `get_context_usage`. Mirror of Rust `control_channel::ContextCategory`. */
+/**
+ * One `get_context_usage` category to draw, as the backend picks it (`drawn_categories_only`).
+ * Mirror of Rust `control_channel::ContextCategory`.
+ */
 export interface ClaudeContextCategory {
   name: string;
   tokens: number;
-  is_deferred: boolean;
 }
 
 /** Typed `get_context_usage` response. Mirror of Rust `control_channel::ContextUsage`. */

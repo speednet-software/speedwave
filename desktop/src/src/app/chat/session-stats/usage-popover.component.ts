@@ -133,7 +133,7 @@ export class UsagePopoverComponent {
   /** Context window in tokens, or `null` while unknown. */
   readonly max = input<number | null>(null);
 
-  /** Context categories as Claude Code reports them, already without free space. */
+  /** Context categories to draw; the backend picks them. */
   readonly categories = input<readonly ClaudeContextCategory[]>([]);
 
   /** Plan usage limits, or `null` when there are none (API key, no data). */
@@ -156,16 +156,14 @@ export class UsagePopoverComponent {
 
   protected readonly segments = computed<ContextSegment[]>(() => {
     const max = this.max();
-    return this.categories()
-      .filter((c) => !c.is_deferred && c.tokens > 0)
-      .map((c) => ({
-        name: c.name,
-        tokens: formatContextLabel(c.tokens),
-        color: BUFFER_CATEGORIES.includes(c.name)
-          ? BUFFER_COLOR
-          : (CATEGORY_COLORS[c.name] ?? UNKNOWN_COLOR),
-        widthPct: max && max > 0 ? Math.min(100, (c.tokens / max) * 100) : 0,
-      }));
+    return this.categories().map((c) => ({
+      name: c.name,
+      tokens: formatContextLabel(c.tokens),
+      color: BUFFER_CATEGORIES.includes(c.name)
+        ? BUFFER_COLOR
+        : (CATEGORY_COLORS[c.name] ?? UNKNOWN_COLOR),
+      widthPct: max && max > 0 ? Math.min(100, (c.tokens / max) * 100) : 0,
+    }));
   });
 
   protected readonly planRows = computed<PlanRow[]>(() => {

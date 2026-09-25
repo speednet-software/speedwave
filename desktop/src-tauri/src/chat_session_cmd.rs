@@ -459,17 +459,22 @@ pub(crate) async fn get_context_usage(
 ) -> Result<ContextUsage, String> {
     check_project(&project)?;
     let session_arc = state.inner().clone();
-    tokio::task::spawn_blocking(move || {
-        control_query_inner(
-            &session_arc,
-            &project,
-            ControlQuery::ContextUsage,
-            control_channel::parse_context_usage,
-        )
-        .map(ContextUsage::without_free_space)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || context_usage_inner(&session_arc, &project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn context_usage_inner(
+    session_arc: &SharedChatSession,
+    project: &str,
+) -> Result<ContextUsage, String> {
+    control_query_inner(
+        session_arc,
+        project,
+        ControlQuery::ContextUsage,
+        control_channel::parse_context_usage,
+    )
+    .map(ContextUsage::drawn_categories_only)
 }
 
 #[cfg(test)]
@@ -520,20 +525,7 @@ mod tests {
             let session_arc = session_arc.clone();
             std::thread::spawn(move || pick(&session_arc))
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while control.pending_ids().is_empty() {
-            if picker.is_finished() {
-                panic!(
-                    "the pick ended before it waited for Claude Code: {:?}",
-                    picker.join()
-                );
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the pick never registered its request"
-            );
-            std::thread::yield_now();
-        }
+        let (_, picker) = pending_request_id(&control, picker);
 
         let mut session = session_arc
             .try_lock()
@@ -545,6 +537,80 @@ mod tests {
             picker.join().unwrap(),
             Err(control_channel::ControlError::SessionEnded.to_string())
         );
+    }
+
+    fn pending_request_id<T: std::fmt::Debug>(
+        control: &control_channel::ControlChannel,
+        caller: std::thread::JoinHandle<T>,
+    ) -> (String, std::thread::JoinHandle<T>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(id) = control.pending_ids().pop() {
+                return (id, caller);
+            }
+            if caller.is_finished() {
+                panic!(
+                    "the caller ended before it waited for Claude Code: {:?}",
+                    caller.join()
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the caller never registered its request"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn answer_the_pending_query<T: std::fmt::Debug>(
+        control: &control_channel::ControlChannel,
+        caller: std::thread::JoinHandle<T>,
+        payload: &serde_json::Value,
+    ) -> T {
+        let (id, caller) = pending_request_id(control, caller);
+        let line = serde_json::json!({
+            "type": control_channel::MSG_TYPE_CONTROL_RESPONSE,
+            "response": {"subtype": "success", "request_id": id, "response": payload},
+        });
+        assert_eq!(
+            control.route_response(&line),
+            control_channel::Routed::Delivered
+        );
+        caller.join().unwrap()
+    }
+
+    #[test]
+    fn context_usage_reaches_the_ui_with_only_the_rows_claude_code_marks_used() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture is valid JSON");
+        let captured = &fixture["run_A"]["get_context_usage/claude-opus-5"];
+        let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
+        let control = {
+            let mut session = session_arc.lock().unwrap();
+            session.set_test_stdin_sink(Vec::new());
+            session.control_channel_for_test()
+        };
+        let reader = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || context_usage_inner(&session_arc, "acme"))
+        };
+
+        let usage = answer_the_pending_query(&control, reader, captured).expect("context usage");
+
+        let names: Vec<&str> = usage.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "System prompt",
+                "System tools",
+                "Custom agents",
+                "Memory files",
+                "Skills"
+            ]
+        );
+        let raw = control_channel::parse_context_usage(captured).unwrap();
+        assert!(raw.categories.len() > usage.categories.len());
+        assert_eq!(usage.total_tokens, raw.total_tokens);
     }
 
     #[test]

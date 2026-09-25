@@ -488,12 +488,35 @@ pub(crate) struct PlanUsage {
     pub(crate) rate_limits: Option<RateLimits>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ContextKind {
+    Used,
+    Free,
+    Buffer,
+    Deferred,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ContextCategory {
     pub(crate) name: String,
     pub(crate) tokens: u64,
-    #[serde(default, rename(deserialize = "isDeferred"))]
+    #[serde(default, rename(deserialize = "isDeferred"), skip_serializing)]
     pub(crate) is_deferred: bool,
+    #[serde(default, skip_serializing)]
+    pub(crate) kind: Option<ContextKind>,
+}
+
+impl ContextCategory {
+    fn is_drawn(&self) -> bool {
+        self.tokens > 0
+            && match self.kind {
+                Some(kind) => kind == ContextKind::Used,
+                None => self.name != FREE_SPACE_CATEGORY && !self.is_deferred,
+            }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -511,8 +534,8 @@ pub(crate) struct ContextUsage {
 const FREE_SPACE_CATEGORY: &str = "Free space";
 
 impl ContextUsage {
-    pub(crate) fn without_free_space(mut self) -> Self {
-        self.categories.retain(|c| c.name != FREE_SPACE_CATEGORY);
+    pub(crate) fn drawn_categories_only(mut self) -> Self {
+        self.categories.retain(ContextCategory::is_drawn);
         self
     }
 }
@@ -1464,11 +1487,25 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_for_display_drops_free_space_and_keeps_every_used_category() {
+    fn context_usage_for_display_keeps_only_the_categories_claude_code_marks_used() {
         let raw =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5"]).unwrap();
+        let kinds: Vec<(&str, Option<ContextKind>)> = raw
+            .categories
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind))
+            .collect();
+        assert_eq!(
+            kinds[kinds.len() - 2..],
+            [
+                ("Autocompact buffer", Some(ContextKind::Buffer)),
+                ("Free space", Some(ContextKind::Free)),
+            ]
+        );
         let total = raw.total_tokens;
-        let shown = raw.without_free_space();
+
+        let shown = raw.drawn_categories_only();
+
         let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1477,12 +1514,118 @@ mod tests {
                 "System tools",
                 "Custom agents",
                 "Memory files",
-                "Skills",
-                "Autocompact buffer"
+                "Skills"
             ]
         );
+        assert!(shown
+            .categories
+            .iter()
+            .all(|c| c.kind == Some(ContextKind::Used)));
         assert_eq!(shown.total_tokens, total);
         assert_eq!(shown.max_tokens, 200_000);
+    }
+
+    #[test]
+    fn every_captured_category_carries_a_kind() {
+        let fx = fixture();
+        for run in ["run_A", "run_B"] {
+            for (key, value) in fx[run].as_object().unwrap() {
+                if !key.starts_with("get_context_usage/") {
+                    continue;
+                }
+                let usage = parse_context_usage(value).unwrap();
+                for category in &usage.categories {
+                    assert!(
+                        matches!(
+                            category.kind,
+                            Some(
+                                ContextKind::Used
+                                    | ContextKind::Free
+                                    | ContextKind::Buffer
+                                    | ContextKind::Deferred
+                            )
+                        ),
+                        "{run} {key} {}: {:?}",
+                        category.name,
+                        category.kind
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_response_without_kind_drops_free_space_and_deferred_rows() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 50, "maxTokens": 100, "percentage": 50,
+            "categories": [
+                { "name": "System prompt", "tokens": 10 },
+                { "name": "MCP tools (deferred)", "tokens": 900, "isDeferred": true },
+                { "name": "Autocompact buffer", "tokens": 30 },
+                { "name": "Free space", "tokens": 50 }
+            ]
+        }))
+        .unwrap();
+
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["System prompt", "Autocompact buffer"]);
+    }
+
+    #[test]
+    fn kind_decides_over_the_name_and_the_deferred_flag() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 50, "maxTokens": 100, "percentage": 50,
+            "categories": [
+                { "name": "Free space", "tokens": 5, "kind": "used" },
+                { "name": "Messages", "tokens": 7, "kind": "used", "isDeferred": true },
+                { "name": "System tools", "tokens": 9, "kind": "deferred" },
+                { "name": "Reserve", "tokens": 11, "kind": "buffer" },
+                { "name": "Room", "tokens": 13, "kind": "free" }
+            ]
+        }))
+        .unwrap();
+
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Free space", "Messages"]);
+    }
+
+    #[test]
+    fn an_unknown_kind_is_not_drawn_and_does_not_break_the_response() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 5, "maxTokens": 100, "percentage": 5,
+            "categories": [
+                { "name": "System prompt", "tokens": 5, "kind": "used" },
+                { "name": "Something new", "tokens": 3, "kind": "reserved" }
+            ]
+        }))
+        .expect("an unknown kind must not fail the parse");
+
+        assert_eq!(usage.categories[1].kind, Some(ContextKind::Unknown));
+        let shown = usage.drawn_categories_only();
+        assert_eq!(shown.categories.len(), 1);
+        assert_eq!(shown.categories[0].name, "System prompt");
+    }
+
+    #[test]
+    fn a_category_without_tokens_is_not_drawn_with_or_without_a_kind() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 5, "maxTokens": 100, "percentage": 5,
+            "categories": [
+                { "name": "Messages", "tokens": 0, "kind": "used" },
+                { "name": "Skills", "tokens": 0 },
+                { "name": "System prompt", "tokens": 5, "kind": "used" }
+            ]
+        }))
+        .unwrap();
+
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["System prompt"]);
     }
 
     #[test]
@@ -1500,19 +1643,28 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_without_a_free_space_category_is_left_alone() {
+    fn context_usage_with_only_drawn_categories_is_left_alone() {
         let usage = ContextUsage {
             model: "m".to_string(),
             total_tokens: 1,
             max_tokens: 2,
             percentage: 50.0,
-            categories: vec![ContextCategory {
-                name: "Messages".to_string(),
-                tokens: 1,
-                is_deferred: false,
-            }],
+            categories: vec![
+                ContextCategory {
+                    name: "Messages".to_string(),
+                    tokens: 1,
+                    is_deferred: false,
+                    kind: None,
+                },
+                ContextCategory {
+                    name: "Skills".to_string(),
+                    tokens: 1,
+                    is_deferred: false,
+                    kind: Some(ContextKind::Used),
+                },
+            ],
         };
-        assert_eq!(usage.clone().without_free_space(), usage);
+        assert_eq!(usage.clone().drawn_categories_only(), usage);
     }
 
     #[test]
