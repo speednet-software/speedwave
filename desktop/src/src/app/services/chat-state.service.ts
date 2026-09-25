@@ -16,7 +16,12 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
-import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
+import {
+  CLAUDE_MODEL_SWITCH_FAILED_EVENT,
+  type ClaudeContextUsage,
+  type ClaudeModelSwitchFailedEvent,
+  type ModelSwitchOutcome,
+} from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
@@ -239,6 +244,7 @@ export class ChatStateService {
   private _effortSave: Promise<void> = Promise.resolve();
   private _effortApply: Promise<void> = Promise.resolve();
   private _modelRequest = 0;
+  private _savedModelRequest = 0;
   private _modelSave: Promise<void> = Promise.resolve();
   private _modelApply: Promise<void> = Promise.resolve();
   private _modelWork = 0;
@@ -364,6 +370,10 @@ export class ChatStateService {
     return this.isNewestOf(pick, this._modelRequest);
   }
 
+  private isNewestSavedModelPick(pick: ModelPick): boolean {
+    return this.isNewestOf(pick, this._savedModelRequest);
+  }
+
   private async saveEffortPin(project: string | null, level: string): Promise<PinSave> {
     try {
       await this.tauri.invoke('set_effort_pin', { projectId: project ?? '', level });
@@ -468,7 +478,10 @@ export class ChatStateService {
     const saving = this.trackModelWork(this._modelSave.then(() => this.saveModelPick(pick)));
     this._modelSave = saving.then(() => undefined);
     const outcome = await saving;
-    if (outcome.saved) return true;
+    if (outcome.saved) {
+      this._savedModelRequest = Math.max(this._savedModelRequest, pick.request);
+      return true;
+    }
     if (this.isNewestModelPick(pick)) {
       this.reportSelectionFailure('model selection persist', outcome.error);
     }
@@ -608,7 +621,7 @@ export class ChatStateService {
     if (outcome === 'restarted') return true;
     if (outcome === 'failed') {
       this.projectState.requestRestartFor(pick.project);
-      if (this.isNewestModelPick(pick)) {
+      if (this.isNewestSavedModelPick(pick)) {
         this.reportSelectionFailure(
           'compose re-render for the picked model',
           this.projectState.restartError
@@ -616,7 +629,7 @@ export class ChatStateService {
       }
       return false;
     }
-    if (this.isNewestModelPick(pick)) {
+    if (this.isNewestSavedModelPick(pick)) {
       this._modelSelectionError.set(MODEL_SWITCH_NOT_APPLIED);
     }
     return false;
@@ -869,6 +882,7 @@ export class ChatStateService {
   private ensureListeners(): Promise<void> {
     this.listenerSetup ??= (async () => {
       await this.setupStreamListener();
+      await this.setupModelSwitchListener();
       this.setupProjectStateListeners();
       this.setupRestartResumeListeners();
       void this.refreshLlmConfigCache();
@@ -2000,6 +2014,22 @@ export class ChatStateService {
       this.notifyChange();
     } catch (err) {
       this.log.debug(`[chat-state] refreshLlmConfigCache failed: ${String(err)}`);
+    }
+  }
+
+  private async setupModelSwitchListener(): Promise<void> {
+    try {
+      await this.tauri.listen<ClaudeModelSwitchFailedEvent>(
+        CLAUDE_MODEL_SWITCH_FAILED_EVENT,
+        (event) => {
+          const { project, model, reason } = event.payload;
+          if (project !== this.projectState.activeProject()) return;
+          this.log.warn(`[chat-state] the session was not switched to ${model}: ${reason}`);
+          this._modelSelectionError.set(modelSwitchRefused(reason));
+        }
+      );
+    } catch (err) {
+      this.log.warn(`[chat-state] Failed to listen for model switch failures: ${String(err)}`);
     }
   }
 

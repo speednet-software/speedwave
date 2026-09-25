@@ -10,6 +10,8 @@ pub(crate) const MSG_TYPE_CONTROL_RESPONSE: &str = "control_response";
 
 pub(crate) const SESSION_INFO_EVENT: &str = "chat_session_info";
 
+pub(crate) const MODEL_SWITCH_FAILED_EVENT: &str = "chat_model_switch_failed";
+
 const SUBTYPE_INITIALIZE: &str = "initialize";
 const SUBTYPE_GET_USAGE: &str = "get_usage";
 const SUBTYPE_GET_CONTEXT_USAGE: &str = "get_context_usage";
@@ -19,7 +21,7 @@ const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +390,27 @@ impl ModelSwitchOutcome {
             Err(ControlError::Timeout { .. }) => Ok(Self::Unconfirmed),
             Err(ControlError::Rejected(reason)) => Ok(Self::Refused { reason }),
             Err(e) => Err(e),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModelSwitchFailedEvent {
+    pub(crate) project: String,
+    pub(crate) model: String,
+    pub(crate) reason: String,
+}
+
+impl ModelSwitchOutcome {
+    pub(crate) fn failure(answer: Result<Self, ControlError>, timeout: Duration) -> Option<String> {
+        match answer {
+            Ok(Self::Confirmed) => None,
+            Ok(Self::Unconfirmed) => Some(format!(
+                "Claude Code gave no answer within {} s",
+                timeout.as_secs()
+            )),
+            Ok(Self::Refused { reason }) => Some(reason),
+            Err(e) => Some(e.to_string()),
         }
     }
 }
@@ -1645,6 +1668,53 @@ mod tests {
         ] {
             assert_eq!(ModelSwitchOutcome::of(Err(error.clone())), Err(error));
         }
+    }
+
+    #[test]
+    fn a_model_switch_fails_unless_claude_code_confirms_it() {
+        let timeout = SET_MODEL_TIMEOUT;
+        assert_eq!(
+            ModelSwitchOutcome::failure(Ok(ModelSwitchOutcome::Confirmed), timeout),
+            None
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(
+                Ok(ModelSwitchOutcome::Refused {
+                    reason: "model not changed".to_string()
+                }),
+                timeout
+            ),
+            Some("model not changed".to_string())
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(Ok(ModelSwitchOutcome::Unconfirmed), timeout),
+            Some(format!(
+                "Claude Code gave no answer within {} s",
+                timeout.as_secs()
+            ))
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(Err(ControlError::SessionEnded), timeout),
+            Some(ControlError::SessionEnded.to_string())
+        );
+    }
+
+    #[test]
+    fn model_switch_failed_event_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/claude-control.ts");
+        let event = ModelSwitchFailedEvent {
+            project: "p".to_string(),
+            model: "m".to_string(),
+            reason: "r".to_string(),
+        };
+        assert_eq!(
+            rust_fields(&event),
+            ts_interface_fields(ts, "ClaudeModelSwitchFailedEvent")
+        );
+        assert!(
+            ts.contains(&format!("'{MODEL_SWITCH_FAILED_EVENT}'")),
+            "claude-control.ts must name the {MODEL_SWITCH_FAILED_EVENT} event"
+        );
     }
 
     #[test]

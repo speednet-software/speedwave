@@ -330,6 +330,7 @@ pub struct ControlRequest {
     pub tool_name: String,
     pub input: serde_json::Value,
     pub tool_use_id: String,
+    pub safety_check: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -550,11 +551,19 @@ impl StreamParser {
         let tool_name = request["tool_name"].as_str()?.to_string();
         let input = request["input"].clone();
         let tool_use_id = request["tool_use_id"].as_str()?.to_string();
+        let safety_check =
+            (request["decision_reason_type"].as_str() == Some(SAFETY_CHECK)).then(|| {
+                request["decision_reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            });
         Some(ControlRequest {
             request_id,
             tool_name,
             input,
             tool_use_id,
+            safety_check,
         })
     }
 
@@ -1223,15 +1232,36 @@ struct SoftImposeConfig {
 }
 
 #[derive(Clone, Default)]
-struct ModelSettled(Arc<std::sync::atomic::AtomicBool>);
+struct ModelSettled {
+    settled: Arc<std::sync::atomic::AtomicBool>,
+    command_awaits_reply: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl ModelSettled {
     fn settle(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn settle_by_command(&self) {
+        self.settle();
+        self.command_awaits_reply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn is_settled(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.settled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn command_awaits_reply(&self) -> bool {
+        self.command_awaits_reply
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn take_command_reply(&self) -> bool {
+        self.command_awaits_reply
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -1322,23 +1352,88 @@ fn send_model_pick(
     control.send_set_model(&mut *handle, model)
 }
 
-fn report_soft_impose(pending: control_channel::PendingControl, model: &str) {
-    match pending.wait(control_channel::SET_MODEL_TIMEOUT) {
-        Ok(_) => log::info!("Claude Code switched the session to {model}"),
-        Err(e) => log::warn!("the soft-impose to {model} did not apply: {e}"),
+fn soft_impose_failure(pending: control_channel::PendingControl, model: &str) -> Option<String> {
+    let answer =
+        control_channel::ModelSwitchOutcome::of(pending.wait(control_channel::SET_MODEL_TIMEOUT));
+    let failure =
+        control_channel::ModelSwitchOutcome::failure(answer, control_channel::SET_MODEL_TIMEOUT);
+    match &failure {
+        None => log::info!("Claude Code switched the session to {model}"),
+        Some(reason) => log::warn!("the soft-impose to {model} did not apply: {reason}"),
+    }
+    failure
+}
+
+fn report_soft_impose(
+    app_handle: &AppHandle,
+    project: &str,
+    pending: control_channel::PendingControl,
+    model: &str,
+) {
+    let Some(reason) = soft_impose_failure(pending, model) else {
+        return;
+    };
+    let event = control_channel::ModelSwitchFailedEvent {
+        project: project.to_string(),
+        model: model.to_string(),
+        reason,
+    };
+    if let Err(e) = app_handle.emit(control_channel::MODEL_SWITCH_FAILED_EVENT, event) {
+        log::warn!("failed to emit the model switch failure event: {e}");
     }
 }
 
-pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
+fn spawn_soft_impose_target(
+    cfg: &SoftImposeConfig,
+    rendered_model: Option<&str>,
+) -> Option<String> {
+    soft_impose_target(
+        cfg.kind,
+        &cfg.entry_id,
+        cfg.entry_model.as_deref(),
+        rendered_model?,
+    )
+}
+
+const MODEL_SWITCHED_PREFIX: &str = "Set model to ";
+
+fn refused_model_command(line: &serde_json::Value, settled: &ModelSettled) -> Option<String> {
+    if line["type"] != "assistant" || line["message"]["model"] != "<synthetic>" {
+        return None;
+    }
+    if !settled.take_command_reply() {
+        return None;
+    }
+    let text = line["message"]["content"]
+        .as_array()?
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.starts_with(MODEL_SWITCHED_PREFIX)).then_some(text)
+}
+
+const SAFETY_CHECK: &str = "safetyCheck";
+
+pub(crate) const SAFETY_CHECK_DECLINED: &str = "Speedwave runs Claude Code with no one to approve a tool call, so it declines every call Claude Code's safety check holds for manual approval. Run it with an explicit, resolved target instead";
+
+pub fn build_tool_permission_response(request: &ControlRequest) -> serde_json::Value {
+    let decision = match &request.safety_check {
+        Some(reason) => serde_json::json!({
+            "behavior": "deny",
+            "message": format!("{SAFETY_CHECK_DECLINED}. Claude Code's reason: {reason}"),
+        }),
+        None => serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": request.input
+        }),
+    };
     serde_json::json!({
         "type": "control_response",
         "response": {
             "subtype": "success",
             "request_id": request.request_id,
-            "response": {
-                "behavior": "allow",
-                "updatedInput": request.input
-            }
+            "response": decision
         }
     })
 }
@@ -1695,6 +1790,13 @@ impl ChatSession {
 
         let provider_kind = soft_impose_cfg.kind;
         let asks_claude_code_for_session_info = provider_kind.is_anthropic();
+        let rendered_model = speedwave_runtime::compose::rendered_service_env_in(
+            consts::data_dir(),
+            &self.project_name,
+            "claude",
+            "ANTHROPIC_MODEL",
+        );
+        let spawn_impose = spawn_soft_impose_target(&soft_impose_cfg, rendered_model.as_deref());
 
         let mut cmd = rt.container_exec_piped(
             &container,
@@ -1783,6 +1885,8 @@ impl ChatSession {
         let awaited_for_reader = self.awaited_result.clone();
         self.model_settled = ModelSettled::default();
         let settled_for_reader = self.model_settled.clone();
+        let project_for_reader = self.project_name.clone();
+        let impose_app_handle = app_handle.clone();
 
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
@@ -1893,7 +1997,13 @@ impl ChatSession {
                             &display_policy,
                         );
                     } else {
-                        let response = build_auto_approve_response(&ctrl);
+                        if let Some(reason) = &ctrl.safety_check {
+                            log::warn!(
+                                "declined a {} call that Claude Code's safety check holds for approval: {reason}",
+                                ctrl.tool_name
+                            );
+                        }
+                        let response = build_tool_permission_response(&ctrl);
                         match stdin_for_reader.lock() {
                             Ok(mut stdin) => {
                                 if let Err(e) = writeln!(stdin, "{}", response) {
@@ -1983,7 +2093,24 @@ impl ChatSession {
                     &control_for_reader,
                     &stdin_for_reader,
                 ) {
-                    std::thread::spawn(move || report_soft_impose(pending, &model));
+                    let app_handle = app_handle.clone();
+                    let project = project_for_reader.clone();
+                    std::thread::spawn(move || {
+                        report_soft_impose(&app_handle, &project, pending, &model)
+                    });
+                }
+                if let Some(refusal) = refused_model_command(&parsed, &settled_for_reader) {
+                    log::warn!(
+                        "Claude Code did not switch the model for a typed /model: {refusal}"
+                    );
+                    emit_sanitized_chunk(
+                        &app_handle,
+                        StreamChunk::Error {
+                            content: refusal,
+                            turn_ended: false,
+                        },
+                        &display_policy,
+                    );
                 }
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
@@ -2024,6 +2151,18 @@ impl ChatSession {
             }
         });
         self.drain_handles.push(h);
+
+        if let Some(model) = spawn_impose {
+            let stdin = self
+                .shared_stdin
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no stdin for the soft-impose"))?;
+            if let Some(pending) =
+                send_soft_impose(&stdin, &self.control, &self.model_settled, &model)
+            {
+                report_soft_impose(&impose_app_handle, &self.project_name, pending, &model);
+            }
+        }
 
         if let Some((probe_app_handle, handle)) = session_info_probe {
             let project = self.project_name.clone();
@@ -2111,7 +2250,7 @@ impl ChatSession {
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
         if matches!(blocks, [WireContentBlock::Text { text }] if settles_model(text)) {
-            self.model_settled.settle();
+            self.model_settled.settle_by_command();
         }
         writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
@@ -2415,7 +2554,7 @@ fn write_and_emit_drained_message(
     match stdin.lock() {
         Ok(mut handle) => {
             if settles_model(text) {
-                settled.settle();
+                settled.settle_by_command();
             }
             if let Err(e) = writeln!(handle, "{}", payload) {
                 log::warn!("failed to write queued message to stdin: {e}");
@@ -2479,9 +2618,14 @@ fn test_capturing_stdin() -> (std::process::ChildStdin, std::thread::JoinHandle<
 
 #[cfg(test)]
 fn test_broken_pipe_stdin() -> std::process::ChildStdin {
-    let (reader, stdin) = test_stdin_pipe();
-    drop(reader);
-    stdin
+    for _ in 0..100 {
+        let (reader, mut stdin) = test_stdin_pipe();
+        drop(reader);
+        if stdin.write_all(b"\n").is_err() {
+            return stdin;
+        }
+    }
+    panic!("every test pipe stayed writable: a process spawned meanwhile kept its read end");
 }
 
 #[cfg(test)]
@@ -3238,6 +3382,39 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_model_command_waits_for_claude_codes_answer() {
+        let mut session = ChatSession::new("proj");
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("what model are you?"), |_| {})
+            .unwrap();
+        assert!(!session.model_settled.command_awaits_reply());
+
+        session
+            .send_message_with_emit(&text_only("/model claude-haiku-4-5"), |_| {})
+            .unwrap();
+
+        assert!(session.model_settled.command_awaits_reply());
+    }
+
+    #[test]
+    fn a_typed_model_command_drained_from_the_queue_waits_for_claude_codes_answer() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+
+        assert!(write_and_emit_drained_message(
+            "sess-1",
+            "/model claude-haiku-4-5",
+            &stdin,
+            &settled,
+            |_| {}
+        ));
+
+        assert!(settled.is_settled());
+        assert!(settled.command_awaits_reply());
+    }
+
+    #[test]
     fn a_plain_message_or_an_effort_pick_leaves_the_soft_impose_armed() {
         let mut session = ChatSession::new("proj");
         session.set_test_stdin_sink(Vec::new());
@@ -3314,7 +3491,8 @@ mod tests {
         let step = at(concat!(
             "ifletSome((pending,model))=soft_impose_step(&parsed,&chunks,&soft_impose_cfg,",
             "&settled_for_reader,&control_for_reader,&stdin_for_reader,)",
-            "{std::thread::spawn(move||report_soft_impose(pending,&model));}"
+            "{letapp_handle=app_handle.clone();letproject=project_for_reader.clone();",
+            "std::thread::spawn(move||{report_soft_impose(&app_handle,&project,pending,&model)});}"
         ));
         assert!(
             answers_routed < parsed,
@@ -3578,6 +3756,7 @@ mod tests {
                     tool_name: ASK_USER_TOOL_NAME.to_string(),
                     input: serde_json::json!({}),
                     tool_use_id: "tool-1".to_string(),
+                    safety_check: None,
                 },
                 questions: vec![AskUserQuestionItem {
                     question: "q".to_string(),
@@ -4164,12 +4343,17 @@ mod tests {
         control.close();
         let started = std::time::Instant::now();
 
-        report_soft_impose(answered, "local/llama-3.1-70b");
-        report_soft_impose(orphaned, "local/llama-3.1-70b");
+        let confirmed = soft_impose_failure(answered, "local/llama-3.1-70b");
+        let ended = soft_impose_failure(orphaned, "local/llama-3.1-70b");
 
         assert!(
             started.elapsed() < control_channel::SET_MODEL_TIMEOUT / 2,
             "neither report waited for the timeout"
+        );
+        assert_eq!(confirmed, None);
+        assert_eq!(
+            ended,
+            Some(control_channel::ControlError::SessionEnded.to_string())
         );
     }
 
@@ -4496,13 +4680,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("the send path must use `{needle}`"))
         };
         let locked = at(&send, "letmutstdin=shared.lock()");
-        let settled = at(&send, "self.model_settled.settle();");
+        let settled = at(&send, "self.model_settled.settle_by_command();");
         let written = at(&send, "writeln!(stdin,\"{}\",serialized)?;");
         assert!(locked < settled && settled < written);
 
         let drain = body_of("fn write_and_emit_drained_message(", "#[cfg(test)]");
         let locked = at(&drain, "matchstdin.lock(){Ok(muthandle)=>{");
-        let settled = at(&drain, "settled.settle();");
+        let settled = at(&drain, "settled.settle_by_command();");
         let written = at(&drain, "writeln!(handle,\"{}\",payload)");
         assert!(locked < settled && settled < written);
     }
@@ -4555,6 +4739,176 @@ mod tests {
         include_str!("../tests/fixtures/cc-2.1.282-model-picks.sanitized.ndjson");
     const MODEL_PICKS_REQUESTS: &str =
         include_str!("../tests/fixtures/cc-2.1.282-model-picks-requests.sanitized.json");
+    const SET_MODEL_CHECK: &str =
+        include_str!("../tests/fixtures/cc-2.1.282-set-model-check.sanitized.json");
+
+    fn set_model_check() -> serde_json::Value {
+        serde_json::from_str(SET_MODEL_CHECK).unwrap()
+    }
+
+    fn synthetic_line(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [{ "type": "text", "text": text }],
+            },
+        })
+    }
+
+    #[test]
+    fn the_set_model_check_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            set_model_check()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the set_model check with the new Claude Code pin"
+        );
+    }
+
+    #[test]
+    fn a_set_model_before_the_first_turn_moves_the_first_init_and_request() {
+        let run = &set_model_check()["before_first_turn"];
+        assert_eq!(run["answer"]["subtype"], "success");
+        assert_eq!(
+            run["probes"],
+            serde_json::json!([{ "model": run["set_model"], "max_tokens": 1, "stream": null }])
+        );
+        assert_eq!(run["first_init_model"], run["set_model"]);
+        assert_eq!(
+            run["first_turn_models"],
+            serde_json::json!([run["set_model"]])
+        );
+        assert_ne!(run["set_model"], run["launched"]);
+    }
+
+    #[test]
+    fn a_set_model_refused_before_the_first_turn_leaves_the_launch_model() {
+        let run = &set_model_check()["refused_not_found"];
+        assert_eq!(run["answer"]["subtype"], "error");
+        assert_eq!(run["first_init_model"], run["launched"]);
+        assert_eq!(
+            run["first_turn_models"],
+            serde_json::json!([run["launched"]])
+        );
+    }
+
+    #[test]
+    fn claude_code_refuses_an_unanswered_set_model_check_before_speedwave_stops_waiting() {
+        let run = &set_model_check()["unanswered"];
+        let answered_after = run["answered_after_s"].as_f64().unwrap();
+        assert!(
+            answered_after < control_channel::SET_MODEL_TIMEOUT.as_secs_f64(),
+            "SET_MODEL_TIMEOUT must outlast Claude Code's own check, answered after {answered_after} s"
+        );
+        assert_eq!(run["answer"]["subtype"], "error");
+        assert_eq!(run["answer"]["error_code"], "check_failed");
+    }
+
+    #[test]
+    fn a_refused_typed_model_command_is_shown_and_a_confirmed_one_is_not() {
+        let check = set_model_check();
+        let refused = check["typed_model_refused"]["synthetic_text"][0]
+            .as_str()
+            .unwrap();
+        let confirmed = check["typed_model_confirmed"]["synthetic_text"][0]
+            .as_str()
+            .unwrap();
+        let settled = ModelSettled::default();
+        settled.settle_by_command();
+
+        assert_eq!(
+            refused_model_command(&synthetic_line(refused), &settled),
+            Some(refused.to_string())
+        );
+        assert!(!settled.command_awaits_reply());
+
+        settled.settle_by_command();
+        assert_eq!(
+            refused_model_command(&synthetic_line(confirmed), &settled),
+            None
+        );
+        assert!(!settled.command_awaits_reply());
+        assert_eq!(
+            check["typed_model_refused"]["turn_models"][0],
+            check["typed_model_refused"]["turn_models"][1],
+            "a refused typed /model leaves the next turn on the session's model"
+        );
+    }
+
+    #[test]
+    fn only_a_synthetic_answer_to_a_typed_model_command_is_read_as_its_reply() {
+        let settled = ModelSettled::default();
+        let refusal = synthetic_line("API error: 429 · model not changed");
+        assert_eq!(refused_model_command(&refusal, &settled), None);
+
+        settled.settle_by_command();
+        let reply = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "claude-opus-5-5", "content": [{ "type": "text", "text": "hi" }] },
+        });
+        assert_eq!(refused_model_command(&reply, &settled), None);
+        assert!(
+            settled.command_awaits_reply(),
+            "a normal reply leaves the command waiting for its own answer"
+        );
+
+        settled.settle();
+        assert!(settled.command_awaits_reply());
+        let picked = ModelSettled::default();
+        picked.settle();
+        assert!(
+            !picked.command_awaits_reply(),
+            "a composer pick or the soft-impose settles the model without a typed command"
+        );
+    }
+
+    #[test]
+    fn the_spawn_soft_imposes_the_configured_model_only_when_the_rendered_one_differs() {
+        let cfg = SoftImposeConfig {
+            kind: config::LlmProviderKind::Local,
+            entry_id: "my-ollama".to_string(),
+            entry_model: Some("llama4".to_string()),
+        };
+        assert_eq!(
+            spawn_soft_impose_target(&cfg, Some("my-ollama/qwen3")),
+            Some("my-ollama/llama4".to_string())
+        );
+        assert_eq!(
+            spawn_soft_impose_target(&cfg, Some("my-ollama/llama4")),
+            None
+        );
+        assert_eq!(spawn_soft_impose_target(&cfg, None), None);
+        let anthropic = SoftImposeConfig {
+            kind: config::LlmProviderKind::AnthropicOauth,
+            entry_id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+            entry_model: None,
+        };
+        assert_eq!(
+            spawn_soft_impose_target(&anthropic, Some("claude-opus-5-5")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_spawn_soft_impose_goes_out_once_the_stdout_reader_routes_answers() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start(")
+            .expect("ChatSession::start");
+        let to = from
+            + source[from..]
+                .find("    pub fn send_message(")
+                .expect("the next method");
+        let start = &source[from..to];
+        let reader = start
+            .find("let mut parser = StreamParser::new();")
+            .expect("start spawns the stdout reader");
+        let imposed = start
+            .find("if let Some(model) = spawn_impose {")
+            .expect("start soft-imposes a rendered model that differs");
+        assert!(reader < imposed);
+    }
 
     #[test]
     fn set_model_checks_a_catalog_id_with_a_one_token_request_and_default_with_none() {
@@ -6661,15 +7015,51 @@ mod tests {
         assert_eq!(req.tool_use_id, "toolu_bash1");
     }
 
+    const SAFETY_CHECK_REQUEST: &str = r#"{"type":"control_request","request_id":"55cf","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"rm -rf \"$(echo /tmp/x)\"","description":"cleanup"},"decision_reason":"Dangerous rm operation on statically-unresolvable target: command substitution output","decision_reason_type":"safetyCheck","classifier_approvable":false,"tool_use_id":"toolu_stub_rm","suppress_always_allow_rule":true}}"#;
+
     #[test]
-    fn build_auto_approve_response_structure() {
+    fn a_tool_call_claude_codes_safety_check_holds_is_declined_with_its_reason() {
+        let req = try_parse_control_request_str(SAFETY_CHECK_REQUEST).unwrap();
+        assert_eq!(
+            req.safety_check.as_deref(),
+            Some("Dangerous rm operation on statically-unresolvable target: command substitution output")
+        );
+
+        let resp = build_tool_permission_response(&req);
+
+        assert_eq!(resp["response"]["subtype"], "success");
+        assert_eq!(resp["response"]["request_id"], "55cf");
+        assert_eq!(resp["response"]["response"]["behavior"], "deny");
+        let message = resp["response"]["response"]["message"].as_str().unwrap();
+        assert!(message.starts_with(SAFETY_CHECK_DECLINED), "{message}");
+        assert!(
+            message.contains("statically-unresolvable target"),
+            "{message}"
+        );
+        assert!(resp["response"]["response"].get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn a_tool_call_without_a_safety_check_is_allowed() {
+        let line = r#"{"type":"control_request","request_id":"req_2","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_bash1","input":{"command":"ls"},"decision_reason_type":"mode"}}"#;
+        let req = try_parse_control_request_str(line).unwrap();
+        assert_eq!(req.safety_check, None);
+        assert_eq!(
+            build_tool_permission_response(&req)["response"]["response"]["behavior"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn build_tool_permission_response_structure() {
         let req = ControlRequest {
             request_id: "req_42".to_string(),
             tool_name: "Read".to_string(),
             input: serde_json::json!({"file_path": "/tmp/test.rs"}),
             tool_use_id: "toolu_read1".to_string(),
+            safety_check: None,
         };
-        let resp = build_auto_approve_response(&req);
+        let resp = build_tool_permission_response(&req);
         assert_eq!(resp["type"], "control_response");
         assert_eq!(resp["response"]["subtype"], "success");
         assert_eq!(resp["response"]["request_id"], "req_42");
@@ -6711,6 +7101,7 @@ mod tests {
                 tool_name: "AskUserQuestion".into(),
                 input: serde_json::json!({ "questions": serde_q }),
                 tool_use_id: "toolu_t".into(),
+                safety_check: None,
             },
             questions,
             answers,
@@ -6946,6 +7337,7 @@ mod tests {
             tool_name: "AskUserQuestion".to_string(),
             input: serde_json::json!({ "questions": questions }),
             tool_use_id: "toolu_multi".to_string(),
+            safety_check: None,
         }
     }
 
@@ -7067,6 +7459,7 @@ mod tests {
                 "options": [{"label": "Yes"}, {"label": "No"}]
             }),
             tool_use_id: "toolu_flat".to_string(),
+            safety_check: None,
         };
         let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
         let (_, questions, _) = unwrap_ask_chunk(chunk);
@@ -7550,6 +7943,7 @@ mod tests {
             tool_name: "AskUserQuestion".to_string(),
             input: serde_json::json!({"question": "test"}),
             tool_use_id: "toolu_test".to_string(),
+            safety_check: None,
         };
         assert_eq!(ctrl.tool_name, "AskUserQuestion");
     }

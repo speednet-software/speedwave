@@ -29,7 +29,10 @@ import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-ta
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
 import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
-import type { ModelSwitchOutcome } from '../models/claude-control';
+import {
+  CLAUDE_MODEL_SWITCH_FAILED_EVENT,
+  type ModelSwitchOutcome,
+} from '../models/claude-control';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 describe('ChatStateService', () => {
@@ -4256,6 +4259,27 @@ describe('ChatStateService', () => {
 
         expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBe(-1);
         expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'set_model_pin')).toBe(-1);
+      });
+
+      it('a switch the backend sent on its own and Claude Code refused shows in the composer of its project only', async () => {
+        const projectState = TestBed.inject(ProjectStateService);
+        await projectState.init();
+        projectState.activeProject.set('test');
+        await service.init();
+
+        mockTauri.dispatchEvent(CLAUDE_MODEL_SWITCH_FAILED_EVENT, {
+          project: 'other',
+          model: 'my-ollama/llama4',
+          reason: 'model not found',
+        });
+        expect(service.modelSelectionError()).toBe('');
+
+        mockTauri.dispatchEvent(CLAUDE_MODEL_SWITCH_FAILED_EVENT, {
+          project: 'test',
+          model: 'my-ollama/llama4',
+          reason: 'model not found',
+        });
+        expect(service.modelSelectionError()).toBe(modelSwitchRefused('model not found'));
       });
 
       describe('a live model pick Claude Code does not accept (SPEED-709)', () => {

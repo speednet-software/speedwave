@@ -477,9 +477,14 @@ now sent first and saved after Claude Code's answer
   goes back to the pick the session confirmed last in the same conversation, or to
   the model the session reported before.
 - `unconfirmed`: no answer within `control_channel::SET_MODEL_TIMEOUT`, raised from
-  10 s to 60 s because the answer now waits for the one-token request, which takes as
-  long as the upstream needs to load the model. The pick is saved, since a late answer
-  may still apply it, and the composer says the session did not confirm it.
+  10 s to 15 s. Claude Code gives its one-token request about 5 s: against a stub that
+  answered after 20 s, after 70 s or never, `set_model` answered 5.3 s after it was sent
+  with `Couldn't confirm model "<id>" with the API. Try again, or run /model to see
+available models.` and `error_code: check_failed`, which is a refusal. A model the
+  upstream must load first, as a local server does on its first request, can therefore
+  be refused and picked again once it is loaded. The pick is saved on `unconfirmed`,
+  since a late answer may still apply it, and the composer says the session did not
+  confirm it.
 - An error (no live process, a session another command holds, a failed write): the
   pick is saved for the next spawn and the error is shown.
 
@@ -489,9 +494,41 @@ while a turn streams or a session starts is saved when it is taken, or when it i
 dropped, so the next spawn still launches with it; every spawn first waits for the
 model picks in flight (`ChatStateService.modelPicksSettled`). Model picks go to the
 session one at a time, in pick order. A pick that a newer one supersedes before its
-turn is neither sent nor saved, and only the newest pick reports an error. Effort
+turn is neither sent nor saved, and only the newest pick reports an error; a failed
+re-render is reported by the newest pick whose save went through. Effort
 picks keep their order (decision 5): `apply_flag_settings` does not check the level
 with a model request, so it cannot refuse one.
+
+**Amendment (SPEED-709, 2026-09-25: the soft-impose goes out before the first turn,
+and a switch that does not apply is shown).** On 2.1.282 the soft-impose sent at the
+first `init` makes Claude Code check the configured model while the first turn's
+first request to the launch model is still open: a stub run recorded the one-token
+check 0.1 ms after that request arrived, with the request open for another 3 s. A
+server that swaps models on one GPU then serves two models at once, and the check
+can be refused, which only a log line recorded. The session start therefore reads
+the claude service's `ANTHROPIC_MODEL` from the rendered compose
+(`compose::rendered_service_env_in`) and, when it differs from the configured model,
+sends `set_model` before the first user message and waits for the answer inside
+`ChatSession::start`. The recording `cc-2.1.282-set-model-check.sanitized.json`
+shows the switch applied there: the one-token check went to the new model, the
+first `init` reported it, and the first turn's request carried it; a refused check
+(404, `error_code: catalog_unknown`) left the launch model. The first-turn gap of the
+earlier amendments is closed for this case. When the rendered compose cannot be read,
+the soft-impose falls back to the first `init`. Either way a soft-impose that is
+refused, gets no answer or finds no process emits `chat_model_switch_failed`
+(`control_channel::ModelSwitchFailedEvent`), and the composer of that project shows
+Claude Code's reason; it is not retried, since a retry at the next `init` would race
+a turn again.
+
+A typed `/model` goes to Claude Code as an input (decision 3), and 2.1.282 checks it
+the same way. The same recording shows its answer: a `<synthetic>` assistant line,
+`Set model to \`Haiku 4.5\` for this session only` when the check passed, and the
+error text (`API error: 429 ... · model not changed`) when it did not, followed by a
+`result`with`num_turns: 0`and`is_error: false`in both cases. The stream parser
+drops every`<synthetic>`line, so a refused typed`/model`looked applied. The stdout
+reader now shows the reply to a typed`/model`as an error block when it does not start
+with`Set model to` (`chat.rs::refused_model_command`). The chip stays, since it shows
+what the user typed.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 

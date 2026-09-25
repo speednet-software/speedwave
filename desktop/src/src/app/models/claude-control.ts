@@ -28,6 +28,16 @@ export type ClaudeSessionInfoState =
 export type ModelSwitchOutcome =
   { outcome: 'confirmed' } | { outcome: 'unconfirmed' } | { outcome: 'refused'; reason: string };
 
+/** Tauri event the backend emits when a switch it sends on its own (the soft-impose) did not apply. */
+export const CLAUDE_MODEL_SWITCH_FAILED_EVENT = 'chat_model_switch_failed';
+
+/** Payload of the model-switch failure event. Mirror of Rust `control_channel::ModelSwitchFailedEvent`. */
+export interface ClaudeModelSwitchFailedEvent {
+  project: string;
+  model: string;
+  reason: string;
+}
+
 /** Tauri event the backend emits when a session's info state changes. */
 export const CLAUDE_SESSION_INFO_EVENT = 'chat_session_info';
 
