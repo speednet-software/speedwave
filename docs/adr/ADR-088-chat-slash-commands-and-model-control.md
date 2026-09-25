@@ -772,9 +772,12 @@ refused the start before it stopped the earlier process: images that are not rea
 sign-in check that fails or says no, or a poisoned session lock. `start_session_inner`
 prefixes exactly those failures with `chat_session_cmd::MSG_SESSION_KEPT`, so the
 frontend does not infer the order from an error text of its own, and the frontend
-strips the prefix from every error it shows. The chat returns to that process, with its
-session id and effort notice restored, and the process takes them at its next turn end.
-The fresh start after a container restart drops them even then, since the restart
+strips the prefix from every error it shows. The chat returns to that process and shows
+its conversation again, with its messages, session id and effort notice restored, and
+the process takes them at its next turn end. A resume belongs to the project it began
+in: one begun while a project switch runs never reaches the backend, and one that a
+switch overtakes loads no transcript and shows neither its error nor the conversation
+it kept. The fresh start after a container restart drops them even then, since the restart
 already ended the earlier process. A pick made while a resume waits out a container
 restart is dropped when the resume begins, since the resumed process launches with the
 pins. The Stop a container restart begins with releases nothing: the restart resumes

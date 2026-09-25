@@ -3793,6 +3793,46 @@ describe('ChatStateService', () => {
         expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
       });
 
+      it('a resume the backend refused before it stopped the running session shows that conversation again', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const { resumed, resuming } = resumeStarting();
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+
+        const shown = JSON.stringify(service.messagesFromState().flatMap((m) => m.blocks));
+        expect(shown).toContain('Hello');
+        expect(shown).toContain('container images are still building');
+        expect(service.sessionStatsFromState()?.session_id).toBe(LIVE);
+      });
+
+      it('a sign-in refusal of a resume the backend kept leaves the running conversation on screen', async () => {
+        liveConversation();
+        await Promise.resolve();
+        const { resumed, resuming } = resumeStarting();
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: Claude is not authenticated.`));
+        await resuming;
+
+        expect(service.lastKnownSessionId).toBe(LIVE);
+        expect(JSON.stringify(service.messagesFromState())).toContain('Hello');
+        expect(service.sessionStatsFromState()?.session_id).toBe(LIVE);
+      });
+
+      it('a new conversation the backend refused before it stopped the running session shows that conversation again', async () => {
+        liveConversation();
+        await Promise.resolve();
+        overrideInvoke(
+          'start_chat',
+          rejected(`${SESSION_KEPT_MARKER}: container images are still building`)
+        );
+
+        await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
+
+        expect(JSON.stringify(service.messagesFromState())).toContain('Hello');
+        expect(service.sessionStatsFromState()?.session_id).toBe(LIVE);
+        expect(service.lastKnownSessionId).toBe(LIVE);
+      });
+
       it('the kept-session prefix never reaches the start error the user reads', async () => {
         liveConversation();
         await Promise.resolve();
@@ -7643,6 +7683,87 @@ describe('ChatStateService', () => {
       const blocks = service.messages.flatMap((m) => m.blocks);
       expect(blocks.some((b) => b.type === 'error')).toBe(false);
       expect(service.sessionStats?.session_id).toBe('sess-ok');
+    });
+  });
+
+  describe('resumeConversation across a project switch', () => {
+    let projectState: ProjectStateService;
+    let calls: string[];
+    let resumed: Deferred;
+
+    beforeEach(async () => {
+      projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-live' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      calls = [];
+      resumed = createDeferred();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'resume_conversation') return resumed.promise;
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-older',
+            messages: [
+              {
+                role: 'user',
+                content: 'from the project switched away from',
+                timestamp: null,
+                blocks: [{ type: 'text', content: 'from the project switched away from' }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+    });
+
+    async function resumeAcrossSwitch(): Promise<{ resuming: Promise<void> }> {
+      const resuming = service.resumeConversation('sess-older');
+      await vi.waitFor(() => expect(calls).toContain('resume_conversation'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      return { resuming };
+    }
+
+    it('a resume the backend refused before the switch landed shows neither its error nor the conversation it kept', async () => {
+      const { resuming } = await resumeAcrossSwitch();
+      resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+      await resuming;
+
+      expect(service.messagesFromState()).toEqual([]);
+      expect(service.lastKnownSessionId).toBeNull();
+      expect(service.sessionStatsFromState()).toBeNull();
+    });
+
+    it('a resume that completes after the switch began loads nothing into the chat of the project switched to', async () => {
+      const { resuming } = await resumeAcrossSwitch();
+      resumed.resolve();
+      await resuming;
+
+      expect(calls).not.toContain('get_conversation');
+      expect(service.messagesFromState()).toEqual([]);
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+
+    it('a resume begun while a switch runs never reaches the backend', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+
+      await service.resumeConversation('sess-older');
+
+      expect(calls).not.toContain('resume_conversation');
+      expect(service.lastKnownSessionId).toBeNull();
     });
   });
 

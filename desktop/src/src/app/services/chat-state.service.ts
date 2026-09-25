@@ -71,6 +71,28 @@ export type {
 
 type StartOutcome = 'started' | 'skipped' | 'auth' | 'failed';
 
+interface StartResult {
+  outcome: StartOutcome;
+  sessionKept: boolean;
+}
+
+interface ConversationView {
+  messages: ChatMessage[];
+  currentBlocks: MessageBlock[];
+  isStreaming: boolean;
+  sessionStats: SessionStats | null;
+  model: string;
+  totalOutputTokens: number;
+  contextWindowSize: number | null;
+  contextSnapshot: ClaudeContextUsage | null;
+  pendingQueue: QueuedMessage | null;
+  queueAwaitingSession: boolean;
+  initialized: boolean;
+  lastKnownSessionId: string | null;
+  optimisticSessionId: string | null;
+  deferredEffort: string | null;
+}
+
 interface ProjectPick {
   project: string | null;
   mark: number | null;
@@ -257,7 +279,7 @@ export class ChatStateService {
     const generation = this._sessionGeneration;
     this._launchedFor = launchedFor === null ? null : { wireId: launchedFor, generation };
     this.initialized = true;
-    const outcome = await this.startChatSession();
+    const { outcome } = await this.startChatSession();
     if (outcome !== 'started' && this._launchedFor?.generation === generation) {
       this._launchedFor = null;
     }
@@ -779,11 +801,11 @@ export class ChatStateService {
     }
   }
 
-  private async startChatSession(keepPicksForKeptSession = false): Promise<StartOutcome> {
+  private async startChatSession(keepPicksForKeptSession = false): Promise<StartResult> {
     const project = this.projectState.activeProject();
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
-      return 'skipped';
+      return { outcome: 'skipped', sessionKept: false };
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
@@ -823,9 +845,9 @@ export class ChatStateService {
       else if (outcome !== 'skipped' && !(keepPicksForKeptSession && sessionKept)) {
         this.dropPendingPicks();
       }
-      return outcome;
+      return { outcome, sessionKept };
     }
-    return 'skipped';
+    return { outcome: 'skipped', sessionKept: false };
   }
 
   /**
@@ -842,18 +864,22 @@ export class ChatStateService {
       ? NEW_CONVERSATION_STREAMING
       : this.newConversationBlockedReason();
     if (blocked) throw new Error(blocked);
-    const priorSessionId = this._lastKnownSessionId;
-    const priorDeferredEffort = this._deferredEffort();
+    const prior = this.captureConversationView();
     this.resetForNewConversation();
     this.initialized = true;
     this._sessionGeneration += 1;
     const gen = this._sessionGeneration;
-    const outcome = await this.startChatSession(priorProcessMayRun && priorSessionId !== null);
+    const keepsPrior = priorProcessMayRun && prior.lastKnownSessionId !== null;
+    const { outcome, sessionKept } = await this.startChatSession(keepsPrior);
     if (outcome === 'started') return;
     if (gen === this._sessionGeneration) {
-      this.initialized = false;
-      this._lastKnownSessionId = priorSessionId;
-      this._deferredEffort.set(priorDeferredEffort);
+      if (keepsPrior && sessionKept) {
+        this.restoreConversationView(prior);
+      } else {
+        this.initialized = false;
+        this._lastKnownSessionId = prior.lastKnownSessionId;
+        this._deferredEffort.set(prior.deferredEffort);
+      }
     }
     if (outcome === 'auth') throw new Error(NEW_CONVERSATION_AUTH);
     throw new Error(outcome === 'skipped' ? NEW_CONVERSATION_BUSY : NEW_CONVERSATION_FAILED);
@@ -1368,6 +1394,43 @@ export class ChatStateService {
     if (cur) this._sessionStats.set({ ...cur, context: undefined, context_window_size: null });
   }
 
+  private captureConversationView(): ConversationView {
+    return {
+      messages: this._messages,
+      currentBlocks: this._currentBlocks,
+      isStreaming: this.isStreaming,
+      sessionStats: this._sessionStats(),
+      model: this._model,
+      totalOutputTokens: this._totalOutputTokens,
+      contextWindowSize: this._contextWindowSize,
+      contextSnapshot: this._contextSnapshot,
+      pendingQueue: this._pendingQueue,
+      queueAwaitingSession: this._queueAwaitingSession,
+      initialized: this.initialized,
+      lastKnownSessionId: this._lastKnownSessionId,
+      optimisticSessionId: this._optimisticSessionId,
+      deferredEffort: this._deferredEffort(),
+    };
+  }
+
+  private restoreConversationView(view: ConversationView): void {
+    this._messages = view.messages;
+    this._currentBlocks = view.currentBlocks;
+    this.isStreaming = view.isStreaming;
+    this._sessionStats.set(view.sessionStats);
+    this._model = view.model;
+    this._totalOutputTokens = view.totalOutputTokens;
+    this._contextWindowSize = view.contextWindowSize;
+    this._contextSnapshot = view.contextSnapshot;
+    this._pendingQueue = view.pendingQueue;
+    this._queueAwaitingSession = view.queueAwaitingSession;
+    this.initialized = view.initialized;
+    this._lastKnownSessionId = view.lastKnownSessionId;
+    this._optimisticSessionId = view.optimisticSessionId;
+    this._deferredEffort.set(view.deferredEffort);
+    this.notifyChange();
+  }
+
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
     this.log.debug('[chat-state] resetForNewConversation');
@@ -1629,12 +1692,15 @@ export class ChatStateService {
   async resumeConversation(sessionId: string): Promise<void> {
     if (this._resumeInProgress) return;
     this._resumeInProgress = true;
-    if (this.projectState.restartInFlight && !(await this.outlastRestart())) {
+    const outlasted = !this.projectState.restartInFlight || (await this.outlastRestart());
+    const project = this.projectState.activeProject();
+    const mark = this.projectState.settledMark(project);
+    const sameProject = (): boolean => this.projectState.isStillSettledOn(project, mark);
+    if (!outlasted || !sameProject()) {
       this._resumeInProgress = false;
       return;
     }
-    const priorSessionId = this._lastKnownSessionId;
-    const priorDeferredEffort = this._deferredEffort();
+    const prior = this.captureConversationView();
     this.resetForNewConversation();
     this.beginTranscriptLoad();
     const endStartingSession = this.beginStartingSession();
@@ -1645,18 +1711,17 @@ export class ChatStateService {
     let outcome: StartOutcome = 'started';
     let sessionKept = false;
     try {
-      const project = this.projectState.activeProject();
       if (!project) return;
 
       await this.tauri.invoke('resume_conversation', { project, sessionId });
-      if (gen !== this._sessionGeneration) return;
+      if (gen !== this._sessionGeneration || !sameProject()) return;
       const transcript = await this.tauri
         .invoke<ConversationTranscript>('get_conversation', { project, sessionId })
         .catch((err) => {
           this.log.error(`[chat-state] get_conversation failed: ${String(err)}`);
           return null;
         });
-      if (gen !== this._sessionGeneration) return;
+      if (gen !== this._sessionGeneration || !sameProject()) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
       } else {
@@ -1683,12 +1748,10 @@ export class ChatStateService {
         return;
       }
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
+      if (!sameProject()) return;
       const msg = String(err);
       sessionKept = msg.includes(SESSION_KEPT_MARKER);
-      if (sessionKept) {
-        this._lastKnownSessionId = priorSessionId;
-        this._deferredEffort.set(priorDeferredEffort);
-      }
+      if (sessionKept) this.restoreConversationView(prior);
       if (isNotAuthenticatedError(msg)) {
         outcome = 'auth';
         await this.projectState.retryAuth();
@@ -1717,7 +1780,7 @@ export class ChatStateService {
         void this.startChatSession();
       }
     }
-    if (gen !== this._sessionGeneration) return;
+    if (gen !== this._sessionGeneration || !sameProject()) return;
     if (outcome === 'started') this.releasePendingPicks();
     else if (!sessionKept) this.dropPendingPicks();
   }
