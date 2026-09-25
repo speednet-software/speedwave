@@ -7,6 +7,7 @@ import {
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
   NEW_CONVERSATION_NO_PROJECT,
+  NEW_CONVERSATION_PROJECT_CHANGED,
   NEW_CONVERSATION_STREAMING,
   SESSION_KEPT_MARKER,
   historyFitsTarget,
@@ -3816,6 +3817,75 @@ describe('ChatStateService', () => {
         expect(service.lastKnownSessionId).toBe(LIVE);
         expect(JSON.stringify(service.messagesFromState())).toContain('Hello');
         expect(service.sessionStatsFromState()?.session_id).toBe(LIVE);
+      });
+
+      it('a resume begun while a turn streams stops that turn first and shows it stopped when the backend kept the session', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Half an answer' } });
+        const { resumed, resuming, invokeSpy } = resumeStarting();
+        await vi.waitFor(() => {
+          expect(
+            indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'resume_conversation')
+          ).toBeGreaterThan(-1);
+        });
+        const calls = invokeSpy.mock.calls;
+        expect(indexOfCall(calls, (cmd) => cmd === 'stop_chat')).toBeGreaterThan(-1);
+        expect(indexOfCall(calls, (cmd) => cmd === 'stop_chat')).toBeLessThan(
+          indexOfCall(calls, (cmd) => cmd === 'resume_conversation')
+        );
+
+        resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+        await resuming;
+
+        expect(service.isStreaming).toBe(false);
+        expect(JSON.stringify(service.messagesFromState())).toContain('Half an answer');
+        expect(service.lastKnownSessionId).toBe(LIVE);
+      });
+
+      it('a restored conversation view brings back every field, and a reset clears every one', () => {
+        const internals = service as unknown as {
+          captureConversationView(): Record<string, unknown>;
+          restoreConversationView(view: Record<string, unknown>): void;
+        };
+        const view: Record<string, unknown> = {
+          messages: [{ role: 'user', blocks: [{ type: 'text', content: 'kept' }], timestamp: 1 }],
+          currentBlocks: [{ type: 'text', content: 'partial' }],
+          isStreaming: true,
+          pendingQueue: { text: 'queued', queued_at: 2 },
+          sessionStats: {
+            session_id: LIVE,
+            total_cost: 0.5,
+            total_output_tokens: 3,
+            context_window_size: 1000,
+          },
+          model: 'claude-fable-5',
+          totalOutputTokens: 3,
+          contextWindowSize: 1000,
+          contextSnapshot: {
+            model: 'claude-fable-5',
+            total_tokens: 10,
+            max_tokens: 1000,
+            percentage: 1,
+            categories: [],
+          },
+          queueAwaitingSession: true,
+          initialized: true,
+          lastKnownSessionId: LIVE,
+          optimisticSessionId: 'sess-optimistic',
+          deferredEffort: 'high',
+        };
+
+        internals.restoreConversationView(view);
+        expect(internals.captureConversationView()).toEqual(view);
+
+        service.resetForNewConversation();
+        const cleared = internals.captureConversationView();
+        expect(Object.keys(cleared).sort()).toEqual(Object.keys(view).sort());
+        for (const [field, value] of Object.entries(view)) {
+          expect(cleared[field], field).not.toEqual(value);
+        }
       });
 
       it('a new conversation the backend refused before it stopped the running session shows that conversation again', async () => {
@@ -7764,6 +7834,74 @@ describe('ChatStateService', () => {
 
       expect(calls).not.toContain('resume_conversation');
       expect(service.lastKnownSessionId).toBeNull();
+    });
+  });
+
+  describe('startNewConversation across a project switch', () => {
+    let projectState: ProjectStateService;
+    let calls: string[];
+    let started: Deferred;
+
+    beforeEach(async () => {
+      projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-live' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      calls = [];
+      started = createDeferred();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'start_chat') return started.promise;
+        return undefined;
+      };
+    });
+
+    async function startAcrossSwitch(): Promise<{ starting: Promise<void> }> {
+      const starting = service.startNewConversation();
+      await vi.waitFor(() => expect(calls).toContain('start_chat'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      return { starting };
+    }
+
+    it('a new chat the backend refused before the switch landed leaves the project switched to alone', async () => {
+      const { starting } = await startAcrossSwitch();
+      started.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+
+      await expect(starting).rejects.toThrow(NEW_CONVERSATION_PROJECT_CHANGED);
+      expect(service.messagesFromState()).toEqual([]);
+      expect(service.lastKnownSessionId).toBeNull();
+      expect(service.sessionStatsFromState()).toBeNull();
+      expect(projectState.error).not.toContain('container images are still building');
+    });
+
+    it('a new chat that started after the switch began fails, so nothing is staged for the other project', async () => {
+      const { starting } = await startAcrossSwitch();
+      started.resolve();
+
+      await expect(starting).rejects.toThrow(NEW_CONVERSATION_PROJECT_CHANGED);
+    });
+
+    it('a sign-in refusal of the old project never marks the project switched to', async () => {
+      const { starting } = await startAcrossSwitch();
+      await new Promise((r) => setTimeout(r, 0));
+      const statusOfTheOtherProject = projectState.status();
+      started.reject(new Error('Claude is not authenticated. Please authenticate first.'));
+
+      await expect(starting).rejects.toThrow(NEW_CONVERSATION_PROJECT_CHANGED);
+      expect(projectState.status()).toBe(statusOfTheOtherProject);
+      expect(projectState.status()).not.toBe('auth_required');
     });
   });
 

@@ -76,21 +76,34 @@ interface StartResult {
   sessionKept: boolean;
 }
 
-interface ConversationView {
-  messages: ChatMessage[];
-  currentBlocks: MessageBlock[];
-  isStreaming: boolean;
-  sessionStats: SessionStats | null;
-  model: string;
+interface ConversationView extends LegacyStateSnapshot {
   totalOutputTokens: number;
   contextWindowSize: number | null;
   contextSnapshot: ClaudeContextUsage | null;
-  pendingQueue: QueuedMessage | null;
   queueAwaitingSession: boolean;
   initialized: boolean;
   lastKnownSessionId: string | null;
   optimisticSessionId: string | null;
   deferredEffort: string | null;
+}
+
+function emptyConversationView(): ConversationView {
+  return {
+    messages: [],
+    currentBlocks: [],
+    isStreaming: false,
+    pendingQueue: null,
+    sessionStats: null,
+    model: '',
+    totalOutputTokens: 0,
+    contextWindowSize: null,
+    contextSnapshot: null,
+    queueAwaitingSession: false,
+    initialized: false,
+    lastKnownSessionId: null,
+    optimisticSessionId: null,
+    deferredEffort: null,
+  };
 }
 
 interface ProjectPick {
@@ -121,6 +134,9 @@ export const NEW_CONVERSATION_STREAMING =
   'The chat is still replying. Wait for it to finish, then try again.';
 
 export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
+
+export const NEW_CONVERSATION_PROJECT_CHANGED =
+  'The project changed before the new chat started. Try again in this project.';
 
 export const SESSION_KEPT_MARKER = 'the running chat session was kept';
 
@@ -803,6 +819,9 @@ export class ChatStateService {
 
   private async startChatSession(keepPicksForKeptSession = false): Promise<StartResult> {
     const project = this.projectState.activeProject();
+    const mark = this.projectState.settledMark(project);
+    const current = (gen: number): boolean =>
+      gen === this._sessionGeneration && this.projectState.isStillSettledOn(project, mark);
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
       return { outcome: 'skipped', sessionKept: false };
@@ -817,10 +836,10 @@ export class ChatStateService {
       try {
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
-        outcome = gen === this._sessionGeneration ? 'started' : 'skipped';
+        outcome = current(gen) ? 'started' : 'skipped';
       } catch (err) {
-        if (gen !== this._sessionGeneration) {
-          this.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
+        if (!current(gen)) {
+          this.log.debug(`[chat-state] startChatSession: superseded, ignoring: ${String(err)}`);
           outcome = 'skipped';
         } else {
           const msg = String(err);
@@ -864,6 +883,8 @@ export class ChatStateService {
       ? NEW_CONVERSATION_STREAMING
       : this.newConversationBlockedReason();
     if (blocked) throw new Error(blocked);
+    const project = this.projectState.activeProject();
+    const mark = this.projectState.settledMark(project);
     const prior = this.captureConversationView();
     this.resetForNewConversation();
     this.initialized = true;
@@ -871,6 +892,9 @@ export class ChatStateService {
     const gen = this._sessionGeneration;
     const keepsPrior = priorProcessMayRun && prior.lastKnownSessionId !== null;
     const { outcome, sessionKept } = await this.startChatSession(keepsPrior);
+    if (!this.projectState.isStillSettledOn(project, mark)) {
+      throw new Error(NEW_CONVERSATION_PROJECT_CHANGED);
+    }
     if (outcome === 'started') return;
     if (gen === this._sessionGeneration) {
       if (keepsPrior && sessionKept) {
@@ -1414,8 +1438,8 @@ export class ChatStateService {
   }
 
   private restoreConversationView(view: ConversationView): void {
-    this._messages = view.messages;
-    this._currentBlocks = view.currentBlocks;
+    this._messages = [...view.messages];
+    this._currentBlocks = [...view.currentBlocks];
     this.isStreaming = view.isStreaming;
     this._sessionStats.set(view.sessionStats);
     this._model = view.model;
@@ -1435,15 +1459,9 @@ export class ChatStateService {
   resetForNewConversation(): void {
     this.log.debug('[chat-state] resetForNewConversation');
     this._sessionGeneration += 1;
-    this.resetCoreStreamState();
-    this._pendingQueue = null;
-    this._queueAwaitingSession = false;
-    this.initialized = false;
     this.startingSession = false;
-    this.clearSessionTracking();
     this.dropPendingPicks();
-    this._deferredEffort.set(null);
-    this.notifyChange();
+    this.restoreConversationView(emptyConversationView());
   }
 
   /**
@@ -1696,7 +1714,12 @@ export class ChatStateService {
     const project = this.projectState.activeProject();
     const mark = this.projectState.settledMark(project);
     const sameProject = (): boolean => this.projectState.isStillSettledOn(project, mark);
-    if (!outlasted || !sameProject()) {
+    let settled = outlasted && sameProject();
+    if (settled && this.isStreaming) {
+      await this.interruptTurn();
+      settled = sameProject();
+    }
+    if (!settled) {
       this._resumeInProgress = false;
       return;
     }
