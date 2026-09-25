@@ -4522,6 +4522,35 @@ mod tests {
         include_str!("../tests/fixtures/cc-2.1.282-model-command-mid-tool-turn.sanitized.ndjson");
     const MODEL_PICKS_CAPTURE: &str =
         include_str!("../tests/fixtures/cc-2.1.282-model-picks.sanitized.ndjson");
+    const MODEL_PICKS_REQUESTS: &str =
+        include_str!("../tests/fixtures/cc-2.1.282-model-picks-requests.sanitized.json");
+
+    #[test]
+    fn set_model_checks_a_catalog_id_with_a_one_token_request_and_default_with_none() {
+        let capture: serde_json::Value = serde_json::from_str(MODEL_PICKS_REQUESTS).unwrap();
+        assert_eq!(
+            capture["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the model-picks requests with the new Claude Code pin"
+        );
+        let requests = capture["requests"].as_array().unwrap();
+        let checks: Vec<(usize, &serde_json::Value)> = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r["max_tokens"] == 1)
+            .collect();
+
+        assert_eq!(checks.len(), 1, "{requests:?}");
+        let (index, check) = checks[0];
+        assert_eq!(index, 1, "the check follows the first turn: {requests:?}");
+        assert_eq!(check["model"], "claude-haiku-4-5");
+        assert_eq!(check["stream"], serde_json::Value::Null);
+        assert_eq!(
+            requests.len(),
+            4,
+            "one request per turn plus the check: {requests:?}"
+        );
+    }
 
     fn capture_lines(capture: &str) -> Vec<serde_json::Value> {
         capture

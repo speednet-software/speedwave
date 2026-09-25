@@ -490,16 +490,31 @@ mod tests {
     fn plan_preference_selects_among_variants_claude_code_actually_reported() {
         let info = info_of(
             vec![
-                listed("opus[1m]", Some("claude-opus-5[1m]"), "Opus (1M)"),
-                listed("opus", Some("claude-opus-5"), "Opus"),
+                listed("opus[1m]", Some("claude-opus-4-6[1m]"), "Opus (1M)"),
+                listed("opus", Some("claude-opus-4-6"), "Opus"),
             ],
             Some("Claude Pro"),
         );
         let pro = picker_of(&info, AnthropicPlan::Pro);
-        assert_eq!(pro.rows[0].wire_id, "claude-opus-5");
+        assert_eq!(pro.rows[0].wire_id, "claude-opus-4-6");
 
         let max = picker_of(&info, AnthropicPlan::Max);
-        assert_eq!(max.rows[0].wire_id, "claude-opus-5[1m]");
+        assert_eq!(max.rows[0].wire_id, "claude-opus-4-6[1m]");
+    }
+
+    #[test]
+    fn a_pro_account_gets_the_1m_window_of_opus_4_7_and_later() {
+        let info = info_of(
+            vec![
+                listed("opus[1m]", Some("claude-opus-5-5[1m]"), "Opus (1M)"),
+                listed("opus", Some("claude-opus-5-5"), "Opus"),
+            ],
+            Some("Claude Pro"),
+        );
+
+        let pro = picker_of(&info, AnthropicPlan::Pro);
+
+        assert_eq!(pro.rows[0].wire_id, "claude-opus-5-5[1m]");
     }
 
     #[test]
@@ -760,8 +775,12 @@ mod tests {
             Some("claude-opus-5[1m]")
         );
         assert_eq!(
-            normalized_pin("claude-opus-5[1m]", AnthropicPlan::Pro).as_deref(),
-            Some("claude-opus-5")
+            normalized_pin("claude-opus-5", AnthropicPlan::Pro).as_deref(),
+            Some("claude-opus-5[1m]")
+        );
+        assert_eq!(
+            normalized_pin("claude-opus-4-6[1m]", AnthropicPlan::Pro).as_deref(),
+            Some("claude-opus-4-6")
         );
         assert_eq!(
             normalized_pin("claude-haiku-4-5-20251001", AnthropicPlan::Max).as_deref(),
@@ -775,7 +794,11 @@ mod tests {
             normalized_pin("claude-fable-5-1[1m]", AnthropicPlan::Max),
             None
         );
-        assert_eq!(normalized_pin("claude-opus-5", AnthropicPlan::Pro), None);
+        assert_eq!(normalized_pin("claude-opus-4-6", AnthropicPlan::Pro), None);
+        assert_eq!(
+            normalized_pin("claude-opus-5-5[1m]", AnthropicPlan::Pro),
+            None
+        );
         assert_eq!(
             normalized_pin("claude-haiku-4-5", AnthropicPlan::Unknown),
             None

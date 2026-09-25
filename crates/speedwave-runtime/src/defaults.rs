@@ -279,7 +279,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_5_5_PRICING,
         pricing_1m: Some(OPUS_5_5_PRICING),
-        one_million_context: OneMillionContext::PaidPlansAndApi,
+        one_million_context: OneMillionContext::EveryPlan,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("medium"),
     },
@@ -315,7 +315,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
-        one_million_context: OneMillionContext::PaidPlansAndApi,
+        one_million_context: OneMillionContext::EveryPlan,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -339,7 +339,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
-        one_million_context: OneMillionContext::PaidPlansAndApi,
+        one_million_context: OneMillionContext::EveryPlan,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -351,7 +351,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
-        one_million_context: OneMillionContext::PaidPlansAndApi,
+        one_million_context: OneMillionContext::EveryPlan,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("xhigh"),
     },
@@ -415,7 +415,7 @@ pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 /// SSOT (`[1m]` where supported). Opus is plan-dependent and Fable resolves natively: both omitted.
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
-    for (alias, family_prefix) in [("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
+    for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
         let Some(latest) = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.family.starts_with(family_prefix) && m.latest)
@@ -633,6 +633,7 @@ mod tests {
                 .and_then(|s| s.strip_suffix("_MODEL"))
                 .expect("var must follow ANTHROPIC_DEFAULT_<ALIAS>_MODEL");
             let prefix = match alias {
+                "OPUS" => "Opus",
                 "SONNET" => "Sonnet",
                 "HAIKU" => "Haiku",
                 other => panic!("unexpected alias {other}"),
@@ -661,7 +662,7 @@ mod tests {
     #[test]
     fn anthropic_default_models_env_covers_every_latest_family() {
         let env = anthropic_default_models_env();
-        for prefix in ["Sonnet", "Haiku"] {
+        for prefix in ["Opus", "Sonnet", "Haiku"] {
             let has_latest = ANTHROPIC_MODELS
                 .iter()
                 .any(|m| m.family.starts_with(prefix) && m.latest);
@@ -676,11 +677,11 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_default_models_env_omits_the_plan_dependent_opus_alias() {
+    fn anthropic_default_models_env_pins_opus_and_sonnet_to_their_1m_windows() {
         let env = anthropic_default_models_env();
-        assert!(
-            !env.keys().any(|k| k.contains("OPUS")),
-            "a pinned `opus[1m]` alias forces a Pro account onto a 1M window that needs usage credits"
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").map(String::as_str),
+            Some("claude-opus-5-5[1m]")
         );
         assert_eq!(
             env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
@@ -745,13 +746,13 @@ mod tests {
     fn one_million_context_table_matches_the_plan_decisions() {
         let expected = [
             ("claude-fable-5-1", OneMillionContext::EveryPlan),
-            ("claude-opus-5-5", OneMillionContext::PaidPlansAndApi),
+            ("claude-opus-5-5", OneMillionContext::EveryPlan),
             ("claude-sonnet-5", OneMillionContext::EveryPlan),
             ("claude-haiku-4-5", OneMillionContext::Never),
-            ("claude-opus-5", OneMillionContext::PaidPlansAndApi),
+            ("claude-opus-5", OneMillionContext::EveryPlan),
             ("claude-fable-5", OneMillionContext::EveryPlan),
-            ("claude-opus-4-8", OneMillionContext::PaidPlansAndApi),
-            ("claude-opus-4-7", OneMillionContext::PaidPlansAndApi),
+            ("claude-opus-4-8", OneMillionContext::EveryPlan),
+            ("claude-opus-4-7", OneMillionContext::EveryPlan),
             ("claude-opus-4-6", OneMillionContext::PaidPlansAndApi),
             ("claude-sonnet-4-6", OneMillionContext::ApiOnly),
         ];
@@ -775,19 +776,20 @@ mod tests {
     }
 
     #[test]
-    fn wire_model_id_gives_opus_1m_only_where_the_plan_includes_it() {
+    fn wire_model_id_gives_opus_4_7_and_later_1m_on_every_plan() {
         for opus in [
             "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
-            "claude-opus-4-6",
         ] {
             for plan in [
+                AnthropicPlan::Pro,
                 AnthropicPlan::Max,
                 AnthropicPlan::Team,
                 AnthropicPlan::Enterprise,
                 AnthropicPlan::Api,
+                AnthropicPlan::Unknown,
             ] {
                 assert_eq!(
                     anthropic_wire_model_id(opus, plan),
@@ -795,9 +797,26 @@ mod tests {
                     "{plan:?}"
                 );
             }
-            assert_eq!(anthropic_wire_model_id(opus, AnthropicPlan::Pro), opus);
-            assert_eq!(anthropic_wire_model_id(opus, AnthropicPlan::Unknown), opus);
         }
+    }
+
+    #[test]
+    fn wire_model_id_gives_opus_4_6_1m_only_where_the_plan_includes_it() {
+        let opus = "claude-opus-4-6";
+        for plan in [
+            AnthropicPlan::Max,
+            AnthropicPlan::Team,
+            AnthropicPlan::Enterprise,
+            AnthropicPlan::Api,
+        ] {
+            assert_eq!(
+                anthropic_wire_model_id(opus, plan),
+                format!("{opus}[1m]"),
+                "{plan:?}"
+            );
+        }
+        assert_eq!(anthropic_wire_model_id(opus, AnthropicPlan::Pro), opus);
+        assert_eq!(anthropic_wire_model_id(opus, AnthropicPlan::Unknown), opus);
     }
 
     #[test]
@@ -972,10 +991,7 @@ mod tests {
         assert!(opus_5.premium);
         assert_eq!(opus_5.pricing.input, 5.0);
         assert_eq!(opus_5.pricing.output, 25.0);
-        assert_eq!(
-            opus_5.one_million_context,
-            OneMillionContext::PaidPlansAndApi
-        );
+        assert_eq!(opus_5.one_million_context, OneMillionContext::EveryPlan);
     }
 
     #[test]

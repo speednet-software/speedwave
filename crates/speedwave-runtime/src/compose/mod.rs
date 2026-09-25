@@ -4161,6 +4161,7 @@ services:
             "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
         );
         for alias in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL=",
             "ANTHROPIC_DEFAULT_SONNET_MODEL=",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL=",
         ] {
@@ -4170,9 +4171,9 @@ services:
             );
         }
         assert!(
-            !env.iter()
-                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
-            "the plan-dependent opus alias must not be pinned for Anthropic kinds: {env:?}"
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]"),
+            "the opus alias must keep the 1M window every plan includes: {env:?}"
         );
     }
 

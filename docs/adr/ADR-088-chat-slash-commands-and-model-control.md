@@ -421,15 +421,20 @@ The three captures were recorded again from the 2.1.282 binary and are now named
   (`cc-2.1.282-model-command-mid-tool-turn.sanitized.ndjson`,
   `chat.rs::a_model_command_written_during_a_tool_using_turn_runs_after_it_as_an_input_of_its_own`).
   An input the chat does not expect ends the user's turn, so both switches stay
-  `set_model` requests. `/effort` behaves the same way, which the SPEED-707 amendment
-  of decision 5 relies on.
+  `set_model` requests. `/effort` behaves the same way: in the 2.1.282 recording of
+  the `apply_flag_settings` contract (`cc-2.1.282-apply-effort.sanitized.json`,
+  `effort_command_mid_tool_turn`) an `/effort low` written at the same point answered
+  after the turn with a `result` of `num_turns: 0`, and the next turn carried `low`.
 - **`set_model` is unchanged in the stream.** The soft-impose capture still shows the
   switch applied from the tool-using turn's next model request, no `init`,
   `<synthetic>` line or `result` of its own, and one `<local-command-stdout>` user
-  line, which on 2.1.282 arrives before the control response.
+  line before the control response, in the same order as on 2.1.267.
 - **`set_model` now checks the new model.** Before it answers, Claude Code sends the
-  new model a one-token request, and it answers with an error when that request
-  fails. On a Max account `set_model` with `claude-sonnet-4-6[1m]` was refused with
+  new model a request that is not streamed and asks for one token (`max_tokens: 1`),
+  and it answers with an error when that request fails. The stub run of the model
+  picks received it for `set_model` with `claude-haiku-4-5` and none for `default`
+  (`cc-2.1.282-model-picks-requests.sanitized.json`,
+  `chat.rs::set_model_checks_a_catalog_id_with_a_one_token_request_and_default_with_none`). On a Max account `set_model` with `claude-sonnet-4-6[1m]` was refused with
   `API error: 429 Usage credits are required for long context requests · model not
 changed` (ADR-089, SPEED-709 amendment). A refused composer pick keeps the
   session on its model and shows the error in the composer
@@ -437,11 +442,26 @@ changed` (ADR-089, SPEED-709 amendment). A refused composer pick keeps the
 - **The account default moved.** The default row's `set_model` with `default` now
   confirms `claude-opus-5-5[1m]` in the stub run (`cc-2.1.282-model-picks.sanitized.ndjson`),
   where 2.1.267 confirmed `claude-opus-5[1m]`.
-- **A settings-writing request exists, and Speedwave does not use it.** The 0.3.282
-  SDK types add `update_settings`, which writes `effortLevel` into the user settings
-  file "as /effort saves it", and state that `apply_flag_settings`, by contrast,
-  "only touches the session-scoped flag layer"[^9]. `effort_pin` stays the only
-  store (decision 5, SPEED-707 amendment), so Speedwave never sends `update_settings`.
+- **A settings-writing request can now write effort, and Speedwave does not use
+  it.** `update_settings` already existed in the 0.3.267 SDK types, for the local
+  settings file only. The 0.3.282 types add a `userSettings` source that takes
+  `effortLevel` and saves it as the default for the session's current model, "under
+  modelSettings as /effort saves it", and state that `apply_flag_settings`, by
+  contrast, "only touches the session-scoped flag layer"[^9]. `effort_pin` stays the
+  only store (decision 5, SPEED-707 amendment), so Speedwave never sends
+  `update_settings`.
+- **The launch hold is gone.** Claude Code 2.1.280 "Changed Opus 4.7, Opus 4.8 and
+  Fable 5 to stop holding their launch-default effort over `/effort` in `-p` or the
+  Agent SDK, a project, managed or `--settings` `effortLevel`, or a per-model
+  level"[^10]. This is why the first `apply_flag_settings` on 2.1.282 records no
+  `unpin…LaunchEffort` flags in `.claude.json`. The same release "Changed an effort
+  level saved before `/effort` became per-model to no longer apply to newly released
+  models such as Opus 5.5"[^10]; Speedwave's `--effort <pin>` still applies to every
+  model.
+- **Pro accounts now default to Opus.** Claude Code 2.1.280 "Changed the default model
+  on Pro and Team Standard plans from Sonnet to Opus, matching Max, Team Premium, and
+  Enterprise"[^10]. A project without a model pin on such an account moves from
+  Sonnet to Opus 5.5 with this bump.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 
@@ -981,6 +1001,20 @@ plan"[^1]) and HAIKU keeps the undated catalog id. The non-Anthropic
 routed-alias remap in `compose/llm.rs` is unchanged and still covers all four
 aliases.
 
+**Amendment (SPEED-709, 2026-09-25: the `opus` alias is pinned again).** The
+model configuration page now says: "On the Anthropic API, Fable 5.1, Fable 5,
+Sonnet 5, and Opus 4.7 and later run with the 1M window on every plan, including
+Pro. You don't select a `[1m]` variant or turn on usage credits for the 1M window on
+these models"; its plan table covers only Opus 4.6 and Sonnet 4.6[^1]. The reason of
+the SPEED-648 amendment is therefore gone for the latest Opus, while the reason the
+SONNET pin exists applies to it too: "when `ANTHROPIC_BASE_URL` points at a gateway,
+Claude Code can't verify 1M support" and budgets the window at 200K unless the
+`[1m]` variant is chosen[^1]. `defaults.rs::anthropic_default_models_env` pins
+`ANTHROPIC_DEFAULT_OPUS_MODEL` to the latest catalog Opus with `[1m]`
+(`claude-opus-5-5[1m]`), so subagents with `model: opus` and the plan phase of
+`opusplan` keep the 1M window every plan includes. The catalog policy moves the same
+way (ADR-089, SPEED-709 amendment of decision 5).
+
 **Amendment (2026-09-24: the self-heal carries a stored model into the pin
 before clearing it).** Decision 7 was written while an Anthropic pick was
 session-scoped, so clearing the stored value lost nothing. Since SPEED-539
@@ -1182,3 +1216,5 @@ stays selectable without typing its id.
 [^8]: `@anthropic-ai/claude-agent-sdk` 0.3.267: `Query.applyFlagSettings(settings)` "Merge the provided settings into the flag settings layer, dynamically updating the active configuration. ... Flag settings sit above user/project/local settings and below managed policy settings in the precedence order", with "`effortLevel` additionally accepts `'max'`, which is session-scoped"; the request type `SDKControlApplyFlagSettingsRequest` (`subtype: 'apply_flag_settings'`, `settings`). https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.267/sdk.d.ts
 
 [^9]: `@anthropic-ai/claude-agent-sdk` 0.3.282, the SDK release for Claude Code 2.1.282: `SDKControlUpdateSettingsRequest` (`subtype: 'update_settings'`), which for `userSettings` "takes effortLevel only and saves it as the default for the session's current model, under modelSettings as /effort saves it ... the running session's level is not set here — send apply_flag_settings for that. Unlike apply_flag_settings, which only touches the session-scoped flag layer". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.282/sdk.d.ts
+
+[^10]: Claude Code changelog, 2.1.280: "Changed the default model on Pro and Team Standard plans from Sonnet to Opus, matching Max, Team Premium, and Enterprise"; "Changed an effort level saved before `/effort` became per-model to no longer apply to newly released models such as Opus 5.5; they start at their default until you pick a level"; "Changed Opus 4.7, Opus 4.8 and Fable 5 to stop holding their launch-default effort over `/effort` in `-p` or the Agent SDK, a project, managed or `--settings` `effortLevel`, or a per-model level". https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
