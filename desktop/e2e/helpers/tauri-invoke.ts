@@ -1,4 +1,4 @@
-export type InvokeResult<T> = { ok: true; value: T } | { ok: false; error: string };
+export type InvokeResult<T> = { ok: true; value: T } | { ok: false; reason: string };
 
 export async function invokeCommand<T>(
   cmd: string,
@@ -15,7 +15,7 @@ export async function invokeCommand<T>(
       ).__TAURI_INTERNALS__
         .invoke(command, commandArgs ?? undefined)
         .then((value) => done({ ok: true, value }))
-        .catch((e: unknown) => done({ ok: false, error: String(e) }));
+        .catch((e: unknown) => done({ ok: false, reason: String(e) }));
     },
     cmd,
     args ?? null

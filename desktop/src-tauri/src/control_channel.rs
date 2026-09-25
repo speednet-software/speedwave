@@ -10,6 +10,8 @@ pub(crate) const MSG_TYPE_CONTROL_RESPONSE: &str = "control_response";
 
 pub(crate) const SESSION_INFO_EVENT: &str = "chat_session_info";
 
+pub(crate) const MODEL_SWITCH_FAILED_EVENT: &str = "chat_model_switch_failed";
+
 const SUBTYPE_INITIALIZE: &str = "initialize";
 const SUBTYPE_GET_USAGE: &str = "get_usage";
 const SUBTYPE_GET_CONTEXT_USAGE: &str = "get_context_usage";
@@ -19,7 +21,7 @@ const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +373,48 @@ pub(crate) enum SessionInfoState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum ModelSwitchOutcome {
+    Confirmed,
+    Unconfirmed,
+    Refused { reason: String },
+}
+
+impl ModelSwitchOutcome {
+    pub(crate) fn of(
+        answer: Result<serde_json::Value, ControlError>,
+    ) -> Result<Self, ControlError> {
+        match answer {
+            Ok(_) => Ok(Self::Confirmed),
+            Err(ControlError::Timeout { .. }) => Ok(Self::Unconfirmed),
+            Err(ControlError::Rejected(reason)) => Ok(Self::Refused { reason }),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModelSwitchFailedEvent {
+    pub(crate) project: String,
+    pub(crate) model: String,
+    pub(crate) reason: String,
+}
+
+impl ModelSwitchOutcome {
+    pub(crate) fn failure(answer: Result<Self, ControlError>, timeout: Duration) -> Option<String> {
+        match answer {
+            Ok(Self::Confirmed) => None,
+            Ok(Self::Unconfirmed) => Some(format!(
+                "Claude Code gave no answer within {} s",
+                timeout.as_secs()
+            )),
+            Ok(Self::Refused { reason }) => Some(reason),
+            Err(e) => Some(e.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SessionInfoEvent {
     pub(crate) project: String,
@@ -494,11 +538,11 @@ pub(crate) fn parse_context_usage(value: &serde_json::Value) -> Result<ContextUs
 
 #[cfg(test)]
 pub(crate) const FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.267-control-responses.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.282-control-responses.sanitized.json");
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.267-apply-effort.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.282-apply-effort.sanitized.json");
 
 #[cfg(test)]
 #[expect(
@@ -509,8 +553,9 @@ const APPLY_EFFORT_FIXTURE: &str =
 mod tests {
     use super::*;
 
-    fn fixture() -> serde_json::Value {
-        serde_json::from_str(FIXTURE).expect("fixture is valid JSON")
+    fn fixture() -> &'static serde_json::Value {
+        static PARSED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARSED.get_or_init(|| serde_json::from_str(FIXTURE).expect("fixture is valid JSON"))
     }
 
     fn success_line(request_id: &str, payload: serde_json::Value) -> serde_json::Value {
@@ -775,8 +820,11 @@ mod tests {
         );
     }
 
-    fn apply_effort_capture() -> serde_json::Value {
-        serde_json::from_str(APPLY_EFFORT_FIXTURE).expect("capture is valid JSON")
+    fn apply_effort_capture() -> &'static serde_json::Value {
+        static PARSED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARSED.get_or_init(|| {
+            serde_json::from_str(APPLY_EFFORT_FIXTURE).expect("capture is valid JSON")
+        })
     }
 
     #[test]
@@ -805,23 +853,12 @@ mod tests {
     }
 
     #[test]
-    fn an_effort_change_stores_no_level_outside_the_pin() {
-        let capture = apply_effort_capture();
-        let added = capture["claude_json_added"]
-            .as_object()
-            .expect("the capture records what .claude.json gained");
-
-        for (key, value) in added {
-            assert!(
-                key.starts_with("unpin") && key.ends_with("LaunchEffort"),
-                "apply_flag_settings may record only launch-hold releases in .claude.json: {key}"
-            );
-            assert_eq!(
-                value,
-                &serde_json::Value::Bool(true),
-                "a launch-hold release is a flag, never a level: {key}"
-            );
-        }
+    fn an_effort_change_stores_nothing_in_claude_json() {
+        assert_eq!(
+            apply_effort_capture()["claude_json_added"],
+            serde_json::json!({}),
+            "the pinned Claude Code keeps no effort state in .claude.json; the pin stays the only store"
+        );
     }
 
     #[test]
@@ -842,19 +879,19 @@ mod tests {
     }
 
     #[test]
-    fn an_effort_input_written_during_a_tool_using_turn_never_runs() {
+    fn an_effort_input_written_during_a_tool_using_turn_runs_after_it_as_a_turn_of_its_own() {
         let capture = apply_effort_capture();
         let mid_turn = &capture["effort_command_mid_tool_turn"];
 
         assert_eq!(
             mid_turn["result_num_turns"],
-            serde_json::json!([2, 1]),
-            "no answer of its own may follow the tool-using turn"
+            serde_json::json!([2, 0, 1]),
+            "the input answers after the tool-using turn with a result of its own"
         );
         assert_eq!(
             mid_turn["requests"],
-            serde_json::json!(["high", "high", "high"]),
-            "the next turn must keep the launch level"
+            serde_json::json!(["high", "high", "low"]),
+            "the turn after it carries the new level"
         );
     }
 
@@ -1148,8 +1185,8 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                Some("claude-opus-5[1m]"),
-                Some("claude-opus-5[1m]"),
+                Some("claude-opus-5-5[1m]"),
+                Some("claude-opus-5-5[1m]"),
                 Some("claude-fable-5-1[1m]"),
                 Some("claude-sonnet-5[1m]"),
                 Some("claude-sonnet-5[1m]"),
@@ -1181,7 +1218,7 @@ mod tests {
                 .find(|m| m.value == v)
                 .and_then(|m| m.resolved_model.clone())
         };
-        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5[1m]"));
+        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5-5[1m]"));
         assert_eq!(by_value("sonnet").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             by_value("haiku").as_deref(),
@@ -1243,20 +1280,20 @@ mod tests {
 
     #[test]
     fn usage_fixture_parses_the_typed_windows() {
-        for run in ["run_A", "run_B"] {
+        for (run, five_hour_used) in [("run_A", 1.0), ("run_B", 2.0)] {
             let usage = parse_plan_usage(&fixture()[run]["get_usage"]).unwrap();
             assert_eq!(usage.subscription_type.as_deref(), Some("max"));
             assert!(usage.rate_limits_available);
             let limits = usage.rate_limits.expect("rate limits");
             let five = limits.five_hour.expect("five_hour");
-            assert_eq!(five.utilization, Some(15.0));
-            assert!(five.resets_at.unwrap().starts_with("2026-09-18T12:40:00"));
-            assert_eq!(limits.seven_day.unwrap().utilization, Some(70.0));
+            assert_eq!(five.utilization, Some(five_hour_used), "{run}");
+            assert!(five.resets_at.unwrap().starts_with("2026-09-25T02:19:59"));
+            assert_eq!(limits.seven_day.unwrap().utilization, Some(71.0));
             assert_eq!(limits.seven_day_opus, None);
             assert_eq!(limits.seven_day_sonnet, None);
             assert_eq!(limits.model_scoped.len(), 1);
             assert_eq!(limits.model_scoped[0].display_name, "Fable");
-            assert_eq!(limits.model_scoped[0].utilization, Some(67.0));
+            assert_eq!(limits.model_scoped[0].utilization, Some(3.0));
             let extra = limits.extra_usage.expect("extra_usage");
             assert!(!extra.is_enabled);
             assert_eq!(extra.utilization, None);
@@ -1398,6 +1435,35 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_set_model_names_its_reason_and_leaves_the_session_on_its_model() {
+        let fx = fixture();
+        for run in ["run_A", "run_B"] {
+            assert!(
+                fx[run].get("set_model/claude-sonnet-4-6[1m]").is_some(),
+                "{run}: the capture switches to every catalog id, bare and [1m]"
+            );
+            let refusals =
+                fx[run].as_object().unwrap().iter().filter(|(key, value)| {
+                    key.starts_with("set_model/") && !value["error"].is_null()
+                });
+            for (key, value) in refusals {
+                let model = key.trim_start_matches("set_model/");
+                let reason = value["error"].as_str().unwrap();
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{run} {key}: a refusal names its reason"
+                );
+                let after = parse_context_usage(&fx[run][format!("get_context_usage/{model}")])
+                    .unwrap_or_else(|e| panic!("{run} {key}: {e}"));
+                assert_ne!(
+                    after.model, model,
+                    "{run}: a refused switch must leave the session on its model"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn context_usage_for_display_drops_free_space_and_keeps_every_used_category() {
         let raw =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5"]).unwrap();
@@ -1450,14 +1516,26 @@ mod tests {
     }
 
     #[test]
+    fn context_usage_of_a_1m_session_reports_the_1m_window() {
+        let usage =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5[1m]"])
+                .unwrap();
+        assert_eq!(usage.model, "claude-opus-5-5[1m]");
+        assert_eq!(usage.max_tokens, 1_000_000);
+        let bare =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5"]).unwrap();
+        assert_eq!(bare.max_tokens, 200_000);
+    }
+
+    #[test]
     fn context_usage_before_the_first_message_reports_the_baseline() {
         let usage = parse_context_usage(&fixture()["run_A"]["get_context_usage/initial"]).unwrap();
-        assert_eq!(usage.model, "claude-fable-5-1[1m]");
-        assert_eq!(usage.total_tokens, 46_567);
-        assert_eq!(usage.max_tokens, 1_000_000);
-        assert!((usage.percentage - 5.0).abs() < f64::EPSILON);
+        assert_eq!(usage.model, "claude-haiku-4-5");
+        assert_eq!(usage.total_tokens, 61_125);
+        assert_eq!(usage.max_tokens, 200_000);
+        assert!((usage.percentage - 31.0).abs() < f64::EPSILON);
         assert_eq!(usage.categories[0].name, "System prompt");
-        assert_eq!(usage.categories[0].tokens, 3_902);
+        assert_eq!(usage.categories[0].tokens, 6_890);
     }
 
     #[test]
@@ -1562,6 +1640,106 @@ mod tests {
             }),
             ts_interface_fields(ts, "ClaudeSessionInfoEvent")
         );
+    }
+
+    #[test]
+    fn a_set_model_answer_maps_to_the_outcome_of_the_pick() {
+        assert_eq!(
+            ModelSwitchOutcome::of(Ok(serde_json::json!({}))),
+            Ok(ModelSwitchOutcome::Confirmed)
+        );
+        assert_eq!(
+            ModelSwitchOutcome::of(Err(ControlError::Timeout {
+                subtype: SUBTYPE_SET_MODEL,
+                timeout: SET_MODEL_TIMEOUT,
+            })),
+            Ok(ModelSwitchOutcome::Unconfirmed)
+        );
+        assert_eq!(
+            ModelSwitchOutcome::of(Err(ControlError::Rejected("model not changed".to_string()))),
+            Ok(ModelSwitchOutcome::Refused {
+                reason: "model not changed".to_string()
+            })
+        );
+        for error in [
+            ControlError::SessionEnded,
+            ControlError::Write("broken pipe".to_string()),
+            ControlError::Malformed("no subtype".to_string()),
+        ] {
+            assert_eq!(ModelSwitchOutcome::of(Err(error.clone())), Err(error));
+        }
+    }
+
+    #[test]
+    fn a_model_switch_fails_unless_claude_code_confirms_it() {
+        let timeout = SET_MODEL_TIMEOUT;
+        assert_eq!(
+            ModelSwitchOutcome::failure(Ok(ModelSwitchOutcome::Confirmed), timeout),
+            None
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(
+                Ok(ModelSwitchOutcome::Refused {
+                    reason: "model not changed".to_string()
+                }),
+                timeout
+            ),
+            Some("model not changed".to_string())
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(Ok(ModelSwitchOutcome::Unconfirmed), timeout),
+            Some(format!(
+                "Claude Code gave no answer within {} s",
+                timeout.as_secs()
+            ))
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(Err(ControlError::SessionEnded), timeout),
+            Some(ControlError::SessionEnded.to_string())
+        );
+    }
+
+    #[test]
+    fn model_switch_failed_event_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/claude-control.ts");
+        let event = ModelSwitchFailedEvent {
+            project: "p".to_string(),
+            model: "m".to_string(),
+            reason: "r".to_string(),
+        };
+        assert_eq!(
+            rust_fields(&event),
+            ts_interface_fields(ts, "ClaudeModelSwitchFailedEvent")
+        );
+        assert!(
+            ts.contains(&format!("'{MODEL_SWITCH_FAILED_EVENT}'")),
+            "claude-control.ts must name the {MODEL_SWITCH_FAILED_EVENT} event"
+        );
+    }
+
+    #[test]
+    fn model_switch_outcome_tags_match_ts_union() {
+        let ts = include_str!("../../src/src/app/models/claude-control.ts");
+        for outcome in [
+            ModelSwitchOutcome::Confirmed,
+            ModelSwitchOutcome::Unconfirmed,
+            ModelSwitchOutcome::Refused {
+                reason: String::new(),
+            },
+        ] {
+            let json = serde_json::to_value(&outcome).unwrap();
+            let tag = json["outcome"].as_str().unwrap();
+            assert!(
+                ts.contains(&format!("outcome: '{tag}'")),
+                "ModelSwitchOutcome must carry the '{tag}' outcome"
+            );
+        }
+        assert_eq!(
+            ts.matches("outcome: '").count(),
+            3,
+            "ModelSwitchOutcome has an outcome the Rust enum lacks"
+        );
+        assert!(ts.contains("outcome: 'refused'; reason: string"));
     }
 
     #[test]

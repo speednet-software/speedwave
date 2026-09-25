@@ -582,17 +582,18 @@ export class ProjectStateService {
   }
 
   /**
-   * Restarts integration containers; backend rebuilds missing worker images.
-   * @returns `skipped` when it never ran (no project, one already in flight, so `restartError` still belongs to an older attempt), else whether it succeeded.
+   * Restarts the integration containers of `project`; backend rebuilds missing worker images.
+   * @param project - the project to restart, only while the app stays settled on it until the backend call
+   * @returns `skipped` when it never ran (no project, the app not settled on it, one already in flight, so `restartError` still belongs to an older attempt), else whether it succeeded.
    */
-  async restartContainers(): Promise<RestartOutcome> {
-    if (!this.activeProject() || this.restarting) return 'skipped';
-    const project = this.activeProject();
+  async restartContainers(project: string | null): Promise<RestartOutcome> {
+    const mark = this.settledMark(project);
+    if (project === null || mark === null || this.restarting) return 'skipped';
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
     this.notifyChange();
-    const run = this.runRestart(project, justEnabled);
+    const run = this.runRestart(project, mark, justEnabled);
     const done = run.then(
       () => undefined,
       () => undefined
@@ -606,12 +607,17 @@ export class ProjectStateService {
   }
 
   private async runRestart(
-    project: string | null,
+    project: string,
+    mark: number,
     justEnabled: string | null
   ): Promise<RestartOutcome> {
+    await this.notifyRestartBegin();
+    if (!this.isStillSettledOn(project, mark)) {
+      if (this.pendingJustEnabled === justEnabled) this.pendingJustEnabled = null;
+      return 'skipped';
+    }
     let restartedOk = false;
     try {
-      await this.notifyRestartBegin();
       await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
       this.needsRestart = false;
       restartedOk = true;

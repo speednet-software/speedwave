@@ -351,10 +351,14 @@ mod tests {
     #[test]
     fn captured_max_account_reports_all_five_stops_for_every_listed_effort_model() {
         let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
-        for id in ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5"] {
+        for (id, catalog_default) in [
+            ("claude-opus-5-5", "medium"),
+            ("claude-fable-5-1", "high"),
+            ("claude-sonnet-5", "high"),
+        ] {
             let (levels, default) = effort_of(&picker, id);
             assert_eq!(levels, EFFORT_LEVELS, "{id}");
-            assert_eq!(default, Some("high"), "{id}");
+            assert_eq!(default, Some(catalog_default), "{id}");
         }
     }
 
@@ -362,6 +366,7 @@ mod tests {
     fn successful_initialize_does_not_restore_models_claude_code_omits() {
         let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
         for id in [
+            "claude-opus-5",
             "claude-fable-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
@@ -443,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn max_account_lists_every_reported_model_once_with_default_on_opus_5() {
+    fn max_account_lists_every_reported_model_once_with_default_on_opus_5_5() {
         for run in ["run_A", "run_B"] {
             let info = fixture_info(run);
             let plan = plan_for(LlmProviderKind::AnthropicOauth, Some(&info));
@@ -451,7 +456,7 @@ mod tests {
             let picker = picker_of(&info, plan);
             assert_eq!(
                 labels(&picker),
-                vec!["Opus 5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"],
+                vec!["Opus 5.5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"],
                 "{run}"
             );
             let defaults: Vec<&str> = picker
@@ -460,7 +465,7 @@ mod tests {
                 .filter(|r| r.is_default)
                 .map(|r| r.id.as_str())
                 .collect();
-            assert_eq!(defaults, vec!["claude-opus-5"], "{run}");
+            assert_eq!(defaults, vec!["claude-opus-5-5"], "{run}");
             assert!(picker.rows.iter().all(|r| r.display_name.is_none()));
         }
     }
@@ -473,7 +478,7 @@ mod tests {
         assert_eq!(
             wire,
             vec![
-                "claude-opus-5[1m]",
+                "claude-opus-5-5[1m]",
                 "claude-fable-5-1[1m]",
                 "claude-sonnet-5[1m]",
                 "claude-haiku-4-5"
@@ -485,16 +490,31 @@ mod tests {
     fn plan_preference_selects_among_variants_claude_code_actually_reported() {
         let info = info_of(
             vec![
-                listed("opus[1m]", Some("claude-opus-5[1m]"), "Opus (1M)"),
-                listed("opus", Some("claude-opus-5"), "Opus"),
+                listed("opus[1m]", Some("claude-opus-4-6[1m]"), "Opus (1M)"),
+                listed("opus", Some("claude-opus-4-6"), "Opus"),
             ],
             Some("Claude Pro"),
         );
         let pro = picker_of(&info, AnthropicPlan::Pro);
-        assert_eq!(pro.rows[0].wire_id, "claude-opus-5");
+        assert_eq!(pro.rows[0].wire_id, "claude-opus-4-6");
 
         let max = picker_of(&info, AnthropicPlan::Max);
-        assert_eq!(max.rows[0].wire_id, "claude-opus-5[1m]");
+        assert_eq!(max.rows[0].wire_id, "claude-opus-4-6[1m]");
+    }
+
+    #[test]
+    fn a_pro_account_gets_the_1m_window_of_opus_4_7_and_later() {
+        let info = info_of(
+            vec![
+                listed("opus[1m]", Some("claude-opus-5-5[1m]"), "Opus (1M)"),
+                listed("opus", Some("claude-opus-5-5"), "Opus"),
+            ],
+            Some("Claude Pro"),
+        );
+
+        let pro = picker_of(&info, AnthropicPlan::Pro);
+
+        assert_eq!(pro.rows[0].wire_id, "claude-opus-5-5[1m]");
     }
 
     #[test]
@@ -585,7 +605,30 @@ mod tests {
 
     #[test]
     fn dated_resolved_model_groups_with_its_catalog_row_and_keeps_the_snapshot() {
-        let picker = picker_of(&fixture_info("run_B"), AnthropicPlan::Max);
+        let info = info_of(
+            vec![listed("haiku", Some("claude-haiku-4-5-20251001"), "Haiku")],
+            Some("Claude Max"),
+        );
+        let picker = picker_of(&info, AnthropicPlan::Max);
+        assert_eq!(picker.rows.len(), 1);
+        assert_eq!(picker.rows[0].id, "claude-haiku-4-5");
+        assert_eq!(picker.rows[0].wire_id, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn a_dated_and_a_plain_listing_of_one_model_make_one_row_on_the_catalog_id() {
+        let info = fixture_info("run_B");
+        let listed: Vec<Option<&str>> = info
+            .models
+            .iter()
+            .filter(|m| m.value.contains("haiku"))
+            .map(|m| m.resolved_model.as_deref())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![Some("claude-haiku-4-5-20251001"), Some("claude-haiku-4-5")]
+        );
+        let picker = picker_of(&info, AnthropicPlan::Max);
         let haiku: Vec<&PickerRow> = picker
             .rows
             .iter()
@@ -593,7 +636,7 @@ mod tests {
             .collect();
         assert_eq!(haiku.len(), 1);
         assert_eq!(haiku[0].id, "claude-haiku-4-5");
-        assert_eq!(haiku[0].wire_id, "claude-haiku-4-5-20251001");
+        assert_eq!(haiku[0].wire_id, "claude-haiku-4-5");
     }
 
     #[test]
@@ -732,8 +775,12 @@ mod tests {
             Some("claude-opus-5[1m]")
         );
         assert_eq!(
-            normalized_pin("claude-opus-5[1m]", AnthropicPlan::Pro).as_deref(),
-            Some("claude-opus-5")
+            normalized_pin("claude-opus-5", AnthropicPlan::Pro).as_deref(),
+            Some("claude-opus-5[1m]")
+        );
+        assert_eq!(
+            normalized_pin("claude-opus-4-6[1m]", AnthropicPlan::Pro).as_deref(),
+            Some("claude-opus-4-6")
         );
         assert_eq!(
             normalized_pin("claude-haiku-4-5-20251001", AnthropicPlan::Max).as_deref(),
@@ -747,7 +794,11 @@ mod tests {
             normalized_pin("claude-fable-5-1[1m]", AnthropicPlan::Max),
             None
         );
-        assert_eq!(normalized_pin("claude-opus-5", AnthropicPlan::Pro), None);
+        assert_eq!(normalized_pin("claude-opus-4-6", AnthropicPlan::Pro), None);
+        assert_eq!(
+            normalized_pin("claude-opus-5-5[1m]", AnthropicPlan::Pro),
+            None
+        );
         assert_eq!(
             normalized_pin("claude-haiku-4-5", AnthropicPlan::Unknown),
             None
@@ -790,7 +841,7 @@ mod tests {
         let dir =
             speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("settings.json"), r#"{"model":"claude-opus-5"}"#).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"model":"claude-opus-5-5"}"#).unwrap();
 
         let info = fixture_info("run_A");
         normalize_pin_for_session(
@@ -801,13 +852,13 @@ mod tests {
         );
         assert_eq!(
             claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
-            Some("claude-opus-5[1m]")
+            Some("claude-opus-5-5[1m]")
         );
 
         normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
         assert_eq!(
             claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
-            Some("claude-opus-5[1m]"),
+            Some("claude-opus-5-5[1m]"),
             "an unknown plan must not downgrade a plan-dependent pin"
         );
     }

@@ -83,6 +83,7 @@
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [projectId]="projectState.activeProject() ?? ''"
             [modelError]="chat.modelSelectionError()"
+            [refusedModelPick]="chat.refusedModelPick()"
             [contextLabel]="composerContextLabel()"
             [transcriptAttached]="transcription.stagedTranscript() !== ''"
             [draftText]="transcription.chatPromptDraft()"

@@ -1160,6 +1160,8 @@ fn main() {
             pin_cmd::get_model_hint,
             pin_cmd::set_model_pin,
             pin_cmd::clear_model_pin,
+            pin_cmd::get_model_pin,
+            pin_cmd::restore_model_pin,
             model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,

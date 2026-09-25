@@ -190,6 +190,60 @@ describe('ModelSelectorComponent', () => {
     expect(badge.nativeElement.textContent).not.toContain('openai/o4-mini');
   });
 
+  async function pickRoutedRow(projectId: string): Promise<HTMLElement> {
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary')
+        return Promise.resolve({
+          provider_id: 'openrouter',
+          kind: 'open_router',
+          model: 'openai/o4-mini',
+          base_url: null,
+          effort_levels: EFFORT_LEVELS,
+        });
+      if (cmd === 'discover_llm_models')
+        return Promise.resolve({ models: [{ id: 'meta-llama/llama-3.1-70b-instruct' }] });
+      if (cmd === 'get_effort_pin') return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', projectId);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
+    badge.nativeElement.click();
+    await fixture.whenStable();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    fixture.debugElement
+      .query(By.css('[data-testid="model-selector-option-meta-llama/llama-3.1-70b-instruct"]'))
+      .nativeElement.click();
+    fixture.detectChanges();
+    return badge.nativeElement as HTMLElement;
+  }
+
+  it('gives the badge back to the model the session runs when Claude Code refuses the pick', async () => {
+    const badge = await pickRoutedRow('proj-or-refused');
+    expect(badge.textContent).toContain('meta-llama/llama-3.1-70b-instruct');
+
+    fixture.componentRef.setInput('refusedPick', {
+      catalogId: 'meta-llama/llama-3.1-70b-instruct',
+      running: null,
+    });
+    fixture.detectChanges();
+
+    expect(badge.textContent).toContain('openai/o4-mini');
+    expect(badge.textContent).not.toContain('meta-llama/llama-3.1-70b-instruct');
+  });
+
+  it('keeps a newer pick on the badge when an older pick is refused', async () => {
+    const badge = await pickRoutedRow('proj-or-older-refused');
+
+    fixture.componentRef.setInput('refusedPick', { catalogId: 'openai/gpt-5', running: null });
+    fixture.detectChanges();
+
+    expect(badge.textContent).toContain('meta-llama/llama-3.1-70b-instruct');
+  });
+
   it('keeps the active-mark slot at a fixed width so every row label starts at the same edge', async () => {
     await fixture.whenStable();
     fixture.detectChanges();

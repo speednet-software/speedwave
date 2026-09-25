@@ -370,7 +370,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   /** Triggers a container restart from the restart-required overlay. */
   restartContainers(): void {
-    this.projectState.restartContainers();
+    this.projectState.restartContainers(this.projectState.activeProject());
   }
 
   /** Dismisses the restart-required overlay without restarting. */

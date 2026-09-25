@@ -1,6 +1,7 @@
 use crate::chat::{self, ChatSession, SharedChatSession};
 use crate::control_channel::{
-    self, ContextUsage, ControlHandle, ControlQuery, PlanUsage, SessionInfoState,
+    self, ContextUsage, ControlHandle, ControlQuery, ModelSwitchOutcome, PlanUsage,
+    SessionInfoState,
 };
 use crate::reconcile::SharedOauth;
 use crate::types::check_project;
@@ -13,6 +14,14 @@ const MSG_SESSION_KEPT: &str = "the running chat session was kept";
 
 fn kept_session_error(e: impl std::fmt::Display) -> String {
     format!("{MSG_SESSION_KEPT}: {e}")
+}
+
+fn failure_before_swap(session_kept: bool, e: impl std::fmt::Display) -> String {
+    if session_kept {
+        kept_session_error(e)
+    } else {
+        e.to_string()
+    }
 }
 
 fn start_session_inner(
@@ -30,9 +39,8 @@ fn start_session_inner(
 
     containers_cmd::ensure_images_ready().map_err(kept_session_error)?;
 
-    if oauth_just_started {
-        containers_cmd::recreate_project_containers_if_running(project);
-    }
+    let recreated =
+        oauth_just_started && containers_cmd::recreate_project_containers_if_running(project);
 
     log::info!("acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
@@ -44,14 +52,14 @@ fn start_session_inner(
         }
         Ok(())
     })
-    .map_err(kept_session_error)?;
+    .map_err(|e| failure_before_swap(!recreated, e))?;
 
     log::info!("extracting old session");
     let mut old_session = {
         let mut guard = session_arc
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))
-            .map_err(kept_session_error)?;
+            .map_err(|e| failure_before_swap(!recreated, e))?;
         std::mem::replace(&mut *guard, ChatSession::new(project))
     };
     log::info!("stopping old session (outside lock)");
@@ -59,14 +67,30 @@ fn start_session_inner(
     drop(old_session);
 
     log::info!("starting new session");
-    let mut session = session_arc
-        .lock()
-        .map_err(|e| format!("Lock poisoned: {e}"))?;
-    let result = session
-        .start(app_handle, resume_session_id)
-        .map_err(|e| e.to_string());
-    log::info!("session.start result={result:?}");
-    result
+    start_then_await_first_turn(&session_arc, |session| {
+        session
+            .start(app_handle, resume_session_id)
+            .map_err(|e| e.to_string())
+    })
+}
+
+fn start_then_await_first_turn(
+    session_arc: &SharedChatSession,
+    start: impl FnOnce(&mut ChatSession) -> Result<(), String>,
+) -> Result<(), String> {
+    let first_turn = {
+        let mut session = session_arc
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let result = start(&mut session);
+        log::info!("session.start result={result:?}");
+        result?;
+        session.first_turn_gate()
+    };
+    if !first_turn.wait(chat::FIRST_TURN_WAIT) {
+        log::warn!("the new session's model switch did not settle before the first turn");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -104,14 +128,39 @@ pub(crate) async fn send_message(
     );
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let mut session = lock_session_for_input(&session_arc)?;
-        log::info!("lock acquired, sending message");
-        session
-            .send_message(&app_handle, &blocks)
-            .map_err(|e| e.to_string())
+        after_first_turn(&session_arc, |session| {
+            log::info!("lock acquired, sending message");
+            session
+                .send_message(&app_handle, &blocks)
+                .map_err(|e| e.to_string())
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn after_first_turn<T>(
+    session_arc: &SharedChatSession,
+    input: impl FnOnce(&mut ChatSession) -> Result<T, String>,
+) -> Result<T, String> {
+    let first_turn = lock_session_for_input(session_arc)?.first_turn_gate();
+    write_after(session_arc, &first_turn, input)
+}
+
+fn write_after<T>(
+    session_arc: &SharedChatSession,
+    first_turn: &chat::FirstTurnGate,
+    input: impl FnOnce(&mut ChatSession) -> Result<T, String>,
+) -> Result<T, String> {
+    if !first_turn.wait(chat::FIRST_TURN_WAIT) {
+        log::warn!("writing before the session's model switch settled");
+    }
+    let mut session = lock_session_for_input(session_arc)?;
+    if !session.first_turn_gate().is(first_turn) {
+        log::info!("the chat session was replaced while an input waited for its first turn");
+        return Err(MSG_SESSION_REPLACED.to_string());
+    }
+    input(&mut session)
 }
 
 #[tauri::command]
@@ -178,6 +227,7 @@ pub(crate) async fn resume_conversation(
 }
 
 const MSG_SESSION_BUSY: &str = "chat session is busy";
+const MSG_SESSION_REPLACED: &str = "the chat session was replaced before this input was written";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
 
 const INPUT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
@@ -286,14 +336,50 @@ fn live_session_input<T>(
     take_from_project_session(&session, project, take)
 }
 
+fn project_session_after_first_turn<T>(
+    session_arc: &SharedChatSession,
+    project: &str,
+    take: impl FnOnce(&ChatSession) -> anyhow::Result<T>,
+) -> Result<T, String> {
+    let deadline = std::time::Instant::now() + chat::FIRST_TURN_WAIT;
+    let mut first_turn = live_session_input(session_arc, project, |s| Ok(s.first_turn_gate()))?;
+    loop {
+        let settled =
+            first_turn.wait(deadline.saturating_duration_since(std::time::Instant::now()));
+        let session = lock_session_for_input(session_arc)?;
+        if session.project_name() != project {
+            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+        }
+        let current = session.first_turn_gate();
+        if current.is(&first_turn) || std::time::Instant::now() >= deadline {
+            if !settled {
+                log::warn!("taking the session before its model switch settled");
+            }
+            return take(&session).map_err(|e| e.to_string());
+        }
+        log::info!("the project's chat session restarted while an input waited for its first turn");
+        first_turn = current;
+    }
+}
+
 fn switch_model_inner(
     session_arc: &SharedChatSession,
     project: &str,
     model: &str,
-) -> Result<(), String> {
-    let switch = live_session_input(session_arc, project, ChatSession::model_switch)?;
+) -> Result<ModelSwitchOutcome, String> {
+    let switch = project_session_after_first_turn(session_arc, project, ChatSession::model_switch)?;
     log::info!("switching the chat session to {model}");
-    switch.apply(model).map_err(|e| e.to_string())
+    let outcome = switch.apply(model).map_err(|e| e.to_string())?;
+    match &outcome {
+        ModelSwitchOutcome::Confirmed => log::info!("Claude Code switched the session to {model}"),
+        ModelSwitchOutcome::Unconfirmed => {
+            log::warn!("Claude Code did not answer the switch to {model} in time");
+        }
+        ModelSwitchOutcome::Refused { reason } => {
+            log::warn!("Claude Code refused the switch to {model}: {reason}");
+        }
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -301,7 +387,7 @@ pub(crate) async fn switch_chat_model(
     project: String,
     model: String,
     state: tauri::State<'_, SharedChatSession>,
-) -> Result<(), String> {
+) -> Result<ModelSwitchOutcome, String> {
     check_project(&project)?;
     validate_model_pick(&model)?;
     let session_arc = state.inner().clone();
@@ -412,9 +498,11 @@ mod tests {
         );
     }
 
-    fn assert_the_pick_leaves_the_session_free_while_it_waits(
-        pick: fn(&SharedChatSession) -> Result<(), String>,
-    ) {
+    fn assert_the_pick_leaves_the_session_free_while_it_waits<T>(
+        pick: fn(&SharedChatSession) -> Result<T, String>,
+    ) where
+        T: std::fmt::Debug + PartialEq + Send + 'static,
+    {
         let session_arc: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("acme")));
         let control = {
             let mut session = session_arc.lock().unwrap();
@@ -592,7 +680,39 @@ mod tests {
                 !MSG_SESSION_BUSY.contains(trigger),
                 "the send retry restarts the session on '{trigger}', which would replace a live conversation"
             );
+            assert!(
+                !MSG_SESSION_REPLACED.contains(trigger),
+                "the send retry restarts the session on '{trigger}', which would resend into the conversation that replaced it"
+            );
         }
+    }
+
+    #[test]
+    fn a_message_that_waited_while_the_session_was_replaced_is_not_written_into_the_new_one() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sender = {
+            let session_arc = session_arc.clone();
+            let written = written.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                write_after(&session_arc, &gate, |_| {
+                    written.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+
+        *session_arc.lock().unwrap() = ChatSession::new("test-project");
+        gate.release();
+
+        assert_eq!(
+            sender.join().unwrap(),
+            Err(MSG_SESSION_REPLACED.to_string())
+        );
+        assert!(!written.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -837,7 +957,10 @@ mod tests {
             outside_closure.matches("?;").count(),
             outside_closure
                 .matches(".map_err(kept_session_error)?;")
-                .count(),
+                .count()
+                + outside_closure
+                    .matches(".map_err(|e| failure_before_swap(!recreated, e))?;")
+                    .count(),
             "a failure before the swap leaves the running session in place and must say so"
         );
         let after_stop = &body[body.find("old_session.stop()").unwrap()..];
@@ -933,13 +1056,241 @@ mod tests {
         let spawn_pos = body
             .find("spawn_blocking")
             .expect("send_message must use spawn_blocking");
-        let lock_pos = body
-            .find("lock_session_for_input(")
-            .expect("send_message must acquire the session lock via lock_session_for_input");
+        let input_pos = body
+            .find("after_first_turn(")
+            .expect("send_message must write through after_first_turn");
         assert!(
-            lock_pos > spawn_pos,
+            input_pos > spawn_pos,
             "session lock must be acquired INSIDE spawn_blocking, not before it"
         );
+        let input = extract_fn_body(source, "fn after_first_turn<");
+        assert!(
+            input.contains("lock_session_for_input("),
+            "after_first_turn must acquire the session lock via lock_session_for_input"
+        );
+    }
+
+    #[test]
+    fn a_message_waits_for_the_first_turn_without_holding_the_session() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let sender = {
+            let session_arc = session_arc.clone();
+            let sent = sent.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                write_after(&session_arc, &gate, |_| {
+                    sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert!(!sent.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            session_arc.try_lock().is_ok(),
+            "the wait must not hold the session"
+        );
+        gate.release();
+        sender.join().unwrap().unwrap();
+        assert!(sent.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_message_to_a_session_without_a_model_switch_goes_at_once() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let started = std::time::Instant::now();
+
+        after_first_turn(&session_arc, |_| Ok(())).unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn start_session_inner_starts_through_the_first_turn_wait() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let wrapped = body
+            .find("start_then_await_first_turn(&session_arc, |session| {")
+            .expect("the start goes through the first-turn wait");
+        let start = body
+            .find(".start(app_handle, resume_session_id)")
+            .expect("the start");
+
+        assert!(wrapped < start);
+    }
+
+    #[test]
+    fn a_start_waits_for_its_first_turn_with_the_session_released() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+        let starter = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                start_then_await_first_turn(&session_arc, |session| {
+                    gate_tx.send(session.hold_first_turn()).unwrap();
+                    Ok(())
+                })
+            })
+        };
+        let gate = gate_rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while session_arc.try_lock().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the start must release the session while it waits"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            !starter.is_finished(),
+            "the start returns only once the first turn may go"
+        );
+        gate.release();
+        assert_eq!(starter.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn a_start_that_fails_returns_its_error_without_waiting() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let started = std::time::Instant::now();
+
+        let result = start_then_await_first_turn(&session_arc, |session| {
+            session.hold_first_turn();
+            Err("failed to spawn claude".to_string())
+        });
+
+        assert_eq!(result, Err("failed to spawn claude".to_string()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_model_pick_for_another_project_never_waits_for_this_projects_first_turn() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("project-b")));
+        let _gate = session_arc.lock().unwrap().hold_first_turn();
+        let started = std::time::Instant::now();
+
+        let result = switch_model_inner(&session_arc, "project-a", "claude-haiku-4-5");
+
+        assert_eq!(result, Err(MSG_NO_SESSION_FOR_PROJECT.to_string()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_model_pick_waits_for_the_first_turn_of_a_new_session() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                switch_model_inner(&session_arc, "test-project", "claude-haiku-4-5")
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert!(!picker.is_finished(), "the pick waits for the soft-impose");
+        assert!(
+            session_arc.try_lock().is_ok(),
+            "the pick must not hold the session while it waits"
+        );
+        gate.release();
+        let Err(err) = picker.join().unwrap() else {
+            panic!("a session without a process cannot take the pick");
+        };
+        assert!(err.contains("no active session"), "{err}");
+    }
+
+    #[test]
+    fn a_model_pick_waits_again_when_its_project_session_restarts_during_the_wait() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let first = session_arc.lock().unwrap().hold_first_turn();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                switch_model_inner(&session_arc, "test-project", "claude-haiku-4-5")
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let second = session_arc.lock().unwrap().hold_first_turn();
+        first.release();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !picker.is_finished(),
+            "the pick waits for the restarted session's own soft-impose"
+        );
+
+        second.release();
+        let Err(err) = picker.join().unwrap() else {
+            panic!("a session without a process cannot take the pick");
+        };
+        assert!(err.contains("no active session"), "{err}");
+        assert_ne!(err, MSG_SESSION_REPLACED);
+    }
+
+    #[test]
+    fn a_model_pick_whose_project_session_was_replaced_by_another_project_is_refused() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                switch_model_inner(&session_arc, "test-project", "claude-haiku-4-5")
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        *session_arc.lock().unwrap() = ChatSession::new("other-project");
+        gate.release();
+
+        assert_eq!(
+            picker.join().unwrap(),
+            Err(MSG_NO_SESSION_FOR_PROJECT.to_string())
+        );
+    }
+
+    #[test]
+    fn a_failure_before_the_swap_says_kept_only_while_the_old_process_still_runs() {
+        assert!(failure_before_swap(true, "not signed in").starts_with(MSG_SESSION_KEPT));
+        assert_eq!(failure_before_swap(false, "not signed in"), "not signed in");
+    }
+
+    #[test]
+    fn a_recreate_for_a_new_oauth_worker_drops_the_kept_marker_after_it() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let recreate = body
+            .find("let recreated =")
+            .expect("the start records whether it recreated the containers");
+        let swap = body.find("std::mem::replace(").expect("the swap");
+        let after_recreate = &body[recreate..swap];
+
+        assert!(body[recreate..].contains("recreate_project_containers_if_running(project)"));
+        assert!(!after_recreate.contains(".map_err(kept_session_error)"));
+        assert!(after_recreate.contains("failure_before_swap(!recreated, e)"));
     }
 
     #[test]

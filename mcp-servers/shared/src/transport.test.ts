@@ -262,6 +262,30 @@ describe('transport', () => {
       );
     });
 
+    it('answers a server/discover under MCP-Protocol-Version 2026-07-28 with an immediate JSON-RPC 400', async () => {
+      const dispatched = vi.spyOn(handler, 'processRequest');
+      const req = createMockRequest(
+        { jsonrpc: '2.0', id: 1, method: 'server/discover', params: {} },
+        { 'mcp-protocol-version': '2026-07-28', accept: 'application/json, text/event-stream' }
+      );
+      const res = createMockResponse();
+
+      await handleMCPPost(handler, req as Request, res as unknown as Response);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith({
+        jsonrpc: '2.0',
+        id: null,
+        error: {
+          code: -32600,
+          message: 'Unsupported MCP-Protocol-Version: 2026-07-28',
+        },
+      });
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(mockSendJSONResponse).not.toHaveBeenCalled();
+      expect(mockCreateSSEStream).not.toHaveBeenCalled();
+    });
+
     it('allows missing MCP-Protocol-Version header', async () => {
       const req = createMockRequest({ jsonrpc: '2.0', id: 1, method: 'ping' });
       const res = createMockResponse();

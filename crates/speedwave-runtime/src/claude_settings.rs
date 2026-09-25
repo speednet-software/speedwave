@@ -57,6 +57,26 @@ pub fn set_model_pin(
     if !listed && !crate::defaults::is_selectable_anthropic_model_id(model) {
         return Err(format!("unknown Anthropic model: {model}"));
     }
+    write_model_pin(data_dir, project, model)
+}
+
+/// Writes back a pin `get_model_pin` read, verbatim (`None` removes it); refuses a value the
+/// entrypoint's foreign-model guard would drop.
+pub fn restore_model_pin(
+    data_dir: &Path,
+    project: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let Some(model) = model else {
+        return clear_model_pin(data_dir, project);
+    };
+    if !crate::defaults::is_claude_code_model_setting(model) {
+        return Err(format!("not a Claude Code model setting: {model}"));
+    }
+    write_model_pin(data_dir, project, model)
+}
+
+fn write_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
     edit_settings(data_dir, project, true, |obj| {
         obj.insert(
             MODEL_KEY.to_string(),
@@ -344,6 +364,41 @@ mod tests {
             assert!(err.contains("unknown Anthropic model"), "id: {bad}");
         }
         assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn restore_model_pin_writes_back_an_alias_set_model_pin_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(set_model_pin(tmp.path(), "proj", "opus", &[]).is_err());
+        restore_model_pin(tmp.path(), "proj", Some("opus")).unwrap();
+        assert_eq!(get_model_pin(tmp.path(), "proj"), Some("opus".to_string()));
+    }
+
+    #[test]
+    fn restore_model_pin_without_a_value_removes_only_the_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"claude-haiku-4-5","outputStyle":"Speedwave"}"#,
+        );
+        restore_model_pin(tmp.path(), "proj", None).unwrap();
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["outputStyle"], "Speedwave");
+    }
+
+    #[test]
+    fn restore_model_pin_refuses_a_value_the_entrypoint_would_drop_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-haiku-4-5"}"#);
+        let err = restore_model_pin(tmp.path(), "proj", Some("gpt-5")).unwrap_err();
+        assert!(err.contains("gpt-5"), "{err}");
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj"),
+            Some("claude-haiku-4-5".to_string())
+        );
     }
 
     #[test]

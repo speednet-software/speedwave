@@ -37,6 +37,7 @@ import {
   type PreprocessedImage,
 } from '../../services/image-preprocessor.service';
 import type { ChatAttachment } from '../../models/chat';
+import type { RefusedModelPick } from '../../services/chat-state.service';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
@@ -229,6 +230,7 @@ const PLAN_MODE_PREFIX =
             [projectId]="projectId()"
             [streaming]="streaming()"
             [modelError]="modelError()"
+            [refusedPick]="refusedModelPick()"
             [sessionModel]="model()"
             (modelSelected)="modelSelected.emit($event)"
             (effortSelected)="effortSelected.emit($event)"
@@ -324,6 +326,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly projectId = input('');
 
   readonly modelError = input('');
+
+  readonly refusedModelPick = input<RefusedModelPick | null>(null);
 
   readonly contextLabel = input('');
 
