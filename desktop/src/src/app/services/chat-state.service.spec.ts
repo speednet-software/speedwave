@@ -4378,6 +4378,27 @@ describe('ChatStateService', () => {
           expect(pinWrites(invokeSpy.mock.calls)).toEqual([]);
         });
 
+        it('a pick whose session was replaced while it waited is saved and shows no error in the new conversation', async () => {
+          liveConversation();
+          await Promise.resolve();
+          const answer = createDeferred<ModelSwitchOutcome>();
+          overrideInvoke('switch_chat_model', () => answer.promise);
+          const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+          const pick = service.applyModelSelection(haikuPick);
+          await vi.waitFor(() => {
+            expect(indexOfCall(invokeSpy.mock.calls, switchedModel)).toBeGreaterThan(-1);
+          });
+
+          service.resetForNewConversation();
+          service.seedSessionId('sess-next');
+          answer.reject(new Error('the chat session was replaced before this input was written'));
+          await pick;
+
+          expect(service.modelSelectionError()).toBe('');
+          expect(service.refusedModelPick()).toBeNull();
+          expect(pinWrites(invokeSpy.mock.calls)).toEqual(['claude-haiku-4-5']);
+        });
+
         it('a refusal after the session reported another model gives the badge back to what it reported', async () => {
           liveConversation();
           await Promise.resolve();

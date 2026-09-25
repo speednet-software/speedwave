@@ -1265,6 +1265,9 @@ impl ModelSettled {
     }
 }
 
+pub(crate) const FIRST_TURN_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(control_channel::SET_MODEL_TIMEOUT.as_secs() + 1);
+
 #[derive(Clone)]
 pub(crate) struct FirstTurnGate(Arc<(Mutex<bool>, std::sync::Condvar)>);
 
@@ -5117,6 +5120,11 @@ mod tests {
             soft_impose_report(answered, "local/llama-3.1-70b", &stopping),
             None
         );
+    }
+
+    #[test]
+    fn the_first_turn_wait_outlasts_the_soft_impose_answer() {
+        assert!(FIRST_TURN_WAIT > control_channel::SET_MODEL_TIMEOUT);
     }
 
     #[test]

@@ -80,7 +80,7 @@ fn start_then_await_first_turn(
         result?;
         session.first_turn_gate()
     };
-    if !first_turn.wait(control_channel::SET_MODEL_TIMEOUT) {
+    if !first_turn.wait(chat::FIRST_TURN_WAIT) {
         log::warn!("the new session's model switch did not settle before the first turn");
     }
     Ok(())
@@ -145,7 +145,7 @@ fn write_after<T>(
     first_turn: &chat::FirstTurnGate,
     input: impl FnOnce(&mut ChatSession) -> Result<T, String>,
 ) -> Result<T, String> {
-    if !first_turn.wait(control_channel::SET_MODEL_TIMEOUT) {
+    if !first_turn.wait(chat::FIRST_TURN_WAIT) {
         log::warn!("writing before the session's model switch settled");
     }
     let mut session = lock_session_for_input(session_arc)?;
@@ -220,7 +220,7 @@ pub(crate) async fn resume_conversation(
 }
 
 const MSG_SESSION_BUSY: &str = "chat session is busy";
-const MSG_SESSION_REPLACED: &str = "the chat session was replaced before the message was written";
+const MSG_SESSION_REPLACED: &str = "the chat session was replaced before this input was written";
 const MSG_NO_SESSION_FOR_PROJECT: &str = "no chat session for this project";
 
 const INPUT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
@@ -334,7 +334,14 @@ fn switch_model_inner(
     project: &str,
     model: &str,
 ) -> Result<ModelSwitchOutcome, String> {
-    let switch = after_first_turn(session_arc, |session| {
+    let first_turn = {
+        let session = lock_session_for_input(session_arc)?;
+        if session.project_name() != project {
+            return Err(MSG_NO_SESSION_FOR_PROJECT.to_string());
+        }
+        session.first_turn_gate()
+    };
+    let switch = write_after(session_arc, &first_turn, |session| {
         take_from_project_session(session, project, ChatSession::model_switch)
     })?;
     log::info!("switching the chat session to {model}");
@@ -1137,6 +1144,19 @@ mod tests {
         });
 
         assert_eq!(result, Err("failed to spawn claude".to_string()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_model_pick_for_another_project_never_waits_for_this_projects_first_turn() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("project-b")));
+        let _gate = session_arc.lock().unwrap().hold_first_turn();
+        let started = std::time::Instant::now();
+
+        let result = switch_model_inner(&session_arc, "project-a", "claude-haiku-4-5");
+
+        assert_eq!(result, Err(MSG_NO_SESSION_FOR_PROJECT.to_string()));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
