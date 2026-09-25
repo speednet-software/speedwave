@@ -131,8 +131,9 @@ fn reap_instance_within(
     let output = crate::binary::run_with_timeout_capture(&mut cmd, deadline)?;
     anyhow::ensure!(
         output.status.success(),
-        "reap exec in '{container}' exited with {}",
-        output.status
+        "reap exec in '{container}' exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(())
 }
@@ -395,6 +396,33 @@ mod tests {
             reap_instance(&runtime, container, "abc-123").expect_err("a failed exec is reported");
 
         assert!(err.to_string().contains(container), "{err}");
+        assert!(
+            err.to_string().ends_with(": container is not responding"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_reap_in_a_container_that_is_gone_reports_why() {
+        for (container, stderr) in [
+            (
+                "reap-missing_claude",
+                "Error: No such container: reap-missing_claude",
+            ),
+            ("reap-stopped_claude", "cannot exec in a stopped state"),
+        ] {
+            let (runtime, _handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
+                .push_exec_piped_failure(stderr)
+                .build();
+
+            let err = reap_instance(&runtime, container, "abc-123")
+                .expect_err("a reap in a gone container fails");
+
+            assert!(
+                crate::runtime::is_missing_or_stopped_container_error(&err),
+                "{err}"
+            );
+        }
     }
 
     #[test]

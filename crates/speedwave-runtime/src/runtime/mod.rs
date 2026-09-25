@@ -673,6 +673,12 @@ fn is_stopped_container_error(message: &str) -> bool {
     lower.contains("cannot exec in a stopped state")
 }
 
+/// `true` if an exec error says its container is missing or stopped, so no process runs in it.
+pub fn is_missing_or_stopped_container_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    is_missing_container_error_msg(&message) || is_stopped_container_error(&message)
+}
+
 const NO_SUCH_IMAGE_FRAGMENT: &str = "no such image";
 
 pub(crate) fn image_inspect_verdict(inspect: anyhow::Result<String>) -> anyhow::Result<bool> {
@@ -2783,6 +2789,33 @@ services:
         assert!(!is_stopped_container_error("mount namespace root"));
         assert!(!is_stopped_container_error("connection refused"));
         assert!(!is_stopped_container_error(""));
+    }
+
+    #[test]
+    fn a_missing_or_stopped_container_is_told_apart_from_other_exec_failures() {
+        for gone in [
+            "reap exec in 'speedwave_acme_claude' exited with exit status: 1: \
+             Error: No such container: speedwave_acme_claude",
+            "time=\"2026-05-03T21:37:58+02:00\" level=fatal \
+             msg=\"cannot exec in a stopped state\"",
+        ] {
+            assert!(
+                is_missing_or_stopped_container_error(&anyhow::anyhow!("{gone}")),
+                "{gone}"
+            );
+        }
+        for other in [
+            "reap exec in 'speedwave_acme_claude' exited with exit status: 1: ",
+            "container is not responding",
+            "command 'limactl' timed out after 9s",
+            "mount namespace root",
+            "",
+        ] {
+            assert!(
+                !is_missing_or_stopped_container_error(&anyhow::anyhow!("{other}")),
+                "{other}"
+            );
+        }
     }
 
     #[test]
