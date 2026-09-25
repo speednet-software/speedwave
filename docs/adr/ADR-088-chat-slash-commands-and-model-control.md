@@ -462,6 +462,15 @@ changed` (ADR-089, SPEED-709 amendment). A refused composer pick keeps the
   on Pro and Team Standard plans from Sonnet to Opus, matching Max, Team Premium, and
   Enterprise"[^10]. A project without a model pin on such an account moves from
   Sonnet to Opus 5.5 with this bump.
+- **The IDE bridge needs no change.** 2.1.282 carries the MCP `server/discover`
+  version probe, and `bridges/ide_bridge.rs` answers every method it does not know
+  with JSON-RPC error -32601. The negotiation code in the pinned binary treats any
+  error answer to `server/discover` other than its unsupported-version error as a
+  server that predates the probe and falls back to `initialize`, and its default
+  negotiation mode sends no probe at all. A stub run of the `-p` stream-json
+  session, with a valid IDE lock file, opened no IDE connection on 2.1.282 or on
+  2.1.267: the binary connects to an IDE only from its interactive UI, so only a
+  session in the terminal reaches the bridge.
 
 **Amendment (SPEED-709, 2026-09-25: a live model pick is saved once Claude Code
 accepts it).** Decision 3 saved a pick before the switch. Since `set_model` can
