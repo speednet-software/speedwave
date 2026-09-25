@@ -48,7 +48,7 @@ function tabTitle(store: ChatSessionStore): string {
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex h-full min-w-0 flex-1 items-stretch', 'data-testid': 'chat-tabs' },
   template: `
-    <div class="flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label="Chat tabs">
+    <div class="flex min-w-0 overflow-x-auto" role="tablist" aria-label="Chat tabs">
       @for (row of tabRows(); track row.id) {
         <div
           class="group flex min-w-[110px] max-w-[200px] flex-1 items-stretch border-r border-[var(--line)]"

@@ -390,6 +390,15 @@ describe('ChatTabsComponent', () => {
     expect(titleFor(tabEls()[0])).toBe('日本語 テスト');
   });
 
+  it('does not force the tab list to fill the header row, so the plus button hugs the last tab', () => {
+    const store = new FakeStore();
+    chat.setTabs([['t1', store]]);
+    fixture.detectChanges();
+
+    const tablist = fixture.nativeElement.querySelector('[role="tablist"]') as HTMLElement;
+    expect(tablist.classList.contains('flex-1')).toBe(false);
+  });
+
   it('carries host classes that shrink-then-scroll as an inline flex child of the header row', () => {
     const store = new FakeStore();
     chat.setTabs([['t1', store]]);
