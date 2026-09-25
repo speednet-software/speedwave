@@ -525,20 +525,7 @@ mod tests {
             let session_arc = session_arc.clone();
             std::thread::spawn(move || pick(&session_arc))
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while control.pending_ids().is_empty() {
-            if picker.is_finished() {
-                panic!(
-                    "the pick ended before it waited for Claude Code: {:?}",
-                    picker.join()
-                );
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the pick never registered its request"
-            );
-            std::thread::yield_now();
-        }
+        let (_, picker) = pending_request_id(&control, picker);
 
         let mut session = session_arc
             .try_lock()
@@ -552,21 +539,35 @@ mod tests {
         );
     }
 
-    fn answer_the_pending_query(
+    fn pending_request_id<T: std::fmt::Debug>(
         control: &control_channel::ControlChannel,
-        payload: &serde_json::Value,
-    ) {
+        caller: std::thread::JoinHandle<T>,
+    ) -> (String, std::thread::JoinHandle<T>) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let id = loop {
+        loop {
             if let Some(id) = control.pending_ids().pop() {
-                break id;
+                return (id, caller);
+            }
+            if caller.is_finished() {
+                panic!(
+                    "the caller ended before it waited for Claude Code: {:?}",
+                    caller.join()
+                );
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the query never registered its request"
+                "the caller never registered its request"
             );
             std::thread::yield_now();
-        };
+        }
+    }
+
+    fn answer_the_pending_query<T: std::fmt::Debug>(
+        control: &control_channel::ControlChannel,
+        caller: std::thread::JoinHandle<T>,
+        payload: &serde_json::Value,
+    ) -> T {
+        let (id, caller) = pending_request_id(control, caller);
         let line = serde_json::json!({
             "type": control_channel::MSG_TYPE_CONTROL_RESPONSE,
             "response": {"subtype": "success", "request_id": id, "response": payload},
@@ -575,6 +576,7 @@ mod tests {
             control.route_response(&line),
             control_channel::Routed::Delivered
         );
+        caller.join().unwrap()
     }
 
     #[test]
@@ -593,8 +595,7 @@ mod tests {
             std::thread::spawn(move || context_usage_inner(&session_arc, "acme"))
         };
 
-        answer_the_pending_query(&control, captured);
-        let usage = reader.join().unwrap().expect("context usage");
+        let usage = answer_the_pending_query(&control, reader, captured).expect("context usage");
 
         let names: Vec<&str> = usage.categories.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
