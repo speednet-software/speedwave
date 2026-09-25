@@ -414,12 +414,20 @@ pub fn base_env() -> HashMap<String, String> {
         "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".into(),
         MCP_TOOL_IDLE_TIMEOUT_MS.to_string(),
     );
+    env.insert(
+        MCP_DESCRIPTION_LENGTH_ENV.into(),
+        MCP_DESCRIPTION_MAX_LENGTH.to_string(),
+    );
     env
 }
 
 /// Idle ceiling (ms) for Claude Code's remote-MCP tool abort. Must stay ≥ the longest
 /// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
 pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
+
+pub(crate) const MCP_DESCRIPTION_LENGTH_ENV: &str = "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH";
+
+pub(crate) const MCP_DESCRIPTION_MAX_LENGTH: usize = 8192;
 
 /// Alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from `ANTHROPIC_MODELS` (Fable resolves
 /// natively); `[1m]` only where every plan has that window, and a plan-dependent one is not pinned.
@@ -607,6 +615,49 @@ mod tests {
             MCP_TOOL_IDLE_TIMEOUT_MS >= worker_max,
             "MCP_TOOL_IDLE_TIMEOUT_MS ({MCP_TOOL_IDLE_TIMEOUT_MS}) must be >= the longest \
              worker timeout STALE_CHUNK_TIMEOUT_MS ({worker_max}) from timeouts.ts — bump it"
+        );
+    }
+
+    #[test]
+    fn base_env_lets_claude_code_keep_whole_mcp_descriptions() {
+        let env = base_env();
+        assert_eq!(
+            env.get("CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH")
+                .map(String::as_str),
+            Some(MCP_DESCRIPTION_MAX_LENGTH.to_string().as_str())
+        );
+        assert_eq!(
+            MCP_DESCRIPTION_LENGTH_ENV,
+            "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH"
+        );
+    }
+
+    fn hub_meta_tool_description_budget() -> usize {
+        let src = include_str!("../../../mcp-servers/hub/src/meta-tools.ts");
+        let re = regex::Regex::new(r"export const MAX_META_TOOL_DESCRIPTION_LENGTH = ([0-9_]+);")
+            .unwrap();
+        re.captures(src)
+            .expect("meta-tools.ts must declare MAX_META_TOOL_DESCRIPTION_LENGTH as a literal")
+            .get(1)
+            .unwrap()
+            .as_str()
+            .replace('_', "")
+            .parse()
+            .expect("MAX_META_TOOL_DESCRIPTION_LENGTH must be an integer")
+    }
+
+    #[test]
+    fn mcp_description_limit_covers_the_hub_meta_tool_budget() {
+        let budget = hub_meta_tool_description_budget();
+        assert!(
+            budget > 2048,
+            "the budget exists because execute_code does not fit Claude Code's default 2048"
+        );
+        assert!(
+            MCP_DESCRIPTION_MAX_LENGTH >= budget,
+            "MCP_DESCRIPTION_MAX_LENGTH ({MCP_DESCRIPTION_MAX_LENGTH}) must be >= the hub's \
+             MAX_META_TOOL_DESCRIPTION_LENGTH ({budget}) from meta-tools.ts, or Claude Code cuts \
+             a hub meta-tool description"
         );
     }
 
