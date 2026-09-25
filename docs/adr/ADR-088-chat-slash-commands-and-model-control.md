@@ -779,10 +779,12 @@ in: one begun while a project switch runs never reaches the backend, and one tha
 switch overtakes loads no transcript and shows neither its error nor the conversation
 it kept. A New chat started from a transcript that a switch overtakes fails with
 `NEW_CONVERSATION_PROJECT_CHANGED`, so nothing is restored or staged into the other
-project's chat, and a start reports its failure only while the app is settled on the
-project it started for. A resume begun while a turn streams stops that turn first, so
-a conversation the backend keeps shows the turn stopped rather than streaming without
-end. The fresh start after a container restart drops them even then, since the restart
+project's chat, and a start, the fresh start after a container restart included,
+reports its failure only while the app is settled on the project it started for. A
+resume begun while a turn streams stops that turn first, so a conversation the backend
+keeps shows the turn stopped rather than streaming without end, and then waits out a
+container restart that began during that stop. The fresh start after a container
+restart drops them even then, since the restart
 already ended the earlier process. A pick made while a resume waits out a container
 restart is dropped when the resume begins, since the resumed process launches with the
 pins. The Stop a container restart begins with releases nothing: the restart resumes

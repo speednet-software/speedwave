@@ -1690,11 +1690,14 @@ export class ChatStateService {
   }
 
   private async startFreshSession(): Promise<void> {
+    const project = this.projectState.activeProject();
+    const mark = this.projectState.settledMark(project);
     try {
       await this.replaceConversation(false);
     } catch (err) {
       const content = `Could not start a new conversation: ${err instanceof Error ? err.message : String(err)}`;
       this.log.error(`[chat-state] startFreshSession failed: ${String(err)}`);
+      if (!this.projectState.isStillSettledOn(project, mark)) return;
       this._messages = [
         ...this._messages,
         { role: 'assistant', blocks: [{ type: 'error', content }], timestamp: Date.now() },
@@ -1717,7 +1720,8 @@ export class ChatStateService {
     let settled = outlasted && sameProject();
     if (settled && this.isStreaming) {
       await this.interruptTurn();
-      settled = sameProject();
+      const outlastedAgain = !this.projectState.restartInFlight || (await this.outlastRestart());
+      settled = outlastedAgain && sameProject();
     }
     if (!settled) {
       this._resumeInProgress = false;

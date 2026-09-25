@@ -3844,6 +3844,35 @@ describe('ChatStateService', () => {
         expect(service.lastKnownSessionId).toBe(LIVE);
       });
 
+      it('a resume that stops a streaming turn also waits out a container restart begun during the stop', async () => {
+        liveConversation();
+        await Promise.resolve();
+        service.isStreaming = true;
+        const stopped = createDeferred<void>();
+        const restart = createDeferred<void>();
+        overrideInvoke('stop_chat', () => stopped.promise);
+        overrideInvoke('restart_integration_containers', () => restart.promise);
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+        const projectState = TestBed.inject(ProjectStateService);
+        const called = (name: string): number =>
+          indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === name);
+
+        const resuming = service.resumeConversation('sess-older');
+        await vi.waitFor(() => expect(called('stop_chat')).toBeGreaterThan(-1));
+        const restarting = projectState.restartContainers();
+        stopped.resolve();
+        await new Promise((r) => setTimeout(r, 0));
+        expect(called('resume_conversation')).toBe(-1);
+
+        restart.resolve();
+        await restarting;
+        await resuming;
+
+        expect(called('resume_conversation')).toBeGreaterThan(
+          called('restart_integration_containers')
+        );
+      });
+
       it('a restored conversation view brings back every field, and a reset clears every one', () => {
         const internals = service as unknown as {
           captureConversationView(): Record<string, unknown>;
@@ -7884,6 +7913,21 @@ describe('ChatStateService', () => {
       expect(service.lastKnownSessionId).toBeNull();
       expect(service.sessionStatsFromState()).toBeNull();
       expect(projectState.error).not.toContain('container images are still building');
+    });
+
+    it('a fresh start after a restart that a switch overtakes leaves no error in the project switched to', async () => {
+      const fresh = (
+        service as unknown as { startFreshSession(): Promise<void> }
+      ).startFreshSession();
+      await vi.waitFor(() => expect(calls).toContain('start_chat'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      started.reject(new Error('failed to spawn claude'));
+      await fresh;
+
+      expect(JSON.stringify(service.messagesFromState())).not.toContain(
+        'Could not start a new conversation'
+      );
     });
 
     it('a new chat that started after the switch began fails, so nothing is staged for the other project', async () => {
