@@ -38,6 +38,13 @@ pub struct BundledAssetSpec {
     pub kind: BundledAssetKind,
 }
 
+/// Bundle-relative directory of the PII NER model artifact (ADR-090).
+pub const PII_NER_ASSET_DIR: &str = "pii-ner";
+/// Manifest file inside [`PII_NER_ASSET_DIR`]; the loader reads weights and tokenizer names from it.
+pub const PII_NER_MANIFEST: &str = "manifest.json";
+/// Repo-relative output of `make prepare-pii-ner-model`, the dev-tree source of the asset dir.
+pub const PII_NER_DEV_ARTIFACT_DIR: &str = "desktop/src-tauri/pii-ner";
+
 const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     BundledAssetSpec {
         path: "build-context/containers",
@@ -94,6 +101,18 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
     BundledAssetSpec {
         path: "oauth/oauth/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
+    },
+    BundledAssetSpec {
+        path: "pii-ner/manifest.json",
+        kind: BundledAssetKind::File,
+    },
+    BundledAssetSpec {
+        path: "pii-ner/redact-bert.safetensors",
+        kind: BundledAssetKind::File,
+    },
+    BundledAssetSpec {
+        path: "pii-ner/tokenizer.json",
+        kind: BundledAssetKind::File,
     },
 ];
 
@@ -1474,6 +1493,10 @@ mod tests {
         std::fs::write(root.join("mcp-os/shared/dist/index.js"), "export {};").unwrap();
         std::fs::write(root.join("mcp-os/shared/package.json"), "{}").unwrap();
         std::fs::write(root.join("mcp-os/shared/package-lock.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("pii-ner")).unwrap();
+        std::fs::write(root.join("pii-ner/manifest.json"), "{}").unwrap();
+        std::fs::write(root.join("pii-ner/redact-bert.safetensors"), "binary").unwrap();
+        std::fs::write(root.join("pii-ner/tokenizer.json"), "{}").unwrap();
         std::fs::write(
             root.join("mcp-os/shared/node_modules/pkg/index.js"),
             "module.exports = {};",
@@ -2042,6 +2065,10 @@ mod tests {
         std::fs::write(temp.path().join("mail-cli"), "").unwrap();
         std::fs::write(temp.path().join("notes-cli"), "").unwrap();
         std::fs::write(temp.path().join("audio-capture-cli"), "").unwrap();
+        std::fs::create_dir_all(temp.path().join("pii-ner")).unwrap();
+        std::fs::write(temp.path().join("pii-ner/manifest.json"), "").unwrap();
+        std::fs::write(temp.path().join("pii-ner/redact-bert.safetensors"), "").unwrap();
+        std::fs::write(temp.path().join("pii-ner/tokenizer.json"), "").unwrap();
 
         validate_bundled_runtime_assets(temp.path(), "macos", true).unwrap();
     }

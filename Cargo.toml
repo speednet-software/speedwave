@@ -4,6 +4,7 @@ members = [
     "crates/speedwave-cli",
     "crates/pii-engine",
     "crates/pii-engine-wasm",
+    "crates/pii-ner",
 ]
 resolver = "2"
 

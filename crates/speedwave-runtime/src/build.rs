@@ -446,6 +446,31 @@ pub fn resolve_oauth_script() -> Option<std::path::PathBuf> {
     )
 }
 
+/// Resolves the PII NER model artifact directory (`manifest.json`, weights, tokenizer; ADR-090):
+/// bundle, then the dev-tree output of `make prepare-pii-ner-model`, then the resources marker.
+pub fn resolve_pii_ner_artifact_dir() -> Option<PathBuf> {
+    resolve_pii_ner_artifact_dir_inner(
+        crate::consts::data_dir().parent().map(|p| p.to_path_buf()),
+        repo_dev_path(crate::bundle::PII_NER_DEV_ARTIFACT_DIR),
+    )
+}
+
+fn resolve_pii_ner_artifact_dir_inner(
+    home: Option<PathBuf>,
+    dev_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let manifest = resolve_worker_script_inner(
+        "pii-ner artifact",
+        &[
+            crate::bundle::PII_NER_ASSET_DIR,
+            crate::bundle::PII_NER_MANIFEST,
+        ],
+        home,
+        dev_dir.map(|d| d.join(crate::bundle::PII_NER_MANIFEST)),
+    )?;
+    manifest.parent().map(std::path::Path::to_path_buf)
+}
+
 /// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
 fn repo_dev_path(rel: &str) -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2074,6 +2099,53 @@ mod tests {
         );
         let result = resolve_mcp_os_script_inner(None, None);
         assert_eq!(result, Some(script_path));
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+    }
+
+    #[test]
+    fn resolve_pii_ner_artifact_dir_prefers_bundle_then_dev_tree_then_marker() {
+        let _guard = crate::binary::tests::ENV_LOCK.lock().unwrap();
+        std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = tmp.path().join("dev").join("pii-ner");
+        let home = tmp.path().join("home");
+        let marker_root = tmp.path().join("bundle");
+        for dir in [&dev, &marker_root.join("pii-ner")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("manifest.json"), "{}").unwrap();
+        }
+        std::fs::create_dir_all(home.join(crate::consts::DATA_DIR)).unwrap();
+        std::fs::write(
+            home.join(crate::consts::DATA_DIR)
+                .join(crate::consts::RESOURCES_MARKER),
+            marker_root.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_pii_ner_artifact_dir_inner(Some(home.clone()), Some(dev.clone())),
+            Some(dev.clone())
+        );
+        assert_eq!(
+            resolve_pii_ner_artifact_dir_inner(Some(home.clone()), None),
+            Some(marker_root.join("pii-ner"))
+        );
+        assert_eq!(
+            resolve_pii_ner_artifact_dir_inner(None, Some(tmp.path().join("missing"))),
+            None
+        );
+
+        let bundle = tmp.path().join("res");
+        std::fs::create_dir_all(bundle.join("pii-ner")).unwrap();
+        std::fs::write(bundle.join("pii-ner").join("manifest.json"), "{}").unwrap();
+        std::env::set_var(
+            crate::consts::BUNDLE_RESOURCES_ENV,
+            bundle.to_string_lossy().as_ref(),
+        );
+        assert_eq!(
+            resolve_pii_ner_artifact_dir_inner(Some(home), Some(dev)),
+            Some(bundle.join("pii-ner"))
+        );
         std::env::remove_var(crate::consts::BUNDLE_RESOURCES_ENV);
     }
 

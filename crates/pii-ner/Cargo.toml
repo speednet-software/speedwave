@@ -1,0 +1,39 @@
+[package]
+name = "speedwave-pii-ner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host-side PII span detection with the Redact BERT token classifier on burn"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray", "wgpu"] }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+safetensors = "0.8"
+sha2 = "0.11"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+bench = []
+model-e2e = []
+
+[[bin]]
+name = "pii-ner-bench"
+path = "src/bin/pii_ner_bench.rs"
+required-features = ["bench"]
+
+[[test]]
+name = "model_e2e"
+required-features = ["model-e2e"]
+
+[lints]
+workspace = true

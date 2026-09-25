@@ -1215,6 +1215,7 @@ pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
 fn build_security_policy_response(
     resolved: &speedwave_runtime::pii_policy::ResolvedPiiPolicy,
     raw: Option<&config::PiiPolicyUserConfig>,
+    ner: speedwave_runtime::pii_policy::ResolvedNer,
 ) -> SecurityPolicyResponse {
     let custom_policies = raw
         .map(|r| {
@@ -1235,6 +1236,8 @@ fn build_security_policy_response(
         forced_policies: resolved.source.forced.clone(),
         effective_rules: resolved.rules.clone(),
         custom_policies,
+        ner_enabled: ner.enabled,
+        ner_forced: ner.forced,
     }
 }
 
@@ -1255,7 +1258,20 @@ fn get_security_policy_in(
         .and_then(|m| m.pii_policy);
     let resolved =
         speedwave_runtime::pii_policy::resolve_pii_policy(policy.as_ref(), managed.as_ref())?;
-    Ok(build_security_policy_response(&resolved, policy.as_ref()))
+    let feature_enabled = speedwave_runtime::pii_policy::pii_feature_enabled(
+        user_config.beta_enabled(),
+        managed.as_ref(),
+    );
+    let ner = speedwave_runtime::pii_policy::resolve_pii_ner(
+        feature_enabled,
+        policy.as_ref(),
+        managed.as_ref(),
+    );
+    Ok(build_security_policy_response(
+        &resolved,
+        policy.as_ref(),
+        ner,
+    ))
 }
 
 fn stored_security_policy(
@@ -1397,6 +1413,7 @@ fn build_pii_policy_user_config(
     let cfg = config::PiiPolicyUserConfig {
         policies,
         custom_policies,
+        ner: Some(update.ner_enabled),
     };
     pii_policy::validate_user_policy_config(&cfg).map_err(|e| anyhow::anyhow!(e))?;
     Ok(cfg)
@@ -1406,12 +1423,20 @@ fn build_pii_policy_user_config(
 pub fn update_security_policy(
     update: SecurityPolicyUpdate,
     project: Option<String>,
+    pii_ner: tauri::State<'_, crate::pii_ner_service::SharedPiiNer>,
 ) -> Result<(), String> {
-    update_security_policy_in(
+    let saved = update_security_policy_in(
         speedwave_runtime::consts::data_dir(),
         &update,
         project.as_deref(),
-    )
+    );
+    if saved.is_ok() {
+        crate::pii_ner_service::apply_desired_state(
+            &pii_ner,
+            speedwave_runtime::consts::data_dir(),
+        );
+    }
+    saved
 }
 
 fn update_security_policy_in(
@@ -2786,6 +2811,7 @@ mod tests {
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            ner: None,
         });
         let tmp = seeded_tempdir(&cfg);
 
@@ -2816,6 +2842,7 @@ mod tests {
         cfg.find_project_mut("beta").unwrap().policy = Some(config::PiiPolicyUserConfig {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            ner: None,
         });
 
         let named = stored_security_policy(&cfg, Some("beta")).unwrap();
@@ -2829,6 +2856,7 @@ mod tests {
         SecurityPolicyUpdate {
             policies: vec!["strict".to_string()],
             custom_policies: Vec::new(),
+            ner_enabled: false,
         }
     }
 
@@ -5778,6 +5806,7 @@ mod tests {
         SecurityPolicyUpdate {
             policies: policies.into_iter().map(String::from).collect(),
             custom_policies,
+            ner_enabled: false,
         }
     }
 
@@ -5823,8 +5852,14 @@ mod tests {
     #[test]
     fn build_response_defaults_to_every_library_rule_tokenized_for_unconfigured_project() {
         let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(None, None).unwrap();
-        let resp = build_security_policy_response(&resolved, None);
+        let resp = build_security_policy_response(
+            &resolved,
+            None,
+            speedwave_runtime::pii_policy::ResolvedNer::default(),
+        );
         assert!(resp.enabled_policies.is_empty());
+        assert!(!resp.ner_enabled);
+        assert!(!resp.ner_forced);
         assert!(resp.forced_policies.is_empty());
         let library = speedwave_runtime::pii_policy::rule_library().unwrap();
         assert_eq!(resp.effective_rules.len(), library.len());
@@ -5861,9 +5896,14 @@ mod tests {
                 }],
                 keywords: vec![],
             }],
+            ner: None,
         };
         let resolved = speedwave_runtime::pii_policy::resolve_pii_policy(Some(&raw), None).unwrap();
-        let resp = build_security_policy_response(&resolved, Some(&raw));
+        let resp = build_security_policy_response(
+            &resolved,
+            Some(&raw),
+            speedwave_runtime::pii_policy::ResolvedNer::default(),
+        );
         assert_eq!(resp.enabled_policies, vec!["my-custom".to_string()]);
         assert!(resp.forced_policies.is_empty());
         assert!(resp.effective_rules.iter().any(|r| r.id == "EMPLOYEE_ID"));
@@ -5881,12 +5921,33 @@ mod tests {
     fn build_response_marks_managed_forced_policies() {
         let managed = config::ManagedPiiPolicyConfig {
             forced_policies: vec!["strict".to_string()],
+            ner_enabled: None,
         };
         let resolved =
             speedwave_runtime::pii_policy::resolve_pii_policy(None, Some(&managed)).unwrap();
-        let resp = build_security_policy_response(&resolved, None);
+        let ner = speedwave_runtime::pii_policy::resolve_pii_ner(true, None, Some(&managed));
+        let resp = build_security_policy_response(&resolved, None, ner);
         assert_eq!(resp.enabled_policies, vec!["strict".to_string()]);
         assert_eq!(resp.forced_policies, vec!["strict".to_string()]);
+        assert!(!resp.ner_enabled);
+        assert!(!resp.ner_forced);
+    }
+
+    #[test]
+    fn build_response_locks_the_detector_switch_when_mdm_sets_it() {
+        let managed = config::ManagedPiiPolicyConfig {
+            forced_policies: Vec::new(),
+            ner_enabled: Some(true),
+        };
+        let resolved =
+            speedwave_runtime::pii_policy::resolve_pii_policy(None, Some(&managed)).unwrap();
+        let feature_enabled =
+            speedwave_runtime::pii_policy::pii_feature_enabled(false, Some(&managed));
+        let ner =
+            speedwave_runtime::pii_policy::resolve_pii_ner(feature_enabled, None, Some(&managed));
+        let resp = build_security_policy_response(&resolved, None, ner);
+        assert!(resp.ner_enabled);
+        assert!(resp.ner_forced);
     }
 
     #[test]
@@ -5895,6 +5956,20 @@ mod tests {
         let cfg = build_pii_policy_user_config(&update).unwrap();
         assert_eq!(cfg.policies, vec!["gdpr-art32".to_string()]);
         assert!(cfg.custom_policies.is_empty());
+    }
+
+    #[test]
+    fn build_config_stores_the_detector_switch() {
+        let mut update = security_policy_input(vec!["gdpr-art32"], vec![]);
+        assert_eq!(
+            build_pii_policy_user_config(&update).unwrap().ner,
+            Some(false)
+        );
+        update.ner_enabled = true;
+        assert_eq!(
+            build_pii_policy_user_config(&update).unwrap().ner,
+            Some(true)
+        );
     }
 
     #[test]

@@ -2,7 +2,8 @@ use crate::bridges::ide_bridge;
 use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::compose::{
-    worker_os_url_state, HostBridgeRegistration, HostBridgesInfo, WorkerOsUrlState,
+    live_pii_ner_service_in, ner_url_state, proxy_config_path_in, worker_os_url_state,
+    HostBridgeRegistration, HostBridgesInfo, NerUrlState, WorkerOsUrlState,
 };
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
@@ -64,6 +65,9 @@ pub(crate) struct ExitCleanupContext {
     pub(crate) ide_bridge: SharedIdeBridge,
     pub(crate) plugin_bridges: SharedPluginBridges,
     pub(crate) mcp_os: SharedMcpOs,
+    /// In-process PII NER detector service (ADR-091) — stopped + lock removed on exit.
+    pub(crate) pii_ner: crate::pii_ner_service::SharedPiiNer,
+    /// Per-project `oauth` workers (ADR-060) — stopped + files cleaned on exit.
     pub(crate) oauth: SharedOauth,
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
 }
@@ -834,16 +838,14 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
 
         let data_dir = speedwave_runtime::consts::data_dir();
         let lock_path = data_dir.join(speedwave_runtime::consts::MCP_OS_LOCK_FILE);
-        let current_port = match speedwave_runtime::host_mcp_process::lock::read(
+        let mcp_os_port = speedwave_runtime::host_mcp_process::lock::read(
             &lock_path,
             speedwave_runtime::host_mcp_process::lock::LockService::McpOs,
-        ) {
-            Some(lock) => lock.port,
-            None => {
-                log::debug!("mcp-os lock.json missing or invalid, skipping compose port reconcile");
-                return;
-            }
-        };
+        )
+        .map(|lock| lock.port);
+        let ner_port = speedwave_runtime::pii_policy::pii_ner_enabled_for_project(&project)
+            .then(|| live_pii_ner_service_in(data_dir).map(|live| live.port))
+            .flatten();
 
         let compose_dir = data_dir.join("compose").join(&project);
         let compose_path = compose_dir.join("compose.yml");
@@ -855,19 +857,24 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             }
         };
 
-        match worker_os_url_state(&compose_content, current_port) {
-            WorkerOsUrlState::Current => {
-                log::debug!("compose WORKER_OS_URL already matches mcp-os port {current_port}");
-                return;
-            }
-            WorkerOsUrlState::Absent => {
-                log::debug!("no WORKER_OS_URL in compose, OS integration not enabled");
-                return;
-            }
-            WorkerOsUrlState::Stale => log::info!(
-                "compose WORKER_OS_URL is stale (mcp-os port is {current_port}), regenerating"
-            ),
+        let os_state = match mcp_os_port {
+            Some(port) => worker_os_url_state(&compose_content, port),
+            None => WorkerOsUrlState::Absent,
+        };
+        let ner_state = match std::fs::read_to_string(proxy_config_path_in(data_dir, &project)) {
+            Ok(proxy_json) => ner_url_state(&proxy_json, ner_port),
+            Err(_) => NerUrlState::Absent,
+        };
+        if os_state != WorkerOsUrlState::Stale && ner_state != NerUrlState::Stale {
+            log::debug!(
+                "compose host URLs are current (mcp-os {os_state:?}, pii-ner {ner_state:?})"
+            );
+            return;
         }
+        log::info!(
+            "compose host URLs are stale (mcp-os {os_state:?} port {mcp_os_port:?}, \
+             pii-ner {ner_state:?} port {ner_port:?}), regenerating"
+        );
 
         if let Err(e) = crate::containers_cmd::ensure_images_ready() {
             log::warn!("images not ready, skipping compose port reconcile: {e}");
@@ -891,10 +898,12 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             return;
         }
 
-        log::info!("containers recreated with mcp-os port {current_port}");
+        log::info!(
+            "containers recreated with mcp-os port {mcp_os_port:?} and pii-ner port {ner_port:?}"
+        );
 
         use tauri::Emitter;
-        let _ = handle.emit("containers_reconciled", current_port);
+        let _ = handle.emit("containers_reconciled", mcp_os_port.unwrap_or(0));
     });
 }
 
@@ -966,6 +975,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     let ide_bridge = ctx.ide_bridge.clone();
     let plugin_bridges = ctx.plugin_bridges.clone();
     let mcp_os = ctx.mcp_os.clone();
+    let pii_ner = ctx.pii_ner.clone();
     let oauth = ctx.oauth.clone();
     let auto_check = ctx.auto_check_handle.clone();
 
@@ -999,6 +1009,16 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                 }
             }
             Err(e) => log::warn!("plugin bridges cleanup skipped, mutex poisoned: {e}"),
+        }
+        match pii_ner.lock() {
+            Ok(mut guard) => {
+                if let Some(mut service) = guard.take() {
+                    if let Err(e) = service.stop() {
+                        log::warn!("pii-ner service stop error: {e}");
+                    }
+                }
+            }
+            Err(e) => log::warn!("pii-ner cleanup skipped, mutex poisoned: {e}"),
         }
         match mcp_os.lock() {
             Ok(mut guard) => {
@@ -2709,6 +2729,7 @@ mod tests {
             mcp_os: SharedMcpOs::default(),
             oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
+            pii_ner: crate::pii_ner_service::SharedPiiNer::default(),
         };
 
         let first = run_exit_cleanup(&ctx);

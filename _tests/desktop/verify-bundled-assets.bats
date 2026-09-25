@@ -38,6 +38,9 @@ populate_common() {
     write_file "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/dist/index.js" "export {};"
     write_file "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/package.json" "{}"
     write_file "$ROOT/THIRD-PARTY-LICENSES/whisper-cpp-LICENSE"
+    write_file "$ROOT/pii-ner/manifest.json" "{}"
+    write_file "$ROOT/pii-ner/redact-bert.safetensors"
+    write_file "$ROOT/pii-ner/tokenizer.json" "{}"
 }
 
 populate_macos() {

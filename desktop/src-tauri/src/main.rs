@@ -43,6 +43,7 @@ mod paste_cmd;
 #[cfg(target_os = "windows")]
 mod path_util;
 mod pii_display;
+mod pii_ner_service;
 mod pin_cmd;
 mod plugin_cmd;
 mod plugin_oauth_cmd;
@@ -704,6 +705,7 @@ fn main() {
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
+    let pii_ner: pii_ner_service::SharedPiiNer = Arc::new(Mutex::new(None));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
@@ -717,6 +719,7 @@ fn main() {
         ide_bridge: ide_bridge.clone(),
         plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
+        pii_ner: pii_ner.clone(),
         oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
@@ -795,6 +798,16 @@ fn main() {
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
                 .level_for("whisper_rs", log::LevelFilter::Info)
+                .level_for("wgpu_core", log::LevelFilter::Warn)
+                .level_for("wgpu_hal", log::LevelFilter::Warn)
+                .level_for("wgpu", log::LevelFilter::Warn)
+                .level_for("naga", log::LevelFilter::Warn)
+                .level_for("cubecl", log::LevelFilter::Warn)
+                .level_for("cubecl_runtime", log::LevelFilter::Warn)
+                .level_for("cubecl_wgpu", log::LevelFilter::Warn)
+                .level_for("burn_fusion", log::LevelFilter::Warn)
+                .level_for("burn_wgpu", log::LevelFilter::Warn)
+                .level_for("tokenizers", log::LevelFilter::Warn)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepSome(10))
                 .format(move |callback, message, record| {
@@ -825,6 +838,7 @@ fn main() {
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
+        .manage(pii_ner.clone())
         .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(transcript_store.clone())
@@ -873,7 +887,6 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
-
             if setup_started {
                 let cleaned =
                     speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
@@ -891,6 +904,11 @@ fn main() {
                     app.handle(),
                 );
 
+                pii_ner_service::apply_desired_state(
+                    &pii_ner,
+                    speedwave_runtime::consts::data_dir(),
+                );
+
                 let script = speedwave_runtime::build::resolve_mcp_os_script();
                 if let Some(script_path) = script {
                     let script_str = script_path.to_string_lossy().to_string();
@@ -901,14 +919,14 @@ fn main() {
                             if let Ok(mut guard) = mcp_os.lock() {
                                 *guard = Some(worker);
                             }
-
-                            reconcile::reconcile_compose_port(app.handle());
                         }
                         Err(e) => log::error!("mcp-os spawn error: {e}"),
                     }
                 } else {
                     log::warn!("mcp-os script not found — OS integrations will be unavailable");
                 }
+
+                reconcile::reconcile_compose_port(app.handle());
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 

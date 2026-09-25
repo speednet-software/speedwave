@@ -84,6 +84,10 @@ export interface SecurityPolicyResponse {
   effective_rules: RuleOutput[];
   /** The user's own policy definitions (editable). */
   custom_policies: CustomPolicyDto[];
+  /** Whether the on-device NER detector is on for the active project. */
+  ner_enabled: boolean;
+  /** Whether MDM set the detector switch, locking it in the UI. */
+  ner_forced: boolean;
 }
 
 /**
@@ -116,4 +120,6 @@ export interface CustomPolicyDtoInput {
 export interface SecurityPolicyUpdate {
   policies: string[];
   custom_policies: CustomPolicyDtoInput[];
+  /** The user's own detector selection, without an MDM-forced value. */
+  ner_enabled: boolean;
 }

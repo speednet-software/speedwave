@@ -1,7 +1,7 @@
 //! Scanning, tokenization, and fail-closed detokenization
 //! (TS counterpart: `mcp-servers/policies/src/tokenizer.ts`).
 
-use crate::policy::{CompiledKeyword, CompiledPolicy};
+use crate::policy::{is_valid_rule_id, CompiledKeyword, CompiledPolicy};
 use crate::siv::{decode_payload, encode_payload, open, seal, EngineKey};
 use regex::Regex;
 use std::collections::HashMap;
@@ -48,6 +48,37 @@ pub struct ScanOutcome {
     pub detections: Vec<Detection>,
 }
 
+/// A span reported by a detector outside the engine, as UTF-8 byte offsets into the scanned text.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExternalSpan {
+    /// First byte of the value.
+    pub start: usize,
+    /// One past the last byte of the value.
+    pub end: usize,
+    /// Category id the value is sealed under; must satisfy the policy rule-id format.
+    pub category: String,
+}
+
+/// A scanned text plus separate detection aggregates for the rules and for the external spans.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExternalScanOutcome {
+    /// The text after tokenization.
+    pub text: String,
+    /// Per-category aggregate of rule hits, ordered by first hit.
+    pub detections: Vec<Detection>,
+    /// Per-category aggregate of sealed external spans, ordered by first hit.
+    pub external_detections: Vec<Detection>,
+}
+
+/// Detection aggregates of a JSON scan that also sealed external spans.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ExternalScanReport {
+    /// Per-category aggregate of rule hits over every string leaf.
+    pub detections: Vec<Detection>,
+    /// Per-category aggregate of sealed external spans over every string leaf.
+    pub external_detections: Vec<Detection>,
+}
+
 /// A scan or tokenization failure; the message never carries the scanned value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanError {
@@ -55,6 +86,13 @@ pub enum ScanError {
     TokenPatternInvalid,
     /// Sealing a detected value failed for the named category; never carries the value.
     SealFailed(String),
+    /// The per-leaf external span lists do not line up with the string leaves of the JSON tree.
+    ExternalSpanCount {
+        /// Number of string leaves in the tree.
+        expected: usize,
+        /// Number of span lists supplied.
+        found: usize,
+    },
 }
 
 impl fmt::Display for ScanError {
@@ -62,6 +100,10 @@ impl fmt::Display for ScanError {
         match self {
             Self::TokenPatternInvalid => write!(f, "token span pattern failed to compile"),
             Self::SealFailed(category) => write!(f, "failed to seal a detected {category} value"),
+            Self::ExternalSpanCount { expected, found } => write!(
+                f,
+                "{found} external span lists supplied for {expected} string leaves"
+            ),
         }
     }
 }
@@ -98,9 +140,10 @@ impl fmt::Display for DetokenizeError {
 
 impl std::error::Error for DetokenizeError {}
 
-/// A run of text: either untouched source, or an already-sealed token span to never rescan.
+/// A run of text: untouched source with its byte offset in the scanned input, or an
+/// already-sealed token span to never rescan.
 enum Segment {
-    Plain(String),
+    Plain { text: String, origin: usize },
     Masked(String),
 }
 
@@ -111,13 +154,19 @@ fn mask_spans(text: &str) -> Result<Vec<Segment>, ScanError> {
     let mut last = 0;
     for m in re.find_iter(text) {
         if m.start() > last {
-            segments.push(Segment::Plain(text[last..m.start()].to_string()));
+            segments.push(Segment::Plain {
+                text: text[last..m.start()].to_string(),
+                origin: last,
+            });
         }
         segments.push(Segment::Masked(m.as_str().to_string()));
         last = m.end();
     }
     if last < text.len() {
-        segments.push(Segment::Plain(text[last..].to_string()));
+        segments.push(Segment::Plain {
+            text: text[last..].to_string(),
+            origin: last,
+        });
     }
     Ok(segments)
 }
@@ -207,8 +256,8 @@ fn apply_rule(
     for segment in segments {
         match segment {
             Segment::Masked(s) => new_segments.push(Segment::Masked(s)),
-            Segment::Plain(s) => {
-                let (mut produced, count) = tokenize_segment(&s, rule, key)?;
+            Segment::Plain { text, origin } => {
+                let (mut produced, count) = tokenize_segment(&text, origin, rule, key)?;
                 total += count;
                 new_segments.append(&mut produced);
             }
@@ -221,6 +270,7 @@ fn apply_rule(
 /// matching counts as a hit) and, if tokenizing, replaces them (dedup by value).
 fn tokenize_segment(
     segment: &str,
+    origin: usize,
     rule: &crate::policy::CompiledRule,
     key: &EngineKey,
 ) -> Result<(Vec<Segment>, u32), ScanError> {
@@ -250,7 +300,11 @@ fn tokenize_segment(
 
     let count = hits.len() as u32;
     if count == 0 || !rule.flags.tokenize {
-        return Ok((vec![Segment::Plain(segment.to_string())], count));
+        let plain = Segment::Plain {
+            text: segment.to_string(),
+            origin,
+        };
+        return Ok((vec![plain], count));
     }
 
     let mut result = Vec::new();
@@ -258,7 +312,10 @@ fn tokenize_segment(
     let mut last = 0;
     for (start, end, value) in hits {
         if start > last {
-            result.push(Segment::Plain(segment[last..start].to_string()));
+            result.push(Segment::Plain {
+                text: segment[last..start].to_string(),
+                origin: origin + last,
+            });
         }
         let token = match cache.get(&value) {
             Some(t) => t.clone(),
@@ -272,9 +329,119 @@ fn tokenize_segment(
         last = end;
     }
     if last < segment.len() {
-        result.push(Segment::Plain(segment[last..].to_string()));
+        result.push(Segment::Plain {
+            text: segment[last..].to_string(),
+            origin: origin + last,
+        });
     }
     Ok((result, count))
+}
+
+/// Keeps the spans that are well-formed for `text`, earliest first, longest at equal start,
+/// dropping any span overlapping an already kept one.
+fn normalize_external<'a>(text: &str, spans: &'a [ExternalSpan]) -> Vec<&'a ExternalSpan> {
+    let mut valid: Vec<&ExternalSpan> = spans
+        .iter()
+        .filter(|s| {
+            s.start < s.end
+                && s.end <= text.len()
+                && text.is_char_boundary(s.start)
+                && text.is_char_boundary(s.end)
+                && is_valid_rule_id(&s.category)
+        })
+        .collect();
+    valid.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
+    let mut kept = Vec::with_capacity(valid.len());
+    let mut last_end = 0usize;
+    for span in valid {
+        if span.start < last_end {
+            continue;
+        }
+        last_end = span.end;
+        kept.push(span);
+    }
+    kept
+}
+
+fn count_hit(detections: &mut Vec<Detection>, category: &str, action: DetectionAction) {
+    if let Some(existing) = detections.iter_mut().find(|d| d.category == category) {
+        existing.count += 1;
+    } else {
+        detections.push(Detection {
+            category: category.to_string(),
+            action,
+            count: 1,
+        });
+    }
+}
+
+/// Seals every external span lying entirely inside one plain segment. Spans touching a masked
+/// segment are dropped (rules and existing tokens win); observation-mode categories only count.
+fn apply_external(
+    segments: Vec<Segment>,
+    spans: &[&ExternalSpan],
+    policy: &CompiledPolicy,
+    key: &EngineKey,
+) -> Result<(Vec<Segment>, Vec<Detection>), ScanError> {
+    let observe_only: Vec<&str> = policy
+        .rules()
+        .iter()
+        .filter(|r| !r.flags.tokenize)
+        .map(|r| r.category.as_str())
+        .collect();
+    let mut out = Vec::with_capacity(segments.len());
+    let mut detections: Vec<Detection> = Vec::new();
+    let mut cache: HashMap<(String, String), String> = HashMap::new();
+    for segment in segments {
+        let (text, origin) = match segment {
+            Segment::Plain { text, origin } => (text, origin),
+            masked => {
+                out.push(masked);
+                continue;
+            }
+        };
+        let segment_end = origin + text.len();
+        let mut last = 0usize;
+        for span in spans
+            .iter()
+            .filter(|s| s.start >= origin && s.end <= segment_end)
+        {
+            let (start, end) = (span.start - origin, span.end - origin);
+            if start < last {
+                continue;
+            }
+            if observe_only.contains(&span.category.as_str()) {
+                count_hit(&mut detections, &span.category, DetectionAction::Passed);
+                continue;
+            }
+            if start > last {
+                out.push(Segment::Plain {
+                    text: text[last..start].to_string(),
+                    origin: origin + last,
+                });
+            }
+            let value = &text[start..end];
+            let cache_key = (span.category.clone(), value.to_string());
+            let token = match cache.get(&cache_key) {
+                Some(t) => t.clone(),
+                None => {
+                    let t = build_token(key, &span.category, value)?;
+                    cache.insert(cache_key, t.clone());
+                    t
+                }
+            };
+            out.push(Segment::Masked(token));
+            count_hit(&mut detections, &span.category, DetectionAction::Tokenized);
+            last = end;
+        }
+        if last < text.len() {
+            out.push(Segment::Plain {
+                text: text[last..].to_string(),
+                origin: origin + last,
+            });
+        }
+    }
+    Ok((out, detections))
 }
 
 /// Scans plain text with every rule in the policy; existing token spans are masked first (idempotent).
@@ -283,6 +450,21 @@ pub fn scan_text(
     key: &EngineKey,
     text: &str,
 ) -> Result<ScanOutcome, ScanError> {
+    let outcome = scan_text_with_external(policy, key, text, &[])?;
+    Ok(ScanOutcome {
+        text: outcome.text,
+        detections: outcome.detections,
+    })
+}
+
+/// [`scan_text`] followed by sealing the external spans that survived the rules, so a value
+/// claimed by a rule or an existing token is never sealed twice.
+pub fn scan_text_with_external(
+    policy: &CompiledPolicy,
+    key: &EngineKey,
+    text: &str,
+    external: &[ExternalSpan],
+) -> Result<ExternalScanOutcome, ScanError> {
     let mut segments = mask_spans(text)?;
     let mut detections: Vec<Detection> = Vec::new();
     for rule in policy.rules() {
@@ -300,13 +482,19 @@ pub fn scan_text(
             });
         }
     }
+    let (segments, external_detections) =
+        apply_external(segments, &normalize_external(text, external), policy, key)?;
     let text = segments
         .into_iter()
         .map(|s| match s {
-            Segment::Plain(s) | Segment::Masked(s) => s,
+            Segment::Plain { text, .. } | Segment::Masked(text) => text,
         })
         .collect();
-    Ok(ScanOutcome { text, detections })
+    Ok(ExternalScanOutcome {
+        text,
+        detections,
+        external_detections,
+    })
 }
 
 /// Merges a sub-tree's detections into the whole-tree aggregate.
@@ -328,32 +516,110 @@ pub fn scan_json(
     value: &mut serde_json::Value,
 ) -> Result<Vec<Detection>, ScanError> {
     let mut clone = value.clone();
-    let mut detections: Vec<Detection> = Vec::new();
-    scan_json_value(policy, key, &mut clone, &mut detections)?;
+    let mut report = ExternalScanReport::default();
+    scan_json_value(policy, key, &mut clone, None, &mut 0, &mut report)?;
     *value = clone;
-    Ok(detections)
+    Ok(report.detections)
+}
+
+/// [`scan_json`] that also seals, per string leaf, the external spans given in the order of
+/// [`collect_string_leaves`]. All-or-nothing: on error, the input remains unchanged.
+pub fn scan_json_with_external(
+    policy: &CompiledPolicy,
+    key: &EngineKey,
+    value: &mut serde_json::Value,
+    external: &[Vec<ExternalSpan>],
+) -> Result<ExternalScanReport, ScanError> {
+    let expected = collect_string_leaves(value).len();
+    if external.len() != expected {
+        return Err(ScanError::ExternalSpanCount {
+            expected,
+            found: external.len(),
+        });
+    }
+    let mut clone = value.clone();
+    let mut report = ExternalScanReport::default();
+    scan_json_value(policy, key, &mut clone, Some(external), &mut 0, &mut report)?;
+    *value = clone;
+    Ok(report)
+}
+
+/// A string leaf together with the object key it hangs under, so a caller can tell prose
+/// (`text`) from protocol plumbing (`type`, `tool_use_id`) and binary payloads (`data`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StringLeaf<'a> {
+    /// The leaf value.
+    pub text: &'a str,
+    /// Key of the object field holding it; `None` for an array element or a bare string root.
+    pub key: Option<&'a str>,
+}
+
+/// Every string leaf of a JSON tree, in the order [`scan_json`] visits them.
+pub fn collect_string_leaves(value: &serde_json::Value) -> Vec<&str> {
+    collect_string_leaves_with_keys(value)
+        .into_iter()
+        .map(|leaf| leaf.text)
+        .collect()
+}
+
+/// [`collect_string_leaves`] with each leaf's object key; same leaves, same order.
+pub fn collect_string_leaves_with_keys(value: &serde_json::Value) -> Vec<StringLeaf<'_>> {
+    let mut leaves = Vec::new();
+    collect_leaves_into(value, None, &mut leaves);
+    leaves
+}
+
+fn collect_leaves_into<'a>(
+    value: &'a serde_json::Value,
+    key: Option<&'a str>,
+    leaves: &mut Vec<StringLeaf<'a>>,
+) {
+    match value {
+        serde_json::Value::String(s) => leaves.push(StringLeaf {
+            text: s.as_str(),
+            key,
+        }),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_leaves_into(item, key, leaves);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (field, field_value) in map {
+                collect_leaves_into(field_value, Some(field.as_str()), leaves);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn scan_json_value(
     policy: &CompiledPolicy,
     key: &EngineKey,
     value: &mut serde_json::Value,
-    detections: &mut Vec<Detection>,
+    external: Option<&[Vec<ExternalSpan>]>,
+    next_leaf: &mut usize,
+    report: &mut ExternalScanReport,
 ) -> Result<(), ScanError> {
     match value {
         serde_json::Value::String(s) => {
-            let outcome = scan_text(policy, key, s)?;
+            let spans = external
+                .and_then(|lists| lists.get(*next_leaf))
+                .map_or(&[][..], Vec::as_slice);
+            *next_leaf += 1;
+            let outcome = scan_text_with_external(policy, key, s, spans)?;
             *s = outcome.text;
-            merge_detections(detections, outcome.detections);
+            merge_detections(&mut report.detections, outcome.detections);
+            merge_detections(&mut report.external_detections, outcome.external_detections);
         }
         serde_json::Value::Array(items) => {
             for item in items.iter_mut() {
-                scan_json_value(policy, key, item, detections)?;
+                scan_json_value(policy, key, item, external, next_leaf, report)?;
             }
         }
         serde_json::Value::Object(map) => {
             for (_, field_value) in map.iter_mut() {
-                scan_json_value(policy, key, field_value, detections)?;
+                scan_json_value(policy, key, field_value, external, next_leaf, report)?;
             }
         }
         _ => {}
@@ -637,9 +903,13 @@ pub fn unalias_text_preserving_tokens_with(
         Ok(segments) => segments
             .into_iter()
             .map(|segment| match segment {
-                Segment::Plain(s) => {
-                    substitute_preserving_case_with(&s, alias, match_text, case_sensitive, render)
-                }
+                Segment::Plain { text, .. } => substitute_preserving_case_with(
+                    &text,
+                    alias,
+                    match_text,
+                    case_sensitive,
+                    render,
+                ),
                 Segment::Masked(s) => s,
             })
             .collect(),
@@ -712,6 +982,49 @@ mod tests {
 
     fn test_key() -> EngineKey {
         EngineKey::from_bytes([9u8; 32])
+    }
+
+    #[test]
+    fn leaf_keys_name_the_field_each_string_hangs_under_without_changing_the_leaf_order() {
+        let value = serde_json::json!({
+            "content": [
+                {"type": "image", "source": {"media_type": "image/png", "data": "AAAA"}},
+                {"type": "text", "text": "Jan"}
+            ],
+            "tool_use_id": "abc"
+        });
+        let keyed = collect_string_leaves_with_keys(&value);
+        assert_eq!(
+            keyed
+                .iter()
+                .map(|leaf| (leaf.key, leaf.text))
+                .collect::<Vec<_>>(),
+            [
+                (Some("data"), "AAAA"),
+                (Some("media_type"), "image/png"),
+                (Some("type"), "image"),
+                (Some("text"), "Jan"),
+                (Some("type"), "text"),
+                (Some("tool_use_id"), "abc"),
+            ]
+        );
+        assert_eq!(
+            keyed.iter().map(|leaf| leaf.text).collect::<Vec<_>>(),
+            collect_string_leaves(&value)
+        );
+        assert_eq!(
+            collect_string_leaves_with_keys(&serde_json::json!(["a", "b"])),
+            [
+                StringLeaf {
+                    text: "a",
+                    key: None
+                },
+                StringLeaf {
+                    text: "b",
+                    key: None
+                }
+            ]
+        );
     }
 
     const FULL_POLICY: &str = r#"{
@@ -1442,13 +1755,21 @@ mod tests {
     #[test]
     fn unalias_with_renders_after_case_pattern() {
         let result = unalias_text_preserving_tokens_with(
-            "use brandex here",
+            "use Brandex here",
             "new\nline",
             "Brandex",
             false,
             &|shaped| json_escape(shaped),
         );
         assert_eq!(result, "use New\\nline here");
+        let result = unalias_text_preserving_tokens_with(
+            "use BRANDEX here",
+            "new\nline",
+            "Brandex",
+            false,
+            &|shaped| json_escape(shaped),
+        );
+        assert_eq!(result, "use NEW\\nLINE here");
     }
 
     #[test]
@@ -1470,5 +1791,284 @@ mod tests {
         let result =
             unalias_text_preserving_tokens_with("text", "match", "", true, &|s| s.to_string());
         assert_eq!(result, "text");
+    }
+
+    fn span(start: usize, end: usize, category: &str) -> ExternalSpan {
+        ExternalSpan {
+            start,
+            end,
+            category: category.to_string(),
+        }
+    }
+
+    fn detection(category: &str, action: DetectionAction, count: u32) -> Detection {
+        Detection {
+            category: category.to_string(),
+            action,
+            count,
+        }
+    }
+
+    #[test]
+    fn external_spans_seal_and_roundtrip_through_detokenize() {
+        let policy = full_policy();
+        let key = test_key();
+        let original = "Jan Kowalski mieszka w Łodzi";
+        let lodz = original.find("Łodzi").expect("city present");
+        let spans = [
+            span(0, 3, "GIVEN_NAME"),
+            span(4, 12, "SURNAME"),
+            span(lodz, original.len(), "CITY"),
+        ];
+
+        let outcome =
+            scan_text_with_external(&policy, &key, original, &spans).expect("scan succeeds");
+        assert!(outcome.text.starts_with("[GIVEN_NAME:TOKEN_"));
+        assert!(outcome.text.contains("] [SURNAME:TOKEN_"));
+        assert!(outcome.text.contains("mieszka w [CITY:TOKEN_"));
+        assert!(!outcome.text.contains("Kowalski"));
+        assert!(outcome.detections.is_empty());
+        assert_eq!(
+            outcome.external_detections,
+            vec![
+                detection("GIVEN_NAME", DetectionAction::Tokenized, 1),
+                detection("SURNAME", DetectionAction::Tokenized, 1),
+                detection("CITY", DetectionAction::Tokenized, 1),
+            ]
+        );
+        let restored = detokenize_text(&key, &outcome.text).expect("detokenize succeeds");
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn scan_text_equals_scan_with_no_external_spans() {
+        let policy = full_policy();
+        let key = test_key();
+        let text = "PESEL 44051401359 and mail someone@example.org";
+        let plain = scan_text(&policy, &key, text).expect("scan succeeds");
+        let with = scan_text_with_external(&policy, &key, text, &[]).expect("scan succeeds");
+        assert_eq!(plain.text, with.text);
+        assert_eq!(plain.detections, with.detections);
+        assert!(with.external_detections.is_empty());
+    }
+
+    #[test]
+    fn external_span_inside_an_existing_token_is_dropped() {
+        let policy = full_policy();
+        let key = test_key();
+        let sealed = scan_text(&policy, &key, "someone@example.org").expect("scan succeeds");
+        let text = format!("mail {} now", sealed.text);
+        let spans = [span(7, 12, "EMAIL"), span(0, 4, "GIVEN_NAME")];
+
+        let outcome = scan_text_with_external(&policy, &key, &text, &spans).expect("scan succeeds");
+        assert!(outcome.text.ends_with(&format!(" {} now", sealed.text)));
+        assert!(outcome.text.starts_with("[GIVEN_NAME:TOKEN_"));
+        assert_eq!(
+            outcome.external_detections,
+            vec![detection("GIVEN_NAME", DetectionAction::Tokenized, 1)]
+        );
+    }
+
+    #[test]
+    fn rule_hit_wins_over_an_overlapping_external_span() {
+        let policy = full_policy();
+        let key = test_key();
+        let text = "write to someone@example.org today";
+        let at = text.find('@').expect("email present");
+        let spans = [span(at - 3, at + 4, "SURNAME"), span(0, 5, "GIVEN_NAME")];
+
+        let outcome = scan_text_with_external(&policy, &key, text, &spans).expect("scan succeeds");
+        assert!(outcome.text.contains("[EMAIL:TOKEN_"));
+        assert!(!outcome.text.contains("SURNAME"));
+        assert!(outcome.text.starts_with("[GIVEN_NAME:TOKEN_"));
+        assert_eq!(
+            outcome.detections,
+            vec![detection("EMAIL", DetectionAction::Tokenized, 1)]
+        );
+        assert_eq!(
+            outcome.external_detections,
+            vec![detection("GIVEN_NAME", DetectionAction::Tokenized, 1)]
+        );
+        let restored = detokenize_text(&key, &outcome.text).expect("detokenize succeeds");
+        assert_eq!(restored, text);
+    }
+
+    #[test]
+    fn overlapping_external_spans_keep_the_earliest_and_longest() {
+        let policy = full_policy();
+        let key = test_key();
+        let text = "Anna Maria Nowak";
+        let spans = [
+            span(5, 16, "SURNAME"),
+            span(0, 10, "GIVEN_NAME"),
+            span(0, 4, "GIVEN_NAME"),
+            span(11, 16, "SURNAME"),
+        ];
+
+        let outcome = scan_text_with_external(&policy, &key, text, &spans).expect("scan succeeds");
+        let expected_first = build_token(&key, "GIVEN_NAME", "Anna Maria").expect("seal ok");
+        let expected_second = build_token(&key, "SURNAME", "Nowak").expect("seal ok");
+        assert_eq!(outcome.text, format!("{expected_first} {expected_second}"));
+        assert_eq!(
+            outcome.external_detections,
+            vec![
+                detection("GIVEN_NAME", DetectionAction::Tokenized, 1),
+                detection("SURNAME", DetectionAction::Tokenized, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_external_spans_are_ignored() {
+        let policy = full_policy();
+        let key = test_key();
+        let text = "Łukasz Zieliński";
+        let spans = [
+            span(3, 1, "GIVEN_NAME"),
+            span(5, 5, "GIVEN_NAME"),
+            span(0, text.len() + 1, "GIVEN_NAME"),
+            span(1, 6, "GIVEN_NAME"),
+            span(0, 7, "given_name"),
+            span(0, 7, "1BAD"),
+            span(0, 7, ""),
+        ];
+
+        let outcome = scan_text_with_external(&policy, &key, text, &spans).expect("scan succeeds");
+        assert_eq!(outcome.text, text);
+        assert!(outcome.external_detections.is_empty());
+    }
+
+    #[test]
+    fn observation_mode_category_counts_external_hits_without_sealing() {
+        let json = FULL_POLICY.replacen(
+            r#"{ "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": true, "log": false },"#,
+            r#"{ "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": false, "log": true },"#,
+            1,
+        );
+        let policy = compile_policy_v3(&json).expect("valid policy compiles");
+        let key = test_key();
+        let text = "contact bob at work";
+        let spans = [span(8, 11, "EMAIL"), span(15, 19, "CITY")];
+
+        let outcome = scan_text_with_external(&policy, &key, text, &spans).expect("scan succeeds");
+        assert!(outcome.text.starts_with("contact bob at [CITY:TOKEN_"));
+        assert_eq!(
+            outcome.external_detections,
+            vec![
+                detection("EMAIL", DetectionAction::Passed, 1),
+                detection("CITY", DetectionAction::Tokenized, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn same_external_value_and_category_yield_the_same_token() {
+        let policy = full_policy();
+        let key = test_key();
+        let text = "Nowak spoke to Nowak";
+        let spans = [span(0, 5, "SURNAME"), span(15, 20, "SURNAME")];
+
+        let outcome = scan_text_with_external(&policy, &key, text, &spans).expect("scan succeeds");
+        let token = build_token(&key, "SURNAME", "Nowak").expect("seal ok");
+        assert_eq!(outcome.text, format!("{token} spoke to {token}"));
+        assert_eq!(
+            outcome.external_detections,
+            vec![detection("SURNAME", DetectionAction::Tokenized, 2)]
+        );
+        let again = scan_text_with_external(&policy, &key, "Nowak", &[span(0, 5, "SURNAME")])
+            .expect("scan succeeds");
+        assert_eq!(again.text, token);
+    }
+
+    #[test]
+    fn string_leaves_follow_the_scan_order() {
+        let value = serde_json::json!({
+            "system": "first",
+            "messages": [
+                { "role": "user", "content": "second" },
+                { "role": "assistant", "content": [ { "type": "text", "text": "third" } ] }
+            ],
+            "max_tokens": 5
+        });
+        let leaves = collect_string_leaves(&value);
+        assert_eq!(leaves.len(), 6);
+        assert!(leaves.contains(&"first") && leaves.contains(&"third"));
+        assert!(!leaves.iter().any(|l| l.contains('5')));
+        assert!(collect_string_leaves(&serde_json::json!(null)).is_empty());
+        assert_eq!(collect_string_leaves(&serde_json::json!("x")), vec!["x"]);
+    }
+
+    #[test]
+    fn scan_json_with_external_maps_span_lists_onto_leaves_in_order() {
+        let policy = full_policy();
+        let key = test_key();
+        let mut value = serde_json::json!({
+            "a": "Kowalski here",
+            "b": ["nothing", "Nowak there"],
+            "n": 7
+        });
+        let leaves = collect_string_leaves(&value);
+        let external: Vec<Vec<ExternalSpan>> = leaves
+            .iter()
+            .map(|leaf| match *leaf {
+                "Kowalski here" => vec![span(0, 8, "SURNAME")],
+                "Nowak there" => vec![span(0, 5, "SURNAME")],
+                _ => Vec::new(),
+            })
+            .collect();
+        let original = value.clone();
+
+        let report =
+            scan_json_with_external(&policy, &key, &mut value, &external).expect("scan succeeds");
+        assert!(report.detections.is_empty());
+        assert_eq!(
+            report.external_detections,
+            vec![detection("SURNAME", DetectionAction::Tokenized, 2)]
+        );
+        assert!(value["a"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("[SURNAME:TOKEN_")));
+        assert_eq!(value["b"][0], "nothing");
+        assert!(value["b"][1]
+            .as_str()
+            .is_some_and(|s| s.starts_with("[SURNAME:TOKEN_")));
+        assert_eq!(value["n"], 7);
+        detokenize_json(&key, &mut value).expect("detokenize succeeds");
+        assert_eq!(value, original);
+    }
+
+    #[test]
+    fn scan_json_with_external_rejects_a_span_list_count_mismatch_and_leaves_input_intact() {
+        let policy = full_policy();
+        let key = test_key();
+        let mut value = serde_json::json!({ "a": "Kowalski", "b": "Nowak" });
+        let original = value.clone();
+        let err =
+            scan_json_with_external(&policy, &key, &mut value, &[vec![span(0, 8, "SURNAME")]])
+                .expect_err("mismatch is rejected");
+        assert_eq!(
+            err,
+            ScanError::ExternalSpanCount {
+                expected: 2,
+                found: 1
+            }
+        );
+        assert_eq!(value, original);
+        assert!(err.to_string().contains("2 string leaves"));
+    }
+
+    #[test]
+    fn scan_json_with_external_matches_scan_json_when_every_list_is_empty() {
+        let policy = full_policy();
+        let key = test_key();
+        let mut plain = serde_json::json!({ "x": "PESEL 44051401359", "y": ["b", 1] });
+        let mut with = plain.clone();
+        let empty = vec![Vec::new(); collect_string_leaves(&plain).len()];
+        let detections = scan_json(&policy, &key, &mut plain).expect("scan succeeds");
+        let report =
+            scan_json_with_external(&policy, &key, &mut with, &empty).expect("scan succeeds");
+        assert_eq!(plain, with);
+        assert_eq!(detections, report.detections);
+        assert!(report.external_detections.is_empty());
     }
 }

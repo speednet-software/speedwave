@@ -28,11 +28,42 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
 @test "shared excludes contain desktop/src-tauri bundled asset dirs" {
     local excludes
     excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-    for asset in lima nodejs wsl cli mcp-os THIRD-PARTY-LICENSES; do
+    for asset in lima nodejs wsl cli mcp-os pii-ner THIRD-PARTY-LICENSES \
+                 calendar-cli mail-cli notes-cli reminders-cli; do
         echo "$excludes" | grep -q "desktop/src-tauri/${asset}" || {
             echo "missing desktop/src-tauri/${asset}"; return 1
         }
     done
+}
+
+@test "every generated tauri bundle resource is excluded from the rig payload" {
+    local repo excludes conf roots root
+    repo="$BATS_TEST_DIRNAME/../.."
+    excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
+
+    for conf in tauri.macos.conf.json tauri.windows.conf.json; do
+        roots="$(sed -n '/"resources": {/,/}/p' "$repo/desktop/src-tauri/$conf" \
+            | grep -o '"[^"]*": *"' | sed 's/^"//; s/": *"$//; s:/.*::' | sort -u)"
+        [ -n "$roots" ]
+        while IFS= read -r root; do
+            if git -C "$repo" ls-files --error-unmatch "desktop/src-tauri/$root" >/dev/null 2>&1; then
+                continue
+            fi
+            echo "$excludes" | grep -qE "desktop/src-tauri/${root}([^A-Za-z0-9._-]|\$)|(^|[[:space:]])${root}([[:space:]]|\$)" || {
+                echo "$conf bundles desktop/src-tauri/$root, which is generated and must not be rsynced to the rig"
+                return 1
+            }
+        done <<< "$roots"
+    done
+}
+
+@test "shared excludes contain the generated wasm package" {
+    local excludes
+    excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
+    echo "$excludes" | grep -q 'mcp-servers/policies/wasm-pkg' || {
+        echo "wasm-pkg is a build output the rig rebuilds via build-mcp; do not ship it"
+        return 1
+    }
 }
 
 @test "ps_squote doubles single quotes for PowerShell literals" {

@@ -81,6 +81,7 @@ fn custom_selection_with_extra_rule_and_keyword_still_compiles() {
                 case_sensitive: true,
             }],
         }],
+        ner: None,
     };
     let resolved =
         resolve_pii_policy(Some(&user), None).expect("gdpr-art32 + custom always resolves");

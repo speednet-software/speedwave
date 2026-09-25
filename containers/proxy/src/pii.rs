@@ -5,10 +5,11 @@ use std::path::Path;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
-    alias_json, compile_policy_v3, default_policy_json, detokenize_text, detokenize_text_with,
-    incomplete_token_span_start, scan_json, unalias_text_preserving_tokens,
+    alias_json, collect_string_leaves, collect_string_leaves_with_keys, compile_policy_v3,
+    default_policy_json, detokenize_text, detokenize_text_with, incomplete_token_span_start,
+    scan_json, scan_json_with_external, unalias_text_preserving_tokens,
     unalias_text_preserving_tokens_with, CompiledKeyword, CompiledPolicy, Detection,
-    DetokenizeError, EngineKey, ScanError,
+    DetokenizeError, EngineKey, ExternalSpan, ScanError,
 };
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
@@ -112,31 +113,116 @@ fn merge_detections(agg: &mut Vec<Detection>, more: Vec<Detection>) {
     }
 }
 
+/// Rule and host-detector (NER) detection aggregates of one request scan.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct ScanReport {
+    pub detections: Vec<Detection>,
+    pub external: Vec<Detection>,
+}
+
+/// Object keys whose string values are protocol plumbing or binary payloads, never prose:
+/// block ids and `type` discriminators carry no PII, and `data` / `signature` hold base64
+/// (an attached image is megabytes, which would be thousands of detector windows and, over
+/// the request cap, would drop the whole request back to rules only). The rule engine still
+/// scans them; only the neural detector skips them.
+const NON_PROSE_LEAF_KEYS: &[&str] = &[
+    "type",
+    "id",
+    "tool_use_id",
+    "media_type",
+    "data",
+    "signature",
+    "url",
+    "file_id",
+];
+
+/// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then each
+/// `messages[].content`. The detector receives exactly this list and answers per leaf; leaves it
+/// must not see are blanked, which keeps the indices aligned and costs no detection.
+///
+/// `system` is blanked whole. It is the client's own scaffolding, not anything a user typed, and
+/// rewriting it breaks the client: the detector reads "Claude" in "You are a Claude agent, built
+/// on Anthropic's Claude Agent SDK" as a GIVEN_NAME at 0.95, so every request went upstream with
+/// a sealed preamble and Anthropic answered `rate_limit_error` on the OAuth leg (SPEED-521,
+/// measured 2026-09-16: same session, same account, 429 on every attempt with the label on and
+/// 200 on every attempt with it off). The rule engine still scans `system`; its patterns match
+/// values, not words, so they leave the scaffolding intact.
+pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
+    let mut leaves = Vec::new();
+    if let Some(system) = body.get("system") {
+        leaves.extend(collect_string_leaves(system).iter().map(|_| String::new()));
+    }
+    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+        for message in messages {
+            if let Some(content) = message.get("content") {
+                leaves.extend(
+                    collect_string_leaves_with_keys(content)
+                        .into_iter()
+                        .map(|leaf| match leaf.key {
+                            Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
+                            _ => leaf.text.to_string(),
+                        }),
+                );
+            }
+        }
+    }
+    leaves
+}
+
+/// [`scan_request_with_external`] without detector spans; the rule-only path the tests use.
+#[cfg(test)]
+pub fn scan_request(
+    policy: &CompiledPolicy,
+    key: &EngineKey,
+    body: &mut serde_json::Value,
+) -> Result<Vec<Detection>, ScanError> {
+    scan_request_with_external(policy, key, body, None).map(|report| report.detections)
+}
+
 /// Scans `system` and every `messages[].content` (tool results included); other protocol
 /// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
 ///
 /// Each scanned subtree is then keyword-masked (design doc §7.3): masking runs strictly after
 /// tokenization so a keyword occurring inside a value that also matched a PII rule is already
 /// sealed behind a token span and cannot be re-exposed by the keyword pass.
-pub fn scan_request(
+///
+/// `external` seals detector spans as well, one list per leaf in the order of
+/// [`collect_scan_leaves`]; a list count that does not match the leaves is an error.
+pub fn scan_request_with_external(
     policy: &CompiledPolicy,
     key: &EngineKey,
     body: &mut serde_json::Value,
-) -> Result<Vec<Detection>, ScanError> {
-    let mut detections = Vec::new();
+    external: Option<Vec<Vec<ExternalSpan>>>,
+) -> Result<ScanReport, ScanError> {
+    let mut report = ScanReport::default();
+    let mut lists = external.map(std::collections::VecDeque::from);
+    let mut scan_subtree =
+        |subtree: &mut serde_json::Value, report: &mut ScanReport| -> Result<(), ScanError> {
+            match lists.as_mut() {
+                None => merge_detections(&mut report.detections, scan_json(policy, key, subtree)?),
+                Some(queue) => {
+                    let wanted = collect_string_leaves(subtree).len();
+                    let taken: Vec<Vec<ExternalSpan>> =
+                        queue.drain(..wanted.min(queue.len())).collect();
+                    let outcome = scan_json_with_external(policy, key, subtree, &taken)?;
+                    merge_detections(&mut report.detections, outcome.detections);
+                    merge_detections(&mut report.external, outcome.external_detections);
+                }
+            }
+            mask_keywords(subtree, policy.keywords());
+            Ok(())
+        };
     if let Some(system) = body.get_mut("system") {
-        merge_detections(&mut detections, scan_json(policy, key, system)?);
-        mask_keywords(system, policy.keywords());
+        scan_subtree(system, &mut report)?;
     }
     if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         for message in messages.iter_mut() {
             if let Some(content) = message.get_mut("content") {
-                merge_detections(&mut detections, scan_json(policy, key, content)?);
-                mask_keywords(content, policy.keywords());
+                scan_subtree(content, &mut report)?;
             }
         }
     }
-    Ok(detections)
+    Ok(report)
 }
 
 /// Masks every configured keyword to its alias across `value`'s string leaves, case-pattern
@@ -183,7 +269,7 @@ pub fn unmask_keywords_text(text: &str, keywords: &[CompiledKeyword]) -> String 
 }
 
 /// Full inbound response rewrite (design doc §5.1, §7.2/§7.3): keywords unmasked first
-/// (alias → match), then PII token spans decrypted — the inverse of `scan_request`'s
+/// (alias → match), then PII token spans decrypted — the inverse of `scan_request_with_external`'s
 /// tokenize-then-mask order. Fail-closed: a token failing SIV verification is an `Err`,
 /// never a silent pass-through of the literal span.
 pub fn unmask_and_detokenize_response(
@@ -1019,5 +1105,146 @@ mod tests {
         let mut buffer = ResponseRewriteBuffer::new();
         buffer.push_chunk(&bytes);
         assert!(buffer.finish(&[], &key).is_err());
+    }
+
+    fn external(start: usize, end: usize, category: &str) -> ExternalSpan {
+        ExternalSpan {
+            start,
+            end,
+            category: category.to_string(),
+        }
+    }
+
+    #[test]
+    fn scan_leaves_are_every_string_under_system_and_message_content_in_walk_order() {
+        let body = json!({
+            "model": "claude",
+            "system": [{"type": "text", "text": "sys"}],
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": [{"type": "text", "text": "second"}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "id", "content": [{"type": "text", "text": "third"}]}]}
+            ],
+            "metadata": {"user_id": "ignored"}
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "first", "second", "", "third", "", "", ""]);
+        assert_eq!(
+            leaves.len(),
+            collect_string_leaves(&body["system"]).len()
+                + body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| collect_string_leaves(&m["content"]).len())
+                    .sum::<usize>(),
+            "blanking must not change how many leaves the scan indexes"
+        );
+        assert!(collect_scan_leaves(&json!({"model": "x"})).is_empty());
+    }
+
+    #[test]
+    fn the_client_scaffolding_is_never_offered_to_the_detector() {
+        let body = json!({
+            "system": [
+                {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
+                {"type": "text", "text": "Jan Kowalski, mikolaj@example.com"}
+            ],
+            "messages": [{"role": "user", "content": "Jan Kowalski"}]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "", "", "Jan Kowalski"]);
+        assert_eq!(
+            leaves.len(),
+            collect_string_leaves(&body["system"]).len() + 1,
+            "system keeps one slot per leaf so the per-leaf answers stay aligned"
+        );
+    }
+
+    #[test]
+    fn an_attached_image_is_blanked_instead_of_being_sent_to_the_detector() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAA"}},
+                    {"type": "text", "text": "Jan Kowalski"}
+                ]
+            }]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "", "", "", "Jan Kowalski", ""]);
+    }
+
+    #[test]
+    fn external_spans_are_sealed_per_leaf_and_reported_separately() {
+        let (policy, key) = test_policy_and_key();
+        let mut body = json!({
+            "system": "Jan Kowalski",
+            "messages": [
+                {"role": "user", "content": "nothing here"},
+                {"role": "user", "content": [{"type": "text", "text": "mieszka w Gdańsku"}]}
+            ]
+        });
+        let leaves = collect_scan_leaves(&body);
+        assert_eq!(leaves, ["", "nothing here", "mieszka w Gdańsku", ""]);
+        let external = vec![
+            vec![],
+            vec![external(0, 7, "SURNAME")],
+            vec![external(10, 18, "CITY")],
+            vec![],
+        ];
+        let report = scan_request_with_external(&policy, &key, &mut body, Some(external)).unwrap();
+        assert!(report.detections.is_empty());
+        assert_eq!(report.external.len(), 2);
+        assert!(report
+            .external
+            .iter()
+            .all(|d| d.action == DetectionAction::Tokenized && d.count == 1));
+        assert_eq!(
+            body["system"], "Jan Kowalski",
+            "the client's scaffolding is forwarded verbatim"
+        );
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[SURNAME:TOKEN_"));
+        let city = body["messages"][1]["content"][0]["text"].as_str().unwrap();
+        assert!(city.starts_with("mieszka w [CITY:TOKEN_"), "{city}");
+    }
+
+    #[test]
+    fn external_spans_defer_to_rules_and_a_short_list_is_an_error() {
+        let (policy, key) = test_policy_and_key();
+        let text = "PESEL 44051401359 and someone@example.org";
+        let mut body = json!({"system": text});
+        let external = vec![vec![
+            external(6, 17, "GOVERNMENT_ID"),
+            external(0, 5, "SURNAME"),
+        ]];
+        let report = scan_request_with_external(&policy, &key, &mut body, Some(external)).unwrap();
+        assert!(report.detections.iter().any(|d| d.category == "PESEL"));
+        assert!(report.detections.iter().any(|d| d.category == "EMAIL"));
+        assert_eq!(report.external.len(), 1);
+        assert_eq!(report.external[0].category, "SURNAME");
+        assert!(!body["system"].as_str().unwrap().contains("GOVERNMENT_ID"));
+
+        let mut body = json!({"system": "a", "messages": [{"role": "user", "content": "b"}]});
+        let err =
+            scan_request_with_external(&policy, &key, &mut body, Some(vec![vec![]])).unwrap_err();
+        assert!(matches!(err, ScanError::ExternalSpanCount { .. }), "{err}");
+    }
+
+    #[test]
+    fn scan_request_equals_scan_with_no_external_lists() {
+        let (policy, key) = test_policy_and_key();
+        let original = json!({"system": "someone@example.org", "messages": [{"role": "user", "content": "44051401359"}]});
+        let mut a = original.clone();
+        let mut b = original;
+        let plain = scan_request(&policy, &key, &mut a).unwrap();
+        let report = scan_request_with_external(&policy, &key, &mut b, None).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(plain, report.detections);
+        assert!(report.external.is_empty());
     }
 }

@@ -86,6 +86,39 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
       @if (loaded()) {
         <div class="mt-4 space-y-2">
           <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            Detection
+          </div>
+          <label
+            class="flex items-start gap-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2"
+          >
+            <input
+              type="checkbox"
+              class="mt-0.5 accent-[var(--accent)]"
+              [checked]="nerEnabled()"
+              [disabled]="nerForced()"
+              (change)="toggleNer($event)"
+              data-testid="security-ner-enabled"
+            />
+            <div class="min-w-0 flex-1">
+              <div class="text-[12px] font-medium text-[var(--ink)]">
+                On-device name and address detection
+                @if (nerForced()) {
+                  <span
+                    class="mono ml-1 rounded bg-[var(--bg-3)] px-1.5 py-0.5 text-[10px] text-[var(--ink-dim)]"
+                    data-testid="security-ner-forced"
+                  >
+                    Enforced by organization
+                  </span>
+                }
+              </div>
+              <div class="text-[11px] text-[var(--ink-dim)]">
+                Catches names, addresses and ids the patterns miss. Message text is analysed by the
+                Speedwave app on this machine and never leaves it.
+              </div>
+            </div>
+          </label>
+
+          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
             Policies
           </div>
           @for (t of templates(); track t.id) {
@@ -377,6 +410,10 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   /** Rule id -> flags, built from the last load's `effective_rules`; a missing id is off. */
   readonly effectiveCategories = signal<RuleCategories>({});
   readonly customPolicies = signal<CustomPolicyRow[]>([]);
+  /** The on-device detector switch for the active project. */
+  readonly nerEnabled = signal(false);
+  /** True when MDM set the detector switch: checkbox locked, badge shown. */
+  readonly nerForced = signal(false);
 
   private readonly loadedFormSnapshot = signal('');
   private nextRowKey = 0;
@@ -462,6 +499,8 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   private applyPolicy(policy: SecurityPolicyResponse): void {
+    this.nerEnabled.set(policy.ner_enabled);
+    this.nerForced.set(policy.ner_forced);
     this.forcedPolicies.set(new Set(policy.forced_policies));
     this.enabledPolicies.set(new Set(policy.enabled_policies));
     this.effectiveCategories.set(
@@ -520,6 +559,15 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       else next.delete(id);
       return next;
     });
+  }
+
+  /**
+   * Toggles the on-device detector; an MDM-forced switch ignores the event.
+   * @param ev - the checkbox change event.
+   */
+  toggleNer(ev: Event): void {
+    if (this.nerForced()) return;
+    this.nerEnabled.set(eventChecked(ev));
   }
 
   /**
@@ -801,6 +849,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
 
   private computeFormSnapshot(): string {
     return JSON.stringify({
+      ner: this.nerEnabled(),
       enabled: Array.from(this.enabledPolicies()).sort(),
       custom: this.customPolicies().map((r) => ({
         name: r.name,
@@ -832,7 +881,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         caseSensitive: k.caseSensitive,
       })),
     }));
-    return { policies, custom_policies };
+    return { policies, custom_policies, ner_enabled: this.nerEnabled() && !this.nerForced() };
   }
 
   /** Persists the enabled policies + custom definitions, then requests a restart. */

@@ -28,6 +28,8 @@ endif
 DEV_TAURI_CONFIG = {"identifier":"$(DEV_IDENTIFIER)","productName":"$(DEV_PRODUCT_NAME)"$(DEV_PORT_CONFIG)}
 export DEV_TAURI_CONFIG
 
+PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+
 SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-$(DEV_INSTANCE)
 export SPEEDWAVE_DATA_DIR
 
@@ -290,7 +292,7 @@ build-desktop: generate-installer-nsh
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh prepare-pii-ner-model
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then "$(MAKE)" download-wsl-resources; fi
 	@bash scripts/bundle-build-context.sh
@@ -389,7 +391,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -419,14 +421,14 @@ test-desktop-run: guard-not-prod-data-dir
 	@echo "✅ Desktop tests passed"
 
 test-run-lanes: test-rust-run test-angular-run test-entrypoint test-desktop-config test-ci \
-                test-mcp-run test-desktop-build-run test-desktop-run test-proxy
+                test-mcp-run test-desktop-build-run test-desktop-run test-proxy test-pii-ner-tools
 
 test-proxy: guard-not-prod-data-dir
 	cd containers/proxy && cargo test --locked
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -491,12 +493,33 @@ test-mcp-office-py:
 	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
 
+PII_NER_ARTIFACT_DIR := desktop/src-tauri/pii-ner
+PII_NER_TOOLS := crates/pii-ner/tools
+
+prepare-pii-ner-model:
+	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR)
+
+test-pii-ner-tools:
+	@$(PYTHON) -m unittest discover -s $(PII_NER_TOOLS) -p 'test_*.py'
+	@echo "✅ pii-ner converter tests passed"
+
+clean-pii-ner-model:
+	rm -rf $(PII_NER_ARTIFACT_DIR)
+
+test-pii-ner-model: guard-not-prod-data-dir prepare-pii-ner-model
+	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR) --verify
+	$(call RUN_CARGO_ISOLATED,env SPEEDWAVE_PII_NER_ARTIFACT="$(CURDIR)/$(PII_NER_ARTIFACT_DIR)" cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e)
+	@echo "✅ pii-ner model e2e passed"
+
+bench-pii-ner: prepare-pii-ner-model
+	cargo run -p speedwave-pii-ner --release --features bench --bin pii-ner-bench -- --artifact $(PII_NER_ARTIFACT_DIR) $(ARGS)
+
 coverage: coverage-rust coverage-mcp coverage-angular
 	@echo "\n✅ All coverage reports generated"
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -667,8 +690,9 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-engine-wasm -p speedwave-pii-ner --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
+	cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
@@ -750,7 +774,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
@@ -873,7 +897,7 @@ clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
@@ -885,7 +909,7 @@ dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resourc
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
-dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
+dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."

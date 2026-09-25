@@ -295,7 +295,75 @@ pub fn pii_feature_enabled(
     beta_enabled: bool,
     managed: Option<&crate::config::ManagedPiiPolicyConfig>,
 ) -> bool {
-    beta_enabled || managed.is_some_and(|m| !m.forced_policies.is_empty())
+    beta_enabled
+        || managed
+            .is_some_and(|m| !m.forced_policies.is_empty() || matches!(m.ner_enabled, Some(true)))
+}
+
+/// The neural detector setting after the user layer and the MDM layer merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResolvedNer {
+    /// Whether the proxy gets a detector endpoint for this project.
+    pub enabled: bool,
+    /// Whether MDM set the value, which locks it in the UI.
+    pub forced: bool,
+}
+
+/// Resolves the detector switch: MDM wins over the user opt-in, and the whole
+/// PII feature gate wins over both.
+pub fn resolve_pii_ner(
+    feature_enabled: bool,
+    user: Option<&crate::config::PiiPolicyUserConfig>,
+    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
+) -> ResolvedNer {
+    let forced_value = managed.and_then(|m| m.ner_enabled);
+    let wanted = forced_value.unwrap_or_else(|| user.and_then(|u| u.ner).unwrap_or(false));
+    ResolvedNer {
+        enabled: feature_enabled && wanted,
+        forced: forced_value.is_some(),
+    }
+}
+
+/// Resolved detector switch for one project, read from the on-disk layers.
+pub fn pii_ner_enabled_for_project(project: &str) -> bool {
+    let user_config = crate::config::load_user_config().unwrap_or_default();
+    let managed = managed_pii_policy_from_disk();
+    let feature_enabled = pii_feature_enabled(user_config.beta_enabled(), managed.as_ref());
+    resolve_pii_ner(
+        feature_enabled,
+        user_config
+            .find_project(project)
+            .and_then(|p| p.policy.as_ref()),
+        managed.as_ref(),
+    )
+    .enabled
+}
+
+/// Whether the host detector service is wanted by anything on this machine,
+/// read from the on-disk layers.
+pub fn pii_ner_wanted_on_this_host() -> bool {
+    let user_config = crate::config::load_user_config().unwrap_or_default();
+    any_project_wants_pii_ner(&user_config, managed_pii_policy_from_disk().as_ref())
+}
+
+fn managed_pii_policy_from_disk() -> Option<crate::config::ManagedPiiPolicyConfig> {
+    crate::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.pii_policy)
+}
+
+/// Whether any registered project resolves the detector on, so the Desktop knows
+/// whether to run the host service at all.
+pub fn any_project_wants_pii_ner(
+    user_config: &crate::config::SpeedwaveUserConfig,
+    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
+) -> bool {
+    let feature_enabled = pii_feature_enabled(user_config.beta_enabled(), managed);
+    user_config
+        .projects
+        .iter()
+        .any(|p| resolve_pii_ner(feature_enabled, p.policy.as_ref(), managed).enabled)
 }
 
 /// Save-time gate, a superset of the TS load lint so a saved rule never gets silently dropped
@@ -1339,6 +1407,7 @@ keywords: []
     fn pii_feature_enabled_gates_on_beta_or_mdm_forced() {
         let forced = ManagedPiiPolicyConfig {
             forced_policies: vec!["gdpr-art32".to_string()],
+            ner_enabled: None,
         };
         let empty = ManagedPiiPolicyConfig::default();
         assert!(pii_feature_enabled(true, None));
@@ -1352,6 +1421,131 @@ keywords: []
             !pii_feature_enabled(false, Some(&empty)),
             "a managed file forcing nothing must not enable the feature"
         );
+    }
+
+    #[test]
+    fn mdm_forcing_the_detector_on_enables_the_pii_feature() {
+        let on = ManagedPiiPolicyConfig {
+            forced_policies: Vec::new(),
+            ner_enabled: Some(true),
+        };
+        let off = ManagedPiiPolicyConfig {
+            forced_policies: Vec::new(),
+            ner_enabled: Some(false),
+        };
+        assert!(pii_feature_enabled(false, Some(&on)));
+        assert!(
+            !pii_feature_enabled(false, Some(&off)),
+            "an MDM kill-switch must not turn the feature on"
+        );
+    }
+
+    #[test]
+    fn resolve_pii_ner_merges_the_user_opt_in_under_the_mdm_layer() {
+        let user_on = PiiPolicyUserConfig {
+            ner: Some(true),
+            ..Default::default()
+        };
+        let user_off = PiiPolicyUserConfig {
+            ner: Some(false),
+            ..Default::default()
+        };
+        let unset = PiiPolicyUserConfig::default();
+        let mdm_on = ManagedPiiPolicyConfig {
+            forced_policies: Vec::new(),
+            ner_enabled: Some(true),
+        };
+        let mdm_off = ManagedPiiPolicyConfig {
+            forced_policies: Vec::new(),
+            ner_enabled: Some(false),
+        };
+        let mdm_silent = ManagedPiiPolicyConfig::default();
+
+        assert_eq!(
+            resolve_pii_ner(true, Some(&user_on), None),
+            ResolvedNer {
+                enabled: true,
+                forced: false
+            }
+        );
+        assert_eq!(
+            resolve_pii_ner(true, Some(&user_off), None),
+            ResolvedNer::default()
+        );
+        assert_eq!(
+            resolve_pii_ner(true, Some(&unset), None),
+            ResolvedNer::default(),
+            "an absent switch is off"
+        );
+        assert_eq!(resolve_pii_ner(true, None, None), ResolvedNer::default());
+        assert_eq!(
+            resolve_pii_ner(true, Some(&user_off), Some(&mdm_on)),
+            ResolvedNer {
+                enabled: true,
+                forced: true
+            }
+        );
+        assert_eq!(
+            resolve_pii_ner(true, Some(&user_on), Some(&mdm_off)),
+            ResolvedNer {
+                enabled: false,
+                forced: true
+            }
+        );
+        assert_eq!(
+            resolve_pii_ner(true, Some(&user_on), Some(&mdm_silent)),
+            ResolvedNer {
+                enabled: true,
+                forced: false
+            }
+        );
+        assert_eq!(
+            resolve_pii_ner(false, Some(&user_on), None),
+            ResolvedNer::default(),
+            "the PII feature gate wins over the user opt-in"
+        );
+    }
+
+    #[test]
+    fn any_project_wants_pii_ner_scans_every_project() {
+        let project = |name: &str, ner: Option<bool>| crate::config::ProjectUserEntry {
+            name: name.to_string(),
+            dir: format!("/tmp/{name}"),
+            claude: None,
+            integrations: None,
+            plugin_settings: None,
+            policy: Some(PiiPolicyUserConfig {
+                ner,
+                ..Default::default()
+            }),
+            effort_pin: None,
+        };
+        let beta_on = crate::config::UiPrefsConfig {
+            beta_enabled: Some(true),
+        };
+
+        let mut cfg = crate::config::SpeedwaveUserConfig {
+            projects: vec![project("a", Some(false)), project("b", None)],
+            ui: Some(beta_on.clone()),
+            ..Default::default()
+        };
+        assert!(!any_project_wants_pii_ner(&cfg, None));
+
+        cfg.projects.push(project("c", Some(true)));
+        assert!(any_project_wants_pii_ner(&cfg, None));
+
+        cfg.ui = None;
+        assert!(
+            !any_project_wants_pii_ner(&cfg, None),
+            "the beta gate still applies"
+        );
+
+        let mdm_off = ManagedPiiPolicyConfig {
+            forced_policies: Vec::new(),
+            ner_enabled: Some(false),
+        };
+        cfg.ui = Some(beta_on);
+        assert!(!any_project_wants_pii_ner(&cfg, Some(&mdm_off)));
     }
 
     #[test]
@@ -1385,6 +1579,7 @@ keywords: []
     fn resolve_with_unknown_managed_forced_id_errs_naming_it() {
         let managed = ManagedPiiPolicyConfig {
             forced_policies: vec!["not-a-real-policy".to_string()],
+            ner_enabled: None,
         };
         let err = resolve_pii_policy(None, Some(&managed)).unwrap_err();
         assert!(err.contains("not-a-real-policy"));
@@ -1400,6 +1595,7 @@ keywords: []
                 Vec::new(),
                 Vec::new(),
             )],
+            ner: None,
         };
         assert!(resolve_pii_policy(Some(&user), None).is_err());
     }
@@ -1410,6 +1606,7 @@ keywords: []
         let user = PiiPolicyUserConfig {
             policies: vec!["acme".to_string()],
             custom_policies: vec![def.clone(), def],
+            ner: None,
         };
         assert!(resolve_pii_policy(Some(&user), None).is_err());
     }
@@ -1422,6 +1619,7 @@ keywords: []
         };
         let managed = ManagedPiiPolicyConfig {
             forced_policies: vec!["gdpr-art32".to_string(), "eu-ai-act-art5".to_string()],
+            ner_enabled: None,
         };
         let resolved = resolve_pii_policy(Some(&user), Some(&managed)).unwrap();
         assert_eq!(
@@ -1469,6 +1667,7 @@ keywords: []
                     Vec::new(),
                 ),
             ],
+            ner: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         let rule = resolved
@@ -1498,6 +1697,7 @@ keywords: []
                     Vec::new(),
                 ),
             ],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("EMPLOYEE_ID"));
@@ -1513,6 +1713,7 @@ keywords: []
                 vec![own_rule("EMAIL", r"x{3}", true, false)],
                 Vec::new(),
             )],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("EMAIL"));
@@ -1528,6 +1729,7 @@ keywords: []
                 vec![own_rule("BAD_ID", "(a+)+", true, false)],
                 Vec::new(),
             )],
+            ner: None,
         };
         assert!(resolve_pii_policy(Some(&user), None).is_err());
     }
@@ -1539,6 +1741,7 @@ keywords: []
         let user = PiiPolicyUserConfig {
             policies: vec!["a".to_string()],
             custom_policies: vec![custom_policy("a", categories, Vec::new(), Vec::new())],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("NOT_A_RULE"));
@@ -1562,6 +1765,7 @@ keywords: []
                     vec![keyword("Calgon", "Solvex", false)],
                 ),
             ],
+            ner: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert_eq!(resolved.keywords.len(), 2);
@@ -1593,6 +1797,7 @@ keywords: []
                     vec![keyword("Coca-Cola", "Brandex", true)],
                 ),
             ],
+            ner: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert_eq!(resolved.keywords.len(), 1);
@@ -1616,6 +1821,7 @@ keywords: []
                     vec![keyword("Coca-Cola", "Fizzex", true)],
                 ),
             ],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("Coca-Cola"));
@@ -1639,6 +1845,7 @@ keywords: []
                     vec![keyword("Calgon", "Brandex", true)],
                 ),
             ],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("Brandex"));
@@ -1662,6 +1869,7 @@ keywords: []
                     vec![keyword("Brandex", "Otherex", true)],
                 ),
             ],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("Brandex"));
@@ -1677,6 +1885,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("ab", "xyzalias", true)],
             )],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("match"));
@@ -1692,6 +1901,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("secretco", "123bad", true)],
             )],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("alias"));
@@ -1707,6 +1917,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("secret", "secret", true)],
             )],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("differ"));
@@ -1720,6 +1931,7 @@ keywords: []
         let user = PiiPolicyUserConfig {
             policies: vec!["a".to_string()],
             custom_policies: vec![custom_policy("a", HashMap::new(), Vec::new(), keywords)],
+            ner: None,
         };
         let err = resolve_pii_policy(Some(&user), None).unwrap_err();
         assert!(err.contains("too many keywords"));
@@ -1735,6 +1947,7 @@ keywords: []
                 Vec::new(),
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
+            ner: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         let json = serde_json::to_value(&resolved).unwrap();
@@ -1765,6 +1978,7 @@ keywords: []
                 vec![own_rule("EMPLOYEE_ID", r"\bEMP-\d{4,8}\b", true, false)],
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
+            ner: None,
         };
         let resolved = resolve_pii_policy(Some(&user), None).unwrap();
 
@@ -1904,6 +2118,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["custom".to_string()],
             custom_policies: vec![custom_policy("custom", HashMap::new(), rules, Vec::new())],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -1921,6 +2136,7 @@ keywords: []
                 ],
                 Vec::new(),
             )],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -1937,6 +2153,7 @@ keywords: []
                 vec![rule],
                 Vec::new(),
             )],
+            ner: None,
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("display name exceeds"));
@@ -1954,6 +2171,7 @@ keywords: []
                 vec![rule],
                 Vec::new(),
             )],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_ok());
     }
@@ -1971,6 +2189,7 @@ keywords: []
                 Vec::new(),
                 keywords,
             )],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -1985,6 +2204,7 @@ keywords: []
                 vec![own_rule("EMPLOYEE_ID", r"\bEMP-\d{4,8}\b", true, false)],
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_ok());
     }
@@ -1994,6 +2214,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["totally-bogus".to_string()],
             custom_policies: Vec::new(),
+            ner: None,
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("totally-bogus"));
@@ -2009,6 +2230,7 @@ keywords: []
                 Vec::new(),
                 Vec::new(),
             )],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2019,6 +2241,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["acme".to_string()],
             custom_policies: vec![def.clone(), def],
+            ner: None,
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -2030,6 +2253,7 @@ keywords: []
         let cfg = PiiPolicyUserConfig {
             policies: vec!["custom".to_string()],
             custom_policies: vec![custom_policy("custom", categories, Vec::new(), Vec::new())],
+            ner: None,
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("NOT_A_RULE"));
@@ -2065,6 +2289,7 @@ keywords: []
                 vec![rule],
                 vec![keyword("Coca-Cola", "Brandex", true)],
             )],
+            ner: None,
         };
         let policy = resolve_pii_policy(Some(&user), None).unwrap();
         write_policy_config_in(tmp.path(), "proj", &policy).unwrap();

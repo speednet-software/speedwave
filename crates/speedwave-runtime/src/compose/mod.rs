@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 mod addressing;
 mod llm;
+mod pii_ner;
 mod plugins;
 mod proxy;
 mod quoting;
@@ -24,6 +25,11 @@ pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
     spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL,
     PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
+};
+
+pub use pii_ner::{
+    live_service_in as live_pii_ner_service_in, ner_url_state, validate_ner_url, LiveNerService,
+    NerUrlState, DEFAULT_NER_LABELS, DEFAULT_NER_MIN_CONFIDENCE,
 };
 
 pub use addressing::{
@@ -287,7 +293,12 @@ pub fn render_compose_in(
     })?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
-    proxy::write_proxy_config_in(data_dir, project_name, &resolved_config.llm)?;
+    proxy::write_proxy_config_in(
+        data_dir,
+        project_name,
+        &resolved_config.llm,
+        resolved_config.pii_ner_enabled,
+    )?;
     let proxy_config_dir = proxy::proxy_config_dir_in(data_dir, project_name);
     std::fs::create_dir_all(&proxy_config_dir)?;
     let proxy_usage_dir = data_dir.join("usage").join(project_name).join("proxy");
@@ -1116,7 +1127,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 52;
+    const SECURITY_RULE_COUNT: usize = 53;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {

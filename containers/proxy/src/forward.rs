@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::audit;
+use crate::ner::NerOutcome;
 use crate::pii::{self, PiiEngineState};
 use crate::router::{resolve, Auth, BareAuth, Config, Route, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
@@ -301,8 +302,19 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
-    let detections = match pii::scan_request(policy, key, &mut parsed) {
-        Ok(d) => d,
+    let external = match cfg.ner.as_deref() {
+        None => None,
+        Some(ner) => match ner.detect_batch(&pii::collect_scan_leaves(&parsed)).await {
+            NerOutcome::Spans(spans) => Some(spans),
+            NerOutcome::Unavailable(reason) => {
+                ner.warn_unavailable(&reason);
+                audit::write_ner_unavailable(cfg.audit_dir.as_deref());
+                None
+            }
+        },
+    };
+    let report = match pii::scan_request_with_external(policy, key, &mut parsed, external) {
+        Ok(report) => report,
         Err(e) => {
             log::error!("PII scan failed, rejecting /v1/messages: {e}");
             return (
@@ -312,7 +324,12 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
-    audit::write_pii_audit(cfg.audit_dir.as_deref(), &detections);
+    audit::write_pii_audit(cfg.audit_dir.as_deref(), &report.detections);
+    audit::write_pii_audit_with_source(
+        cfg.audit_dir.as_deref(),
+        &report.external,
+        Some(audit::NER_SOURCE),
+    );
 
     let scanned_body = match serde_json::to_vec(&parsed) {
         Ok(b) => b,
