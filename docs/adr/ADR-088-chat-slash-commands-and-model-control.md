@@ -537,7 +537,11 @@ the soft-impose falls back to the first `init`. Either way a soft-impose that is
 refused, gets no answer or finds no process emits `chat_model_switch_failed`
 (`control_channel::ModelSwitchFailedEvent`), and the composer of that project shows
 Claude Code's reason; it is not retried, since a retry at the next `init` would race
-a turn again.
+a turn again. A soft-impose whose session was stopped before the answer (a New chat,
+a resume or a project switch replaced it) is only logged, so no failure of a session
+that is gone reaches the conversation that replaced it (`chat.rs::soft_impose_report`).
+A composer pick made while a spawn-time soft-impose is unanswered waits for the same
+first-turn gate, so the two `set_model` requests never race.
 
 A typed `/model` goes to Claude Code as an input (decision 3), and 2.1.282 checks it
 the same way. The same recording shows its answer: a `<synthetic>` assistant line,

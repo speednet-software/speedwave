@@ -4269,14 +4269,11 @@ services:
                     || e.starts_with("ANTHROPIC_API_KEY=")),
             "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
         );
-        for alias in [
-            "ANTHROPIC_DEFAULT_OPUS_MODEL=",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL=",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL=",
-        ] {
+        for (key, value) in crate::defaults::anthropic_default_models_env() {
+            let pin = format!("{key}={value}");
             assert!(
-                env.iter().any(|e| e.starts_with(alias)),
-                "alias pin {alias} must be present: {env:?}"
+                env.contains(&pin),
+                "alias pin {pin} must be rendered: {env:?}"
             );
         }
         assert!(

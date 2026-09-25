@@ -60,13 +60,22 @@ fn start_session_inner(
     drop(old_session);
 
     log::info!("starting new session");
+    start_then_await_first_turn(&session_arc, |session| {
+        session
+            .start(app_handle, resume_session_id)
+            .map_err(|e| e.to_string())
+    })
+}
+
+fn start_then_await_first_turn(
+    session_arc: &SharedChatSession,
+    start: impl FnOnce(&mut ChatSession) -> Result<(), String>,
+) -> Result<(), String> {
     let first_turn = {
         let mut session = session_arc
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))?;
-        let result = session
-            .start(app_handle, resume_session_id)
-            .map_err(|e| e.to_string());
+        let result = start(&mut session);
         log::info!("session.start result={result:?}");
         result?;
         session.first_turn_gate()
@@ -128,12 +137,20 @@ fn after_first_turn<T>(
     input: impl FnOnce(&mut ChatSession) -> Result<T, String>,
 ) -> Result<T, String> {
     let first_turn = lock_session_for_input(session_arc)?.first_turn_gate();
+    write_after(session_arc, &first_turn, input)
+}
+
+fn write_after<T>(
+    session_arc: &SharedChatSession,
+    first_turn: &chat::FirstTurnGate,
+    input: impl FnOnce(&mut ChatSession) -> Result<T, String>,
+) -> Result<T, String> {
     if !first_turn.wait(control_channel::SET_MODEL_TIMEOUT) {
-        log::warn!("sending before the session's model switch settled");
+        log::warn!("writing before the session's model switch settled");
     }
     let mut session = lock_session_for_input(session_arc)?;
-    if !session.first_turn_gate().is(&first_turn) {
-        log::info!("the chat session was replaced while a message waited for its first turn");
+    if !session.first_turn_gate().is(first_turn) {
+        log::info!("the chat session was replaced while an input waited for its first turn");
         return Err(MSG_SESSION_REPLACED.to_string());
     }
     input(&mut session)
@@ -317,7 +334,9 @@ fn switch_model_inner(
     project: &str,
     model: &str,
 ) -> Result<ModelSwitchOutcome, String> {
-    let switch = live_session_input(session_arc, project, ChatSession::model_switch)?;
+    let switch = after_first_turn(session_arc, |session| {
+        take_from_project_session(session, project, ChatSession::model_switch)
+    })?;
     log::info!("switching the chat session to {model}");
     let outcome = switch.apply(model).map_err(|e| e.to_string())?;
     match &outcome {
@@ -646,14 +665,14 @@ mod tests {
         let sender = {
             let session_arc = session_arc.clone();
             let written = written.clone();
+            let gate = gate.clone();
             std::thread::spawn(move || {
-                after_first_turn(&session_arc, |_| {
+                write_after(&session_arc, &gate, |_| {
                     written.store(true, std::sync::atomic::Ordering::SeqCst);
                     Ok(())
                 })
             })
         };
-        std::thread::sleep(std::time::Duration::from_millis(100));
 
         *session_arc.lock().unwrap() = ChatSession::new("test-project");
         gate.release();
@@ -1023,17 +1042,21 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
         let gate = session_arc.lock().unwrap().hold_first_turn();
         let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let sender = {
             let session_arc = session_arc.clone();
             let sent = sent.clone();
+            let gate = gate.clone();
             std::thread::spawn(move || {
-                after_first_turn(&session_arc, |_| {
+                ready_tx.send(()).unwrap();
+                write_after(&session_arc, &gate, |_| {
                     sent.store(true, std::sync::atomic::Ordering::SeqCst);
                     Ok(())
                 })
             })
         };
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         assert!(!sent.load(std::sync::atomic::Ordering::SeqCst));
         assert!(
@@ -1057,22 +1080,88 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_waits_for_the_first_turn_after_it_releases_the_session() {
+    fn start_session_inner_starts_through_the_first_turn_wait() {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
-        let scope = body
-            .find("let first_turn = {")
-            .expect("the start runs in its own lock scope");
+        let wrapped = body
+            .find("start_then_await_first_turn(&session_arc, |session| {")
+            .expect("the start goes through the first-turn wait");
         let start = body
             .find(".start(app_handle, resume_session_id)")
             .expect("the start");
-        let gate = body
-            .find("session.first_turn_gate()")
-            .expect("the gate is read under the lock");
-        let scope_end = scope + body[scope..].find("\n    };").expect("the lock scope ends");
-        let wait = body.find("first_turn.wait(").expect("the wait");
 
-        assert!(scope < start && start < gate && gate < scope_end && scope_end < wait);
+        assert!(wrapped < start);
+    }
+
+    #[test]
+    fn a_start_waits_for_its_first_turn_with_the_session_released() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+        let starter = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                start_then_await_first_turn(&session_arc, |session| {
+                    gate_tx.send(session.hold_first_turn()).unwrap();
+                    Ok(())
+                })
+            })
+        };
+        let gate = gate_rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while session_arc.try_lock().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the start must release the session while it waits"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            !starter.is_finished(),
+            "the start returns only once the first turn may go"
+        );
+        gate.release();
+        assert_eq!(starter.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn a_start_that_fails_returns_its_error_without_waiting() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let started = std::time::Instant::now();
+
+        let result = start_then_await_first_turn(&session_arc, |session| {
+            session.hold_first_turn();
+            Err("failed to spawn claude".to_string())
+        });
+
+        assert_eq!(result, Err("failed to spawn claude".to_string()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_model_pick_waits_for_the_first_turn_of_a_new_session() {
+        let session_arc: SharedChatSession =
+            std::sync::Arc::new(std::sync::Mutex::new(ChatSession::new("test-project")));
+        let gate = session_arc.lock().unwrap().hold_first_turn();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let picker = {
+            let session_arc = session_arc.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                switch_model_inner(&session_arc, "test-project", "claude-haiku-4-5")
+            })
+        };
+        ready_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert!(!picker.is_finished(), "the pick waits for the soft-impose");
+        gate.release();
+        let Err(err) = picker.join().unwrap() else {
+            panic!("a session without a process cannot take the pick");
+        };
+        assert!(err.contains("no active session"), "{err}");
     }
 
     #[test]

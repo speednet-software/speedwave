@@ -1400,23 +1400,42 @@ fn soft_impose_failure(pending: control_channel::PendingControl, model: &str) ->
     failure
 }
 
-fn report_soft_impose(
-    app_handle: &AppHandle,
-    project: &str,
+fn soft_impose_report(
     pending: control_channel::PendingControl,
     model: &str,
-) {
-    let Some(reason) = soft_impose_failure(pending, model) else {
-        return;
-    };
-    let event = control_channel::ModelSwitchFailedEvent {
-        project: project.to_string(),
-        model: model.to_string(),
-        reason,
-    };
-    if let Err(e) = app_handle.emit(control_channel::MODEL_SWITCH_FAILED_EVENT, event) {
-        log::warn!("failed to emit the model switch failure event: {e}");
+    stopping: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    let reason = soft_impose_failure(pending, model)?;
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        log::info!("the session stopped before Claude Code answered the switch to {model}");
+        return None;
     }
+    Some(reason)
+}
+
+fn spawn_soft_impose_report(
+    app_handle: AppHandle,
+    project: String,
+    pending: control_channel::PendingControl,
+    model: String,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
+    first_turn: Option<FirstTurnGate>,
+) {
+    std::thread::spawn(move || {
+        if let Some(reason) = soft_impose_report(pending, &model, &stopping) {
+            let event = control_channel::ModelSwitchFailedEvent {
+                project,
+                model,
+                reason,
+            };
+            if let Err(e) = app_handle.emit(control_channel::MODEL_SWITCH_FAILED_EVENT, event) {
+                log::warn!("failed to emit the model switch failure event: {e}");
+            }
+        }
+        if let Some(gate) = first_turn {
+            gate.release();
+        }
+    });
 }
 
 fn spawn_soft_impose_target(
@@ -2145,11 +2164,14 @@ impl ChatSession {
                     &control_for_reader,
                     &stdin_for_reader,
                 ) {
-                    let app_handle = app_handle.clone();
-                    let project = project_for_reader.clone();
-                    std::thread::spawn(move || {
-                        report_soft_impose(&app_handle, &project, pending, &model)
-                    });
+                    spawn_soft_impose_report(
+                        app_handle.clone(),
+                        project_for_reader.clone(),
+                        pending,
+                        model,
+                        stopping_for_reader.clone(),
+                        None,
+                    );
                 }
                 if let Some(refusal) = refused_model_command(&parsed, &settled_for_reader) {
                     log::warn!(
@@ -2214,11 +2236,14 @@ impl ChatSession {
             {
                 let gate = FirstTurnGate::closed();
                 self.first_turn_gate = gate.clone();
-                let project = self.project_name.clone();
-                std::thread::spawn(move || {
-                    report_soft_impose(&impose_app_handle, &project, pending, &model);
-                    gate.release();
-                });
+                spawn_soft_impose_report(
+                    impose_app_handle,
+                    self.project_name.clone(),
+                    pending,
+                    model,
+                    self.stopping.clone(),
+                    Some(gate),
+                );
             }
         }
 
@@ -3549,8 +3574,8 @@ mod tests {
         let step = at(concat!(
             "ifletSome((pending,model))=soft_impose_step(&parsed,&chunks,&soft_impose_cfg,",
             "&settled_for_reader,&control_for_reader,&stdin_for_reader,)",
-            "{letapp_handle=app_handle.clone();letproject=project_for_reader.clone();",
-            "std::thread::spawn(move||{report_soft_impose(&app_handle,&project,pending,&model)});}"
+            "{spawn_soft_impose_report(app_handle.clone(),project_for_reader.clone(),pending,",
+            "model,stopping_for_reader.clone(),None,);}"
         ));
         assert!(
             answers_routed < parsed,
@@ -5021,13 +5046,77 @@ mod tests {
             .expect("the first turn waits for the switch");
         let awaited = start
             .find(concat!(
-                "std::thread::spawn(move||{",
-                "report_soft_impose(&impose_app_handle,&project,pending,&model);",
-                "gate.release();});"
+                "spawn_soft_impose_report(impose_app_handle,self.project_name.clone(),pending,",
+                "model,self.stopping.clone(),Some(gate),);"
             ))
-            .expect("the answer is awaited on its own thread");
+            .expect("the answer is awaited by the report thread");
 
         assert!(imposed < closed && closed < awaited);
+        let report_from = source
+            .find("fn spawn_soft_impose_report(")
+            .expect("the report thread");
+        let report: String = source[report_from..]
+            .split("\n}\n")
+            .next()
+            .expect("its body")
+            .split_whitespace()
+            .collect();
+        let spawned = report
+            .find("std::thread::spawn(move||{")
+            .expect("the wait runs on its own thread");
+        let released = report
+            .find("ifletSome(gate)=first_turn{gate.release();}")
+            .expect("the gate opens once the answer is in");
+        assert!(spawned < released);
+    }
+
+    #[test]
+    fn a_switch_that_fails_because_its_session_stopped_is_not_reported() {
+        let control = ControlChannel::default();
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.close();
+        let stopping = std::sync::atomic::AtomicBool::new(true);
+
+        assert_eq!(
+            soft_impose_report(orphaned, "local/llama-3.1-70b", &stopping),
+            None
+        );
+    }
+
+    #[test]
+    fn a_switch_that_fails_in_a_live_session_is_reported() {
+        let control = ControlChannel::default();
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.close();
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            soft_impose_report(orphaned, "local/llama-3.1-70b", &stopping),
+            Some(control_channel::ControlError::SessionEnded.to_string())
+        );
+    }
+
+    #[test]
+    fn a_confirmed_switch_is_never_reported() {
+        let control = ControlChannel::default();
+        let answered = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        let id = control.pending_ids().pop().expect("a waiter");
+        control.route_response(&serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        }));
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            soft_impose_report(answered, "local/llama-3.1-70b", &stopping),
+            None
+        );
     }
 
     #[test]
@@ -7207,21 +7296,31 @@ mod tests {
     #[test]
     fn claude_code_hands_a_declined_call_to_the_model_as_a_failed_tool_result() {
         let capture = safety_check_capture();
-        let sent = &capture["control_response"]["response"]["response"];
-        assert_eq!(sent["behavior"], "deny");
+        let req = try_parse_control_request_str(&capture["control_request"].to_string()).unwrap();
+        let decline = build_tool_permission_response(&req);
+        assert_eq!(
+            decline, capture["control_response"],
+            "record the capture again with the decline Speedwave sends now"
+        );
         let results = capture["tool_results"].as_array().unwrap();
 
         let [result] = results.as_slice() else {
             panic!("one tool call, one result: {results:?}");
         };
         assert_eq!(result["is_error"], true);
-        assert_eq!(result["content"], sent["message"]);
+        assert_eq!(
+            result["content"],
+            decline["response"]["response"]["message"]
+        );
         assert_eq!(
             result["tool_use_id"],
             capture["control_request"]["request"]["tool_use_id"]
         );
         assert_eq!(capture["result"]["is_error"], false);
-        assert_eq!(capture["target_absent_after"], true);
+        assert_eq!(
+            capture["target_kept"], true,
+            "the declined rm left its target in place"
+        );
     }
 
     #[test]
