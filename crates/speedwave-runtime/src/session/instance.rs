@@ -16,19 +16,29 @@ pub fn new_instance_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Busybox-safe `sh -c` body killing only process(es) whose environ carries
-/// `SPW_SESSION_INSTANCE_ID=<id>`; no procps, other sessions untouched.
+const REAP_EXIT_WAIT_TENTHS: u32 = 30;
+
+/// Busybox-safe `sh -c` body stopping only process(es) whose environ carries
+/// `SPW_SESSION_INSTANCE_ID=<id>`: TERM, a bounded wait for their exit, then KILL.
 pub fn kill_by_instance_command(id: &str) -> Vec<String> {
     let marker = format!("{SESSION_INSTANCE_ENV}={id}");
     let script = format!(
-        "for d in /proc/[0-9]*; do \
-grep -qa '{marker}' \"$d/environ\" 2>/dev/null && kill \"${{d#/proc/}}\" 2>/dev/null; \
-done; true"
+        "m='{marker}'; \
+signal() {{ for d in /proc/[0-9]*; do \
+grep -qa \"$m\" \"$d/environ\" 2>/dev/null && kill \"$1\" \"${{d#/proc/}}\" 2>/dev/null; \
+done; }}; \
+alive() {{ for d in /proc/[0-9]*; do \
+grep -qa \"$m\" \"$d/environ\" 2>/dev/null && return 0; \
+done; return 1; }}; \
+signal -TERM; i=0; \
+while [ \"$i\" -lt {REAP_EXIT_WAIT_TENTHS} ] && alive; do sleep 0.1; i=$((i + 1)); done; \
+signal -KILL; true"
     );
     vec!["sh".to_string(), "-c".to_string(), script]
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test assertions may expect freely")]
 mod tests {
     use super::*;
 
@@ -54,6 +64,33 @@ mod tests {
         assert!(cmd[2].contains("SPW_SESSION_INSTANCE_ID=abc-123"));
         assert!(cmd[2].contains("/proc/[0-9]*"));
         assert!(cmd[2].contains("kill"));
+    }
+
+    #[test]
+    fn kill_command_waits_for_the_instance_to_exit_before_it_kills_what_is_left() {
+        let script = &kill_by_instance_command("abc-123")[2];
+        let term = script.find("signal -TERM").expect("a TERM first");
+        let wait = script.find("while").expect("a wait for the exit");
+        let kill = script.find("signal -KILL").expect("a KILL for survivors");
+
+        assert!(term < wait && wait < kill, "{script}");
+        assert!(script.contains("&& alive; do sleep 0.1;"));
+        assert!(script.contains(&format!("-lt {REAP_EXIT_WAIT_TENTHS} ]")));
+        assert!(script.ends_with("true"));
+    }
+
+    #[test]
+    fn kill_command_waits_at_most_three_seconds() {
+        assert_eq!(REAP_EXIT_WAIT_TENTHS, 30);
+    }
+
+    #[test]
+    fn kill_command_is_valid_posix_shell() {
+        let script = &kill_by_instance_command("abc-123")[2];
+        let words = shlex::split(script).expect("the script tokenizes as shell words");
+        assert!(words
+            .iter()
+            .any(|w| w == "m=SPW_SESSION_INSTANCE_ID=abc-123;"));
     }
 
     #[test]

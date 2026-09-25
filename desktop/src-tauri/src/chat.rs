@@ -433,6 +433,11 @@ impl StreamParser {
         self.last_context_usage = context_usage;
     }
 
+    pub(crate) fn restore_resume_snapshot(&mut self, seed: crate::history::ResumeSnapshot) {
+        let usage = seed.usage();
+        self.restore_session_snapshot(usage, seed.total_cost, seed.model, seed.context_usage);
+    }
+
     #[cfg(test)]
     pub fn previous_session_usage(&self) -> TurnUsage {
         self.previous_session_usage
@@ -2004,17 +2009,7 @@ impl ChatSession {
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
             if let Some(seed) = resume_seed {
-                parser.restore_session_snapshot(
-                    TurnUsage {
-                        input_tokens: seed.input_tokens,
-                        output_tokens: seed.output_tokens,
-                        cache_read_tokens: seed.cache_read_tokens,
-                        cache_write_tokens: seed.cache_write_tokens,
-                    },
-                    seed.total_cost,
-                    seed.model,
-                    seed.context_usage,
-                );
+                parser.restore_resume_snapshot(seed);
             }
             let mut log_file = stdout_log_path
                 .as_deref()
