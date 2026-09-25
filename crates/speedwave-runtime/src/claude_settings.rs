@@ -1,7 +1,11 @@
+//! The keys of a project's Claude Code `settings.json` that Speedwave owns: the model pin and
+//! the legacy `effortLevel` takeover; every write is locked, atomic and keeps the other keys.
+
 use std::path::Path;
 
-use speedwave_runtime::fs_perms;
+use crate::fs_perms;
 
+/// The `model` pin of the project's `settings.json`, or `None` when unset or unreadable.
 pub fn get_model_pin(data_dir: &Path, project: &str) -> Option<String> {
     read_settings_string_key(data_dir, project, "model")
 }
@@ -15,6 +19,7 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
     value.get(key)?.as_str().map(str::to_string)
 }
 
+/// Removes the legacy `effortLevel` key and returns its string value, if any.
 pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     let path = settings_path(data_dir, project);
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
@@ -41,6 +46,7 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
 
 const MODEL_KEY: &str = "model";
 
+/// Writes `model` as the pin: a Claude id the live session listed, else a selectable catalog id.
 pub fn set_model_pin(
     data_dir: &Path,
     project: &str,
@@ -48,13 +54,29 @@ pub fn set_model_pin(
     listed_by_claude_code: &[String],
 ) -> Result<(), String> {
     let listed = model.starts_with("claude-") && listed_by_claude_code.iter().any(|m| m == model);
-    if !listed && !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
+    if !listed && !crate::defaults::is_selectable_anthropic_model_id(model) {
         return Err(format!("unknown Anthropic model: {model}"));
     }
-    let path = settings_path(data_dir, project);
-    if let Some(parent) = path.parent() {
-        fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
+    write_model_pin(data_dir, project, model)
+}
+
+/// Writes back a pin `get_model_pin` read, verbatim (`None` removes it); refuses a value the
+/// entrypoint's foreign-model guard would drop.
+pub fn restore_model_pin(
+    data_dir: &Path,
+    project: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let Some(model) = model else {
+        return clear_model_pin(data_dir, project);
+    };
+    if !crate::defaults::is_claude_code_model_setting(model) {
+        return Err(format!("not a Claude Code model setting: {model}"));
     }
+    write_model_pin(data_dir, project, model)
+}
+
+fn write_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
     edit_settings(data_dir, project, true, |obj| {
         obj.insert(
             MODEL_KEY.to_string(),
@@ -65,6 +87,7 @@ pub fn set_model_pin(
     .map(|_| ())
 }
 
+/// Removes the `model` pin; a missing file or key is not an error.
 pub fn clear_model_pin(data_dir: &Path, project: &str) -> Result<(), String> {
     edit_settings(data_dir, project, false, |obj| {
         obj.remove(MODEL_KEY).is_some()
@@ -72,6 +95,7 @@ pub fn clear_model_pin(data_dir: &Path, project: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Rewrites the pin to what `normalized` returns for it and yields the new value, if any.
 pub fn normalize_model_pin(
     data_dir: &Path,
     project: &str,
@@ -107,6 +131,11 @@ fn edit_settings(
         return Ok(false);
     }
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
+        if create_if_missing {
+            if let Some(parent) = path.parent() {
+                fs_perms::ensure_owner_only_dir(parent)?;
+            }
+        }
         let existing = fs_perms::read_regular_file_no_follow(&path).map_err(anyhow::Error::msg)?;
         let mut value: serde_json::Value = match existing {
             Some(contents) => serde_json::from_str(&contents)
@@ -128,11 +157,11 @@ fn edit_settings(
 }
 
 fn settings_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
-    speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join("settings.json")
+    crate::claude_home::claude_config_dir(data_dir, project).join("settings.json")
 }
 
 fn settings_lock_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
-    speedwave_runtime::claude_home::claude_config_dir(data_dir, project).join(".settings.json.lock")
+    crate::claude_home::claude_config_dir(data_dir, project).join(".settings.json.lock")
 }
 
 #[cfg(test)]
@@ -338,6 +367,41 @@ mod tests {
     }
 
     #[test]
+    fn restore_model_pin_writes_back_an_alias_set_model_pin_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(set_model_pin(tmp.path(), "proj", "opus", &[]).is_err());
+        restore_model_pin(tmp.path(), "proj", Some("opus")).unwrap();
+        assert_eq!(get_model_pin(tmp.path(), "proj"), Some("opus".to_string()));
+    }
+
+    #[test]
+    fn restore_model_pin_without_a_value_removes_only_the_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"claude-haiku-4-5","outputStyle":"Speedwave"}"#,
+        );
+        restore_model_pin(tmp.path(), "proj", None).unwrap();
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["outputStyle"], "Speedwave");
+    }
+
+    #[test]
+    fn restore_model_pin_refuses_a_value_the_entrypoint_would_drop_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-haiku-4-5"}"#);
+        let err = restore_model_pin(tmp.path(), "proj", Some("gpt-5")).unwrap_err();
+        assert!(err.contains("gpt-5"), "{err}");
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj"),
+            Some("claude-haiku-4-5".to_string())
+        );
+    }
+
+    #[test]
     fn clear_model_pin_removes_only_the_model_key() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(
@@ -514,5 +578,30 @@ mod tests {
         let lock_path = settings_lock_path(tmp.path(), "proj");
         let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_model_pin_tightens_a_new_or_loose_claude_dir_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::claude_home::claude_config_dir(tmp.path(), "proj");
+        let mode = || std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5", &[]).unwrap();
+        assert_eq!(mode(), 0o700);
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-opus-5", &[]).unwrap();
+        assert_eq!(mode(), 0o700);
+    }
+
+    #[test]
+    fn set_model_pin_rejects_an_unknown_id_before_creating_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = set_model_pin(tmp.path(), "proj", "claude-mystery-9", &[]).unwrap_err();
+        assert!(err.contains("unknown Anthropic model"));
+        assert!(!crate::claude_home::claude_home_dir(tmp.path(), "proj").exists());
     }
 }

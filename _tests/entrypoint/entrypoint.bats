@@ -2,6 +2,7 @@
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"
 DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
+SETTINGS_TEMPLATE="$BATS_TEST_DIRNAME/../../containers/claude-resources/settings.json"
 
 PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
 [[ -n "$PINNED_VERSION" ]] || { echo "ERROR: could not extract CLAUDE_VERSION from defaults.rs" >&2; exit 1; }
@@ -677,6 +678,29 @@ PY
     [ "$status" -eq 0 ]
     run cat "${TEST_HOME}/.claude/settings.json"
     [ "$output" = '{"effortLevel":"low","model":"claude-opus-5"}' ]
+}
+
+@test "a new container starts with claude.ai skill and plugin sync off" {
+    cp "${SETTINGS_TEMPLATE}" "${SPEEDWAVE_RESOURCES}/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run _settings_check "s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false"
+    [ "$status" -eq 0 ]
+}
+
+@test "an existing settings.json gets the claude.ai sync keys and keeps the values the user set" {
+    cp "${SETTINGS_TEMPLATE}" "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"claude-opus-5"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run _settings_check "s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false && s.model==='claude-opus-5'"
+    [ "$status" -eq 0 ]
+
+    printf '{"syncClaudeAiSkills":true,"syncClaudeAiPlugins":true}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run _settings_check "s.syncClaudeAiSkills===true && s.syncClaudeAiPlugins===true"
+    [ "$status" -eq 0 ]
 }
 
 

@@ -179,28 +179,29 @@ impl LlmConfig {
         true
     }
 
-    /// Clears the active entry's model when its kind is Anthropic (oauth or
-    /// api-key): the composer never writes a stored model for it (spec
-    /// section 4.5). No-op for any other active kind or when unconfigured.
-    pub fn clear_active_anthropic_model(&mut self) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        let provider_id = active.provider_id.clone();
-        let is_anthropic = self
-            .providers
-            .iter()
-            .find(|p| p.id == provider_id)
-            .is_some_and(|p| p.kind.is_anthropic());
-        if !is_anthropic {
-            return;
-        }
-        if let Some(entry) = self.providers.iter_mut().find(|p| p.id == provider_id) {
-            entry.model = None;
+    /// Clears the model of every Anthropic entry, of an Anthropic active pointer and of the v1
+    /// flat field: the pick lives in the container `settings.json` pin. `true` if changed.
+    pub fn clear_anthropic_models(&mut self) -> bool {
+        let mut changed = false;
+        for entry in &mut self.providers {
+            if entry.kind.is_anthropic() && entry.model.take().is_some() {
+                changed = true;
+            }
         }
         if let Some(active) = &mut self.active {
-            active.model = None;
+            let active_is_anthropic = self
+                .providers
+                .iter()
+                .any(|p| p.id == active.provider_id && p.kind.is_anthropic());
+            if active_is_anthropic && active.model.take().is_some() {
+                changed = true;
+            }
         }
+        let v1_is_anthropic = self.provider.as_deref() == Some(ANTHROPIC_PROVIDER_ID);
+        if v1_is_anthropic && self.model.take().is_some() {
+            changed = true;
+        }
+        changed
     }
 
     /// Routing model for the active provider, enforcing provenance (ADR-073):
@@ -379,27 +380,33 @@ fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
     }
 }
 
-pub(crate) fn clear_anthropic_models(llm: &mut LlmConfig) -> bool {
-    let mut changed = false;
-    for entry in &mut llm.providers {
-        if entry.kind.is_anthropic() && entry.model.take().is_some() {
-            changed = true;
-        }
-    }
-    if let Some(active) = &mut llm.active {
-        let active_is_anthropic = llm
+fn anthropic_model_to_carry(llm: &LlmConfig) -> Option<String> {
+    match llm.active_provider() {
+        Some(entry) if entry.kind.is_anthropic() => llm.effective_active_model(),
+        _ => llm
             .providers
             .iter()
-            .any(|p| p.id == active.provider_id && p.kind.is_anthropic());
-        if active_is_anthropic && active.model.take().is_some() {
-            changed = true;
-        }
+            .filter(|entry| entry.kind.is_anthropic())
+            .find_map(|entry| {
+                entry
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+            })
+            .map(str::to_string),
     }
-    let v1_is_anthropic = llm.provider.as_deref() == Some(ANTHROPIC_PROVIDER_ID);
-    if v1_is_anthropic && llm.model.take().is_some() {
-        changed = true;
+}
+
+fn carry_anthropic_model_to_pin(data_dir: &Path, project: &str, model: &str) {
+    match crate::claude_settings::set_model_pin(data_dir, project, model, &[]) {
+        Ok(()) => log::info!(
+            "llm config: moved the Anthropic model {model} of project {project} to its settings.json model pin"
+        ),
+        Err(e) => log::error!(
+            "llm config: cleared the Anthropic model {model} of project {project} from config.json but could not pin it in settings.json: {e}"
+        ),
     }
-    changed
 }
 
 /// Downgrade story (one release): derive the legacy flat fields from the
@@ -666,8 +673,8 @@ pub struct ProjectUserEntry {
     /// PII policy selection for this project (`None` = compiled-in default).
     #[serde(default)]
     pub policy: Option<PiiPolicyUserConfig>,
-    /// Persistent Anthropic effort pin, one of `defaults::EFFORT_LEVELS`;
-    /// `None` = no pin, so the spawn omits `--effort` (model default applies).
+    /// Persistent effort pin for every provider kind, one of `defaults::EFFORT_LEVELS`;
+    /// `None` = no pin, so the spawn omits `--effort` (Claude Code's default applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
 }
@@ -1849,13 +1856,17 @@ pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
         let config_path = data_dir.join("config.json");
         let mut config = load_user_config_from(&config_path)?;
         let mut changed = false;
+        let mut carried = Vec::new();
         for project in &mut config.projects {
             let evidence = AnthropicEvidence::detect_in(data_dir, &project.name);
             let has_llm = project.claude.as_ref().is_some_and(|c| c.llm.is_some());
             if has_llm {
                 if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
                     changed |= migrate_llm(llm, evidence);
-                    changed |= clear_anthropic_models(llm);
+                    if let Some(model) = anthropic_model_to_carry(llm) {
+                        carried.push((project.name.clone(), model));
+                    }
+                    changed |= llm.clear_anthropic_models();
                 }
             } else if evidence != AnthropicEvidence::None {
                 let mut llm = LlmConfig::default();
@@ -1867,6 +1878,9 @@ pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
         if changed {
             save_user_config_to(&config, &config_path)?;
             log::info!("llm config: healed on-disk config to schema v{LLM_SCHEMA_VERSION}");
+        }
+        for (project, model) in carried {
+            carry_anthropic_model_to_pin(data_dir, &project, &model);
         }
         Ok(())
     })
@@ -1904,6 +1918,7 @@ fn repo_env_key_is_denied(key: &str) -> bool {
         .copied()
         .chain(crate::consts::RESERVED_ENV_KEYS.iter().copied())
         .chain(telemetry_denied)
+        .chain(std::iter::once(crate::defaults::MCP_DESCRIPTION_LENGTH_ENV))
         .any(|denied| denied.eq_ignore_ascii_case(key))
 }
 
@@ -2170,45 +2185,33 @@ mod tests {
     }
 
     #[test]
-    fn clear_active_anthropic_model_clears_entry_and_pointer() {
+    fn clear_anthropic_models_clears_an_inactive_anthropic_entry_and_keeps_the_active_local_model()
+    {
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
-            providers: vec![LlmProviderEntry {
-                model: Some("claude-opus-4-6".into()),
-                ..anthropic_entry()
-            }],
-            active: Some(LlmActive {
-                provider_id: "anthropic".into(),
-                model: Some("claude-opus-4-6".into()),
-            }),
-            ..Default::default()
-        };
-        llm.clear_active_anthropic_model();
-        assert_eq!(llm.active_provider().unwrap().model, None);
-        assert_eq!(llm.active.as_ref().unwrap().model, None);
-        assert_eq!(llm.effective_active_model(), None);
-    }
-
-    #[test]
-    fn clear_active_anthropic_model_noop_for_non_anthropic_active() {
-        let mut llm = LlmConfig {
-            schema_version: Some(LLM_SCHEMA_VERSION),
-            providers: vec![LlmProviderEntry {
-                id: "local".into(),
-                kind: LlmProviderKind::Local,
-                base_url: Some("http://host.docker.internal:1234".into()),
-                model: Some("llama3.3".into()),
-                has_api_key: false,
-                context_tokens: None,
-                has_custom_headers: false,
-            }],
+            providers: vec![
+                LlmProviderEntry {
+                    model: Some("claude-opus-4-6".into()),
+                    ..anthropic_entry()
+                },
+                LlmProviderEntry {
+                    id: "local".into(),
+                    kind: LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:1234".into()),
+                    model: Some("llama3.3".into()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
             active: Some(LlmActive {
                 provider_id: "local".into(),
                 model: Some("llama3.3".into()),
             }),
             ..Default::default()
         };
-        llm.clear_active_anthropic_model();
+        assert!(llm.clear_anthropic_models());
+        assert_eq!(llm.providers[0].model, None);
         assert_eq!(
             llm.effective_active_model().as_deref(),
             Some("llama3.3"),
@@ -2217,9 +2220,9 @@ mod tests {
     }
 
     #[test]
-    fn clear_active_anthropic_model_noop_when_unconfigured() {
+    fn clear_anthropic_models_is_a_noop_when_unconfigured() {
         let mut llm = LlmConfig::default();
-        llm.clear_active_anthropic_model();
+        assert!(!llm.clear_anthropic_models());
         assert!(llm.is_unconfigured());
     }
 
@@ -2581,6 +2584,29 @@ mod tests {
             Some(&"0".to_string())
         );
         assert_eq!(defaults.get("DISABLE_AUTOUPDATER"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn the_resolved_claude_env_carries_the_mcp_description_limit() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+
+        let (resolved, _) = resolve_project_config_in_with_managed(
+            data_dir.path(),
+            project_dir.path(),
+            &SpeedwaveUserConfig::default(),
+            "mcp-desc",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            resolved
+                .env
+                .get(defaults::MCP_DESCRIPTION_LENGTH_ENV)
+                .map(String::as_str),
+            Some(defaults::MCP_DESCRIPTION_MAX_LENGTH.to_string().as_str())
+        );
     }
 
     #[test]
@@ -3875,7 +3901,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(clear_anthropic_models(&mut llm));
+        assert!(llm.clear_anthropic_models());
         assert_eq!(llm.providers[0].model, None);
         assert_eq!(llm.active.as_ref().unwrap().model, None);
     }
@@ -3887,7 +3913,7 @@ mod tests {
             model: Some("claude-haiku-4-5".into()),
             ..Default::default()
         };
-        assert!(clear_anthropic_models(&mut llm));
+        assert!(llm.clear_anthropic_models());
         assert_eq!(llm.model, None);
     }
 
@@ -3921,7 +3947,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(!clear_anthropic_models(&mut llm));
+        assert!(!llm.clear_anthropic_models());
         assert!(llm.providers.iter().all(|p| p.model.is_some()));
     }
 
@@ -3944,8 +3970,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(clear_anthropic_models(&mut llm));
-        assert!(!clear_anthropic_models(&mut llm));
+        assert!(llm.clear_anthropic_models());
+        assert!(!llm.clear_anthropic_models());
     }
 
     #[test]
@@ -4059,6 +4085,237 @@ mod tests {
             .unwrap();
         assert_eq!(llm.providers[0].model, None);
         assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    fn write_user_config_json(dir: &Path, llm: serde_json::Value) -> std::path::PathBuf {
+        let config_path = dir.join("config.json");
+        let config = serde_json::json!({
+            "projects": [{ "name": "proj", "dir": "/x", "claude": { "llm": llm } }]
+        });
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        config_path
+    }
+
+    fn healed_llm(config_path: &Path) -> LlmConfig {
+        load_user_config_from(config_path).unwrap().projects[0]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .clone()
+            .unwrap()
+    }
+
+    fn project_settings_path(dir: &Path) -> std::path::PathBuf {
+        crate::claude_home::claude_config_dir(dir, "proj").join("settings.json")
+    }
+
+    fn anthropic_llm_with_model(model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "anthropic",
+            "model": model,
+            "context_tokens": 1_000_000,
+            "schema_version": LLM_SCHEMA_VERSION,
+            "providers": [
+                {
+                    "id": "anthropic",
+                    "kind": "anthropic_oauth",
+                    "model": model,
+                    "context_tokens": 1_000_000,
+                    "has_api_key": false,
+                    "has_custom_headers": false
+                },
+                {
+                    "id": "local",
+                    "kind": "local",
+                    "base_url": "https://llm.example/",
+                    "model": "gemma-4-26b-a4b",
+                    "has_api_key": true,
+                    "has_custom_headers": false
+                }
+            ],
+            "active": { "provider_id": "anthropic", "model": model }
+        })
+    }
+
+    #[test]
+    fn heal_moves_the_anthropic_model_of_a_0_18_config_into_the_settings_json_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(
+            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
+            Some("claude-fable-5")
+        );
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+        assert_eq!(llm.model, None);
+        assert_eq!(llm.providers[1].model.as_deref(), Some("gemma-4-26b-a4b"));
+
+        let config_after_first = std::fs::read_to_string(&config_path).unwrap();
+        let settings_after_first =
+            std::fs::read_to_string(project_settings_path(dir.path())).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(
+            config_after_first,
+            std::fs::read_to_string(&config_path).unwrap()
+        );
+        assert_eq!(
+            settings_after_first,
+            std::fs::read_to_string(project_settings_path(dir.path())).unwrap()
+        );
+    }
+
+    #[test]
+    fn heal_overwrites_an_older_pin_with_the_model_0_18_sessions_ran_on_and_keeps_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-sonnet-4-6"));
+        let settings = project_settings_path(dir.path());
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"model":"claude-opus-5","hooks":{"PreToolUse":[]}}"#,
+        )
+        .unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"model":"claude-sonnet-4-6","hooks":{"PreToolUse":[]}})
+        );
+        assert_eq!(healed_llm(&config_path).providers[0].model, None);
+    }
+
+    #[test]
+    fn heal_carries_the_model_of_an_inactive_anthropic_entry_and_leaves_the_active_local_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = anthropic_llm_with_model(" claude-opus-4-8 ");
+        llm["provider"] = serde_json::json!("local");
+        llm["model"] = serde_json::json!("gemma-4-26b-a4b");
+        llm["active"] = serde_json::json!({ "provider_id": "local", "model": "gemma-4-26b-a4b" });
+        let config_path = write_user_config_json(dir.path(), llm);
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(
+            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
+            Some("claude-opus-4-8")
+        );
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("gemma-4-26b-a4b")
+        );
+    }
+
+    #[test]
+    fn heal_drops_an_anthropic_model_the_pin_cannot_hold_without_writing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-mystery-9"));
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert!(!project_settings_path(dir.path()).exists());
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    #[test]
+    fn heal_without_an_anthropic_model_writes_no_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = anthropic_llm_with_model("claude-fable-5");
+        llm["model"] = serde_json::Value::Null;
+        llm["providers"][0]["model"] = serde_json::Value::Null;
+        llm["active"]["model"] = serde_json::Value::Null;
+        write_user_config_json(dir.path(), llm);
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert!(!crate::claude_home::claude_home_dir(dir.path(), "proj").exists());
+    }
+
+    #[test]
+    fn heal_carries_nothing_when_the_active_anthropic_entry_ran_on_the_account_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut llm = anthropic_llm_with_model("claude-fable-5");
+        llm["model"] = serde_json::Value::Null;
+        llm["providers"][0]["model"] = serde_json::Value::Null;
+        llm["active"]["model"] = serde_json::Value::Null;
+        llm["providers"][1] = serde_json::json!({
+            "id": "anthropic-key",
+            "kind": "anthropic_api_key",
+            "model": "claude-opus-4-8",
+            "has_api_key": true,
+            "has_custom_headers": false
+        });
+        let config_path = write_user_config_json(dir.path(), llm);
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert!(!crate::claude_home::claude_home_dir(dir.path(), "proj").exists());
+        assert_eq!(healed_llm(&config_path).providers[1].model, None);
+    }
+
+    #[test]
+    fn heal_clears_the_config_model_even_when_the_pin_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
+        let settings = project_settings_path(dir.path());
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "not json").unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json");
+        let llm = healed_llm(&config_path);
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+
+        std::fs::write(&settings, r#"{"model":"claude-opus-5[1m]"}"#).unwrap();
+        heal_llm_config_in(dir.path()).unwrap();
+        assert_eq!(
+            crate::claude_settings::get_model_pin(dir.path(), "proj").as_deref(),
+            Some("claude-opus-5[1m]"),
+            "a later start must never carry the old model over a pin picked since"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heal_writes_no_pin_when_the_config_cannot_be_saved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_user_config_json(dir.path(), anthropic_llm_with_model("claude-fable-5"));
+        let settings = project_settings_path(dir.path());
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "{}").unwrap();
+        std::fs::write(dir.path().join("config.lock"), "").unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = heal_llm_config_in(dir.path());
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            result.is_err(),
+            "the config save must fail in a read-only data dir"
+        );
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
     }
 
     #[test]
@@ -4681,8 +4938,25 @@ mod tests {
             }
         }
         assert!(repo_env_key_is_denied("otel_exporter_otlp_endpoint"));
+        assert!(repo_env_key_is_denied(
+            crate::defaults::MCP_DESCRIPTION_LENGTH_ENV
+        ));
         assert!(!repo_env_key_is_denied("ANTHROPIC_MODEL"));
         assert!(!repo_env_key_is_denied("SAFE_VAR"));
+    }
+
+    #[test]
+    fn repo_env_cannot_cut_the_hub_tool_descriptions() {
+        let cleaned = sanitize_repo_env(Some(HashMap::from([
+            (
+                "claude_code_max_mcp_description_length".to_string(),
+                "1".to_string(),
+            ),
+            ("KEEP".to_string(), "y".to_string()),
+        ])))
+        .unwrap();
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned.get("KEEP"), Some(&"y".to_string()));
     }
 
     #[test]

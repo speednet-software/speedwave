@@ -24,6 +24,20 @@ export interface ClaudeSessionInfo {
 export type ClaudeSessionInfoState =
   { state: 'unavailable' } | { state: 'pending' } | { state: 'ready'; info: ClaudeSessionInfo };
 
+/** What became of a model pick sent to the live session. Mirror of Rust `control_channel::ModelSwitchOutcome`. */
+export type ModelSwitchOutcome =
+  { outcome: 'confirmed' } | { outcome: 'unconfirmed' } | { outcome: 'refused'; reason: string };
+
+/** Tauri event the backend emits when a switch it sends on its own (the soft-impose) did not apply. */
+export const CLAUDE_MODEL_SWITCH_FAILED_EVENT = 'chat_model_switch_failed';
+
+/** Payload of the model-switch failure event. Mirror of Rust `control_channel::ModelSwitchFailedEvent`. */
+export interface ClaudeModelSwitchFailedEvent {
+  project: string;
+  model: string;
+  reason: string;
+}
+
 /** Tauri event the backend emits when a session's info state changes. */
 export const CLAUDE_SESSION_INFO_EVENT = 'chat_session_info';
 
@@ -72,11 +86,13 @@ export interface ClaudePlanUsage {
   rate_limits: ClaudeRateLimits | null;
 }
 
-/** One context category of `get_context_usage`. Mirror of Rust `control_channel::ContextCategory`. */
+/**
+ * One `get_context_usage` category to draw, as the backend picks it (`drawn_categories_only`).
+ * Mirror of Rust `control_channel::ContextCategory`.
+ */
 export interface ClaudeContextCategory {
   name: string;
   tokens: number;
-  is_deferred: boolean;
 }
 
 /** Typed `get_context_usage` response. Mirror of Rust `control_channel::ContextUsage`. */

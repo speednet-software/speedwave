@@ -18,8 +18,14 @@ import * as path from 'node:path';
 
 import { waitForHealthy } from '../helpers/health';
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
-import { activeProjectSlug, switchToProject } from '../helpers/projects';
+import {
+  activeProjectSlug,
+  containersRunning,
+  openProjectSwitcher,
+  switchToProject,
+} from '../helpers/projects';
 import { waitForShellReady } from '../helpers/shell';
+import { invokeCommand } from '../helpers/tauri-invoke';
 
 const SECOND_PROJECT_NAME = 'e2e-second';
 const SECOND_PROJECT_DIR = process.env.E2E_SECOND_PROJECT_DIR || '/tmp/speedwave-e2e-project-2';
@@ -140,25 +146,13 @@ describe('Project Management', function () {
         }
       );
 
-      await pill.click();
+      await (await $('[data-testid="project-pill"]')).click();
     });
 
     it('leaves the new no-provider project without running containers', async function () {
       this.timeout(30_000);
       expect(await activeProjectSlug()).toBe(SECOND_PROJECT_NAME);
-      const running = await browser.executeAsync((project: string, done: (r: boolean) => void) => {
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: {
-              invoke: (cmd: string, args: unknown) => Promise<boolean>;
-            };
-          }
-        ).__TAURI_INTERNALS__
-          .invoke('check_containers_running', { project })
-          .then((r) => done(r))
-          .catch(() => done(false));
-      }, SECOND_PROJECT_NAME);
-      expect(running).toBe(false);
+      expect(await containersRunning(SECOND_PROJECT_NAME)).toBe(false);
     });
   });
 
@@ -168,16 +162,7 @@ describe('Project Management', function () {
 
       await waitForShellReady();
 
-      const pill = await $('[data-testid="project-pill"]');
-      const dropdown = await $('[data-testid="project-switcher-dropdown"]');
-      await browser.waitUntil(
-        async () => {
-          if (await dropdown.isExisting()) return true;
-          await pill.click();
-          return await dropdown.isExisting();
-        },
-        { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' }
-      );
+      await openProjectSwitcher();
 
       const firstProject = await $('[data-testid="project-switcher-item-e2e-test"]');
       await firstProject.click();
@@ -239,36 +224,18 @@ describe('Project Management', function () {
     it('guards the active project: no remove button, backend rejects direct removal', async function () {
       this.timeout(60_000);
       await waitForShellReady();
-      const pill = await $('[data-testid="project-pill"]');
-      const dropdown = await $('[data-testid="project-switcher-dropdown"]');
-      await browser.waitUntil(
-        async () => {
-          if (await dropdown.isExisting()) return true;
-          await pill.click();
-          return await dropdown.isExisting();
-        },
-        { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' }
-      );
+      await openProjectSwitcher();
 
       expect(await $('[data-testid="project-switcher-remove-e2e-test"]').isExisting()).toBe(false);
       expect(
         await $(`[data-testid="project-switcher-remove-${SECOND_PROJECT_NAME}"]`).isExisting()
       ).toBe(true);
 
-      const rejection = await browser.executeAsync((done: (r: string | null) => void) => {
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<void> };
-          }
-        ).__TAURI_INTERNALS__
-          .invoke('remove_project', { name: 'e2e-test' })
-          .then(() => done(null))
-          .catch((e: unknown) => done(String(e)));
-      });
-      expect(rejection).not.toBeNull();
+      const removal = await invokeCommand<void>('remove_project', { name: 'e2e-test' });
+      expect(removal.ok).toBe(false);
 
       expect(await activeProjectSlug()).toBe('e2e-test');
-      await pill.click();
+      await (await $('[data-testid="project-pill"]')).click();
     });
 
     it('removes a disposable project and its switcher entry', async function () {
@@ -277,16 +244,7 @@ describe('Project Management', function () {
       await mockDialogOpen(THIRD_PROJECT_DIR);
 
       await waitForShellReady();
-      const pill = await $('[data-testid="project-pill"]');
-      const dropdown = await $('[data-testid="project-switcher-dropdown"]');
-      await browser.waitUntil(
-        async () => {
-          if (await dropdown.isExisting()) return true;
-          await pill.click();
-          return await dropdown.isExisting();
-        },
-        { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never opened' }
-      );
+      await openProjectSwitcher();
       await (await $('[data-testid="add-project-btn"]')).click();
       const modal = await $('[data-testid="create-project-modal"]');
       await modal.waitForExist({ timeout: 5_000 });
@@ -306,15 +264,7 @@ describe('Project Management', function () {
 
       await switchToProject('e2e-test');
 
-      const dropdown2 = await $('[data-testid="project-switcher-dropdown"]');
-      await browser.waitUntil(
-        async () => {
-          if (await dropdown2.isExisting()) return true;
-          await pill.click();
-          return await dropdown2.isExisting();
-        },
-        { timeout: 30_000, interval: 500, timeoutMsg: 'project-switcher-dropdown never reopened' }
-      );
+      await openProjectSwitcher('project-switcher-dropdown never reopened');
       await (await $(`[data-testid="project-switcher-item-${THIRD_PROJECT_NAME}"]`)).moveTo();
       await (await $(`[data-testid="project-switcher-remove-${THIRD_PROJECT_NAME}"]`)).click();
       const confirmYes = await $(
@@ -328,21 +278,12 @@ describe('Project Management', function () {
         reverse: true,
         timeoutMsg: 'removed project still listed in the switcher',
       });
-      const stillListed = await browser.executeAsync((name: string, done: (r: boolean) => void) => {
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: {
-              invoke: (cmd: string) => Promise<{ projects: Array<{ name: string }> }>;
-            };
-          }
-        ).__TAURI_INTERNALS__
-          .invoke('list_projects')
-          .then((r) => done(r.projects.some((p) => p.name === name)))
-          .catch(() => done(true));
-      }, THIRD_PROJECT_NAME);
+      const listed = await invokeCommand<{ projects: Array<{ name: string }> }>('list_projects');
+      const stillListed =
+        !listed.ok || listed.value.projects.some((p) => p.name === THIRD_PROJECT_NAME);
       expect(stillListed).toBe(false);
       expect(await activeProjectSlug()).toBe('e2e-test');
-      await pill.click();
+      await (await $('[data-testid="project-pill"]')).click();
       await waitForHealthy('e2e-test');
     });
   });

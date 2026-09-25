@@ -727,37 +727,37 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub(crate) fn recreate_project_containers_if_running(project: &str) {
+pub(crate) fn recreate_project_containers_if_running(project: &str) -> bool {
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
     if active.as_deref() != Some(project) {
         log::debug!("'{project}' is not the active project — skipping recreate");
-        return;
+        return false;
     }
     if let Err(e) = ensure_images_ready() {
         log::warn!("images not ready for '{project}' — skipping recreate: {e}");
-        return;
+        return false;
     }
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
         log::debug!("runtime not available — skipping recreate");
-        return;
+        return false;
     }
     let running = match rt.compose_ps(project) {
         Ok(c) => !c.is_empty(),
         Err(e) => {
             log::debug!("compose_ps failed ({e}) — skipping recreate");
-            return;
+            return false;
         }
     };
     if !running {
         log::debug!("'{project}' not running — skipping recreate");
-        return;
+        return false;
     }
     if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
         log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
-        return;
+        return false;
     }
     use crate::types::IntoAnyhow;
     let result = rt.transaction(project, |rt| -> anyhow::Result<()> {
@@ -774,6 +774,7 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
             log::warn!("failed to recreate containers for '{project}': {e}");
         }
     }
+    true
 }
 
 #[tauri::command]
@@ -931,6 +932,7 @@ pub struct ActiveProviderSummary {
     pub kind: config::LlmProviderKind,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub effort_levels: &'static [&'static str],
 }
 
 pub(crate) fn active_provider_summary_from(
@@ -953,6 +955,7 @@ pub(crate) fn active_provider_summary_from(
         kind: entry.kind,
         model: llm.effective_active_model(),
         base_url: entry.base_url.clone(),
+        effort_levels: speedwave_runtime::defaults::EFFORT_LEVELS,
     })
 }
 
@@ -1861,7 +1864,7 @@ async fn update_llm_config_in(
                 }
             }
         }
-        merged.clear_active_anthropic_model();
+        merged.clear_anthropic_models();
         if !merged.providers.is_empty() {
             merged.schema_version = Some(config::LLM_SCHEMA_VERSION);
             config::sync_llm_legacy_fields(&mut merged);
@@ -3154,19 +3157,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_llm_config_merge_clears_anthropic_model() {
-        let stored = config::LlmConfig {
-            schema_version: Some(config::LLM_SCHEMA_VERSION),
-            providers: vec![config::LlmProviderEntry {
-                id: "anthropic".to_string(),
-                kind: config::LlmProviderKind::AnthropicOauth,
-                base_url: None,
-                model: Some("claude-opus-4-6".to_string()),
-                has_api_key: false,
-                context_tokens: None,
-                has_custom_headers: false,
-            }],
+    fn anthropic_entry_with_model(model: &str) -> config::LlmProviderEntry {
+        config::LlmProviderEntry {
+            id: "anthropic".to_string(),
+            kind: config::LlmProviderKind::AnthropicOauth,
+            base_url: None,
+            model: Some(model.to_string()),
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }
+    }
+
+    fn saved_alpha_llm(data_dir: &std::path::Path) -> config::LlmConfig {
+        config::load_user_config_from(&data_dir.join("config.json"))
+            .expect("reload saved config")
+            .find_project("alpha")
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.clone())
+            .expect("saved llm block")
+    }
+
+    #[tokio::test]
+    async fn update_llm_config_in_stores_no_model_for_the_active_anthropic_entry() {
+        let tmp = seeded_config_tempdir();
+        let update = LlmConfigUpdate {
+            providers: Some(vec![anthropic_entry_with_model("claude-opus-4-6")]),
             active: Some(config::LlmActive {
                 provider_id: "anthropic".to_string(),
                 model: Some("claude-opus-4-6".to_string()),
@@ -3174,40 +3190,47 @@ mod tests {
             ..Default::default()
         };
 
-        let mut merged = config::LlmConfig {
-            providers: stored.providers.clone(),
-            active: stored.active.clone(),
-            schema_version: Some(config::LLM_SCHEMA_VERSION),
-            ..Default::default()
-        };
-        merged.clear_active_anthropic_model();
-        config::sync_llm_legacy_fields(&mut merged);
+        update_llm_config_in(tmp.path(), update)
+            .await
+            .expect("save must succeed");
 
-        assert_eq!(
-            merged.active_provider().unwrap().model,
-            None,
-            "entry model must be cleared"
-        );
-        assert_eq!(
-            merged.active.as_ref().unwrap().model,
-            None,
-            "active pointer model must be cleared"
-        );
-        assert_eq!(merged.effective_active_model(), None);
+        let llm = saved_alpha_llm(tmp.path());
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+        assert_eq!(llm.model, None);
     }
 
-    #[test]
-    fn update_llm_config_source_calls_clear_active_anthropic_model() {
-        let source = include_str!("containers_cmd.rs");
-        let site = source
-            .find("apply_llm_config(&mut user_config, merged)?;")
-            .expect("update_llm_config merge call site must exist");
-        let start = source[..site].rfind("let mut merged").unwrap_or(0);
-        assert!(
-            source[start..site].contains("merged.clear_active_anthropic_model()"),
-            "update_llm_config must call clear_active_anthropic_model on \
-             `merged` before apply_llm_config"
-        );
+    #[tokio::test]
+    async fn update_llm_config_in_stores_no_model_for_an_inactive_anthropic_entry() {
+        let tmp = seeded_config_tempdir();
+        let update = LlmConfigUpdate {
+            providers: Some(vec![
+                anthropic_entry_with_model("claude-opus-4-8"),
+                config::LlmProviderEntry {
+                    id: "local".to_string(),
+                    kind: config::LlmProviderKind::Local,
+                    base_url: Some("http://localhost:11434".to_string()),
+                    model: Some("llama3.3".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ]),
+            active: Some(config::LlmActive {
+                provider_id: "local".to_string(),
+                model: Some("llama3.3".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        update_llm_config_in(tmp.path(), update)
+            .await
+            .expect("save must succeed");
+
+        let llm = saved_alpha_llm(tmp.path());
+        let anthropic = llm.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(anthropic.model, None);
+        assert_eq!(llm.effective_active_model().as_deref(), Some("llama3.3"));
     }
 
     #[tokio::test]
@@ -3647,6 +3670,54 @@ mod tests {
             Some("http://host.docker.internal:11434"),
             "local discovery needs the entry's base_url, not the provider_id"
         );
+        assert_eq!(
+            summary.effort_levels,
+            speedwave_runtime::defaults::EFFORT_LEVELS,
+            "a routed model takes every effort level Speedwave can pin"
+        );
+    }
+
+    #[test]
+    fn active_provider_summary_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/llm.ts");
+        let body = ts
+            .split("export interface ActiveProviderSummary {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("ActiveProviderSummary interface in models/llm.ts");
+        let ts_fields: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().split(':').next())
+            .map(|name| name.trim_end_matches('?'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        let summary = ActiveProviderSummary {
+            provider_id: "p".to_string(),
+            kind: config::LlmProviderKind::Local,
+            model: None,
+            base_url: None,
+            effort_levels: speedwave_runtime::defaults::EFFORT_LEVELS,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        let rust_fields: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(ts_fields, rust_fields);
+    }
+
+    #[test]
+    fn model_selector_takes_the_slider_order_from_the_summary_not_from_a_level_count() {
+        let ts = include_str!(
+            "../../src/src/app/chat/composer/model-selector/model-selector.component.ts"
+        );
+        assert!(
+            !ts.contains("length === 5"),
+            "the slider order comes from EFFORT_LEVELS via ActiveProviderSummary.effort_levels"
+        );
+        assert!(ts.contains("summary()?.effort_levels"));
     }
 
     #[test]

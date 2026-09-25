@@ -1,4 +1,5 @@
 import { RESTART_WAIT_MS } from './shell';
+import { invokeOr } from './tauri-invoke';
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -32,20 +33,11 @@ export async function openSettings(): Promise<void> {
 }
 
 export async function storedProviderModel(providerId: string): Promise<string | null> {
-  return browser.executeAsync((id: string, done: (model: string | null) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: {
-          invoke: (
-            cmd: string
-          ) => Promise<{ providers?: { id: string; model?: string | null }[] }>;
-        };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('get_llm_config')
-      .then((config) => done(config.providers?.find((p) => p.id === id)?.model ?? null))
-      .catch(() => done(null));
-  }, providerId);
+  const config = await invokeOr<{ providers?: { id: string; model?: string | null }[] } | null>(
+    null,
+    'get_llm_config'
+  );
+  return config?.providers?.find((p) => p.id === providerId)?.model ?? null;
 }
 
 export async function configureOpenRouter(apiKey: string): Promise<void> {

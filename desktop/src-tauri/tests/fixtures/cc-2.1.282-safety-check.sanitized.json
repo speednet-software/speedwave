@@ -1,0 +1,50 @@
+{
+  "claude_code_version": "2.1.282",
+  "launched_with": ["--dangerously-skip-permissions", "--permission-prompt-tool", "stdio"],
+  "control_request": {
+    "type": "control_request",
+    "request_id": "02b67c0b-694a-4e47-ba9f-cff32653b521",
+    "request": {
+      "subtype": "can_use_tool",
+      "tool_name": "Bash",
+      "display_name": "Bash",
+      "input": {
+        "command": "rm -rf \"$(echo /capture/keep-me)\"",
+        "description": "cleanup"
+      },
+      "description": "cleanup",
+      "permission_suggestions": [],
+      "decision_reason": "Dangerous rm operation on statically-unresolvable target: command substitution output",
+      "decision_reason_type": "safetyCheck",
+      "classifier_approvable": false,
+      "tool_use_id": "toolu_stub_rm",
+      "suppress_always_allow_rule": true
+    }
+  },
+  "control_response": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "02b67c0b-694a-4e47-ba9f-cff32653b521",
+      "response": {
+        "behavior": "deny",
+        "message": "Speedwave runs Claude Code with no one to approve a tool call, so it declines every call Claude Code's safety check holds for manual approval. Run it with an explicit, resolved target instead. Claude Code's reason: Dangerous rm operation on statically-unresolvable target: command substitution output"
+      }
+    }
+  },
+  "tool_results": [
+    {
+      "type": "tool_result",
+      "content": "Speedwave runs Claude Code with no one to approve a tool call, so it declines every call Claude Code's safety check holds for manual approval. Run it with an explicit, resolved target instead. Claude Code's reason: Dangerous rm operation on statically-unresolvable target: command substitution output",
+      "is_error": true,
+      "tool_use_id": "toolu_stub_rm"
+    }
+  ],
+  "result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "num_turns": 2
+  },
+  "target_kept": true
+}

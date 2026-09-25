@@ -3,7 +3,7 @@
 export const RESTART_WAIT_MS = 360_000;
 
 interface RestartUi {
-  error: string | null;
+  errorText: string | null;
   overlay: boolean;
 }
 
@@ -23,7 +23,7 @@ export async function waitForShellReady(timeoutMs = 60_000): Promise<void> {
 
 function readRestartUi(): Promise<RestartUi> {
   return browser.execute(() => ({
-    error: document.querySelector('[data-testid="restart-error"]')?.textContent?.trim() ?? null,
+    errorText: document.querySelector('[data-testid="restart-error"]')?.textContent?.trim() ?? null,
     overlay: document.querySelector('[data-testid="restart-overlay"]') !== null,
   }));
 }
@@ -42,16 +42,16 @@ export async function confirmRestartAndWait(timeoutMs = RESTART_WAIT_MS): Promis
   });
   const before = await readRestartUi();
   await btn.click();
-  let sawClear = before.error === null;
+  let sawClear = before.errorText === null;
   const outcome = await browser.waitUntil(
     async () => {
       const now = await readRestartUi();
-      if (now.error === null) {
+      if (now.errorText === null) {
         sawClear = true;
         return now.overlay ? false : { failure: null };
       }
-      if (!sawClear && now.error === before.error) return false;
-      return { failure: now.error };
+      if (!sawClear && now.errorText === before.errorText) return false;
+      return { failure: now.errorText };
     },
     {
       timeout: timeoutMs,

@@ -10,15 +10,19 @@ pub(crate) const MSG_TYPE_CONTROL_RESPONSE: &str = "control_response";
 
 pub(crate) const SESSION_INFO_EVENT: &str = "chat_session_info";
 
+pub(crate) const MODEL_SWITCH_FAILED_EVENT: &str = "chat_model_switch_failed";
+
 const SUBTYPE_INITIALIZE: &str = "initialize";
 const SUBTYPE_GET_USAGE: &str = "get_usage";
 const SUBTYPE_GET_CONTEXT_USAGE: &str = "get_context_usage";
 const SUBTYPE_SET_MODEL: &str = "set_model";
+const SUBTYPE_APPLY_FLAG_SETTINGS: &str = "apply_flag_settings";
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 const GET_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const GET_CONTEXT_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const SET_MODEL_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const APPLY_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlQuery {
@@ -75,6 +79,17 @@ pub(crate) fn build_set_model_request(request_id: &str, model: &str) -> serde_js
     })
 }
 
+pub(crate) fn build_apply_effort_request(request_id: &str, level: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": MSG_TYPE_CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": {
+            "subtype": SUBTYPE_APPLY_FLAG_SETTINGS,
+            "settings": { "effortLevel": level },
+        },
+    })
+}
+
 fn next_request_id(subtype: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -124,15 +139,19 @@ pub(crate) enum Routed {
     Malformed,
 }
 
-type WaiterMap = HashMap<String, mpsc::Sender<ControlOutcome>>;
+#[derive(Default)]
+struct Waiters {
+    by_id: HashMap<String, mpsc::Sender<ControlOutcome>>,
+    closed: bool,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct ControlChannel {
-    waiters: Arc<Mutex<WaiterMap>>,
+    waiters: Arc<Mutex<Waiters>>,
 }
 
 impl ControlChannel {
-    fn lock_waiters(&self) -> std::sync::MutexGuard<'_, WaiterMap> {
+    fn lock_waiters(&self) -> std::sync::MutexGuard<'_, Waiters> {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -142,7 +161,7 @@ impl ControlChannel {
             log::debug!("dropped control_response without a request id");
             return Routed::Malformed;
         };
-        let Some(waiter) = self.lock_waiters().remove(request_id) else {
+        let Some(waiter) = self.lock_waiters().by_id.remove(request_id) else {
             log::debug!("dropped control_response for unknown request id {request_id}");
             return Routed::Unmatched;
         };
@@ -165,25 +184,31 @@ impl ControlChannel {
         Routed::Delivered
     }
 
-    pub(crate) fn fail_all(&self) {
-        self.lock_waiters().clear();
+    pub(crate) fn close(&self) {
+        let mut waiters = self.lock_waiters();
+        waiters.closed = true;
+        waiters.by_id.clear();
     }
 
     #[cfg(test)]
     pub(crate) fn pending_ids(&self) -> Vec<String> {
-        self.lock_waiters().keys().cloned().collect()
+        self.lock_waiters().by_id.keys().cloned().collect()
     }
 
-    fn register(&self, subtype: &'static str) -> PendingControl {
+    fn register(&self, subtype: &'static str) -> Result<PendingControl, ControlError> {
         let request_id = next_request_id(subtype);
         let (tx, rx) = mpsc::channel();
-        self.lock_waiters().insert(request_id.clone(), tx);
-        PendingControl {
+        let mut waiters = self.lock_waiters();
+        if waiters.closed {
+            return Err(ControlError::SessionEnded);
+        }
+        waiters.by_id.insert(request_id.clone(), tx);
+        Ok(PendingControl {
             channel: self.clone(),
             request_id,
             subtype,
             rx,
-        }
+        })
     }
 
     pub(crate) fn request<W: Write>(
@@ -192,7 +217,7 @@ impl ControlChannel {
         query: ControlQuery,
         timeout: Duration,
     ) -> Result<serde_json::Value, ControlError> {
-        let pending = self.register(query.subtype());
+        let pending = self.register(query.subtype())?;
         let payload = build_control_request(&pending.request_id, query);
         let written = match stdin.lock() {
             Ok(mut w) => writeln!(w, "{payload}").and_then(|()| w.flush()),
@@ -210,8 +235,29 @@ impl ControlChannel {
         locked_stdin: &mut W,
         model: &str,
     ) -> Result<PendingControl, ControlError> {
-        let pending = self.register(SUBTYPE_SET_MODEL);
-        let payload = build_set_model_request(&pending.request_id, model);
+        self.send_session_change(locked_stdin, SUBTYPE_SET_MODEL, |id| {
+            build_set_model_request(id, model)
+        })
+    }
+
+    pub(crate) fn send_apply_effort<W: Write>(
+        &self,
+        locked_stdin: &mut W,
+        level: &str,
+    ) -> Result<PendingControl, ControlError> {
+        self.send_session_change(locked_stdin, SUBTYPE_APPLY_FLAG_SETTINGS, |id| {
+            build_apply_effort_request(id, level)
+        })
+    }
+
+    fn send_session_change<W: Write>(
+        &self,
+        locked_stdin: &mut W,
+        subtype: &'static str,
+        build: impl FnOnce(&str) -> serde_json::Value,
+    ) -> Result<PendingControl, ControlError> {
+        let pending = self.register(subtype)?;
+        let payload = build(&pending.request_id);
         if let Err(e) = writeln!(locked_stdin, "{payload}").and_then(|()| locked_stdin.flush()) {
             pending.forget();
             return Err(ControlError::Write(e.to_string()));
@@ -229,7 +275,7 @@ pub(crate) struct PendingControl {
 
 impl PendingControl {
     fn forget(&self) {
-        self.channel.lock_waiters().remove(&self.request_id);
+        self.channel.lock_waiters().by_id.remove(&self.request_id);
     }
 
     pub(crate) fn wait(self, timeout: Duration) -> Result<serde_json::Value, ControlError> {
@@ -264,6 +310,25 @@ impl ControlHandle {
 
     pub(crate) fn query(&self, query: ControlQuery) -> Result<serde_json::Value, ControlError> {
         self.channel.request(&self.stdin, query, query.timeout())
+    }
+
+    pub(crate) fn apply_effort(&self, level: &str) -> Result<(), ControlError> {
+        self.apply_effort_within(level, APPLY_EFFORT_TIMEOUT)
+    }
+
+    pub(crate) fn apply_effort_within(
+        &self,
+        level: &str,
+        timeout: Duration,
+    ) -> Result<(), ControlError> {
+        let pending = {
+            let mut stdin = self
+                .stdin
+                .lock()
+                .map_err(|e| ControlError::Write(format!("stdin lock poisoned: {e}")))?;
+            self.channel.send_apply_effort(&mut *stdin, level)?
+        };
+        pending.wait(timeout).map(|_| ())
     }
 }
 
@@ -306,6 +371,48 @@ pub(crate) enum SessionInfoState {
     Ready {
         info: SessionInfo,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum ModelSwitchOutcome {
+    Confirmed,
+    Unconfirmed,
+    Refused { reason: String },
+}
+
+impl ModelSwitchOutcome {
+    pub(crate) fn of(
+        answer: Result<serde_json::Value, ControlError>,
+    ) -> Result<Self, ControlError> {
+        match answer {
+            Ok(_) => Ok(Self::Confirmed),
+            Err(ControlError::Timeout { .. }) => Ok(Self::Unconfirmed),
+            Err(ControlError::Rejected(reason)) => Ok(Self::Refused { reason }),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModelSwitchFailedEvent {
+    pub(crate) project: String,
+    pub(crate) model: String,
+    pub(crate) reason: String,
+}
+
+impl ModelSwitchOutcome {
+    pub(crate) fn failure(answer: Result<Self, ControlError>, timeout: Duration) -> Option<String> {
+        match answer {
+            Ok(Self::Confirmed) => None,
+            Ok(Self::Unconfirmed) => Some(format!(
+                "Claude Code gave no answer within {} s",
+                timeout.as_secs()
+            )),
+            Ok(Self::Refused { reason }) => Some(reason),
+            Err(e) => Some(e.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -381,12 +488,35 @@ pub(crate) struct PlanUsage {
     pub(crate) rate_limits: Option<RateLimits>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ContextKind {
+    Used,
+    Free,
+    Buffer,
+    Deferred,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ContextCategory {
     pub(crate) name: String,
     pub(crate) tokens: u64,
-    #[serde(default, rename(deserialize = "isDeferred"))]
+    #[serde(default, rename(deserialize = "isDeferred"), skip_serializing)]
     pub(crate) is_deferred: bool,
+    #[serde(default, skip_serializing)]
+    pub(crate) kind: Option<ContextKind>,
+}
+
+impl ContextCategory {
+    fn is_drawn(&self) -> bool {
+        self.tokens > 0
+            && match self.kind {
+                Some(kind) => kind == ContextKind::Used,
+                None => self.name != FREE_SPACE_CATEGORY && !self.is_deferred,
+            }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,8 +534,8 @@ pub(crate) struct ContextUsage {
 const FREE_SPACE_CATEGORY: &str = "Free space";
 
 impl ContextUsage {
-    pub(crate) fn without_free_space(mut self) -> Self {
-        self.categories.retain(|c| c.name != FREE_SPACE_CATEGORY);
+    pub(crate) fn drawn_categories_only(mut self) -> Self {
+        self.categories.retain(ContextCategory::is_drawn);
         self
     }
 }
@@ -431,7 +561,11 @@ pub(crate) fn parse_context_usage(value: &serde_json::Value) -> Result<ContextUs
 
 #[cfg(test)]
 pub(crate) const FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.267-control-responses.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.282-control-responses.sanitized.json");
+
+#[cfg(test)]
+const APPLY_EFFORT_FIXTURE: &str =
+    include_str!("../tests/fixtures/cc-2.1.282-apply-effort.sanitized.json");
 
 #[cfg(test)]
 #[expect(
@@ -442,8 +576,9 @@ pub(crate) const FIXTURE: &str =
 mod tests {
     use super::*;
 
-    fn fixture() -> serde_json::Value {
-        serde_json::from_str(FIXTURE).expect("fixture is valid JSON")
+    fn fixture() -> &'static serde_json::Value {
+        static PARSED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARSED.get_or_init(|| serde_json::from_str(FIXTURE).expect("fixture is valid JSON"))
     }
 
     fn success_line(request_id: &str, payload: serde_json::Value) -> serde_json::Value {
@@ -546,6 +681,7 @@ mod tests {
             assert!(q.timeout() > Duration::ZERO, "{q:?}");
         }
         assert!(SET_MODEL_TIMEOUT > Duration::ZERO);
+        assert!(APPLY_EFFORT_TIMEOUT > Duration::ZERO);
     }
 
     #[test]
@@ -651,13 +787,164 @@ mod tests {
     }
 
     #[test]
-    fn fail_all_ends_every_pending_request() {
+    fn closing_the_channel_ends_every_pending_request() {
         let channel = ControlChannel::default();
         let sink = Arc::new(Mutex::new(Vec::new()));
         let caller = request_in_background(&channel, &sink, ControlQuery::Initialize);
         wait_for_pending(&channel, 1);
-        channel.fail_all();
+        channel.close();
         assert_eq!(caller.join().unwrap(), Err(ControlError::SessionEnded));
+    }
+
+    #[test]
+    fn a_query_on_a_closed_channel_fails_at_once_and_writes_nothing() {
+        let channel = ControlChannel::default();
+        channel.close();
+        let sink = Mutex::new(Vec::new());
+        let started = std::time::Instant::now();
+
+        let err = channel
+            .request(&sink, ControlQuery::Usage, Duration::from_secs(30))
+            .expect_err("the session has ended");
+
+        assert_eq!(err, ControlError::SessionEnded);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(sink.lock().unwrap().is_empty());
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_session_change_on_a_closed_channel_fails_at_once_and_writes_nothing() {
+        let channel = ControlChannel::default();
+        channel.close();
+        let mut sink = Vec::new();
+
+        let effort = channel.send_apply_effort(&mut sink, "low").err();
+        let model = channel.send_set_model(&mut sink, "claude-haiku-4-5").err();
+
+        assert_eq!(effort, Some(ControlError::SessionEnded));
+        assert_eq!(model, Some(ControlError::SessionEnded));
+        assert!(sink.is_empty());
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_clone_taken_before_the_close_is_closed_too() {
+        let channel = ControlChannel::default();
+        let held_by_a_handle = channel.clone();
+
+        channel.close();
+
+        assert_eq!(
+            held_by_a_handle
+                .send_apply_effort(&mut Vec::new(), "high")
+                .err(),
+            Some(ControlError::SessionEnded)
+        );
+    }
+
+    fn apply_effort_capture() -> &'static serde_json::Value {
+        static PARSED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        PARSED.get_or_init(|| {
+            serde_json::from_str(APPLY_EFFORT_FIXTURE).expect("capture is valid JSON")
+        })
+    }
+
+    #[test]
+    fn the_apply_effort_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            apply_effort_capture()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the apply_flag_settings contract for the new Claude Code pin"
+        );
+    }
+
+    #[test]
+    fn claude_code_takes_an_effort_change_from_the_next_model_request_and_writes_no_settings() {
+        let capture = apply_effort_capture();
+
+        assert_eq!(
+            capture["applied"],
+            serde_json::json!(["launch", "low", "max", "turbo"])
+        );
+        assert_eq!(
+            capture["requests"],
+            serde_json::json!(["high", "low", "max", "max"]),
+            "each level must reach the next model request without a restart"
+        );
+        assert_eq!(capture["settings_json_unchanged"], true);
+    }
+
+    #[test]
+    fn an_effort_change_stores_nothing_in_claude_json() {
+        assert_eq!(
+            apply_effort_capture()["claude_json_added"],
+            serde_json::json!({}),
+            "the pinned Claude Code keeps no effort state in .claude.json; the pin stays the only store"
+        );
+    }
+
+    #[test]
+    fn an_effort_change_sent_before_the_first_turn_reaches_its_first_model_request() {
+        let capture = apply_effort_capture();
+        let before = &capture["before_first_turn"];
+
+        assert_eq!(before["response"]["response"]["subtype"], "success");
+        assert!(
+            before["launched"].is_string(),
+            "the recording names the level its process launched with"
+        );
+        assert_ne!(
+            before["applied"], before["launched"],
+            "the recording must apply a level other than the one its process launched with"
+        );
+        assert_eq!(before["requests"], serde_json::json!([before["applied"]]));
+    }
+
+    #[test]
+    fn an_effort_input_written_during_a_tool_using_turn_runs_after_it_as_a_turn_of_its_own() {
+        let capture = apply_effort_capture();
+        let mid_turn = &capture["effort_command_mid_tool_turn"];
+
+        assert_eq!(
+            mid_turn["result_num_turns"],
+            serde_json::json!([2, 0, 1]),
+            "the input answers after the tool-using turn with a result of its own"
+        );
+        assert_eq!(
+            mid_turn["requests"],
+            serde_json::json!(["high", "high", "low"]),
+            "the turn after it carries the new level"
+        );
+    }
+
+    #[test]
+    fn claude_codes_answer_to_an_effort_change_resolves_the_pick() {
+        let capture = apply_effort_capture();
+        for level in ["low", "max"] {
+            let channel = ControlChannel::default();
+            let pending = channel
+                .send_apply_effort(&mut Vec::new(), level)
+                .expect("written");
+            let id = channel.pending_ids().pop().expect("a waiter");
+            let mut answer = capture["responses"][level].clone();
+            answer["response"]["request_id"] = serde_json::Value::String(id);
+
+            assert_eq!(channel.route_response(&answer), Routed::Delivered);
+            assert!(pending.wait(Duration::from_secs(5)).is_ok(), "{level}");
+        }
+    }
+
+    #[test]
+    fn claude_code_answers_an_unknown_effort_level_with_success_and_keeps_the_level() {
+        let capture = apply_effort_capture();
+
+        assert_eq!(
+            capture["responses"]["turbo"]["response"]["subtype"],
+            "success"
+        );
+        assert_eq!(capture["requests"][3], capture["requests"][2]);
+        assert!(crate::pin_cmd::validate_effort_level("turbo").is_err());
     }
 
     #[test]
@@ -773,6 +1060,115 @@ mod tests {
     }
 
     #[test]
+    fn apply_effort_request_matches_the_sdk_envelope() {
+        let v = build_apply_effort_request("req_apply_flag_settings_1", "xhigh");
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "control_request",
+                "request_id": "req_apply_flag_settings_1",
+                "request": {
+                    "subtype": "apply_flag_settings",
+                    "settings": { "effortLevel": "xhigh" },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn an_effort_change_written_under_the_callers_lock_resolves_on_its_answer() {
+        let channel = ControlChannel::default();
+        let mut sink = Vec::new();
+
+        let pending = channel
+            .send_apply_effort(&mut sink, "low")
+            .expect("written");
+
+        let text = String::from_utf8(sink).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let sent: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(sent["request"]["settings"]["effortLevel"], "low");
+        let id = sent["request_id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("req_apply_flag_settings_"), "{id}");
+        assert_eq!(channel.pending_ids(), vec![id.clone()]);
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        });
+        assert_eq!(channel.route_response(&answer), Routed::Delivered);
+        assert_eq!(
+            pending.wait(Duration::from_secs(5)),
+            Ok(serde_json::Value::Null)
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_rejected_effort_change_carries_claude_codes_text() {
+        let channel = ControlChannel::default();
+        let pending = channel
+            .send_apply_effort(&mut Vec::new(), "max")
+            .expect("written");
+        let id = channel.pending_ids().pop().expect("a waiter");
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "error", "request_id": id, "error": "not allowed" },
+        });
+
+        assert_eq!(channel.route_response(&answer), Routed::Delivered);
+        assert_eq!(
+            pending.wait(Duration::from_secs(5)),
+            Err(ControlError::Rejected("not allowed".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_unanswered_effort_change_times_out_and_forgets_its_waiter() {
+        let channel = ControlChannel::default();
+        let pending = channel
+            .send_apply_effort(&mut Vec::new(), "medium")
+            .expect("written");
+
+        let err = pending
+            .wait(Duration::from_millis(30))
+            .expect_err("no answer");
+
+        assert_eq!(
+            err,
+            ControlError::Timeout {
+                subtype: "apply_flag_settings",
+                timeout: Duration::from_millis(30),
+            }
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_change_that_cannot_be_written_leaves_no_waiter() {
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let channel = ControlChannel::default();
+
+        let err = channel
+            .send_apply_effort(&mut FailWriter, "low")
+            .err()
+            .expect("write must fail");
+
+        assert!(
+            matches!(&err, ControlError::Write(e) if e.contains("gone")),
+            "{err}"
+        );
+        assert!(channel.pending_ids().is_empty());
+    }
+
+    #[test]
     fn concurrent_requests_resolve_independently() {
         let channel = ControlChannel::default();
         let sink = Arc::new(Mutex::new(Vec::new()));
@@ -812,8 +1208,8 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                Some("claude-opus-5[1m]"),
-                Some("claude-opus-5[1m]"),
+                Some("claude-opus-5-5[1m]"),
+                Some("claude-opus-5-5[1m]"),
                 Some("claude-fable-5-1[1m]"),
                 Some("claude-sonnet-5[1m]"),
                 Some("claude-sonnet-5[1m]"),
@@ -845,7 +1241,7 @@ mod tests {
                 .find(|m| m.value == v)
                 .and_then(|m| m.resolved_model.clone())
         };
-        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5[1m]"));
+        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5-5[1m]"));
         assert_eq!(by_value("sonnet").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             by_value("haiku").as_deref(),
@@ -907,20 +1303,20 @@ mod tests {
 
     #[test]
     fn usage_fixture_parses_the_typed_windows() {
-        for run in ["run_A", "run_B"] {
+        for (run, five_hour_used) in [("run_A", 1.0), ("run_B", 2.0)] {
             let usage = parse_plan_usage(&fixture()[run]["get_usage"]).unwrap();
             assert_eq!(usage.subscription_type.as_deref(), Some("max"));
             assert!(usage.rate_limits_available);
             let limits = usage.rate_limits.expect("rate limits");
             let five = limits.five_hour.expect("five_hour");
-            assert_eq!(five.utilization, Some(15.0));
-            assert!(five.resets_at.unwrap().starts_with("2026-09-18T12:40:00"));
-            assert_eq!(limits.seven_day.unwrap().utilization, Some(70.0));
+            assert_eq!(five.utilization, Some(five_hour_used), "{run}");
+            assert!(five.resets_at.unwrap().starts_with("2026-09-25T02:19:59"));
+            assert_eq!(limits.seven_day.unwrap().utilization, Some(71.0));
             assert_eq!(limits.seven_day_opus, None);
             assert_eq!(limits.seven_day_sonnet, None);
             assert_eq!(limits.model_scoped.len(), 1);
             assert_eq!(limits.model_scoped[0].display_name, "Fable");
-            assert_eq!(limits.model_scoped[0].utilization, Some(67.0));
+            assert_eq!(limits.model_scoped[0].utilization, Some(3.0));
             let extra = limits.extra_usage.expect("extra_usage");
             assert!(!extra.is_enabled);
             assert_eq!(extra.utilization, None);
@@ -1062,11 +1458,54 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_for_display_drops_free_space_and_keeps_every_used_category() {
+    fn a_refused_set_model_names_its_reason_and_leaves_the_session_on_its_model() {
+        let fx = fixture();
+        for run in ["run_A", "run_B"] {
+            assert!(
+                fx[run].get("set_model/claude-sonnet-4-6[1m]").is_some(),
+                "{run}: the capture switches to every catalog id, bare and [1m]"
+            );
+            let refusals =
+                fx[run].as_object().unwrap().iter().filter(|(key, value)| {
+                    key.starts_with("set_model/") && !value["error"].is_null()
+                });
+            for (key, value) in refusals {
+                let model = key.trim_start_matches("set_model/");
+                let reason = value["error"].as_str().unwrap();
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{run} {key}: a refusal names its reason"
+                );
+                let after = parse_context_usage(&fx[run][format!("get_context_usage/{model}")])
+                    .unwrap_or_else(|e| panic!("{run} {key}: {e}"));
+                assert_ne!(
+                    after.model, model,
+                    "{run}: a refused switch must leave the session on its model"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_usage_for_display_keeps_only_the_categories_claude_code_marks_used() {
         let raw =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5"]).unwrap();
+        let kinds: Vec<(&str, Option<ContextKind>)> = raw
+            .categories
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind))
+            .collect();
+        assert_eq!(
+            kinds[kinds.len() - 2..],
+            [
+                ("Autocompact buffer", Some(ContextKind::Buffer)),
+                ("Free space", Some(ContextKind::Free)),
+            ]
+        );
         let total = raw.total_tokens;
-        let shown = raw.without_free_space();
+
+        let shown = raw.drawn_categories_only();
+
         let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1075,12 +1514,118 @@ mod tests {
                 "System tools",
                 "Custom agents",
                 "Memory files",
-                "Skills",
-                "Autocompact buffer"
+                "Skills"
             ]
         );
+        assert!(shown
+            .categories
+            .iter()
+            .all(|c| c.kind == Some(ContextKind::Used)));
         assert_eq!(shown.total_tokens, total);
         assert_eq!(shown.max_tokens, 200_000);
+    }
+
+    #[test]
+    fn every_captured_category_carries_a_kind() {
+        let fx = fixture();
+        for run in ["run_A", "run_B"] {
+            for (key, value) in fx[run].as_object().unwrap() {
+                if !key.starts_with("get_context_usage/") {
+                    continue;
+                }
+                let usage = parse_context_usage(value).unwrap();
+                for category in &usage.categories {
+                    assert!(
+                        matches!(
+                            category.kind,
+                            Some(
+                                ContextKind::Used
+                                    | ContextKind::Free
+                                    | ContextKind::Buffer
+                                    | ContextKind::Deferred
+                            )
+                        ),
+                        "{run} {key} {}: {:?}",
+                        category.name,
+                        category.kind
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_response_without_kind_drops_free_space_and_deferred_rows() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 50, "maxTokens": 100, "percentage": 50,
+            "categories": [
+                { "name": "System prompt", "tokens": 10 },
+                { "name": "MCP tools (deferred)", "tokens": 900, "isDeferred": true },
+                { "name": "Autocompact buffer", "tokens": 30 },
+                { "name": "Free space", "tokens": 50 }
+            ]
+        }))
+        .unwrap();
+
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["System prompt", "Autocompact buffer"]);
+    }
+
+    #[test]
+    fn kind_decides_over_the_name_and_the_deferred_flag() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 50, "maxTokens": 100, "percentage": 50,
+            "categories": [
+                { "name": "Free space", "tokens": 5, "kind": "used" },
+                { "name": "Messages", "tokens": 7, "kind": "used", "isDeferred": true },
+                { "name": "System tools", "tokens": 9, "kind": "deferred" },
+                { "name": "Reserve", "tokens": 11, "kind": "buffer" },
+                { "name": "Room", "tokens": 13, "kind": "free" }
+            ]
+        }))
+        .unwrap();
+
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Free space", "Messages"]);
+    }
+
+    #[test]
+    fn an_unknown_kind_is_not_drawn_and_does_not_break_the_response() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 5, "maxTokens": 100, "percentage": 5,
+            "categories": [
+                { "name": "System prompt", "tokens": 5, "kind": "used" },
+                { "name": "Something new", "tokens": 3, "kind": "reserved" }
+            ]
+        }))
+        .expect("an unknown kind must not fail the parse");
+
+        assert_eq!(usage.categories[1].kind, Some(ContextKind::Unknown));
+        let shown = usage.drawn_categories_only();
+        assert_eq!(shown.categories.len(), 1);
+        assert_eq!(shown.categories[0].name, "System prompt");
+    }
+
+    #[test]
+    fn a_category_without_tokens_is_not_drawn_with_or_without_a_kind() {
+        let usage = parse_context_usage(&serde_json::json!({
+            "model": "m", "totalTokens": 5, "maxTokens": 100, "percentage": 5,
+            "categories": [
+                { "name": "Messages", "tokens": 0, "kind": "used" },
+                { "name": "Skills", "tokens": 0 },
+                { "name": "System prompt", "tokens": 5, "kind": "used" }
+            ]
+        }))
+        .unwrap();
+
+        let shown = usage.drawn_categories_only();
+
+        let names: Vec<&str> = shown.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["System prompt"]);
     }
 
     #[test]
@@ -1098,30 +1643,51 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_without_a_free_space_category_is_left_alone() {
+    fn context_usage_with_only_drawn_categories_is_left_alone() {
         let usage = ContextUsage {
             model: "m".to_string(),
             total_tokens: 1,
             max_tokens: 2,
             percentage: 50.0,
-            categories: vec![ContextCategory {
-                name: "Messages".to_string(),
-                tokens: 1,
-                is_deferred: false,
-            }],
+            categories: vec![
+                ContextCategory {
+                    name: "Messages".to_string(),
+                    tokens: 1,
+                    is_deferred: false,
+                    kind: None,
+                },
+                ContextCategory {
+                    name: "Skills".to_string(),
+                    tokens: 1,
+                    is_deferred: false,
+                    kind: Some(ContextKind::Used),
+                },
+            ],
         };
-        assert_eq!(usage.clone().without_free_space(), usage);
+        assert_eq!(usage.clone().drawn_categories_only(), usage);
+    }
+
+    #[test]
+    fn context_usage_of_a_1m_session_reports_the_1m_window() {
+        let usage =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5[1m]"])
+                .unwrap();
+        assert_eq!(usage.model, "claude-opus-5-5[1m]");
+        assert_eq!(usage.max_tokens, 1_000_000);
+        let bare =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5"]).unwrap();
+        assert_eq!(bare.max_tokens, 200_000);
     }
 
     #[test]
     fn context_usage_before_the_first_message_reports_the_baseline() {
         let usage = parse_context_usage(&fixture()["run_A"]["get_context_usage/initial"]).unwrap();
-        assert_eq!(usage.model, "claude-fable-5-1[1m]");
-        assert_eq!(usage.total_tokens, 46_567);
-        assert_eq!(usage.max_tokens, 1_000_000);
-        assert!((usage.percentage - 5.0).abs() < f64::EPSILON);
+        assert_eq!(usage.model, "claude-haiku-4-5");
+        assert_eq!(usage.total_tokens, 61_125);
+        assert_eq!(usage.max_tokens, 200_000);
+        assert!((usage.percentage - 31.0).abs() < f64::EPSILON);
         assert_eq!(usage.categories[0].name, "System prompt");
-        assert_eq!(usage.categories[0].tokens, 3_902);
+        assert_eq!(usage.categories[0].tokens, 6_890);
     }
 
     #[test]
@@ -1226,6 +1792,106 @@ mod tests {
             }),
             ts_interface_fields(ts, "ClaudeSessionInfoEvent")
         );
+    }
+
+    #[test]
+    fn a_set_model_answer_maps_to_the_outcome_of_the_pick() {
+        assert_eq!(
+            ModelSwitchOutcome::of(Ok(serde_json::json!({}))),
+            Ok(ModelSwitchOutcome::Confirmed)
+        );
+        assert_eq!(
+            ModelSwitchOutcome::of(Err(ControlError::Timeout {
+                subtype: SUBTYPE_SET_MODEL,
+                timeout: SET_MODEL_TIMEOUT,
+            })),
+            Ok(ModelSwitchOutcome::Unconfirmed)
+        );
+        assert_eq!(
+            ModelSwitchOutcome::of(Err(ControlError::Rejected("model not changed".to_string()))),
+            Ok(ModelSwitchOutcome::Refused {
+                reason: "model not changed".to_string()
+            })
+        );
+        for error in [
+            ControlError::SessionEnded,
+            ControlError::Write("broken pipe".to_string()),
+            ControlError::Malformed("no subtype".to_string()),
+        ] {
+            assert_eq!(ModelSwitchOutcome::of(Err(error.clone())), Err(error));
+        }
+    }
+
+    #[test]
+    fn a_model_switch_fails_unless_claude_code_confirms_it() {
+        let timeout = SET_MODEL_TIMEOUT;
+        assert_eq!(
+            ModelSwitchOutcome::failure(Ok(ModelSwitchOutcome::Confirmed), timeout),
+            None
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(
+                Ok(ModelSwitchOutcome::Refused {
+                    reason: "model not changed".to_string()
+                }),
+                timeout
+            ),
+            Some("model not changed".to_string())
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(Ok(ModelSwitchOutcome::Unconfirmed), timeout),
+            Some(format!(
+                "Claude Code gave no answer within {} s",
+                timeout.as_secs()
+            ))
+        );
+        assert_eq!(
+            ModelSwitchOutcome::failure(Err(ControlError::SessionEnded), timeout),
+            Some(ControlError::SessionEnded.to_string())
+        );
+    }
+
+    #[test]
+    fn model_switch_failed_event_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/claude-control.ts");
+        let event = ModelSwitchFailedEvent {
+            project: "p".to_string(),
+            model: "m".to_string(),
+            reason: "r".to_string(),
+        };
+        assert_eq!(
+            rust_fields(&event),
+            ts_interface_fields(ts, "ClaudeModelSwitchFailedEvent")
+        );
+        assert!(
+            ts.contains(&format!("'{MODEL_SWITCH_FAILED_EVENT}'")),
+            "claude-control.ts must name the {MODEL_SWITCH_FAILED_EVENT} event"
+        );
+    }
+
+    #[test]
+    fn model_switch_outcome_tags_match_ts_union() {
+        let ts = include_str!("../../src/src/app/models/claude-control.ts");
+        for outcome in [
+            ModelSwitchOutcome::Confirmed,
+            ModelSwitchOutcome::Unconfirmed,
+            ModelSwitchOutcome::Refused {
+                reason: String::new(),
+            },
+        ] {
+            let json = serde_json::to_value(&outcome).unwrap();
+            let tag = json["outcome"].as_str().unwrap();
+            assert!(
+                ts.contains(&format!("outcome: '{tag}'")),
+                "ModelSwitchOutcome must carry the '{tag}' outcome"
+            );
+        }
+        assert_eq!(
+            ts.matches("outcome: '").count(),
+            3,
+            "ModelSwitchOutcome has an outcome the Rust enum lacks"
+        );
+        assert!(ts.contains("outcome: 'refused'; reason: string"));
     }
 
     #[test]

@@ -31,7 +31,6 @@ const CATALOG: AnthropicModel[] = [
 ];
 
 const PICKER: ModelPicker = {
-  effort_order: ['low', 'medium', 'high', 'xhigh', 'max'],
   rows: [
     {
       id: 'claude-opus-5',

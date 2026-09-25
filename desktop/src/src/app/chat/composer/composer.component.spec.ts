@@ -599,6 +599,16 @@ describe('ComposerComponent', () => {
       expect(selector).toBeTruthy();
     });
 
+    it('forwards sessionAwaited() to the model selector', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.sessionAwaited()).toBe(false);
+
+      fixture.componentRef.setInput('sessionAwaited', true);
+      fixture.detectChanges();
+
+      expect(selector.componentInstance.sessionAwaited()).toBe(true);
+    });
+
     it('forwards streaming() to the model selector', () => {
       fixture.componentRef.setInput('streaming', true);
       fixture.detectChanges();

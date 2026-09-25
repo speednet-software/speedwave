@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::chat::SharedChatSession;
 use crate::types::check_project;
-use speedwave_runtime::config;
+use speedwave_runtime::{claude_settings, config};
 
 fn resolve_project_name(project_id: &str) -> Result<String, String> {
     check_project(project_id)?;
@@ -26,7 +26,7 @@ pub(crate) fn ensure_effort_pin_migrated_in(
         else {
             return Ok(());
         };
-        let legacy = match crate::claude_settings::take_legacy_effort_pin(data_dir, project_name) {
+        let legacy = match claude_settings::take_legacy_effort_pin(data_dir, project_name) {
             Ok(legacy) => legacy,
             Err(e) => {
                 log::warn!("legacy effort pin migration skipped for {project_name}: {e}");
@@ -55,14 +55,20 @@ pub(crate) fn ensure_effort_pin_migrated_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
+pub(crate) fn validate_effort_level(level: &str) -> Result<(), String> {
+    if speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
+        Ok(())
+    } else {
+        Err(format!("unknown effort level: {level}"))
+    }
+}
+
 fn set_effort_pin_in(
     data_dir: &std::path::Path,
     project_name: &str,
     level: &str,
 ) -> Result<(), String> {
-    if !speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
-        return Err(format!("unknown effort level: {level}"));
-    }
+    validate_effort_level(level)?;
     config::with_config_lock_in(data_dir, || {
         let config_path = data_dir.join("config.json");
         let mut user_config = config::load_user_config_from(&config_path)?;
@@ -102,7 +108,7 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
 }
 
 fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
-    let pin = crate::claude_settings::get_model_pin(data_dir, project)
+    let pin = claude_settings::get_model_pin(data_dir, project)
         .map(|pin| speedwave_runtime::defaults::resolve_model_alias(&pin))
         .filter(|model| model.starts_with("claude-"));
     pin.or_else(|| {
@@ -126,7 +132,7 @@ fn set_model_pin_inner(
     session_arc: &SharedChatSession,
 ) -> Result<(), String> {
     let project_name = resolve_project_name(project_id)?;
-    crate::claude_settings::set_model_pin(
+    claude_settings::set_model_pin(
         speedwave_runtime::consts::data_dir(),
         &project_name,
         model,
@@ -146,7 +152,26 @@ pub(crate) fn set_model_pin(
 #[tauri::command]
 pub(crate) fn clear_model_pin(project_id: String) -> Result<(), String> {
     let project_name = resolve_project_name(&project_id)?;
-    crate::claude_settings::clear_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
+    claude_settings::clear_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
+}
+
+#[tauri::command]
+pub(crate) fn get_model_pin(project_id: String) -> Result<Option<String>, String> {
+    let project_name = resolve_project_name(&project_id)?;
+    Ok(claude_settings::get_model_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+    ))
+}
+
+#[tauri::command]
+pub(crate) fn restore_model_pin(project_id: String, model: Option<String>) -> Result<(), String> {
+    let project_name = resolve_project_name(&project_id)?;
+    claude_settings::restore_model_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+        model.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -258,6 +283,15 @@ mod tests {
     }
 
     #[test]
+    fn get_and_restore_model_pin_reject_an_invalid_project() {
+        let err = resolve_project_name("").unwrap_err();
+        assert_eq!(get_model_pin(String::new()).unwrap_err(), err);
+        assert_eq!(restore_model_pin(String::new(), None).unwrap_err(), err);
+        assert!(get_model_pin("../escape".to_string()).is_err());
+        assert!(restore_model_pin("../escape".to_string(), Some("opus".to_string())).is_err());
+    }
+
+    #[test]
     fn set_model_pin_shares_the_same_resolution_error_as_the_effort_commands() {
         let model_err = set_model_pin_inner("", "claude-sonnet-5", &no_session()).unwrap_err();
         let effort_err = set_effort_pin(String::new(), "low".to_string()).unwrap_err();
@@ -306,6 +340,20 @@ mod tests {
         user_config_with_project(tmp.path(), "proj");
         let err = set_effort_pin_in(tmp.path(), "proj", "ultra").unwrap_err();
         assert!(err.contains("unknown effort level"));
+    }
+
+    #[test]
+    fn effort_levels_are_exactly_the_ssot_list() {
+        for level in speedwave_runtime::defaults::EFFORT_LEVELS {
+            assert_eq!(validate_effort_level(level), Ok(()), "{level}");
+        }
+        for bad in ["", "turbo", "High", " low", "low\n", "auto", "ultracode"] {
+            assert_eq!(
+                validate_effort_level(bad),
+                Err(format!("unknown effort level: {bad}")),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

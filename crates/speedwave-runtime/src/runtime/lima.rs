@@ -1620,7 +1620,7 @@ mod tests {
                 }
                 if joined.contains("base64 -d | sh") {
                     let sudo = if args.contains(&"sudo") { "sudo " } else { "" };
-                    let script = crate::runtime::test_support::decode_payload(args.last().unwrap());
+                    let script = crate::runtime::decode_payload(args.last().unwrap());
                     self.events
                         .lock()
                         .unwrap()

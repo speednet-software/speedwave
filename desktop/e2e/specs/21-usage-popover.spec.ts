@@ -1,5 +1,6 @@
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { openChat, openSettings, sendMessageAndWait, startNewConversation } from '../helpers/llm';
+import { invokeOr } from '../helpers/tauri-invoke';
 
 const ROUTED_PROJECT = 'e2e-test';
 const ANTHROPIC_PROJECT = 'e2e-second';
@@ -103,16 +104,7 @@ async function popoverPaint(): Promise<PopoverPaint> {
 }
 
 async function planUsage(project: string): Promise<PlanUsage | null> {
-  return browser.executeAsync((proj: string, done: (r: PlanUsage | null) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<PlanUsage> };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('get_plan_usage', { project: proj })
-      .then((r) => done(r))
-      .catch(() => done(null));
-  }, project);
+  return invokeOr<PlanUsage | null>(null, 'get_plan_usage', { project });
 }
 
 describe('Usage Ring + Popover', function () {

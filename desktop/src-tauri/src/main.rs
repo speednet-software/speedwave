@@ -8,7 +8,6 @@ mod auth_commands;
 mod bridges;
 mod chat;
 mod chat_session_cmd;
-mod claude_settings;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
@@ -1161,6 +1160,8 @@ fn main() {
             pin_cmd::get_model_hint,
             pin_cmd::set_model_pin,
             pin_cmd::clear_model_pin,
+            pin_cmd::get_model_pin,
+            pin_cmd::restore_model_pin,
             model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
@@ -1188,8 +1189,8 @@ fn main() {
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
             chat_session_cmd::get_chat_session_info,
-            chat_session_cmd::get_chat_takes_wire_effort,
             chat_session_cmd::switch_chat_model,
+            chat_session_cmd::apply_chat_effort,
             chat_session_cmd::get_plan_usage,
             chat_session_cmd::get_context_usage,
             retry_cmd::retry_last_turn,
@@ -1274,6 +1275,8 @@ fn main() {
             system_settings_cmd::open_audio_capture_pane,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_spawn_args,
+            #[cfg(feature = "e2e")]
+            e2e_support::e2e_last_applied_effort,
             #[cfg(feature = "e2e")]
             e2e_support::e2e_restart_app,
         ])

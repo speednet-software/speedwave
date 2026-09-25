@@ -1,3 +1,5 @@
+import { invokeOr } from './tauri-invoke';
+
 export interface AnthropicCatalogEntry {
   id: string;
   family: string;
@@ -9,16 +11,7 @@ export interface AnthropicCatalogEntry {
 }
 
 export async function anthropicCatalog(): Promise<AnthropicCatalogEntry[]> {
-  return browser.executeAsync((done: (rows: AnthropicCatalogEntry[]) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<AnthropicCatalogEntry[]> };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('list_anthropic_models')
-      .then((rows) => done(rows))
-      .catch(() => done([]));
-  });
+  return invokeOr<AnthropicCatalogEntry[]>([], 'list_anthropic_models');
 }
 
 export async function latestAnthropicModelIds(): Promise<string[]> {
@@ -27,18 +20,10 @@ export async function latestAnthropicModelIds(): Promise<string[]> {
 }
 
 export async function modelPickerRowIds(project: string): Promise<string[] | null> {
-  return browser.executeAsync((proj: string, done: (ids: string[] | null) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: {
-          invoke: (cmd: string, args: unknown) => Promise<{ rows: { id: string }[] } | null>;
-        };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('list_model_picker', { project: proj })
-      .then((picker) => done(picker ? picker.rows.map((r) => r.id) : null))
-      .catch(() => done(null));
-  }, project);
+  const picker = await invokeOr<{ rows: { id: string }[] } | null>(null, 'list_model_picker', {
+    project,
+  });
+  return picker ? picker.rows.map((r) => r.id) : null;
 }
 
 export function catalogEntryForBadgeLabel(

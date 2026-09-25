@@ -7,6 +7,7 @@ import {
   input,
   output,
   signal,
+  untracked,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { TooltipDirective } from '../../../shared/tooltip.directive';
@@ -19,8 +20,10 @@ import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
+import type { RefusedModelPick } from '../../../services/chat-state.service';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
+import { SpinIconComponent } from '../../../shared/spin-icon.component';
 
 const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
 const LOAD_FAILED = 'Failed to load models.';
@@ -55,7 +58,7 @@ export interface ModelSelection {
  */
 @Component({
   selector: 'app-model-selector',
-  imports: [FormsModule, TooltipDirective, EffortSliderComponent],
+  imports: [FormsModule, TooltipDirective, EffortSliderComponent, SpinIconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
   template: `
@@ -135,19 +138,20 @@ export interface ModelSelection {
             </div>
           }
           <div class="max-h-72 overflow-y-auto py-1">
-            @if (loading()) {
+            @if (listLoading()) {
               <div
                 data-testid="model-selector-loading"
-                class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+                class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
               >
+                <app-spin-icon testId="model-selector-spinner" class="h-3 w-3" />
                 Loading models...
               </div>
-            } @else if (error()) {
+            } @else if (listError()) {
               <div
                 data-testid="model-selector-error"
                 class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
               >
-                {{ error() }}
+                {{ listError() }}
                 <button
                   type="button"
                   data-testid="model-selector-retry"
@@ -167,7 +171,7 @@ export interface ModelSelection {
                   (click)="select(opt)"
                 >
                   <span class="flex min-w-0 items-start gap-2">
-                    @if (showEffortControl()) {
+                    @if (isAnthropic()) {
                       <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
                         @if (opt.id === activeOptionId()) {
                           <span data-testid="model-selector-active-mark">&#x2713;</span>
@@ -212,7 +216,7 @@ export interface ModelSelection {
           </div>
         </div>
       }
-      @if (effortOpen()) {
+      @if (effortOpen() && showEffortSegment()) {
         <button
           type="button"
           data-testid="effort-popover-backdrop"
@@ -252,6 +256,10 @@ export class ModelSelectorComponent {
 
   readonly sessionModel = input('');
 
+  readonly sessionAwaited = input(false);
+
+  readonly refusedPick = input<RefusedModelPick | null>(null);
+
   readonly modelSelected = output<ModelSelection>();
 
   readonly effortSelected = output<string>();
@@ -263,9 +271,11 @@ export class ModelSelectorComponent {
   protected readonly stale = signal(false);
   protected readonly summary = signal<ActiveProviderSummary | null>(null);
   private summaryProjectId: string | null = null;
-  private readonly options = signal<ModelOption[]>([]);
+  private readonly discoveredOptions = signal<ModelOption[]>([]);
 
   private optionsFetch: Promise<void> = Promise.resolve();
+
+  private fetchGeneration = 0;
 
   private probedKey = '';
 
@@ -276,16 +286,33 @@ export class ModelSelectorComponent {
 
   private readonly modelHint = signal('');
 
-  protected readonly showEffortControl = computed(() => {
+  protected readonly isAnthropic = computed(() => {
     const summary = this.summary();
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
+  private readonly providerKnown = computed(() => this.summary() !== null);
+
   protected readonly pickerPending = computed(
-    () =>
-      this.showEffortControl() &&
-      this.control.sessionInfoState(this.projectId()).state === 'pending'
+    () => this.isAnthropic() && this.control.sessionInfoState(this.projectId()).state === 'pending'
   );
+
+  protected readonly awaitingSession = computed(() => this.isAnthropic() && this.sessionAwaited());
+
+  private readonly options = computed<ModelOption[]>(() => {
+    if (!this.isAnthropic()) return this.discoveredOptions();
+    const projectId = this.projectId();
+    const held = this.picker.picker(projectId);
+    return held ? this.anthropicOptionsFrom(held, projectId) : [];
+  });
+
+  protected readonly listLoading = computed(
+    () =>
+      this.loading() ||
+      ((this.pickerPending() || this.awaitingSession()) && this.options().length === 0)
+  );
+
+  protected readonly listError = computed(() => (this.options().length === 0 ? this.error() : ''));
 
   protected readonly badgeTitle = computed<string>(() => {
     if (this.streaming()) return 'Model locked while a turn is streaming';
@@ -295,32 +322,30 @@ export class ModelSelectorComponent {
   protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
 
   private readonly activeRow = computed<ModelPickerRow | null>(() =>
-    this.showEffortControl() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
+    this.isAnthropic() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
   );
 
   private readonly currentModelEntry = computed<AnthropicModel | null>(() =>
-    this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
+    this.isAnthropic()
+      ? this.anthropicModels.entryFor(this.activeOptionId() ?? this.displayModel())
+      : null
   );
 
-  private readonly canonicalOrder = computed<string[]>(
-    () => this.picker.picker(this.projectId())?.effort_order ?? []
-  );
+  private readonly canonicalOrder = computed<string[]>(() => this.summary()?.effort_levels ?? []);
 
-  protected readonly effortStops = computed<string[]>(
-    () =>
-      this.activeRow()?.effort_levels ??
-      this.currentModelEntry()?.effort_levels ??
-      this.canonicalOrder()
-  );
+  protected readonly effortStops = computed<string[]>(() => {
+    if (!this.isAnthropic()) return this.canonicalOrder();
+    const listed = this.activeRow()?.effort_levels ?? this.currentModelEntry()?.effort_levels;
+    if (listed) return listed;
+    return this.picker.picker(this.projectId()) ? this.canonicalOrder() : [];
+  });
 
   private readonly catalogDefaultEffort = computed<string | null>(() => {
     const row = this.activeRow();
     return row ? row.default_effort : (this.currentModelEntry()?.default_effort ?? null);
   });
 
-  protected readonly showEffortSegment = computed(
-    () => this.showEffortControl() && this.effortStops().length > 0
-  );
+  protected readonly showEffortSegment = computed(() => this.effortStops().length > 0);
 
   protected readonly effectiveEffortLevel = computed<string | null>(() => {
     const stops = this.effortStops();
@@ -359,19 +384,19 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.loadEffortState(id);
+      if (this.providerKnown() && id) void this.loadEffortState(id);
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.anthropicModels.list();
+      if (this.isAnthropic() && id) void this.anthropicModels.list();
     });
     effect(() => {
       const id = this.projectId();
-      if (this.showEffortControl() && id) void this.control.refreshSessionInfo(id);
+      if (this.isAnthropic() && id) void this.control.refreshSessionInfo(id);
     });
     effect(() => {
       const id = this.projectId();
-      if (!this.showEffortControl() || !id) return;
+      if (!this.isAnthropic() || !id) return;
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
     });
     effect(() => {
@@ -380,18 +405,30 @@ export class ModelSelectorComponent {
       const ended = live === '' && this.lastSessionModel !== '';
       this.lastSessionModel = live;
       const id = this.projectId();
-      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
+      if (changed && this.providerKnown() && id) void this.loadEffortState(id);
       if (ended) {
         this.lastPicked.set('');
         if (id && !this.summary()?.model) void this.loadModelHint(id);
       }
     });
     effect(() => {
+      this.projectId();
+      this.showEffortSegment();
+      untracked(() => this.effortOpen.set(false));
+    });
+    effect(() => {
+      const refused = this.refusedPick();
+      if (!refused) return;
+      untracked(() => {
+        if (this.lastPicked() === refused.catalogId) this.lastPicked.set(refused.running ?? '');
+      });
+    });
+    effect(() => {
       const err = this.modelError();
       const changed = err !== '' && err !== this.lastModelError;
       this.lastModelError = err;
       const id = this.projectId();
-      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
+      if (changed && this.providerKnown() && id) void this.loadEffortState(id);
     });
   }
 
@@ -480,25 +517,28 @@ export class ModelSelectorComponent {
    * Fetches the option list for the active provider kind (badge combobox source).
    * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
    * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
-   * @param force - Re-issue the discovery probe even when this instance already probed.
+   * Anthropic rows are the `ModelPickerService` rows; only the latest fetch writes the state.
+   * @param force - Re-issue the discovery probe (or re-read the session info) even when held.
    */
   async fetchOptions(force = false): Promise<void> {
     const summary = this.summary();
     if (!summary) return;
+    const generation = ++this.fetchGeneration;
+    const latest = (): boolean => generation === this.fetchGeneration;
     this.loading.set(true);
     this.error.set('');
     this.stale.set(false);
     try {
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
+        if (force) await this.control.refreshSessionInfo(projectId);
         await this.anthropicModels.list();
         const picker = await this.picker.refresh(projectId);
+        if (!latest()) return;
         if (!picker) {
-          this.options.set([]);
           this.error.set(MODEL_LIST_UNAVAILABLE);
           return;
         }
-        this.options.set(this.anthropicOptionsFrom(picker, projectId));
       } else {
         const isOpenRouter = summary.kind === 'open_router';
         if (!isOpenRouter && !summary.base_url) {
@@ -509,26 +549,27 @@ export class ModelSelectorComponent {
         const key = `${provider}|${baseUrl}`;
         const held = this.discovered.cached(provider, baseUrl);
         if (!force && this.probedKey === key && held) {
-          this.options.set(this.discoveredOptionsFrom(held));
+          this.discoveredOptions.set(this.discoveredOptionsFrom(held));
         } else {
           const res = await this.discovered.refresh(provider, baseUrl);
+          if (!latest()) return;
           if (!res) {
-            this.options.set([]);
+            this.discoveredOptions.set([]);
             this.error.set(LOAD_FAILED);
             return;
           }
           if (res.fresh) this.probedKey = key;
           this.stale.set(!res.fresh);
-          this.options.set(this.discoveredOptionsFrom(res.models));
+          this.discoveredOptions.set(this.discoveredOptionsFrom(res.models));
         }
       }
       if (this.options().length === 0) this.error.set('No models available.');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: fetch failed: ${msg}`);
-      this.error.set(LOAD_FAILED);
+      if (latest()) this.error.set(LOAD_FAILED);
     } finally {
-      this.loading.set(false);
+      if (latest()) this.loading.set(false);
     }
   }
 
