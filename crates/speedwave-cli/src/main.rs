@@ -63,6 +63,7 @@ enum CliAction {
     Update(Option<String>),
     Run(Option<String>),
     Help,
+    Version,
 }
 
 fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, String> {
@@ -109,6 +110,7 @@ fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Resul
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
     match args.get(1).map(|s| s.as_str()) {
         Some("--help" | "-h" | "help") => Ok(CliAction::Help),
+        Some("--version" | "-V") => Ok(CliAction::Version),
         Some("plugin") => match args.get(2).map(|s| s.as_str()) {
             Some("install") => {
                 let path = args
@@ -425,7 +427,8 @@ USAGE:
     speedwave plugin enable  <id> --project <project>   Enable a plugin per-project
     speedwave plugin disable <id> --project <project>   Disable a plugin per-project
 
-    speedwave --help | -h | help      Show this help and exit
+    speedwave --help | -h | help       Show this help and exit
+    speedwave --version | -V           Show the version and exit
 
 The active project is the one selected in Speedwave Desktop; `--project <p>`
 overrides it. The working directory does not select the project.
@@ -494,6 +497,11 @@ fn main() -> anyhow::Result<()> {
 
     if action == CliAction::Help {
         print_help();
+        std::process::exit(0);
+    }
+
+    if action == CliAction::Version {
+        out!("speedwave {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
 
@@ -1286,6 +1294,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_action_version_long_flag() {
+        let args = vec!["speedwave".to_string(), "--version".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
+    }
+
+    #[test]
+    fn parse_action_version_short_flag() {
+        let args = vec!["speedwave".to_string(), "-V".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
+    }
+
+    #[test]
     fn main_handles_help_before_runtime_check() {
         let source = include_str!("main.rs");
         let main_start = source
@@ -1302,6 +1322,27 @@ mod tests {
             help_idx < runtime_idx,
             "CliAction::Help must be handled BEFORE any runtime_not_available \
              call site inside main() — otherwise `speedwave --help` fails \
+             when Desktop is not running"
+        );
+    }
+
+    #[test]
+    fn main_handles_version_before_runtime_check() {
+        let source = include_str!("main.rs");
+        let main_start = source
+            .find("\nfn main() -> anyhow::Result<()>")
+            .expect("main.rs must define fn main()");
+        let main_body = &source[main_start..];
+        let version_idx = main_body
+            .find("if action == CliAction::Version")
+            .expect("main() must handle CliAction::Version");
+        let runtime_idx = main_body
+            .find("runtime_not_available()")
+            .expect("main() must have at least one runtime_not_available call site");
+        assert!(
+            version_idx < runtime_idx,
+            "CliAction::Version must be handled BEFORE any runtime_not_available \
+             call site inside main() — otherwise `speedwave --version` fails \
              when Desktop is not running"
         );
     }
@@ -1418,6 +1459,16 @@ mod tests {
         assert!(
             err.contains("unknown command") && err.contains("updatte"),
             "expected unknown-command error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_unknown_flag_yields_unexpected_argument() {
+        let args = vec!["speedwave".to_string(), "-x".to_string()];
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unexpected argument") && err.contains("-x"),
+            "expected unexpected argument error for unknown flag, got: {err}"
         );
     }
 
@@ -1639,6 +1690,22 @@ mod tests {
         assert!(
             body.contains("speedwave logout"),
             "print_help must document `logout` subcommand"
+        );
+    }
+
+    #[test]
+    fn print_help_lists_version_flag() {
+        let source = include_str!("main.rs");
+        let help_start = source
+            .find("fn print_help() {")
+            .expect("print_help must exist");
+        let help_end = source[help_start..]
+            .find("\n}")
+            .expect("print_help must end with `}`");
+        let body = &source[help_start..help_start + help_end];
+        assert!(
+            body.contains("speedwave --version | -V"),
+            "print_help must document `--version | -V` flag"
         );
     }
 
