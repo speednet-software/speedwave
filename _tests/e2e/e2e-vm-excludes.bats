@@ -44,6 +44,14 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
     [ "$(ps_squote "'; calc; '")" = "''; calc; ''" ]
 }
 
+@test "run_macos_e2e neither stops nor kills the VM before launching the app" {
+    local body launch
+    body="$(sed -n '/^run_macos_e2e()/,/^}/p' "$SCRIPT")"
+    launch="$(echo "$body" | grep -n '^"\$APP_PATH" &$' | cut -d: -f1)"
+    [ -n "$launch" ]
+    [ "$(echo "$body" | head -n "$launch" | grep -ciE 'pkill .*limactl|limactl"? stop')" -eq 0 ]
+}
+
 @test "every windows_ps env injection goes through ps_squote" {
     local body assignments squoted
     body="$(sed -n '/^windows_ps()/,/^}/p' "$SCRIPT")"

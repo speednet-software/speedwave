@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::chat_registry::SharedChatSessions;
 use crate::types::check_project;
-use speedwave_runtime::config;
+use speedwave_runtime::{claude_settings, config};
 
 fn resolve_project_name(project_id: &str) -> Result<String, String> {
     check_project(project_id)?;
@@ -26,7 +26,7 @@ pub(crate) fn ensure_effort_pin_migrated_in(
         else {
             return Ok(());
         };
-        let legacy = match crate::claude_settings::take_legacy_effort_pin(data_dir, project_name) {
+        let legacy = match claude_settings::take_legacy_effort_pin(data_dir, project_name) {
             Ok(legacy) => legacy,
             Err(e) => {
                 log::warn!("legacy effort pin migration skipped for {project_name}: {e}");
@@ -65,7 +65,7 @@ pub(crate) fn ensure_model_pin_migrated_in(
         if user_config.find_project(project_name).is_none() {
             return Ok(());
         }
-        let legacy = match crate::claude_settings::take_legacy_model_pin(data_dir, project_name) {
+        let legacy = match claude_settings::take_legacy_model_pin(data_dir, project_name) {
             Ok(legacy) => legacy,
             Err(e) => {
                 log::warn!("legacy model pin migration skipped for {project_name}: {e}");
@@ -152,14 +152,20 @@ pub(crate) fn normalize_model_pin_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
+pub(crate) fn validate_effort_level(level: &str) -> Result<(), String> {
+    if speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
+        Ok(())
+    } else {
+        Err(format!("unknown effort level: {level}"))
+    }
+}
+
 fn set_effort_pin_in(
     data_dir: &std::path::Path,
     project_name: &str,
     level: &str,
 ) -> Result<(), String> {
-    if !speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
-        return Err(format!("unknown effort level: {level}"));
-    }
+    validate_effort_level(level)?;
     config::with_config_lock_in(data_dir, || {
         let config_path = data_dir.join("config.json");
         let mut user_config = config::load_user_config_from(&config_path)?;
@@ -449,6 +455,20 @@ mod tests {
         user_config_with_project(tmp.path(), "proj");
         let err = set_effort_pin_in(tmp.path(), "proj", "ultra").unwrap_err();
         assert!(err.contains("unknown effort level"));
+    }
+
+    #[test]
+    fn effort_levels_are_exactly_the_ssot_list() {
+        for level in speedwave_runtime::defaults::EFFORT_LEVELS {
+            assert_eq!(validate_effort_level(level), Ok(()), "{level}");
+        }
+        for bad in ["", "turbo", "High", " low", "low\n", "auto", "ultracode"] {
+            assert_eq!(
+                validate_effort_level(bad),
+                Err(format!("unknown effort level: {bad}")),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

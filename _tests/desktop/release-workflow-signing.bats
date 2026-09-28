@@ -123,6 +123,7 @@ SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 
 
 SIGNING_LOGIN_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/azure-signing-login/action.yml"
+RELEASE_PLEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release-please.yml"
 
 @test "workflow configures Windows signing before tauri-action" {
     login_line=$(grep -n "name: Configure Windows code signing" "$WORKFLOW" | head -1 | cut -d: -f1)
@@ -149,13 +150,63 @@ SIGNING_LOGIN_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/azure-signing-log
     [ "$(grep -c "^    environment: release$" "$WORKFLOW")" -eq 2 ]
 }
 
+@test "release-please grants the release build every permission its jobs request" {
+    caller=$(awk '/^  build-and-publish:$/ { found = 1; next } found && /^  [^ ]/ { exit } found' "$RELEASE_PLEASE_WORKFLOW")
+    echo "$caller" | grep -qxF "    uses: ./.github/workflows/desktop-release.yml"
+    requested=$(grep -E "^      [a-z-]+: (read|write)$" "$WORKFLOW" | sed 's/^ *//' | sort -u)
+    [ -n "$requested" ]
+    while IFS= read -r perm; do
+        name=${perm%%:*}
+        if [ "${perm#*: }" = "read" ]; then
+            granted="^      $name: (read|write)$"
+        else
+            granted="^      $name: write$"
+        fi
+        if ! echo "$caller" | grep -qE "$granted"; then
+            echo "ERROR: desktop-release.yml requests '$perm' but release-please.yml build-and-publish does not grant it" >&2
+            return 1
+        fi
+    done <<EOF
+$requested
+EOF
+}
+
+@test "every signing login is followed at once by the Artifact Signing token fetch" {
+    token_run="run: az account get-access-token --resource https://codesigning.azure.net --output none"
+    [ "$(grep -cF "$token_run" "$WORKFLOW")" -eq 2 ]
+    logins=$(grep -n "uses: ./.github/actions/azure-signing-login" "$WORKFLOW" | cut -d: -f1)
+    [ -n "$logins" ]
+    for login_line in $logins; do
+        next_step=$(awk -v start="$login_line" 'NR>start && /^      - / { print; exit }' "$WORKFLOW")
+        if [ "$next_step" != "      - name: Cache the Artifact Signing token (Windows)" ]; then
+            echo "ERROR: the step after the signing login at line $login_line is '$next_step', not the token fetch" >&2
+            return 1
+        fi
+    done
+}
+
+@test "the Artifact Signing token fetch is skipped when signing is not configured" {
+    grep -A1 "name: Cache the Artifact Signing token (Windows)" "$WORKFLOW" | grep "if:" > "$BATS_TEST_TMPDIR/guards"
+    [ "$(wc -l < "$BATS_TEST_TMPDIR/guards")" -eq 2 ]
+    [ "$(grep -cF "&& vars.AZURE_CLIENT_ID != ''" "$BATS_TEST_TMPDIR/guards")" -eq 2 ]
+}
+
 @test "cli job signs the Windows CLI before packaging it" {
     sign_line=$(grep -n "name: Sign CLI binary (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
     pack_line=$(grep -n "name: Package CLI (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
     [ -n "$sign_line" ]
     [ -n "$pack_line" ]
     [ "$sign_line" -lt "$pack_line" ]
-    grep -qF 'sign-windows-binaries.ps1 "target\$env:TARGET\release\speedwave.exe"' "$WORKFLOW"
+    grep -qF 'sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\target\$env:TARGET\release\speedwave.exe"' "$WORKFLOW"
+}
+
+@test "every file the workflow hands to the signing script is a rooted path" {
+    grep -F 'sign-windows-binaries.ps1 "' "$WORKFLOW" > "$BATS_TEST_TMPDIR/calls"
+    [ -s "$BATS_TEST_TMPDIR/calls" ]
+    if grep -vF 'sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\' "$BATS_TEST_TMPDIR/calls"; then
+        echo "ERROR: Invoke-ArtifactSigning rejects a relative path ('is not rooted'); pass \$env:GITHUB_WORKSPACE\\..." >&2
+        return 1
+    fi
 }
 
 @test "no PFX-based Windows signing remains in the release workflow" {

@@ -9,6 +9,8 @@ pub enum PrereqRule {
     WslNotAvailable,
     /// Windows: `wsl.exe` answered but reports WSL2 cannot start — installing again cannot fix it.
     WslCannotStart,
+    /// Windows: `wsl.exe --status` ran but did not answer — WSL is wedged, not missing.
+    WslUnresponsive,
 }
 
 impl fmt::Display for PrereqRule {
@@ -16,6 +18,7 @@ impl fmt::Display for PrereqRule {
         match self {
             Self::WslNotAvailable => f.write_str("WSL_NOT_AVAILABLE"),
             Self::WslCannotStart => f.write_str("WSL_CANNOT_START"),
+            Self::WslUnresponsive => f.write_str("WSL_UNRESPONSIVE"),
         }
     }
 }
@@ -219,13 +222,22 @@ pub(crate) fn check_wsl_with(
 ) -> Vec<PrereqViolation> {
     let classified = match status {
         Ok((exit_code, body)) => classify_wsl_status(exit_code, &body),
-        Err(e) => Some((
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some() => Some((
             PrereqRule::WslNotAvailable,
             format!("WSL2 check failed: {e}"),
+        )),
+        Err(e) => Some((
+            PrereqRule::WslUnresponsive,
+            format!("wsl.exe --status did not answer: {e}"),
         )),
     };
     let Some((rule, message)) = classified else {
         return Vec::new();
+    };
+    let remediation = if rule == PrereqRule::WslUnresponsive {
+        crate::consts::WSL_UNRESPONSIVE_MSG
+    } else {
+        crate::consts::WSL_NOT_AVAILABLE_MSG
     };
     let message = match wsl_blocker_note(system32, servicing) {
         Some(note) => format!("{message}\n{note}"),
@@ -234,7 +246,7 @@ pub(crate) fn check_wsl_with(
     vec![PrereqViolation {
         rule,
         message,
-        remediation: crate::consts::WSL_NOT_AVAILABLE_MSG,
+        remediation,
     }]
 }
 
@@ -392,6 +404,7 @@ mod tests {
     fn test_prereq_rule_wsl_not_available_display() {
         assert_eq!(PrereqRule::WslNotAvailable.to_string(), "WSL_NOT_AVAILABLE");
         assert_eq!(PrereqRule::WslCannotStart.to_string(), "WSL_CANNOT_START");
+        assert_eq!(PrereqRule::WslUnresponsive.to_string(), "WSL_UNRESPONSIVE");
     }
 
     #[test]
@@ -767,7 +780,7 @@ mod tests {
         let violations = check_wsl_with(
             dir.path(),
             ServicingState::Clean,
-            Err(anyhow::anyhow!("boom")),
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "boom").into()),
         );
         assert_eq!(violations.len(), 1);
         assert_eq!(
@@ -778,12 +791,37 @@ mod tests {
     }
 
     #[test]
+    fn check_wsl_with_a_status_that_does_not_answer_reports_wsl_as_unresponsive() {
+        let dir = system32_with_vm_platform();
+        let violations = check_wsl_with(
+            dir.path(),
+            ServicingState::Clean,
+            Err(anyhow::anyhow!("child process timed out after 10s")),
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule,
+            PrereqRule::WslUnresponsive,
+            "a wsl.exe that ran and never answered is wedged, which installing cannot fix"
+        );
+        assert!(
+            violations[0].message.contains("timed out"),
+            "{}",
+            violations[0].message
+        );
+        assert_eq!(
+            violations[0].remediation,
+            crate::consts::WSL_UNRESPONSIVE_MSG
+        );
+    }
+
+    #[test]
     fn check_wsl_with_spawn_error_is_a_violation() {
         let dir = system32_with_vm_platform();
         let violations = check_wsl_with(
             dir.path(),
             ServicingState::Clean,
-            Err(anyhow::anyhow!("program not found")),
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "program not found").into()),
         );
         assert_eq!(violations.len(), 1);
         assert!(

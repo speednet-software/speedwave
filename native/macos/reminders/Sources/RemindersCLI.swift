@@ -182,7 +182,7 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     reminder.title = name
 
     if let filter = params["list_id"] as? String {
-        reminder.calendar = try resolveReminderList(filter, store: store)
+        reminder.calendar = try resolveSingleCalendar(for: .reminder, filter: filter, store: store)
     } else {
         reminder.calendar = store.defaultCalendarForNewReminders()
     }
@@ -231,7 +231,7 @@ func applyReminderUpdate(_ params: [String: Any], to reminder: EKReminder, store
     }
 
     if let filter = params["list_id"] as? String {
-        reminder.calendar = try resolveReminderList(filter, store: store)
+        reminder.calendar = try resolveSingleCalendar(for: .reminder, filter: filter, store: store)
     }
 
     if params["due_date"] is NSNull {
@@ -280,15 +280,6 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
 }
 
 
-/// One list by id or exact name; several lists sharing a name are refused rather than picked blindly.
-func resolveReminderList(_ filter: String, store: EKEventStore) throws -> EKCalendar {
-    let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
-    guard matches.count == 1 else {
-        throw CLIError.ambiguous("Reminder list '\(filter)' matches \(matches.count) lists; pass the list id instead")
-    }
-    return matches[0]
-}
-
 func reminderToDict(_ r: EKReminder, timeZone: TimeZone = .current) -> [String: Any] {
     let rawNotes = r.notes ?? ""
     let tags = extractTags(from: rawNotes)
@@ -326,16 +317,6 @@ func reminderToDict(_ r: EKReminder, timeZone: TimeZone = .current) -> [String: 
 
 private let gregorian = Calendar(identifier: .gregorian)
 
-private let zonelessGregorian: Calendar = {
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-    return calendar
-}()
-
-private let dateOnlyPattern = #"^\d{4}-\d{2}-\d{2}$"#
-private let wallClockPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$"#
-private let offsetPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"#
-
 func isAllDay(_ components: DateComponents) -> Bool {
     components.hour == nil
 }
@@ -343,34 +324,18 @@ func isAllDay(_ components: DateComponents) -> Bool {
 /// Floating Gregorian components (EventKit requires that calendar): a bare date is all-day, a time
 /// without offset is kept as typed (never DST-adjusted), a time with offset/`Z` becomes `timeZone`'s wall clock.
 func dueDateComponents(from string: String, timeZone: TimeZone = .current) -> DateComponents? {
-    func matches(_ pattern: String) -> Bool {
-        string.range(of: pattern, options: .regularExpression) != nil
+    switch parseISODateInput(string) {
+    case .day(let components)?, .wallClock(let components)?:
+        return components
+    case .instant(let date)?:
+        var zoned = gregorian
+        zoned.timeZone = timeZone
+        var components = zoned.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        components.calendar = gregorian
+        return components
+    case nil:
+        return nil
     }
-    let dateOnly = matches(dateOnlyPattern)
-    let wallClock = matches(wallClockPattern)
-    guard dateOnly || wallClock || matches(offsetPattern) else { return nil }
-
-    let ymd = string.prefix(10).split(separator: "-").compactMap { Int($0) }
-    guard ymd.count == 3 else { return nil }
-    var components = DateComponents(calendar: gregorian, year: ymd[0], month: ymd[1], day: ymd[2])
-    guard components.isValidDate(in: zonelessGregorian) else { return nil }
-    if dateOnly { return components }
-
-    if wallClock {
-        let hms = string.dropFirst(11).prefix(8).split(separator: ":").compactMap { Int($0) }
-        guard hms.count == 3 else { return nil }
-        components.hour = hms[0]
-        components.minute = hms[1]
-        components.second = hms[2]
-        return components.isValidDate(in: zonelessGregorian) ? components : nil
-    }
-
-    guard let date = parseISO8601(string) else { return nil }
-    var zoned = gregorian
-    zoned.timeZone = timeZone
-    components = zoned.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-    components.calendar = gregorian
-    return components
 }
 
 /// Formats due date components: all-day as `yyyy-MM-dd`, timed as wall-clock time with UTC offset

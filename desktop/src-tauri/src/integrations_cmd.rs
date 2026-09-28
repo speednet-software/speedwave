@@ -1307,6 +1307,7 @@ pub async fn restart_integration_containers(
                         "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
                     );
                 }
+                log::warn!("restart of '{project}' failed and its containers were rolled back to the previous configuration");
                 anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
             }
 
@@ -2091,6 +2092,29 @@ mod tests {
         assert!(
             window.contains("rollback_integration_to_disabled"),
             "up-failure arm must roll the just-enabled toggle back"
+        );
+    }
+
+    #[test]
+    fn restart_logs_a_rolled_back_failure_before_returning_it() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn restart_integration_containers(")
+            .expect("restart_integration_containers must exist");
+        let fn_len = source[fn_start..]
+            .find("#[cfg(test)]")
+            .expect("the test module must follow restart_integration_containers");
+        let body = &source[fn_start..fn_start + fn_len];
+        let after_rollback_failure = &body[body
+            .find("Rollback also failed")
+            .expect("rollback-failure arm must exist")..];
+        let arm = &after_rollback_failure[..after_rollback_failure
+            .find("Rolled back to previous configuration.")
+            .expect("rolled-back arm must follow the rollback-failure arm")];
+        assert!(
+            arm.contains("log::warn!(")
+                && arm.contains("rolled back to the previous configuration"),
+            "a restart that rolled back must be logged before its error returns"
         );
     }
 

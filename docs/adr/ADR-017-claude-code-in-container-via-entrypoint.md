@@ -43,7 +43,7 @@ Claude Code's binary and user data persist across container rebuilds via a per-p
 
 ## Onboarding pre-seed (`~/.claude.json`)
 
-`containers/entrypoint.sh` creates `~/.claude.json` only when it is absent (so it never overwrites user state). It always pre-accepts the `/workspace` trust dialog. The `hasCompletedOnboarding` / `installMethod: native` fields are written **only when credentials are valid** — i.e. `~/.claude/.credentials.json` exists and is a complete JSON object. When credentials are absent those fields are omitted, so Claude Code still shows the login wizard on the next start. See ADR-052.
+`containers/entrypoint.sh` creates `~/.claude.json` only when it is absent; into an existing file it merges only the missing flags below and leaves every other key untouched. It always pre-accepts the `/workspace` trust dialog, with or without credentials. The `hasCompletedOnboarding` / `installMethod: native` fields are written **only when credentials are valid** — i.e. `~/.claude/.credentials.json` exists and is a complete JSON object. When credentials are absent those fields are omitted, so Claude Code still shows the login wizard on the next start. See ADR-052.
 
 ## Rejected alternatives
 

@@ -452,7 +452,7 @@ export function validateDateFields(
             {
               paramName: field,
               received: value,
-              nextStep: `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".`,
+              nextStep: `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00".`,
             },
             'INVALID_DATE'
           ),

@@ -103,14 +103,15 @@ export interface LlmActive {
 
 /**
  * Mirror of Rust `containers_cmd::ActiveProviderSummary` (`get_active_provider_summary`).
- * Used by the composer badge/combobox: `base_url` is required for local-provider
- * discovery (never pass `provider_id` as a URL).
+ * `base_url` is required for local-provider discovery (never pass `provider_id` as a URL);
+ * `effort_levels` is `defaults::EFFORT_LEVELS`, the effort slider order.
  */
 export interface ActiveProviderSummary {
   provider_id: string;
   kind: LlmProviderKind;
   model: string | null;
   base_url: string | null;
+  effort_levels: string[];
 }
 
 /**

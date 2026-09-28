@@ -1,17 +1,10 @@
+import { invokeCommand } from './tauri-invoke';
+
 const DEFAULT_RESTART_TIMEOUT_MS = 180_000;
 
 async function triggerRestart(): Promise<void> {
   try {
-    await browser.executeAsync((done: (ok: boolean) => void) => {
-      (
-        window as unknown as {
-          __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<unknown> };
-        }
-      ).__TAURI_INTERNALS__
-        .invoke('e2e_restart_app')
-        .then(() => done(true))
-        .catch(() => done(false));
-    });
+    await invokeCommand<unknown>('e2e_restart_app');
   } catch {}
 }
 

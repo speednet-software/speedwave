@@ -94,11 +94,24 @@ export class ProjectStateService {
   readonly status = signal<ProjectStatus>('loading');
   error = '';
   needsRestart = false;
-  restarting = false;
+  private readonly restartingSignal = signal(false);
+  /** Whether a container restart runs (signal read). */
+  get restarting(): boolean {
+    return this.restartingSignal();
+  }
+  /**
+   * Marks a container restart as running or finished.
+   * @param v - Whether a restart runs.
+   */
+  set restarting(v: boolean) {
+    this.restartingSignal.set(v);
+  }
   restartInFlight: Promise<void> | null = null;
   restartError = '';
   /** Restart requested while status was pre-ready; surfaced once we settle. */
   private pendingRestartOnSettle = false;
+  private restartOwedTo: string | null = null;
+  private switchesStarted = 0;
 
   /** Service just toggled on, forwarded to backend for rollback on build fail. */
   pendingJustEnabled: string | null = null;
@@ -123,6 +136,7 @@ export class ProjectStateService {
   private readyListeners: Array<() => void> = [];
   private restartListeners: Array<() => void> = [];
   private restartBeginListeners: Array<() => Promise<void>> = [];
+  private restartFailedListeners: Array<() => void> = [];
   private failedListeners: Array<(error: string) => void> = [];
   private settledListeners: Array<() => void> = [];
 
@@ -173,6 +187,17 @@ export class ProjectStateService {
     this.restartBeginListeners.push(cb);
     return () => {
       this.restartBeginListeners = this.restartBeginListeners.filter((l) => l !== cb);
+    };
+  }
+
+  /**
+   * Subscribe to a container restart that began and failed, so work held for it can go on.
+   * @param cb - Listener invoked after the failure; unsubscribe via the returned function.
+   */
+  onRestartFailed(cb: () => void): () => void {
+    this.restartFailedListeners.push(cb);
+    return () => {
+      this.restartFailedListeners = this.restartFailedListeners.filter((l) => l !== cb);
     };
   }
 
@@ -437,12 +462,14 @@ export class ProjectStateService {
     }
     if (this.status() === 'ready' || this.status() === next) return;
     this.status.set(next);
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
   /** Force-sets status to no_provider, skipping the never-downgrade guard. */
   forceUnconfigured(): void {
     this.status.set('no_provider');
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
   }
 
@@ -481,7 +508,49 @@ export class ProjectStateService {
       this.status.set('ready');
       this.error = '';
     }
+    this.applyPendingRestartOnSettle();
     this.notifyChange();
+  }
+
+  /**
+   * True while `project` is the active project and no switch runs, so work finishing for it still applies.
+   * @param project - the project a late result or a save belongs to
+   */
+  isSettledOn(project: string | null): boolean {
+    return project === this.activeProject() && this.status() !== 'switching';
+  }
+
+  /**
+   * Marks the moment work for `project` begins: `null` unless the app is settled on it now.
+   * @param project - the project the work belongs to
+   */
+  settledMark(project: string | null): number | null {
+    return this.isSettledOn(project) ? this.switchesStarted : null;
+  }
+
+  /**
+   * True while the app is settled on `project` and no switch has started since `mark` was taken, even one that failed back.
+   * @param project - the project the work belongs to
+   * @param mark - what `settledMark` returned when the work began
+   */
+  isStillSettledOn(project: string | null, mark: number | null): boolean {
+    return mark === this.switchesStarted && this.isSettledOn(project);
+  }
+
+  /**
+   * Requests the restart a save of `project` needs, now while the app is settled on it, or once a switch away from it fails back to it.
+   * @param project - the project whose saved settings its running containers do not have yet
+   */
+  requestRestartFor(project: string | null): void {
+    if (this.isSettledOn(project)) {
+      this.requestRestart();
+    } else if (
+      project !== null &&
+      this.status() === 'switching' &&
+      project === this.activeProject()
+    ) {
+      this.restartOwedTo = project;
+    }
   }
 
   /** Marks that pending changes require a container restart. */
@@ -524,17 +593,18 @@ export class ProjectStateService {
   }
 
   /**
-   * Restarts integration containers; backend rebuilds missing worker images.
-   * @returns `skipped` when it never ran (no project, one already in flight, so `restartError` still belongs to an older attempt), else whether it succeeded.
+   * Restarts the integration containers of `project`; backend rebuilds missing worker images.
+   * @param project - the project to restart, only while the app stays settled on it until the backend call
+   * @returns `skipped` when it never ran (no project, the app not settled on it, one already in flight, so `restartError` still belongs to an older attempt), else whether it succeeded.
    */
-  async restartContainers(): Promise<RestartOutcome> {
-    if (!this.activeProject() || this.restarting) return 'skipped';
-    const project = this.activeProject();
+  async restartContainers(project: string | null): Promise<RestartOutcome> {
+    const mark = this.settledMark(project);
+    if (project === null || mark === null || this.restarting) return 'skipped';
     const justEnabled = this.pendingJustEnabled;
     this.restarting = true;
     this.restartError = '';
     this.notifyChange();
-    const run = this.runRestart(project, justEnabled);
+    const run = this.runRestart(project, mark, justEnabled);
     const done = run.then(
       () => undefined,
       () => undefined
@@ -548,12 +618,17 @@ export class ProjectStateService {
   }
 
   private async runRestart(
-    project: string | null,
+    project: string,
+    mark: number,
     justEnabled: string | null
   ): Promise<RestartOutcome> {
+    await this.notifyRestartBegin();
+    if (!this.isStillSettledOn(project, mark)) {
+      if (this.pendingJustEnabled === justEnabled) this.pendingJustEnabled = null;
+      return 'skipped';
+    }
     let restartedOk = false;
     try {
-      await this.notifyRestartBegin();
       await this.tauri.invoke('restart_integration_containers', { project, justEnabled });
       this.needsRestart = false;
       restartedOk = true;
@@ -576,6 +651,8 @@ export class ProjectStateService {
       this.notifyReady();
       this.notifySettled();
       this.notifyRestartComplete();
+    } else {
+      for (const cb of this.restartFailedListeners) cb();
     }
     return restartedOk ? 'restarted' : 'failed';
   }
@@ -617,12 +694,16 @@ export class ProjectStateService {
   private async setupListeners(): Promise<void> {
     try {
       await this.tauri.listen<{ project: string }>('project_switch_started', (event) => {
+        this.switchesStarted += 1;
         this.targetProject = event.payload.project;
         this.status.set('switching');
         this.error = '';
         this.errorKind = undefined;
         this.failureProvider = undefined;
         this.failureProjectDir = undefined;
+        if (this.needsRestart || this.pendingRestartOnSettle) {
+          this.restartOwedTo = this.activeProject();
+        }
         this.needsRestart = false;
         this.pendingRestartOnSettle = false;
         this.restarting = false;
@@ -633,6 +714,7 @@ export class ProjectStateService {
       await this.tauri.listen<{ project: string }>('project_switch_succeeded', (event) => {
         this.activeProject.set(event.payload.project);
         this.targetProject = null;
+        this.restartOwedTo = null;
         this.error = '';
         void this.resolveSwitchSucceededStatus();
         void this.refreshProjectList();
@@ -641,6 +723,8 @@ export class ProjectStateService {
       await this.tauri.listen<ProjectSwitchFailedPayload>('project_switch_failed', (event) => {
         this.activeProject.set(event.payload.project);
         this.targetProject = null;
+        if (this.restartOwedTo === event.payload.project) this.pendingRestartOnSettle = true;
+        this.restartOwedTo = null;
         this.status.set('error');
         this.error = event.payload.error;
         this.errorKind = event.payload.error_kind;
@@ -657,6 +741,7 @@ export class ProjectStateService {
           this.status() === 'starting' ||
           this.status() === 'checking' ||
           this.status() === 'system_check' ||
+          this.status() === 'check_failed' ||
           this.status() === 'loading' ||
           this.status() === 'auth_required'
         ) {

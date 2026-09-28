@@ -95,12 +95,19 @@ export class AnthropicModelsService {
    * @param projectId - Project this write applies to.
    * @param providerId - `LlmProviderEntry.id` to update.
    * @param model - New model id (wire-shaped per the id triad).
+   * @param contextTokens - The model's context window from discovery, or null when unknown.
    */
-  async setProviderModel(projectId: string, providerId: string, model: string): Promise<void> {
+  async setProviderModel(
+    projectId: string,
+    providerId: string,
+    model: string,
+    contextTokens: number | null
+  ): Promise<void> {
     await this.tauri.invoke<void>('set_provider_model', {
       projectId,
       providerId,
       model,
+      contextTokens,
     });
   }
 }

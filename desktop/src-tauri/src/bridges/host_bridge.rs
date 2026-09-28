@@ -1834,26 +1834,38 @@ mod tests {
     #[serial_test::serial(host_addressing)]
     fn stale_lock_cleanup_reverse_translates_container_facing_port() {
         let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
-        let dir = tempfile::tempdir().unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let bind_port = listener.local_addr().unwrap().port();
-        let relay = speedwave_runtime::compose::container_facing_port(bind_port);
-        assert_ne!(relay, bind_port, "mirrored must translate the bind port");
-        let alive = dir.path().join(format!("{relay}.lock"));
-        std::fs::write(&alive, "{}").unwrap();
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let bind_port = listener.local_addr().unwrap().port();
+            let relay = speedwave_runtime::compose::container_facing_port(bind_port);
+            assert_ne!(relay, bind_port, "mirrored must translate the bind port");
+            let alive = dir.path().join(format!("{relay}.lock"));
+            std::fs::write(&alive, "{}").unwrap();
 
-        cleanup_stale_lock_files(dir.path(), Duration::from_millis(500), true);
-        assert!(
-            alive.exists(),
-            "live container-facing lock must survive the reverse-translated probe"
-        );
+            cleanup_stale_lock_files(dir.path(), Duration::from_millis(500), true);
+            assert!(
+                alive.exists(),
+                "live container-facing lock must survive the reverse-translated probe"
+            );
 
-        drop(listener);
-        cleanup_stale_lock_files(dir.path(), Duration::from_millis(200), true);
-        assert!(
-            !alive.exists(),
-            "dead container-facing lock must be removed once the bind port stops listening"
-        );
+            drop(listener);
+            let taken_again = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], bind_port)),
+                Duration::from_millis(100),
+            )
+            .is_ok();
+            if taken_again {
+                continue;
+            }
+            cleanup_stale_lock_files(dir.path(), Duration::from_millis(200), true);
+            assert!(
+                !alive.exists(),
+                "dead container-facing lock must be removed once the bind port stops listening"
+            );
+            return;
+        }
+        panic!("every freed test port was taken again by a parallel test");
     }
 
     #[test]

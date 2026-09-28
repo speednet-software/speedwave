@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createUserTools } from './user-tools.js';
+import { expectEmittedKeysDeclared } from './test-helpers.js';
 import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
@@ -288,6 +289,29 @@ describe('User Tools', () => {
       expect(result).toEqual({
         content: [{ type: 'text', text: JSON.stringify(mockUser, null, 2) }],
       });
+    });
+
+    it('declares the flat profile it emits, with no nested user key', async () => {
+      mockClient.getCurrentUser.mockResolvedValue({
+        id: 1454,
+        login: 'kacper',
+        firstname: 'Kacper',
+        lastname: 'L',
+        mail: 'k@example.com',
+        created_on: '2024-01-01T00:00:00Z',
+        updated_on: '2024-02-01T00:00:00Z',
+      });
+      const def = createUserTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'getCurrentUser'
+      )!;
+
+      const emitted = expectEmittedKeysDeclared(def.tool, await def.handler({}));
+
+      expect(emitted.id).toBe(1454);
+      expect((def.tool.outputSchema!.properties as Record<string, unknown>).user).toBeUndefined();
+      expect(
+        (def.tool.outputSchema!.properties as Record<string, unknown>).api_key
+      ).toBeUndefined();
     });
 
     it('should handle errors', async () => {

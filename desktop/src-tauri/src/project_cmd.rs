@@ -70,7 +70,7 @@ pub(crate) async fn switch_project(
     use tauri::Manager;
     let oauth_arc = app.state::<reconcile::SharedOauth>().inner().clone();
     let oauth_for_teardown = oauth_arc.clone();
-    let switch_result = tokio::task::spawn_blocking(move || {
+    let switch_task = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
             return SwitchResult::failed(e, None);
         }
@@ -96,9 +96,13 @@ pub(crate) async fn switch_project(
             })
             .map_err(|e| e.to_string())
         })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    });
+    let switch_result = containers_cmd::finish_switch_task(
+        switch_task,
+        &name,
+        containers_cmd::teardown_new_project,
+    )
+    .await;
 
     let pending_teardown = match switch_result {
         SwitchResult::Failed {
@@ -113,9 +117,9 @@ pub(crate) async fn switch_project(
     };
 
     let registry = chat_state.inner().clone();
-    tokio::task::spawn_blocking(move || clear_chat_sessions(&registry))
-        .await
-        .map_err(|e| e.to_string())?;
+    if let Err(je) = tokio::task::spawn_blocking(move || clear_chat_sessions(&registry)).await {
+        log::warn!("clearing the chat sessions after the project switch did not finish: {je}");
+    }
 
     if let Some(prev) = pending_teardown {
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
@@ -130,8 +134,12 @@ pub(crate) async fn switch_project(
 }
 
 pub(crate) fn clear_chat_sessions(registry: &SharedChatSessions) {
-    for session_arc in registry.drain_all() {
-        match session_arc.lock() {
+    for entry in registry.drain_all() {
+        let _serialize = entry
+            .start_serialize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match entry.session.lock() {
             Ok(mut session) => {
                 if let Err(e) = session.stop() {
                     log::warn!("failed to stop a chat session during project transition: {e}");
@@ -323,6 +331,34 @@ mod tests {
     }
 
     #[test]
+    fn a_started_switch_ends_only_through_its_success_or_failure_event() {
+        for (source, signature) in [
+            (
+                include_str!("project_cmd.rs"),
+                "pub(crate) async fn switch_project(",
+            ),
+            (
+                include_str!("containers_cmd.rs"),
+                "pub async fn add_project(",
+            ),
+        ] {
+            let body = &source[source.find(signature).expect(signature)..];
+            let body = &body[..body.find("\n}\n").expect("function end")];
+            let started = &body[body
+                .find("\"project_switch_started\"")
+                .expect("switch start event")..];
+            assert!(
+                !started.contains(".map_err(|e| e.to_string())?"),
+                "{signature} returns without project_switch_failed after the switch started"
+            );
+            assert!(
+                started.contains("finish_switch_task(") && started.contains("teardown_new_project"),
+                "{signature} must tear the new project down when its switch task does not finish"
+            );
+        }
+    }
+
+    #[test]
     fn switch_retires_previous_host_workers_only_after_success() {
         let source = include_str!("project_cmd.rs");
         let switch_fn = source
@@ -410,6 +446,25 @@ mod tests {
         .join();
         clear_chat_sessions(&reg);
         assert!(reg.entry(TAB_A).is_none());
+    }
+
+    #[test]
+    fn clear_chat_sessions_waits_out_each_tab_start_before_it_stops_the_session() {
+        let source = include_str!("project_cmd.rs");
+        let body = source
+            .split("pub(crate) fn clear_chat_sessions(")
+            .nth(1)
+            .expect("clear_chat_sessions must exist");
+        let body = &body[..body.find("\n}\n").expect("clear_chat_sessions must end")];
+        let serialize = body
+            .find(".start_serialize")
+            .expect("clear_chat_sessions must take the tab's start lock");
+        let session_lock = body
+            .find("entry.session.lock()")
+            .expect("clear_chat_sessions must lock the session");
+
+        assert!(serialize < session_lock, "{body}");
+        assert!(body.contains("let _serialize ="), "{body}");
     }
 
     #[test]

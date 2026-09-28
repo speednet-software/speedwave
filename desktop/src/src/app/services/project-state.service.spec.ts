@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { computed } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import {
   ProjectStateService,
@@ -695,6 +696,23 @@ describe('ProjectStateService', () => {
         });
         expect(service.status()).toBe(active);
       }
+    });
+
+    it('keeps the blocking system check page when a reconcile failure arrives', async () => {
+      await service.init();
+      service.status.set('check_failed');
+      service.error = 'System check failed: WSL2 is not available';
+
+      mockTauri.dispatchEvent('bundle_reconcile_status', {
+        phase: 'done',
+        in_progress: false,
+        last_error: 'Container engine did not answer the image check',
+        pending_running_projects: [],
+        applied_bundle_id: 'bundle',
+      });
+
+      expect(service.status()).toBe('check_failed');
+      expect(service.error).toBe('System check failed: WSL2 is not available');
     });
 
     it('ignores reconcile events during switching', async () => {
@@ -1589,6 +1607,242 @@ describe('ProjectStateService', () => {
     });
   });
 
+  describe('isSettledOn', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('is true for the active project while no switch runs', () => {
+      expect(service.activeProject()).toBe('test');
+      expect(service.isSettledOn('test')).toBe(true);
+    });
+
+    it('is false for any other project, and for none', () => {
+      expect(service.isSettledOn('other')).toBe(false);
+      expect(service.isSettledOn(null)).toBe(false);
+    });
+
+    it('is false for the active project from the moment a switch starts until it lands', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.activeProject()).toBe('test');
+      expect(service.isSettledOn('test')).toBe(false);
+      expect(service.isSettledOn('other')).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      expect(service.isSettledOn('test')).toBe(true);
+    });
+
+    it('is false after a switch lands until its status is resolved', async () => {
+      const auth = createDeferred<unknown>();
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_auth_status' ? auth.promise : undefined;
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+
+      expect(service.activeProject()).toBe('other');
+      expect(service.isSettledOn('other')).toBe(false);
+
+      auth.resolve({
+        api_key_configured: false,
+        oauth_authenticated: true,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.isSettledOn('other')).toBe(true);
+    });
+  });
+
+  describe('settledMark and isStillSettledOn', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('a mark taken while settled holds until a switch starts', () => {
+      const mark = service.settledMark('test');
+
+      expect(mark).not.toBeNull();
+      expect(service.isStillSettledOn('test', mark)).toBe(true);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.isStillSettledOn('test', mark)).toBe(false);
+    });
+
+    it('a mark stays spent after a switch that failed back, while a new one holds', () => {
+      const before = service.settledMark('test');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      expect(service.isSettledOn('test')).toBe(true);
+      expect(service.isStillSettledOn('test', before)).toBe(false);
+      const after = service.settledMark('test');
+      expect(service.isStillSettledOn('test', after)).toBe(true);
+    });
+
+    it('a mark taken during a switch or for another project never holds', () => {
+      expect(service.settledMark('other')).toBeNull();
+      expect(service.isStillSettledOn('other', service.settledMark('other'))).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      const during = service.settledMark('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      expect(during).toBeNull();
+      expect(service.isStillSettledOn('test', during)).toBe(false);
+    });
+
+    it('a mark holds only for the project it was taken for', () => {
+      const mark = service.settledMark('test');
+
+      expect(service.isStillSettledOn('other', mark)).toBe(false);
+      expect(service.isStillSettledOn(null, mark)).toBe(false);
+    });
+  });
+
+  describe('requestRestartFor', () => {
+    beforeEach(async () => {
+      await service.init();
+    });
+
+    it('flags the restart at once while the app is settled on the project', () => {
+      service.status.set('ready');
+
+      service.requestRestartFor('test');
+
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('drops a request for a project the app is not on', () => {
+      service.status.set('ready');
+
+      service.requestRestartFor('other');
+
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('surfaces a restart owed by a save that lands during a switch once the switch fails back', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.retry();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('forgets a restart owed to the project a switch left, also when a later switch fails back to it', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'test' });
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'third' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
+
+    it('keeps a restart requested before a switch that fails back', async () => {
+      service.status.set('ready');
+      service.requestRestart();
+      expect(service.needsRestart).toBe(true);
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      expect(service.needsRestart).toBe(false);
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      await service.retry();
+
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when its error is dismissed', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+      expect(service.status()).toBe('error');
+
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when the dismiss cannot check the containers', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_containers_running') throw new Error('timeout');
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      await service.dismissError();
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('holds a restart owed across a failed switch while a dismiss finds the containers down', async () => {
+      let running = false;
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'check_containers_running' ? running : undefined;
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      await service.dismissError();
+      expect(service.status()).toBe('error');
+      expect(service.needsRestart).toBe(false);
+
+      running = true;
+      await service.dismissError();
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('surfaces a restart owed across a failed switch when a sign-in check finds the project signed out', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+
+      expect(service.status()).toBe('auth_required');
+      expect(service.needsRestart).toBe(true);
+    });
+
+    it('drops a restart owed across a failed switch once a logout leaves the project without a provider', () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      service.requestRestartFor('test');
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'failed' });
+
+      service.forceUnconfigured();
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: true,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+
+      expect(service.status()).toBe('ready');
+      expect(service.needsRestart).toBe(false);
+    });
+  });
+
   describe('restart state', () => {
     beforeEach(async () => {
       await service.init();
@@ -1612,11 +1866,29 @@ describe('ProjectStateService', () => {
       expect(service.needsRestart).toBe(true);
     });
 
+    it('reports a restart in flight to a computed reader', async () => {
+      const readsRestarting = computed(() => service.restarting);
+      const invoked = createDeferred<void>();
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) =>
+        cmd === 'restart_integration_containers' ? invoked.promise : base(cmd, args);
+      expect(readsRestarting()).toBe(false);
+
+      const restart = service.restartContainers('test');
+      await vi.waitFor(() => {
+        expect(readsRestarting()).toBe(true);
+      });
+      invoked.resolve();
+      await restart;
+
+      expect(readsRestarting()).toBe(false);
+    });
+
     it('restartContainers invokes Tauri command and clears needsRestart', async () => {
       service.requestRestart();
       const spy = vi.spyOn(mockTauri, 'invoke');
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
         project: 'test',
@@ -1643,10 +1915,43 @@ describe('ProjectStateService', () => {
         return undefined as unknown as never;
       });
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(order.indexOf('begin')).toBeLessThan(order.indexOf('invoke'));
       expect(order.indexOf('ready')).toBeLessThan(order.indexOf('complete'));
+    });
+
+    it('restartContainers runs the restart-failed listeners only when the restart fails', async () => {
+      const failed = vi.fn();
+      const complete = vi.fn();
+      service.onRestartFailed(failed);
+      service.onRestartComplete(complete);
+
+      await expect(service.restartContainers('test')).resolves.toBe('restarted');
+      expect(failed).not.toHaveBeenCalled();
+
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+      await expect(service.restartContainers('test')).resolves.toBe('failed');
+
+      expect(failed).toHaveBeenCalledTimes(1);
+      expect(complete).toHaveBeenCalledTimes(1);
+    });
+
+    it('an unsubscribed restart-failed listener is not run', async () => {
+      const failed = vi.fn();
+      const unsubscribe = service.onRestartFailed(failed);
+      unsubscribe();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'restart_integration_containers') throw new Error('compose failed');
+        return undefined;
+      };
+
+      await expect(service.restartContainers('test')).resolves.toBe('failed');
+
+      expect(failed).not.toHaveBeenCalled();
     });
 
     it('restartContainers clears a stale auth_required after switching to a no-auth provider', async () => {
@@ -1662,7 +1967,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(service.status()).toBe('ready');
     });
@@ -1674,7 +1979,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(service.needsRestart).toBe(false);
       expect(service.restartError).toBe('');
@@ -1696,7 +2001,7 @@ describe('ProjectStateService', () => {
         return Promise.resolve(undefined);
       };
 
-      const promise = service.restartContainers();
+      const promise = service.restartContainers('test');
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
@@ -1717,7 +2022,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      const outcome = await service.restartContainers();
+      const outcome = await service.restartContainers('test');
 
       expect(outcome).toBe('failed');
       expect(service.restartError).toBe('compose failed');
@@ -1735,7 +2040,7 @@ describe('ProjectStateService', () => {
       };
       expect(service.restartInFlight).toBeNull();
 
-      const promise = service.restartContainers();
+      const promise = service.restartContainers('test');
       const inFlight = service.restartInFlight;
       expect(inFlight).not.toBeNull();
       void inFlight?.then(() => order.push('settled'));
@@ -1756,7 +2061,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      const promise = service.restartContainers();
+      const promise = service.restartContainers('test');
       const inFlight = service.restartInFlight;
 
       await expect(promise).resolves.toBe('failed');
@@ -1773,10 +2078,11 @@ describe('ProjectStateService', () => {
         return next ? next.promise : Promise.resolve(undefined);
       };
 
-      const older = service.restartContainers();
+      const older = service.restartContainers('test');
       await new Promise((r) => setTimeout(r, 0));
-      mockTauri.dispatchEvent('project_switch_started', { project: 'test' });
-      const newer = service.restartContainers();
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'switch failed' });
+      const newer = service.restartContainers('test');
       const newerHandle = service.restartInFlight;
       await new Promise((r) => setTimeout(r, 0));
       first.resolve();
@@ -1794,7 +2100,7 @@ describe('ProjectStateService', () => {
     it('restartInFlight stays null for a restart that never started', async () => {
       service.restarting = true;
 
-      await expect(service.restartContainers()).resolves.toBe('skipped');
+      await expect(service.restartContainers('test')).resolves.toBe('skipped');
 
       expect(service.restartInFlight).toBeNull();
     });
@@ -1802,14 +2108,14 @@ describe('ProjectStateService', () => {
     it('restartContainers separates a restart it ran from one it never started', async () => {
       service.requestRestart();
 
-      await expect(service.restartContainers()).resolves.toBe('restarted');
+      await expect(service.restartContainers('test')).resolves.toBe('restarted');
 
       service.restarting = true;
-      await expect(service.restartContainers()).resolves.toBe('skipped');
+      await expect(service.restartContainers('test')).resolves.toBe('skipped');
 
       service.restarting = false;
       service.activeProject.set(null);
-      await expect(service.restartContainers()).resolves.toBe('skipped');
+      await expect(service.restartContainers(null)).resolves.toBe('skipped');
     });
 
     it('restartContainers recovers after previous failure', async () => {
@@ -1823,11 +2129,11 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      await service.restartContainers();
+      await service.restartContainers('test');
       expect(service.restartError).toBe('first attempt failed');
 
       shouldFail = false;
-      await service.restartContainers();
+      await service.restartContainers('test');
       expect(service.restartError).toBe('');
       expect(service.needsRestart).toBe(false);
     });
@@ -1838,7 +2144,7 @@ describe('ProjectStateService', () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       const callsBefore = spy.mock.calls.length;
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(spy.mock.calls.length).toBe(callsBefore);
     });
@@ -1849,7 +2155,7 @@ describe('ProjectStateService', () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       const callsBefore = spy.mock.calls.length;
 
-      await service.restartContainers();
+      await service.restartContainers(null);
 
       expect(spy.mock.calls.length).toBe(callsBefore);
     });
@@ -1862,7 +2168,7 @@ describe('ProjectStateService', () => {
       service.onProjectReady(readyCallback);
       service.onProjectSettled(settledCallback);
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(spy).toHaveBeenCalledWith('invalidate_slash_cache', { projectId: 'test' });
       expect(readyCallback).toHaveBeenCalled();
@@ -1883,7 +2189,7 @@ describe('ProjectStateService', () => {
       service.onProjectReady(readyCallback);
       service.onProjectSettled(settledCallback);
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(service.restartError).toBe('boom');
       expect(spy).not.toHaveBeenCalledWith('invalidate_slash_cache', expect.anything());
@@ -1904,12 +2210,81 @@ describe('ProjectStateService', () => {
       service.onProjectReady(readyCallback);
       service.onProjectSettled(settledCallback);
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(service.restartError).toBe('');
       expect(service.needsRestart).toBe(false);
       expect(readyCallback).toHaveBeenCalled();
       expect(settledCallback).toHaveBeenCalled();
+    });
+
+    it('restartContainers refuses a project the app is not settled on', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await expect(service.restartContainers('other')).resolves.toBe('skipped');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      await expect(service.restartContainers('test')).resolves.toBe('skipped');
+
+      expect(spy).not.toHaveBeenCalledWith('restart_integration_containers', expect.anything());
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    function beginHeldOpen(): ReturnType<typeof createDeferred<void>> {
+      const begin = createDeferred<void>();
+      service.onRestartBegin(() => begin.promise);
+      return begin;
+    }
+
+    it('a project switch that starts while the restart-begin listeners run restarts nothing', async () => {
+      const begin = beginHeldOpen();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const complete = vi.fn();
+      service.onRestartComplete(complete);
+
+      const restart = service.restartContainers('test');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      begin.resolve();
+
+      await expect(restart).resolves.toBe('skipped');
+      expect(spy).not.toHaveBeenCalledWith('restart_integration_containers', expect.anything());
+      expect(complete).not.toHaveBeenCalled();
+      expect(service.restarting).toBe(false);
+      expect(service.restartInFlight).toBeNull();
+    });
+
+    it('a project switch that fails back while the restart-begin listeners run restarts nothing', async () => {
+      const begin = beginHeldOpen();
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      const restart = service.restartContainers('test');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'switch failed' });
+      expect(service.isSettledOn('test')).toBe(true);
+      begin.resolve();
+
+      await expect(restart).resolves.toBe('skipped');
+      expect(spy).not.toHaveBeenCalledWith('restart_integration_containers', expect.anything());
+    });
+
+    it('the integration toggle of a restart a switch overtook reaches no later restart', async () => {
+      const begin = beginHeldOpen();
+      service.pendingJustEnabled = 'playwright';
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      const restart = service.restartContainers('test');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      begin.resolve();
+      await expect(restart).resolves.toBe('skipped');
+      expect(service.pendingJustEnabled).toBeNull();
+      await vi.waitFor(() => expect(service.isSettledOn('other')).toBe(true));
+
+      await expect(service.restartContainers('other')).resolves.toBe('restarted');
+
+      expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
+        project: 'other',
+        justEnabled: null,
+      });
     });
 
     it('dismissRestart does not affect restarting flag', () => {
@@ -1940,7 +2315,7 @@ describe('ProjectStateService', () => {
       service.pendingJustEnabled = 'playwright';
       const spy = vi.spyOn(mockTauri, 'invoke');
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
         project: 'test',
@@ -1962,7 +2337,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
 
-      await service.restartContainers();
+      await service.restartContainers('test');
 
       expect(refresher).toHaveBeenCalledTimes(1);
       expect(service.pendingJustEnabled).toBeNull();
@@ -1991,7 +2366,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
       service.activeProject.set('p');
-      await service.restartContainers();
+      await service.restartContainers('p');
       expect(order).toEqual(['begin', 'restart']);
     });
 
@@ -2005,7 +2380,7 @@ describe('ProjectStateService', () => {
         return undefined;
       };
       service.activeProject.set('p');
-      await service.restartContainers();
+      await service.restartContainers('p');
       expect(order).toEqual(['restart']);
     });
   });

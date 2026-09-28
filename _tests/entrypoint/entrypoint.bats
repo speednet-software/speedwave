@@ -2,6 +2,7 @@
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"
 DEFAULTS_RS="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/defaults.rs"
+SETTINGS_TEMPLATE="$BATS_TEST_DIRNAME/../../containers/claude-resources/settings.json"
 
 PINNED_VERSION="$(grep 'pub const CLAUDE_VERSION' "$DEFAULTS_RS" | sed 's/.*"\(.*\)".*/\1/')"
 [[ -n "$PINNED_VERSION" ]] || { echo "ERROR: could not extract CLAUDE_VERSION from defaults.rs" >&2; exit 1; }
@@ -405,12 +406,56 @@ EOF
     python3 -c "import json,sys; json.load(open('${TEST_HOME}/.claude.json'))"
 }
 
-@test "preserves existing ~/.claude.json keys when no credentials (no merge)" {
+@test "merges only /workspace trust into an existing ~/.claude.json when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
     printf '{"my":"existing-state"}' > "${TEST_HOME}/.claude.json"
     run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    [ "$(cat "${TEST_HOME}/.claude.json")" = '{"my":"existing-state"}' ]
+    python3 - "${TEST_HOME}/.claude.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+assert j["my"] == "existing-state", j
+ws = j["projects"]["/workspace"]
+assert ws["hasTrustDialogAccepted"] is True, j
+assert ws["hasCompletedProjectOnboarding"] is True, j
+assert "hasCompletedOnboarding" not in j, j
+assert "installMethod" not in j, j
+PY
+}
+
+@test "restores a dropped /workspace trust flag without credentials and keeps other project keys" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    printf '{"projects":{"/workspace":{"hasTrustDialogAccepted":false,"allowedTools":["Bash"]},"/other":{"hasTrustDialogAccepted":false}}}' \
+        > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    python3 - "${TEST_HOME}/.claude.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+ws = j["projects"]["/workspace"]
+assert ws["hasTrustDialogAccepted"] is True, j
+assert ws["allowedTools"] == ["Bash"], j
+assert j["projects"]["/other"] == {"hasTrustDialogAccepted": False}, j
+PY
+}
+
+@test "leaves an already trusted ~/.claude.json byte-identical without credentials" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    printf '{"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' \
+        > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = '{"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' ]
+}
+
+@test "trust merge leaves a corrupt ~/.claude.json untouched without credentials" {
+    [ ! -e "${TEST_HOME}/.claude/.credentials.json" ]
+    printf 'NOT_JSON' > "${TEST_HOME}/.claude.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    [ "$(cat "${TEST_HOME}/.claude.json")" = 'NOT_JSON' ]
+    [ ! -e "${TEST_HOME}/.claude.json.tmp" ]
+    [[ "$output" == *".claude.json unparseable — onboarding merge skipped"* ]]
 }
 
 @test "merges onboarding+trust into an existing ~/.claude.json when credentials exist" {
@@ -633,6 +678,29 @@ EOF
     [ "$status" -eq 0 ]
     run cat "${TEST_HOME}/.claude/settings.json"
     [ "$output" = '{"effortLevel":"low","model":"claude-opus-5"}' ]
+}
+
+@test "a new container starts with claude.ai skill and plugin sync off" {
+    cp "${SETTINGS_TEMPLATE}" "${SPEEDWAVE_RESOURCES}/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run _settings_check "s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false"
+    [ "$status" -eq 0 ]
+}
+
+@test "an existing settings.json gets the claude.ai sync keys and keeps the values the user set" {
+    cp "${SETTINGS_TEMPLATE}" "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"claude-opus-5"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run _settings_check "s.syncClaudeAiSkills===false && s.syncClaudeAiPlugins===false && s.model==='claude-opus-5'"
+    [ "$status" -eq 0 ]
+
+    printf '{"syncClaudeAiSkills":true,"syncClaudeAiPlugins":true}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run _settings_check "s.syncClaudeAiSkills===true && s.syncClaudeAiPlugins===true"
+    [ "$status" -eq 0 ]
 }
 
 

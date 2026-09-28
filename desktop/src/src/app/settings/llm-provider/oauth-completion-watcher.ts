@@ -51,6 +51,7 @@ export class OauthCompletionWatcher implements OnDestroy {
 
   /** (Re)starts the completion poll; self-expires after `MAX_TICKS`. */
   startPoll(): void {
+    if (this.destroyed) return;
     this.stopPoll();
     this.ticksLeft = OauthCompletionWatcher.MAX_TICKS;
     this.poll = setInterval(() => {
@@ -104,7 +105,7 @@ export class OauthCompletionWatcher implements OnDestroy {
     this.checkInFlight = true;
     try {
       const status = await this.tauri.invoke<AuthStatusResponse>('get_auth_status', { project });
-      if (ctx.activeProject() !== project) return;
+      if (this.destroyed || ctx.activeProject() !== project) return;
       const observed: OauthSignIn =
         status.oauth_sign_in ?? (status.oauth_authenticated ? 'verified' : 'none');
       const known = ctx.lastKnown();

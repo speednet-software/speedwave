@@ -1,0 +1,27 @@
+{
+  "claude_code_version": "2.1.282",
+  "captured": "2026-09-24",
+  "note": "Model requests the stub /v1/messages received during the run recorded in cc-2.1.282-model-picks.sanitized.ndjson (same session), in order. The run sent: a first question, set_model claude-haiku-4-5, a second question, set_model default, a third question, and a typed /model claude-haiku-4-5. stream is null when the request did not ask to stream.",
+  "requests": [
+    {
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "max_tokens": 1,
+      "stream": null
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "max_tokens": 32000,
+      "stream": true
+    },
+    {
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true
+    }
+  ]
+}

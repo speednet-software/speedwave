@@ -514,8 +514,11 @@ if [ ! -f "${HOME}/.claude.json" ]; then
 }
 EOF
 fi
+_signed_in=false
 if creds_valid; then
-    node -e "
+    _signed_in=true
+fi
+node -e "
 const fs = require('fs');
 ${JS_WRITE_ATOMIC}
 const p = '${HOME}/.claude.json';
@@ -523,8 +526,10 @@ let j;
 try { j = JSON.parse(fs.readFileSync(p, 'utf8')); }
 catch { console.error('entrypoint: .claude.json unparseable — onboarding merge skipped'); process.exit(0); }
 let changed = false;
-if (j.hasCompletedOnboarding !== true) { j.hasCompletedOnboarding = true; changed = true; }
-if (j.installMethod == null) { j.installMethod = 'native'; changed = true; }
+if (${_signed_in}) {
+  if (j.hasCompletedOnboarding !== true) { j.hasCompletedOnboarding = true; changed = true; }
+  if (j.installMethod == null) { j.installMethod = 'native'; changed = true; }
+}
 j.projects = j.projects || {};
 const ws = j.projects['/workspace'] || {};
 if (ws.hasTrustDialogAccepted !== true) { ws.hasTrustDialogAccepted = true; changed = true; }
@@ -534,7 +539,7 @@ if (changed) {
   writeAtomic(p, JSON.stringify(j, null, 2) + '\n');
 }
 " || echo 'entrypoint: .claude.json onboarding merge skipped' >&2
-fi
+unset _signed_in
 
 
 if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then

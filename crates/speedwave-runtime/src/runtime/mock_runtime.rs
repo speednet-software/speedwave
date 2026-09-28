@@ -7,7 +7,7 @@
 
 use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -137,6 +137,7 @@ pub struct MockRuntimeBuilder {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
+    ensure_ready_script: Arc<Mutex<VecDeque<ScriptedEnsureReady>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -149,6 +150,7 @@ pub struct MockRuntimeBuilder {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
+    image_exists_failure_queue: Arc<Mutex<VecDeque<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
@@ -170,12 +172,20 @@ pub struct MockRuntimeBuilder {
     buildkit_prune_result: Result<(), String>,
     remove_images_result: Result<(), String>,
     prepare_build_context_root: Option<std::path::PathBuf>,
+    engine_teardown_check: fn() -> bool,
 }
 
 #[derive(Clone)]
 enum ResultCell {
     Ok,
     Err(String),
+}
+
+enum ScriptedEnsureReady {
+    StatusUnreadable(String),
+    VmNotFound(String),
+    Fails(String),
+    DuringTeardown,
 }
 
 #[derive(Clone)]
@@ -200,6 +210,7 @@ impl MockRuntimeBuilder {
             handles: MockHandles::default(),
             is_available: true,
             ensure_ready_result: ResultCell::Ok,
+            ensure_ready_script: Arc::new(Mutex::new(VecDeque::new())),
             fail_on_up: HashSet::new(),
             fail_on_down: HashSet::new(),
             fail_on_recreate: HashSet::new(),
@@ -212,6 +223,7 @@ impl MockRuntimeBuilder {
             image_exists_default: false,
             image_missing_substrings: Vec::new(),
             image_exists_error: None,
+            image_exists_failure_queue: Arc::new(Mutex::new(VecDeque::new())),
             build_image_result: BuildResult::Ok,
             build_attempt_errors: HashMap::new(),
             build_attempts: Arc::new(Mutex::new(HashMap::new())),
@@ -233,6 +245,7 @@ impl MockRuntimeBuilder {
             buildkit_prune_result: Ok(()),
             remove_images_result: Ok(()),
             prepare_build_context_root: None,
+            engine_teardown_check: || false,
         }
     }
 
@@ -244,6 +257,33 @@ impl MockRuntimeBuilder {
     /// Makes `ensure_ready` fail with `msg`.
     pub fn with_ensure_ready_error(mut self, msg: &str) -> Self {
         self.ensure_ready_result = ResultCell::Err(msg.to_string());
+        self
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmStatusUnreadable`; scripted failures
+    /// run first in FIFO order, then the configured result resumes.
+    pub fn push_ensure_ready_status_unreadable(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::StatusUnreadable(msg.to_string()))
+    }
+    /// Makes the runtime ask `started` whether the engine teardown began, as
+    /// [`super::engine_teardown_started`] does in production.
+    pub fn with_engine_teardown_check(mut self, started: fn() -> bool) -> Self {
+        self.engine_teardown_check = started;
+        self
+    }
+    /// Push a scripted `ensure_ready` failure carrying `VmNotFound`.
+    pub fn push_ensure_ready_vm_not_found(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::VmNotFound(msg.to_string()))
+    }
+    /// Push a scripted plain `ensure_ready` failure with `msg`.
+    pub fn push_ensure_ready_failure(self, msg: &str) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::Fails(msg.to_string()))
+    }
+    /// Push a scripted `ensure_ready` failure carrying `EngineTearingDown`.
+    pub fn push_ensure_ready_during_teardown(self) -> Self {
+        self.push_ensure_ready(ScriptedEnsureReady::DuringTeardown)
+    }
+    fn push_ensure_ready(self, outcome: ScriptedEnsureReady) -> Self {
+        self.ensure_ready_script.lock().unwrap().push_back(outcome);
         self
     }
     /// Sets the value returned by `is_available`.
@@ -287,6 +327,14 @@ impl MockRuntimeBuilder {
     /// Makes `image_exists` fail with `msg`.
     pub fn with_image_exists_error(mut self, msg: &str) -> Self {
         self.image_exists_error = Some(msg.to_string());
+        self
+    }
+    /// Push a scripted `image_exists` failure (FIFO); the normal answer resumes once the queue is empty.
+    pub fn push_image_exists_failure(self, msg: &str) -> Self {
+        self.image_exists_failure_queue
+            .lock()
+            .unwrap()
+            .push_back(msg.to_string());
         self
     }
     /// Default for `image_exists(tag)` when no exact-match override is set and no
@@ -405,6 +453,7 @@ impl MockRuntimeBuilder {
             handles: self.handles,
             is_available: self.is_available,
             ensure_ready_result: self.ensure_ready_result,
+            ensure_ready_script: self.ensure_ready_script,
             fail_on_up: self.fail_on_up,
             fail_on_down: self.fail_on_down,
             fail_on_recreate: self.fail_on_recreate,
@@ -417,6 +466,7 @@ impl MockRuntimeBuilder {
             image_exists_default: self.image_exists_default,
             image_missing_substrings: self.image_missing_substrings,
             image_exists_error: self.image_exists_error,
+            image_exists_failure_queue: self.image_exists_failure_queue,
             build_image_result: self.build_image_result,
             build_attempt_errors: self.build_attempt_errors,
             build_attempts: self.build_attempts,
@@ -439,7 +489,10 @@ impl MockRuntimeBuilder {
             remove_images_result: self.remove_images_result,
             prepare_build_context_root: self.prepare_build_context_root,
         };
-        (LockedRuntime::new(Box::new(mock)), handles)
+        (
+            LockedRuntime::new(Box::new(mock), self.engine_teardown_check),
+            handles,
+        )
     }
 }
 
@@ -447,6 +500,7 @@ struct MockRuntime {
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
+    ensure_ready_script: Arc<Mutex<VecDeque<ScriptedEnsureReady>>>,
     fail_on_up: HashSet<String>,
     fail_on_down: HashSet<String>,
     fail_on_recreate: HashSet<String>,
@@ -459,6 +513,7 @@ struct MockRuntime {
     image_exists_default: bool,
     image_missing_substrings: Vec<String>,
     image_exists_error: Option<String>,
+    image_exists_failure_queue: Arc<Mutex<VecDeque<String>>>,
     build_image_result: BuildResult,
     build_attempt_errors: HashMap<(String, u32), String>,
     build_attempts: AttemptCounter,
@@ -590,6 +645,20 @@ impl ContainerRuntime for MockRuntime {
         self.handles
             .ensure_ready_calls
             .fetch_add(1, Ordering::SeqCst);
+        let scripted = self.ensure_ready_script.lock().unwrap().pop_front();
+        match scripted {
+            Some(ScriptedEnsureReady::StatusUnreadable(msg)) => {
+                return Err(super::VmStatusUnreadable::error(msg));
+            }
+            Some(ScriptedEnsureReady::VmNotFound(msg)) => {
+                return Err(super::VmNotFound::error(msg));
+            }
+            Some(ScriptedEnsureReady::Fails(msg)) => anyhow::bail!("{msg}"),
+            Some(ScriptedEnsureReady::DuringTeardown) => {
+                return Err(anyhow::Error::new(super::EngineTearingDown));
+            }
+            None => {}
+        }
         match &self.ensure_ready_result {
             ResultCell::Ok => Ok(()),
             ResultCell::Err(e) => anyhow::bail!("{e}"),
@@ -683,6 +752,10 @@ impl ContainerRuntime for MockRuntime {
     }
 
     fn image_exists(&self, tag: &str) -> anyhow::Result<bool> {
+        let next_failure = self.image_exists_failure_queue.lock().unwrap().pop_front();
+        if let Some(err) = next_failure {
+            anyhow::bail!("{err}");
+        }
         if let Some(err) = &self.image_exists_error {
             anyhow::bail!("{err}");
         }
@@ -883,6 +956,45 @@ mod tests {
             .build();
         assert!(rt.image_exists("present:1").unwrap());
         assert!(!rt.image_exists("absent:1").unwrap());
+    }
+
+    #[test]
+    fn ensure_ready_script_drains_in_fifo_before_the_configured_result() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_ensure_ready_status_unreadable("status read failed")
+            .push_ensure_ready_failure("stuck in Stopping")
+            .push_ensure_ready_during_teardown()
+            .build();
+        let unreadable = rt.ensure_ready().unwrap_err();
+        assert!(unreadable
+            .downcast_ref::<super::super::VmStatusUnreadable>()
+            .is_some());
+        assert!(unreadable.to_string().contains("status read failed"));
+        let failed = rt.ensure_ready().unwrap_err();
+        assert!(failed.to_string().contains("stuck in Stopping"));
+        assert!(failed
+            .downcast_ref::<super::super::VmStatusUnreadable>()
+            .is_none());
+        let inhibited = rt.ensure_ready().unwrap_err();
+        assert!(inhibited
+            .downcast_ref::<super::super::EngineTearingDown>()
+            .is_some());
+        assert!(rt.ensure_ready().is_ok());
+        assert_eq!(handles.ensure_ready_count(), 4);
+    }
+
+    #[test]
+    fn image_exists_failure_queue_drains_in_fifo_before_the_configured_answer() {
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_image_exists("present:1", true)
+            .push_image_exists_failure("first engine error")
+            .push_image_exists_failure("second engine error")
+            .build();
+        let first = rt.image_exists("present:1").unwrap_err();
+        assert!(first.to_string().contains("first engine error"));
+        let second = rt.image_exists("present:1").unwrap_err();
+        assert!(second.to_string().contains("second engine error"));
+        assert!(rt.image_exists("present:1").unwrap());
     }
 
     #[test]

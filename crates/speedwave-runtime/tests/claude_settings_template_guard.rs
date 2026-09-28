@@ -1,5 +1,5 @@
 //! Guard for the bundled Claude Code `settings.json` template: it must not seed
-//! a key that host-side code owns as a per-project store.
+//! a key that host-side code owns as a per-project store, and it keeps claude.ai sync off.
 
 #![expect(
     clippy::expect_used,
@@ -42,6 +42,19 @@ fn settings_template_seeds_no_host_owned_key() {
     let template = template();
     for (key, why) in HOST_OWNED_KEYS {
         assert!(!template.contains_key(key), "{key}: {why}");
+    }
+}
+
+#[test]
+fn settings_template_turns_claude_ai_sync_off() {
+    let template = template();
+    for key in ["syncClaudeAiSkills", "syncClaudeAiPlugins"] {
+        assert_eq!(
+            template.get(key),
+            Some(&serde_json::Value::Bool(false)),
+            "{key}: Claude Code honours only `false`, and the container must not pull skills or \
+             plugins enabled on claude.ai unless the user sets the key in its settings.json"
+        );
     }
 }
 

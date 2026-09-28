@@ -1,3 +1,6 @@
+import { RESTART_WAIT_MS } from './shell';
+import { invokeOr } from './tauri-invoke';
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -27,6 +30,14 @@ export async function openSettings(): Promise<void> {
   await nav.waitForExist({ timeout: 15_000 });
   await nav.click();
   await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
+}
+
+export async function storedProviderModel(providerId: string): Promise<string | null> {
+  const config = await invokeOr<{ providers?: { id: string; model?: string | null }[] } | null>(
+    null,
+    'get_llm_config'
+  );
+  return config?.providers?.find((p) => p.id === providerId)?.model ?? null;
 }
 
 export async function configureOpenRouter(apiKey: string): Promise<void> {
@@ -106,6 +117,23 @@ export async function pickComposerModel(catalogId: string): Promise<void> {
   });
 }
 
+export async function useCheapOpenRouterModel(): Promise<void> {
+  const model = requireOpenrouterModel();
+  await pickComposerModel(model);
+  const overlay = await $('[data-testid="restart-overlay"]');
+  await overlay.waitForExist({ timeout: 15_000 }).catch(() => undefined);
+  await overlay.waitForExist({
+    timeout: RESTART_WAIT_MS,
+    reverse: true,
+    timeoutMsg: `restart-overlay still visible after ${RESTART_WAIT_MS}ms: the re-render for ${model} never finished`,
+  });
+  await browser.waitUntil(
+    async () =>
+      (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() === model,
+    { timeout: 30_000, timeoutMsg: `composer-model-badge never settled on ${model}` }
+  );
+}
+
 export async function saveProvider(): Promise<void> {
   const saveBtn = await $('[data-testid="settings-llm-save"]');
   await browser.waitUntil(async () => await saveBtn.isEnabled(), {
@@ -154,7 +182,7 @@ export async function sendMessageNoWait(text: string): Promise<void> {
 
   const sendBtn = await $('[data-testid="chat-send"]');
   await browser.waitUntil(async () => await sendBtn.isEnabled(), {
-    timeout: 10_000,
+    timeout: 60_000,
     timeoutMsg: 'chat-send never became enabled',
   });
   await sendBtn.click();

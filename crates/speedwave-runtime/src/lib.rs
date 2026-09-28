@@ -7,6 +7,7 @@ pub mod build;
 pub mod bundle;
 pub mod claude_home;
 pub mod claude_managed;
+pub mod claude_settings;
 pub mod cloudstorage;
 pub mod compose;
 pub mod config;

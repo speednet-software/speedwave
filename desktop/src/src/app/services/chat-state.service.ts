@@ -23,6 +23,10 @@ import {
   type ModelSelectionInput,
 } from './chat-session-store';
 import type { TabStreamChunk } from '../models/chat';
+import {
+  CLAUDE_MODEL_SWITCH_FAILED_EVENT,
+  type ClaudeModelSwitchFailedEvent,
+} from '../models/claude-control';
 import type { ConversationStateTree } from '../models/state-tree';
 import {
   type ChatInput,
@@ -56,11 +60,14 @@ export type {
 export {
   MAX_CHAT_TABS,
   MODEL_SWITCH_NOT_APPLIED,
+  MODEL_SWITCH_UNCONFIRMED,
   NEW_CONVERSATION_AUTH,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
   NEW_CONVERSATION_NO_PROJECT,
+  NEW_CONVERSATION_PROJECT_CHANGED,
   NEW_CONVERSATION_STREAMING,
+  SESSION_KEPT_MARKER,
   blocksToPlainText,
   buildStateTreeFromLegacy,
   historyFitsTarget,
@@ -68,6 +75,7 @@ export {
   mapContextOverflowError,
   mapNotLoggedInError,
   messageBlocksToState,
+  modelSwitchRefused,
   stateBlocksToMessageBlocks,
   stateEntriesToChatMessages,
   toChatMessages,
@@ -286,21 +294,21 @@ export class ChatStateService {
   readonly pendingModelOverride: Signal<string | null> = computed(() =>
     this.activeStore().pendingModelOverride()
   );
-  /** Effort level saved for the next session because the live one holds its launch effort. */
+  /** Effort level saved for new sessions that the active tab's live session did not confirm. */
   readonly deferredEffort: Signal<string | null> = computed(() =>
     this.activeStore().deferredEffort()
   );
 
   /**
-   * Persists the effort pin, then applies it: queued while the chat is busy, wired as `/effort` into
-   * a live conversation (deferred to the next session if it holds its launch effort), else respawned.
+   * Persists the effort pin, then applies it to the active tab: queued while the chat is busy,
+   * sent to a live conversation as an `apply_flag_settings` control request, else respawned.
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   applyEffortSelection(level: string): Promise<void> {
     return this.activeStore().applyEffortSelection(level);
   }
 
-  /** Resumes the live conversation so it launches with the deferred effort; its background tasks stop. */
+  /** Restarts the active tab's session so it launches with the deferred effort. */
   restartForDeferredEffort(): Promise<void> {
     return this.activeStore().restartForDeferredEffort();
   }
@@ -313,9 +321,9 @@ export class ChatStateService {
   readonly pickedModel: Signal<string> = computed(() => this.activeStore().pickedModel());
 
   /**
-   * Applies a composer model pick to the ACTIVE TAB ONLY (SPEED-388): wire switch on a live
-   * session, queued while streaming, or an idle respawn carrying `--model`; routed picks keep
-   * the project-level config write-through plus the compose re-render.
+   * Takes a composer model pick for the ACTIVE TAB ONLY (SPEED-388): a `set_model` on a live
+   * session, queued while busy, or an idle respawn carrying `--model`; routed picks keep the
+   * project-level config write-through plus the compose re-render.
    * @param sel - Selected model triad emitted by the model selector.
    */
   applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -395,6 +403,15 @@ export class ChatStateService {
     this.activeStore().newConversationBlockedReason()
   );
 
+  readonly sessionStartInFlightFromState: Signal<boolean> = computed(() =>
+    this.activeStore().sessionStartInFlightFromState()
+  );
+
+  /** Whether a chat session for the active tab is on its way: a start, a resume or a restart. */
+  readonly sessionAwaitedFromState: Signal<boolean> = computed(() =>
+    this.activeStore().sessionAwaitedFromState()
+  );
+
   readonly loadingTranscriptFromState: Signal<boolean> = computed(() =>
     this.activeStore().loadingTranscriptFromState()
   );
@@ -409,11 +426,8 @@ export class ChatStateService {
     this.activeStore().endTranscriptLoad();
   }
 
-  /**
-   * Mark a session start in progress (resume) so a concurrent `sendMessage` waits;
-   * bumps the generation to no-op in-flight starts. Disposer records how the start ended.
-   */
-  beginStartingSession(): (outcome?: 'started' | 'skipped' | 'auth' | 'failed') => void {
+  /** Mark a resume's session start in flight until the returned function runs. */
+  beginStartingSession(): () => void {
     return this.activeStore().beginStartingSession();
   }
 
@@ -446,6 +460,7 @@ export class ChatStateService {
   private ensureListeners(): Promise<void> {
     this.listenerSetup ??= (async () => {
       await this.setupStreamListener();
+      await this.setupModelSwitchListener();
       this.setupProjectStateListeners();
       this.setupRestartResumeListeners();
       void this.activeStore().refreshLlmConfigCache();
@@ -622,7 +637,10 @@ export class ChatStateService {
 
   private setupRestartResumeListeners(): void {
     this.projectState.onRestartBegin(async () => {
-      if (this.activeStore().isStreaming) await this.stopConversation();
+      await this.activeStore().interruptForRestart();
+    });
+    this.projectState.onRestartFailed(() => {
+      for (const store of this._tabs().values()) store.releasePicksAfterFailedRestart();
     });
     this.projectState.onRestartComplete(() => {
       const activeTabId = this._activeTabId();
@@ -636,12 +654,27 @@ export class ChatStateService {
     });
   }
 
+  private async setupModelSwitchListener(): Promise<void> {
+    try {
+      await this.tauri.listen<ClaudeModelSwitchFailedEvent>(
+        CLAUDE_MODEL_SWITCH_FAILED_EVENT,
+        (event) => {
+          const { project, tab_id, model, reason } = event.payload;
+          if (project !== this.projectState.activeProject()) return;
+          this._tabs().get(tab_id)?.reportModelSwitchFailed(model, reason);
+        }
+      );
+    } catch (err) {
+      this.log.warn(`[chat-state] Failed to listen for model switch failures: ${String(err)}`);
+    }
+  }
+
   private async setupStreamListener(): Promise<void> {
     try {
       this.unlisten = await this.tauri.listen<TabStreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
         const store = this._tabs().get(chunk.tab_id);
-        if (!store) return;
+        if (!store || store.sessionStartInFlightFromState()) return;
         if (
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||

@@ -11,7 +11,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   META_KEYS,
 } from '@speedwave/mcp-shared';
-import { RedmineClient } from '../client.js';
+import { RedmineClient, PUBLIC_USER_FIELDS } from '../client.js';
 import { withRedmineErrors } from './error-handling.js';
 import { successResultSchema } from './schema-helpers.js';
 
@@ -115,7 +115,8 @@ const resolveUserTool: Tool = {
 
 const getCurrentUserTool: Tool = {
   name: 'getCurrentUser',
-  description: "Get current authenticated user's profile (id, login, email, name)",
+  description:
+    "Get the current authenticated user's profile as a flat object: id, login, firstname, lastname, mail, created_on, updated_on. Never includes the API key.",
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
@@ -128,18 +129,14 @@ const getCurrentUserTool: Tool = {
     type: 'object',
     properties: {},
   },
-  outputSchema: successResultSchema({
-    user: {
-      type: 'object',
-      properties: {
-        id: { type: 'number' },
-        login: { type: 'string' },
-        firstname: { type: 'string' },
-        lastname: { type: 'string' },
-        mail: { type: 'string' },
-      },
-    },
-  }),
+  outputSchema: successResultSchema(
+    Object.fromEntries(
+      PUBLIC_USER_FIELDS.filter((field) => field !== 'name').map((field) => [
+        field,
+        { type: field === 'id' ? 'number' : 'string' },
+      ])
+    )
+  ),
 };
 
 /**

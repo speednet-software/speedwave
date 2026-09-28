@@ -38,6 +38,7 @@ pub(crate) fn retry_last_turn_inner(
     session_id: &str,
     user_uuid: &str,
     model: Option<&str>,
+    start_serialize: &std::sync::Mutex<()>,
     driver: &mut dyn SessionDriver,
 ) -> Result<(), RetryError> {
     if validate_session_id(session_id).is_err() {
@@ -47,6 +48,9 @@ pub(crate) fn retry_last_turn_inner(
         return Err(RetryError::NoAssistantTurn);
     }
 
+    let _serialize = start_serialize
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     driver.stop().map_err(RetryError::ResumeFailed)?;
     driver
         .start_with_retry(session_id, user_uuid, model)
@@ -152,16 +156,19 @@ pub async fn retry_last_turn(
     tokio::task::spawn_blocking(move || {
         let entry = tab_entry_for_retry(&registry, &tab_id)?;
         let serializer = entry.start_serialize.clone();
-        let _serialize = serializer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut driver = ChatSessionDriver {
             entry,
             tab_id,
             registry,
             app_handle: &app_handle,
         };
-        retry_last_turn_inner(&session_id, &user_uuid, model.as_deref(), &mut driver)
+        retry_last_turn_inner(
+            &session_id,
+            &user_uuid,
+            model.as_deref(),
+            &serializer,
+            &mut driver,
+        )
     })
     .await
     .map_err(|e| RetryError::ResumeFailed(format!("join error: {e}")))?
@@ -213,7 +220,13 @@ mod tests {
     #[test]
     fn retry_happy_path_stops_then_starts_with_retry() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(r.is_ok(), "expected Ok, got {r:?}");
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(
@@ -225,7 +238,13 @@ mod tests {
     #[test]
     fn retry_threads_the_tab_model_override_into_the_respawn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, Some("claude-opus-4-8"), &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            Some("claude-opus-4-8"),
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(r.is_ok());
         assert_eq!(
             drv.start_calls,
@@ -240,7 +259,13 @@ mod tests {
     #[test]
     fn retry_with_invalid_session_returns_session_not_found() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner("not-a-uuid", VALID_UUID, None, &mut drv);
+        let r = retry_last_turn_inner(
+            "not-a-uuid",
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert_eq!(r, Err(RetryError::SessionNotFound));
         assert_eq!(
             drv.stop_calls, 0,
@@ -252,7 +277,7 @@ mod tests {
     #[test]
     fn retry_with_empty_session_returns_session_not_found() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner("", VALID_UUID, None, &mut drv);
+        let r = retry_last_turn_inner("", VALID_UUID, None, &std::sync::Mutex::new(()), &mut drv);
         assert_eq!(r, Err(RetryError::SessionNotFound));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -260,7 +285,13 @@ mod tests {
     #[test]
     fn retry_with_empty_uuid_returns_no_assistant_turn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, "", None, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            "",
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -268,7 +299,13 @@ mod tests {
     #[test]
     fn retry_with_malformed_uuid_returns_no_assistant_turn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, "foo; rm -rf /", None, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            "foo; rm -rf /",
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -279,7 +316,13 @@ mod tests {
             stop_err: Some("stop boom".to_string()),
             ..Default::default()
         };
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("stop boom")));
         assert_eq!(drv.stop_calls, 1);
         assert!(
@@ -294,10 +337,92 @@ mod tests {
             start_err: Some("nerdctl exec failed".to_string()),
             ..Default::default()
         };
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("nerdctl exec failed")));
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(drv.start_calls.len(), 1);
+    }
+
+    struct OrderedDriver {
+        log: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        stopped: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl SessionDriver for OrderedDriver {
+        fn stop(&mut self) -> Result<(), String> {
+            self.log.lock().unwrap().push("retry stop");
+            if let Some(stopped) = self.stopped.take() {
+                stopped.send(()).unwrap();
+            }
+            Ok(())
+        }
+        fn start_with_retry(
+            &mut self,
+            _session_id: &str,
+            _user_uuid: &str,
+            _model: Option<&str>,
+        ) -> Result<(), String> {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.log.lock().unwrap().push("retry start");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_retry_waits_for_a_session_start_in_progress() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let serialize = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let start_in_progress = serialize.lock().unwrap();
+        let mut drv = OrderedDriver {
+            log: log.clone(),
+            stopped: None,
+        };
+        let retry_serialize = serialize.clone();
+        let retry = std::thread::spawn(move || {
+            retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &retry_serialize, &mut drv)
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        log.lock().unwrap().push("other start done");
+        drop(start_in_progress);
+
+        assert_eq!(retry.join().unwrap(), Ok(()));
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["other start done", "retry stop", "retry start"]
+        );
+    }
+
+    #[test]
+    fn a_session_start_waits_until_a_retry_has_spawned_its_session() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stopped, retry_stopped) = std::sync::mpsc::channel();
+        let serialize = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let mut drv = OrderedDriver {
+            log: log.clone(),
+            stopped: Some(stopped),
+        };
+        let retry_serialize = serialize.clone();
+        let retry = std::thread::spawn(move || {
+            retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &retry_serialize, &mut drv)
+        });
+
+        retry_stopped.recv().unwrap();
+        let other_start = serialize.lock().unwrap();
+        log.lock().unwrap().push("other start");
+        drop(other_start);
+
+        assert_eq!(retry.join().unwrap(), Ok(()));
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["retry stop", "retry start", "other start"]
+        );
     }
 
     #[test]
@@ -326,7 +451,13 @@ mod tests {
     #[test]
     fn retry_does_not_open_session_jsonl_in_mock_driver() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(r.is_ok());
         assert_eq!(drv.stop_calls, 1);
     }

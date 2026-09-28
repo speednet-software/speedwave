@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-cli"
-version = "0.18.1"
+version = "0.20.0"
 edition = "2021"
 publish = false
 description = "CLI client for Speedwave — interactive Claude Code in a terminal"
@@ -31,6 +31,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 anstyle-query = "1.1"
 
 [dev-dependencies]
+speedwave-runtime = { path = "../speedwave-runtime", features = ["test-support"] }
 tempfile = "3"
 
 [lints]

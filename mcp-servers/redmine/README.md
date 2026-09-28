@@ -50,44 +50,62 @@ Contains:       Redmine URL, mappings (status, priority, tracker, activity)
 
 ## Tools Reference
 
+Every tool rejects, before anything is sent to Redmine:
+
+- a parameter its `inputSchema` does not declare (the error names it and lists the accepted ones);
+- a missing, `null`, or empty required parameter;
+- a numeric ID parameter (`*_id` declared as a number) that is not a positive integer or its digit string (the error names the parameter, never the value);
+- a name together with its `_id` twin, e.g. `status` and `status_id`;
+- arguments passed as anything other than an object of named parameters.
+
 ### Issue Operations
 
-#### 1. listIssues
+#### 1. listIssueIds
 
-List Redmine issues with optional filters.
+List issue IDs with optional filters.
 
 **Parameters**:
 
 - `project_id` (string, optional): Filter by project ID/identifier
-- `assigned_to_id` (string/number, optional): Filter by user ('me' for current user)
-- `status_id` (string, optional): Filter by status ('open', 'closed', '\*')
+- `status` (string, optional): `open` (default), `closed`, `*`, or a status name from the mappings
+- `status_id` (number or string, optional): Status ID, or `open` / `closed` / `*`
+- `assigned_to` (string, optional): `me`, a user ID, or a username
+- `assigned_to_id` (number, optional): Assignee user ID
+- `tracker_id` (number, optional): Filter by tracker
+- `priority_id` (number, optional): Filter by priority
+- `fixed_version_id` (number, optional): Filter by target version (from `listVersions`)
 - `parent_id` (number, optional): Filter by parent issue
 - `limit` (number, optional): Max results (1-100, default 25)
 - `offset` (number, optional): Pagination offset (default 0)
+
+Without `status`, Redmine returns open issues only; pass `status: "*"` to include
+closed ones, e.g. when counting every issue in a target version or every subtask.
 
 **Example**:
 
 ```json
 {
-  "project_id": "my-project",
-  "assigned_to_id": "me",
-  "status_id": "open",
+  "status": "open",
+  "assigned_to": "me",
+  "fixed_version_id": 87,
   "limit": 50
 }
 ```
 
-#### 2. showIssue
+#### 2. getIssueFull
 
-Get detailed information about a specific issue.
+Get detailed information about a specific issue. Returns the issue object itself
+(not wrapped in `issue`); `fixed_version`, `assigned_to`, `category`, and `parent`
+are absent while unset.
 
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID
-- `include` (array, optional): Data to include: journals, attachments, relations, children, watchers
+- `include` (array, optional): journals, attachments, relations, children, watchers, changesets, allowed_statuses
 
-#### 3. searchIssues
+#### 3. searchIssueIds
 
-Search issues by text query.
+Search issues by text query. Returns matching IDs only.
 
 **Parameters**:
 
@@ -110,21 +128,29 @@ Create a new issue.
 - `assigned_to_id` (number, optional): Assigned user ID
 - `parent_issue_id` (number, optional): Parent issue (for subtasks)
 - `estimated_hours` (number, optional): Estimated hours
+- `fixed_version_id` (number, optional): Target version (from `listVersions`)
 
 #### 5. updateIssue
 
-Update an existing issue.
+Update an existing issue. Returns `id`, `subject`, `project`, `tracker`, `status`,
+`priority`, `assigned_to`, `fixed_version`, `parent`, and `estimated_hours` as the
+issue holds them after the update, so every changed field can be checked. A call
+whose fields are all empty fails instead of sending an empty update.
 
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID to update
+- `project_id` (string, optional): Move the issue to another project
 - `subject` (string, optional): New subject
 - `description` (string, optional): New description (Textile markup)
-- `status_id` (number, optional): New status ID
-- `status` (string, optional): New status name, resolved via the project's configured mappings
-- `priority_id` (number, optional): New priority ID
+- `tracker_id` / `tracker` (number / string, optional): New tracker, by ID or mapped name
+- `status_id` / `status` (number / string, optional): New status, by ID or mapped name
+- `priority_id` / `priority` (number / string, optional): New priority, by ID or mapped name
 - `assigned_to_id` (number, optional): New assigned user ID
 - `assigned_to` (string, optional): Assignee name, or `'me'` to assign to the current authenticated user (resolved via `resolveUser`)
+- `parent_issue_id` (number, optional): New parent issue (must be in the configured project when scoped)
+- `estimated_hours` (number, optional): New estimated hours
+- `fixed_version_id` (number, optional): New target version, an open one from `listVersions`
 - `notes` (string, optional): Update notes/comment (Textile markup)
 
 #### 6. commentIssue
@@ -134,7 +160,7 @@ Add a comment to an issue.
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID
-- `comment` (string, required): Comment text (Textile markup)
+- `notes` (string, required): Comment text (Textile markup)
 
 ### Time Entry Operations
 
@@ -280,6 +306,21 @@ If scoped to a single project, only that project is searched.
 - `query` (string, required): Search query
 - `limit` (number, optional): Max results (default 25)
 
+#### listVersions
+
+List a project's versions (target versions, e.g. a milestone or a planning
+week) in every status, including versions shared from other projects. A version's
+`id` is the `fixed_version_id` that `createIssue`, `updateIssue`, and
+`listIssueIds` take; Redmine assigns only versions whose `status` is `open`.
+If scoped to a single project, another project fails with a scope error; the
+configured project may be named by its numeric ID or its identifier.
+
+**Parameters**:
+
+- `project_id` (string or number, optional): Project ID or identifier; defaults to the configured project
+
+**Returns**: `{ versions: [{ id, project, name, description, status, due_date, sharing, wiki_page_title, custom_fields, created_on, updated_on }], total_count }`
+
 ### Relation Operations
 
 #### listRelations, createRelation, deleteRelation
@@ -292,8 +333,12 @@ inline on an issue.
 
 #### getCurrentUser
 
-Get the current authenticated user's profile (id, login, email, name). Use this
-to resolve `'me'` for tools that only accept a numeric or username assignee.
+Get the current authenticated user's profile as a flat object. Use this to
+resolve `'me'` for tools that only accept a numeric or username assignee.
+Redmine returns the account's `api_key` to its owner; the worker copies only the
+profile fields (`id`, `login`, `firstname`, `lastname`, `mail`, `created_on`,
+`updated_on`), so the key never reaches the model. `listUsers` applies the same
+projection (membership rows carry only `id` and `name`).
 
 ## File Structure
 

@@ -1,6 +1,31 @@
 # Changelog
 
 
+## [0.20.0](https://github.com/speednet-software/speedwave/compare/v0.19.0...v0.20.0) (2026-09-25)
+
+
+### Features
+
+* Claude Code 2.1.282 with Opus 5.5 and live model/effort control ([#1268](https://github.com/speednet-software/speedwave/issues/1268)) ([0dad447](https://github.com/speednet-software/speedwave/commit/0dad447df13e2749e96217f0422562649af3d54c))
+
+
+### Bug Fixes
+
+* **ci:** fetch the Artifact Signing token before the OIDC assertion expires ([#1254](https://github.com/speednet-software/speedwave/issues/1254)) ([cee27d8](https://github.com/speednet-software/speedwave/commit/cee27d855dc71081c98b417f1d9516c6092eca97))
+* **ci:** hand the Windows CLI to the signing script by a rooted path ([#1257](https://github.com/speednet-software/speedwave/issues/1257)) ([33d4e68](https://github.com/speednet-software/speedwave/commit/33d4e685d364b0e8b6fd783b35a274fc34e35a61))
+
+## [0.19.0](https://github.com/speednet-software/speedwave/compare/v0.18.1...v0.19.0) (2026-09-24)
+
+
+### Features
+
+* Claude Code control channel, signed Windows builds, and container engine self-healing ([#1250](https://github.com/speednet-software/speedwave/issues/1250)) ([3edff14](https://github.com/speednet-software/speedwave/commit/3edff140d102525e0acc3e83c4ada20bb138b7be))
+
+
+### Bug Fixes
+
+* **ci:** grant the release build the permissions its signing jobs request ([#1251](https://github.com/speednet-software/speedwave/issues/1251)) ([43c318f](https://github.com/speednet-software/speedwave/commit/43c318f99fea40977e532be17980a04d7fdc9f99))
+
 ## [0.18.1](https://github.com/speednet-software/speedwave/compare/v0.18.0...v0.18.1) (2026-08-25)
 
 

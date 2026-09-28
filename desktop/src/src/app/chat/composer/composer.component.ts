@@ -231,6 +231,7 @@ const PLAN_MODE_PREFIX =
             [modelError]="modelError()"
             [sessionModel]="model()"
             [pickedModel]="pickedModel()"
+            [sessionAwaited]="sessionAwaited()"
             (modelSelected)="modelSelected.emit($event)"
             (defaultModelSelected)="defaultModelSelected.emit($event)"
             (effortSelected)="effortSelected.emit($event)"
@@ -315,6 +316,8 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly streaming = input(false);
 
+  readonly sendBlocked = input<() => boolean>(() => false);
+
   readonly queuedText = input('');
 
   readonly placeholder = input('message speedwave...');
@@ -322,6 +325,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly model = input('');
 
   readonly pickedModel = input('');
+
+  readonly sessionAwaited = input(false);
 
   readonly projectId = input('');
 
@@ -523,7 +528,7 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
   canSubmit(): boolean {
-    if (this.disabled()) return false;
+    if (this.disabled() || this.sendBlocked()()) return false;
     if (this.anyAttachmentPreprocessing()) return false;
     const text = this.textValue();
     const hasText = !isBlankOrSlashOnly(text);
@@ -538,11 +543,9 @@ export class ComposerComponent implements AfterViewInit {
     return t.length <= 80 ? t : `${t.slice(0, 77)}…`;
   }
 
-  /**
-   * Placeholder swaps to a queueing hint while streaming so the user knows
-   * their next submit will queue rather than send immediately.
-   */
+  /** Placeholder for the current send state. */
   effectivePlaceholder(): string {
+    if (this.sendBlocked()()) return 'starting session...';
     if (this.streaming()) return 'queue next message...';
     return this.placeholder();
   }

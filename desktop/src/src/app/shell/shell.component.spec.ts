@@ -526,7 +526,8 @@ describe('ShellComponent', () => {
       expect(q('[data-testid="restart-overlay"]')).toBeNull();
     });
 
-    it('Restart Now button calls projectState.restartContainers', () => {
+    it('Restart Now button restarts the active project through projectState.restartContainers', () => {
+      projectState.activeProject.set('test');
       projectState.needsRestart = true;
       component['cdr'].markForCheck();
       fixture.detectChanges();
@@ -535,7 +536,7 @@ describe('ShellComponent', () => {
       const btn = q('[data-testid="restart-now-btn"]') as HTMLButtonElement;
       btn.click();
 
-      expect(spy).toHaveBeenCalled();
+      expect(spy).toHaveBeenCalledWith('test');
       spy.mockRestore();
     });
 

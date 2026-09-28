@@ -63,6 +63,7 @@ enum CliAction {
     Update(Option<String>),
     Run(Option<String>),
     Help,
+    Version,
 }
 
 fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, String> {
@@ -109,6 +110,7 @@ fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Resul
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
     match args.get(1).map(|s| s.as_str()) {
         Some("--help" | "-h" | "help") => Ok(CliAction::Help),
+        Some("--version" | "-V") => Ok(CliAction::Version),
         Some("plugin") => match args.get(2).map(|s| s.as_str()) {
             Some("install") => {
                 let path = args
@@ -425,7 +427,8 @@ USAGE:
     speedwave plugin enable  <id> --project <project>   Enable a plugin per-project
     speedwave plugin disable <id> --project <project>   Disable a plugin per-project
 
-    speedwave --help | -h | help      Show this help and exit
+    speedwave --help | -h | help       Show this help and exit
+    speedwave --version | -V           Show the version and exit
 
 The active project is the one selected in Speedwave Desktop; `--project <p>`
 overrides it. The working directory does not select the project.
@@ -494,6 +497,11 @@ fn main() -> anyhow::Result<()> {
 
     if action == CliAction::Help {
         print_help();
+        std::process::exit(0);
+    }
+
+    if action == CliAction::Version {
+        out!("speedwave {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
 
@@ -1049,16 +1057,21 @@ fn reap_instance(
     container: &str,
     instance_id: &str,
 ) {
-    let argv = speedwave_runtime::session::kill_by_instance_command(instance_id);
-    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    match runtime.container_exec_piped(container, &argv_refs) {
-        Ok(mut cmd) => {
-            if let Err(e) = cmd.output() {
-                log::debug!("session reap failed: {e}");
-            }
-        }
-        Err(e) => log::debug!("session reap unavailable: {e}"),
+    if let Some(warning) = reap_warning(runtime, container, instance_id) {
+        err!("{warning}");
     }
+}
+
+fn reap_warning(
+    runtime: &speedwave_runtime::runtime::LockedRuntime,
+    container: &str,
+    instance_id: &str,
+) -> Option<String> {
+    let e = speedwave_runtime::session::reap_instance(runtime, container, instance_id).err()?;
+    Some(format!(
+        "Warning: Claude Code may still be running in '{container}': {}",
+        redact_err(&e)
+    ))
 }
 
 fn resolve_action_project(
@@ -1281,6 +1294,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_action_version_long_flag() {
+        let args = vec!["speedwave".to_string(), "--version".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
+    }
+
+    #[test]
+    fn parse_action_version_short_flag() {
+        let args = vec!["speedwave".to_string(), "-V".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
+    }
+
+    #[test]
     fn main_handles_help_before_runtime_check() {
         let source = include_str!("main.rs");
         let main_start = source
@@ -1297,6 +1322,27 @@ mod tests {
             help_idx < runtime_idx,
             "CliAction::Help must be handled BEFORE any runtime_not_available \
              call site inside main() — otherwise `speedwave --help` fails \
+             when Desktop is not running"
+        );
+    }
+
+    #[test]
+    fn main_handles_version_before_runtime_check() {
+        let source = include_str!("main.rs");
+        let main_start = source
+            .find("\nfn main() -> anyhow::Result<()>")
+            .expect("main.rs must define fn main()");
+        let main_body = &source[main_start..];
+        let version_idx = main_body
+            .find("if action == CliAction::Version")
+            .expect("main() must handle CliAction::Version");
+        let runtime_idx = main_body
+            .find("runtime_not_available()")
+            .expect("main() must have at least one runtime_not_available call site");
+        assert!(
+            version_idx < runtime_idx,
+            "CliAction::Version must be handled BEFORE any runtime_not_available \
+             call site inside main() — otherwise `speedwave --version` fails \
              when Desktop is not running"
         );
     }
@@ -1413,6 +1459,16 @@ mod tests {
         assert!(
             err.contains("unknown command") && err.contains("updatte"),
             "expected unknown-command error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_unknown_flag_yields_unexpected_argument() {
+        let args = vec!["speedwave".to_string(), "-x".to_string()];
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unexpected argument") && err.contains("-x"),
+            "expected unexpected argument error for unknown flag, got: {err}"
         );
     }
 
@@ -1634,6 +1690,22 @@ mod tests {
         assert!(
             body.contains("speedwave logout"),
             "print_help must document `logout` subcommand"
+        );
+    }
+
+    #[test]
+    fn print_help_lists_version_flag() {
+        let source = include_str!("main.rs");
+        let help_start = source
+            .find("fn print_help() {")
+            .expect("print_help must exist");
+        let help_end = source[help_start..]
+            .find("\n}")
+            .expect("print_help must end with `}`");
+        let body = &source[help_start..help_start + help_end];
+        assert!(
+            body.contains("speedwave --version | -V"),
+            "print_help must document `--version | -V` flag"
         );
     }
 
@@ -2682,6 +2754,65 @@ mod tests {
     fn emit_output_line_passes_normal_text_through() {
         let out = sanitize_output_line("Project 'demo' registered at /workspace");
         assert_eq!(out, "Project 'demo' registered at /workspace");
+    }
+
+    #[test]
+    fn a_reap_that_fails_in_a_running_container_warns_that_claude_code_may_still_run() {
+        let container = "cli-reap-fails_claude";
+        let (runtime, _handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+                .push_exec_piped_failure("container is not responding")
+                .build();
+
+        let warning = reap_warning(&runtime, container, "abc-123").expect("a warning");
+
+        assert!(
+            warning.starts_with(&format!(
+                "Warning: Claude Code may still be running in '{container}': "
+            )),
+            "{warning}"
+        );
+        assert!(warning.contains("container is not responding"), "{warning}");
+    }
+
+    #[test]
+    fn a_reap_that_finds_no_container_or_a_stopped_one_stays_quiet() {
+        for (container, stderr) in [
+            (
+                "cli-reap-missing_claude",
+                "Error: No such container: cli-reap-missing_claude",
+            ),
+            (
+                "cli-reap-stopped_claude",
+                "level=fatal msg=\"cannot exec in a stopped state\"",
+            ),
+        ] {
+            let (runtime, handles) =
+                speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+                    .push_exec_piped_failure(stderr)
+                    .build();
+
+            let warning = reap_warning(&runtime, container, "abc-123");
+
+            assert_eq!(warning, None, "{stderr}");
+            assert_eq!(handles.exec_calls.lock().unwrap().len(), 1, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn a_reap_that_succeeds_stays_quiet() {
+        let (runtime, handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+
+        let warning = reap_warning(&runtime, "cli-reap-ok_claude", "abc-123");
+
+        assert_eq!(warning, None);
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].argv,
+            speedwave_runtime::session::kill_by_instance_command("abc-123")
+        );
     }
 
     #[test]

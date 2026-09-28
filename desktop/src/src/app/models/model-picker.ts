@@ -14,12 +14,11 @@ export interface ModelPickerRow {
 }
 
 /**
- * The rows Claude Code listed for one project plus the slider order; `list_model_picker` returns
- * `null` until the session reports them. Mirror of Rust `model_picker::ModelPicker`.
+ * The rows Claude Code listed for one project; `list_model_picker` returns `null` until the
+ * session reports them. Mirror of Rust `model_picker::ModelPicker`.
  */
 export interface ModelPicker {
   rows: ModelPickerRow[];
-  effort_order: string[];
 }
 
 const ONE_MILLION_SUFFIX = /(\[1m\])+$/;

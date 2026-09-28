@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { ChatStateService, MAX_CHAT_TABS, NEW_CONVERSATION_BUSY } from './chat-state.service';
+import {
+  ChatStateService,
+  MAX_CHAT_TABS,
+  NEW_CONVERSATION_BUSY,
+  SESSION_KEPT_MARKER,
+  modelSwitchRefused,
+} from './chat-state.service';
 import { ProjectStateService } from './project-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -10,6 +16,7 @@ import { BetaService } from './beta.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred, type Deferred } from '../testing/deferred';
 import { makeMockLogger } from '../testing/mock-logger';
+import { CLAUDE_MODEL_SWITCH_FAILED_EVENT } from '../models/claude-control';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
 describe('ChatStateService', () => {
@@ -22,6 +29,14 @@ describe('ChatStateService', () => {
     mockTauri = new MockTauriService();
     mockLogger = makeMockLogger();
     betaEnabled = signal(false);
+    const invoke = mockTauri.invoke.bind(mockTauri);
+    mockTauri.invoke = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      const answer = await invoke<T>(cmd, args);
+      if (cmd === 'switch_chat_model' && answer === undefined) {
+        return { outcome: 'confirmed' } as T;
+      }
+      return answer;
+    };
 
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
@@ -227,7 +242,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
       const spy = vi.spyOn(mockTauri, 'invoke');
 
-      await projectState.restartContainers();
+      await projectState.restartContainers('test');
 
       expect(projectState.status()).toBe('ready');
       expect(spy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
@@ -313,6 +328,7 @@ describe('ChatStateService', () => {
           providerId: 'anthropic',
           kind: 'anthropic_oauth',
           isDefault: false,
+          contextTokens: null,
         });
         const tab2 = await service.openTab();
         await new Promise((r) => setTimeout(r, 0));
@@ -344,6 +360,7 @@ describe('ChatStateService', () => {
           providerId: 'anthropic',
           kind: 'anthropic_oauth',
           isDefault: false,
+          contextTokens: null,
         });
 
         service.activateTab(tab1);
@@ -910,6 +927,401 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('session flows the service listeners drive', () => {
+    const haikuPick = {
+      catalogId: 'claude-haiku-4-5',
+      wireId: 'claude-haiku-4-5',
+      providerId: 'anthropic',
+      kind: 'anthropic_oauth',
+      isDefault: false,
+      contextTokens: null,
+    };
+
+    function indexOfCall(calls: unknown[][], match: (cmd: string, args: unknown) => boolean) {
+      return calls.findIndex(([cmd, args]) => match(cmd as string, args));
+    }
+
+    const appliedEffort = (level: string) => (cmd: string, args: unknown) =>
+      cmd === 'apply_chat_effort' &&
+      JSON.stringify(args) === JSON.stringify({ project: 'test', tabId: service.tabId, level });
+
+    const switchedModel = (cmd: string) => cmd === 'switch_chat_model';
+
+    const rejected = (message: string) => async () => {
+      throw new Error(message);
+    };
+
+    function liveConversation(apply: () => Promise<unknown> = async () => undefined): void {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      TestBed.inject(ProjectStateService).status.set('ready');
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'apply_chat_effort' ? apply() : undefined;
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-live' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+    }
+
+    function overrideInvoke(cmd: string, answer: () => Promise<unknown>): void {
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (c, args) => (c === cmd ? answer() : base(c, args));
+    }
+
+    function installFailingSendWithPendingRetryStart(activeProject = 'test') {
+      const pendingRetryStart = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            if (calls.filter((c) => c === 'send_message').length === 1) {
+              throw new Error('session exited (exit status: 1)');
+            }
+            return undefined;
+          case 'start_chat':
+            return pendingRetryStart.promise;
+          case 'list_projects':
+            return {
+              projects: [{ name: activeProject, dir: `/tmp/${activeProject}` }],
+              active_project: activeProject,
+            };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          case 'get_auth_status':
+            return {
+              api_key_configured: false,
+              oauth_authenticated: true,
+              needs_anthropic_auth: true,
+              provider_configured: true,
+            };
+          default:
+            return undefined;
+        }
+      };
+      return { pendingRetryStart, calls };
+    }
+
+    it("does not send after a project switch failed back during the retry's own start", async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const { pendingRetryStart, calls } = installFailingSendWithPendingRetryStart();
+
+      const sending = service.sendMessage('written before the switch');
+      await vi.waitFor(() => {
+        expect(calls).toContain('start_chat');
+      });
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'switch failed' });
+      pendingRetryStart.resolve();
+      await sending;
+
+      expect(projectState.activeProject()).toBe('test');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(service.isStreaming).toBe(false);
+    });
+
+    it('gives up when the dying session reports its end while the retry looks up the project', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingLookup = createDeferred();
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        switch (cmd) {
+          case 'send_message':
+            throw new Error('Broken pipe (os error 32)');
+          case 'list_projects':
+            if (calls.includes('send_message')) await pendingLookup.promise;
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+
+      const sending = service.sendMessage('hello');
+      await vi.waitFor(() => {
+        expect(calls.lastIndexOf('list_projects')).toBeGreaterThan(calls.indexOf('send_message'));
+      });
+      mockTauri.dispatchEvent('chat_stream', {
+        tab_id: service.tabId,
+        chunk_type: 'Error',
+        data: { content: 'Claude session ended unexpectedly', turn_ended: false },
+      });
+      pendingLookup.resolve();
+      await sending;
+
+      expect(calls).not.toContain('start_chat');
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(service.isStreaming).toBe(false);
+      const lastMsg = service.messages[service.messages.length - 1];
+      expect((lastMsg.blocks[0] as { content: string }).content).toContain(
+        'Claude session ended unexpectedly'
+      );
+    });
+
+    it('ignores stream output of the replaced process while a session start is in flight', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const pendingStart = createDeferred();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'start_chat') return pendingStart.promise;
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+
+      await service.init();
+      await vi.waitFor(() => {
+        expect(service.sessionStartInFlightFromState()).toBe(true);
+      });
+      mockTauri.dispatchEvent('chat_stream', {
+        tab_id: service.tabId,
+        chunk_type: 'QueueDrained',
+        data: { session_id: 'sess-old', text: 'queued in the old conversation' },
+      });
+      mockTauri.dispatchEvent('chat_stream', {
+        tab_id: service.tabId,
+        chunk_type: 'SystemInit',
+        data: { model: 'old-model', session_id: 'sess-old' },
+      });
+
+      expect(service.messages).toHaveLength(0);
+      expect(service.isStreaming).toBe(false);
+      expect(service.lastKnownSessionId).toBeNull();
+
+      pendingStart.resolve();
+      await vi.waitFor(() => {
+        expect(service.sessionStartInFlightFromState()).toBe(false);
+      });
+      mockTauri.dispatchEvent('chat_stream', {
+        tab_id: service.tabId,
+        chunk_type: 'SystemInit',
+        data: { model: 'new-model', session_id: 'sess-new' },
+      });
+
+      expect(service.lastKnownSessionId).toBe('sess-new');
+    });
+
+    it('the Stop a container restart begins with releases no pick', async () => {
+      liveConversation();
+      await Promise.resolve();
+      await service.init();
+      service.isStreaming = true;
+      await service.applyEffortSelection('xhigh');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await (
+        TestBed.inject(ProjectStateService) as unknown as {
+          notifyRestartBegin(): Promise<void>;
+        }
+      ).notifyRestartBegin();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'stop_chat')).toBeGreaterThan(-1);
+      expect(indexOfCall(invokeSpy.mock.calls, (cmd) => cmd === 'apply_chat_effort')).toBe(-1);
+    });
+
+    it('a container restart that fails releases the picks it held to the process that kept running', async () => {
+      liveConversation();
+      await Promise.resolve();
+      await service.init();
+      service.isStreaming = true;
+      await service.applyEffortSelection('xhigh');
+      await service.applyModelSelection(haikuPick);
+      overrideInvoke('restart_integration_containers', rejected('SecurityCheck failed'));
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await expect(TestBed.inject(ProjectStateService).restartContainers('test')).resolves.toBe(
+        'failed'
+      );
+
+      await vi.waitFor(() => {
+        expect(indexOfCall(invokeSpy.mock.calls, appliedEffort('xhigh'))).toBeGreaterThan(-1);
+      });
+      const calls = invokeSpy.mock.calls;
+      const stopped = indexOfCall(calls, (cmd) => cmd === 'stop_chat');
+      const failedRestart = indexOfCall(calls, (cmd) => cmd === 'restart_integration_containers');
+      expect(stopped).toBeGreaterThan(-1);
+      expect(indexOfCall(calls, switchedModel)).toBeGreaterThan(failedRestart);
+      expect(indexOfCall(calls, appliedEffort('xhigh'))).toBeGreaterThan(failedRestart);
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('a project switch clears the composer selection error', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      await service.init();
+      projectState.activeProject.set('test');
+      overrideInvoke('set_effort_pin', rejected('config is locked'));
+      await service.applyEffortSelection('low');
+      expect(service.modelSelectionError()).toContain('config is locked');
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(service.modelSelectionError()).toBe('');
+    });
+  });
+
+  describe('resumeConversation across a project switch', () => {
+    let projectState: ProjectStateService;
+    let calls: string[];
+    let resumed: Deferred;
+
+    beforeEach(async () => {
+      projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-live' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      calls = [];
+      resumed = createDeferred();
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd === 'resume_conversation') return resumed.promise;
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-older',
+            messages: [
+              {
+                role: 'user',
+                content: 'from the project switched away from',
+                timestamp: null,
+                blocks: [{ type: 'text', content: 'from the project switched away from' }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+    });
+
+    async function resumeAcrossSwitch(): Promise<{ resuming: Promise<void> }> {
+      const resuming = service.resumeConversation('sess-older');
+      await vi.waitFor(() => expect(calls).toContain('resume_conversation'));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'other' });
+      return { resuming };
+    }
+
+    it('a resume the backend refused before the switch landed shows neither its error nor the conversation it kept', async () => {
+      const { resuming } = await resumeAcrossSwitch();
+      resumed.reject(new Error(`${SESSION_KEPT_MARKER}: container images are still building`));
+      await resuming;
+
+      expect(service.messagesFromState()).toEqual([]);
+      expect(service.lastKnownSessionId).toBeNull();
+      expect(service.sessionStatsFromState()).toBeNull();
+    });
+
+    it('a resume that completes after the switch began loads nothing into the chat of the project switched to', async () => {
+      const { resuming } = await resumeAcrossSwitch();
+      resumed.resolve();
+      await resuming;
+
+      expect(calls).not.toContain('get_conversation');
+      expect(service.messagesFromState()).toEqual([]);
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+
+    it('a resume begun while a switch runs never reaches the backend', async () => {
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+
+      await service.resumeConversation('sess-older');
+
+      expect(calls).not.toContain('resume_conversation');
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+  });
+
+  describe('model switch failures the backend reports on its own (SPEED-709)', () => {
+    it('a switch the backend sent on its own and Claude Code refused shows in the composer of its project only', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+
+      mockTauri.dispatchEvent(CLAUDE_MODEL_SWITCH_FAILED_EVENT, {
+        project: 'other',
+        tab_id: service.tabId,
+        model: 'my-ollama/llama4',
+        reason: 'model not found',
+      });
+      expect(service.modelSelectionError()).toBe('');
+
+      mockTauri.dispatchEvent(CLAUDE_MODEL_SWITCH_FAILED_EVENT, {
+        project: 'test',
+        tab_id: service.tabId,
+        model: 'my-ollama/llama4',
+        reason: 'model not found',
+      });
+      expect(service.modelSelectionError()).toBe(modelSwitchRefused('model not found'));
+    });
+
+    it('routes the failure to the tab whose session was switched, never to the active tab', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      const background = service.activeTabId();
+      const active = await service.openTab();
+      expect(service.activeTabId()).toBe(active);
+
+      mockTauri.dispatchEvent(CLAUDE_MODEL_SWITCH_FAILED_EVENT, {
+        project: 'test',
+        tab_id: background,
+        model: 'claude-haiku-4-5',
+        reason: 'model not found',
+      });
+
+      expect(service.modelSelectionError()).toBe('');
+      expect(service.tabs().get(background)?.modelSelectionError()).toBe(
+        modelSwitchRefused('model not found')
+      );
+    });
+
+    it('ignores a failure addressed to a tab that no longer exists', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+
+      mockTauri.dispatchEvent(CLAUDE_MODEL_SWITCH_FAILED_EVENT, {
+        project: 'test',
+        tab_id: 'closed-tab',
+        model: 'claude-haiku-4-5',
+        reason: 'model not found',
+      });
+
+      for (const store of service.tabs().values()) {
+        expect(store.modelSelectionError()).toBe('');
+      }
+    });
+  });
+
   describe('pendingModelOverride — project switch clears queued pick', () => {
     it('a project switch clears a queued mid-stream pick so a later SystemInit sends no /model', async () => {
       const projectState = TestBed.inject(ProjectStateService);
@@ -930,6 +1342,7 @@ describe('ChatStateService', () => {
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
         isDefault: false,
+        contextTokens: null,
       });
       expect(service.pendingModelOverride()).toBe('claude-opus-4-8[1m]');
       service.isStreaming = false;
@@ -945,9 +1358,7 @@ describe('ChatStateService', () => {
       });
       await Promise.resolve();
 
-      const modelSendCall = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
+      const modelSendCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'switch_chat_model');
       expect(modelSendCall).toBeUndefined();
     });
   });
@@ -1498,14 +1909,14 @@ describe('ChatStateService', () => {
       total_tokens: 46_567,
       max_tokens: 1_000_000,
       percentage: 5,
-      categories: [{ name: 'System prompt', tokens: 3_902, is_deferred: false }],
+      categories: [{ name: 'System prompt', tokens: 3_902 }],
     };
     const SNAPSHOT_HAIKU = {
       model: 'claude-haiku-4-5',
       total_tokens: 62_767,
       max_tokens: 200_000,
       percentage: 31,
-      categories: [{ name: 'System prompt', tokens: 8_257, is_deferred: false }],
+      categories: [{ name: 'System prompt', tokens: 8_257 }],
     };
     let snapshot: unknown;
     let contextCalls: number;
@@ -1514,7 +1925,7 @@ describe('ChatStateService', () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') {
           return {
-            provider: kind.startsWith('anthropic') ? 'anthropic' : 'openrouter',
+            provider: kind === 'local' ? 'local' : 'anthropic',
             model: null,
             base_url: null,
             default_base_url: null,
@@ -2018,6 +2429,37 @@ describe('ChatStateService', () => {
       );
     });
 
+    it('keeps a session awaited from the end of a restart until its resume ends, the resume-or-fresh dialog included', async () => {
+      service.seedSessionId('sess-awaited');
+      (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
+      (service.activeStore() as unknown as TokensInternal)._persistedContextTokens = 8192;
+      const config = createDeferred<unknown>();
+      const answer = createDeferred<'resume' | 'fresh'>();
+      const resumed = createDeferred<void>();
+      const decider = vi.fn(() => answer.promise);
+      service.setResumeDecider(decider);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') return config.promise;
+        if (cmd === 'resume_conversation') return resumed.promise;
+        if (cmd === 'get_conversation') return { session_id: 'sess-awaited', messages: [] };
+        return undefined;
+      };
+      expect(projectState.restarting).toBe(false);
+      expect(service.sessionAwaitedFromState()).toBe(false);
+
+      projectState.notifyRestartComplete();
+      expect(service.sessionAwaitedFromState()).toBe(true);
+      config.resolve({ provider: 'anthropic', context_tokens: 8192 });
+      await vi.waitFor(() => expect(decider).toHaveBeenCalledTimes(1));
+      expect(service.sessionAwaitedFromState()).toBe(true);
+      answer.resolve('resume');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(service.sessionAwaitedFromState()).toBe(true);
+
+      resumed.resolve();
+      await vi.waitFor(() => expect(service.sessionAwaitedFromState()).toBe(false));
+    });
+
     it('logs the restart resume decision when a known window is too small and the decider is asked', async () => {
       service.seedSessionId('sess-log-ask');
       (service.activeStore() as unknown as TokensInternal)._lastContextTokens = 25229;
@@ -2100,17 +2542,18 @@ describe('ChatStateService', () => {
     });
 
     it('interrupts a streaming turn on restart-begin', async () => {
-      const stopSpy = vi.spyOn(service, 'stopConversation').mockResolvedValue();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.isStreaming = true;
       await (projectState as unknown as RestartInternal).notifyRestartBegin();
-      expect(stopSpy).toHaveBeenCalled();
+      expect(invokeSpy).toHaveBeenCalledWith('stop_chat', { tabId: service.tabId });
+      expect(service.isStreaming).toBe(false);
     });
 
     it('does not interrupt on restart-begin when not streaming', async () => {
-      const stopSpy = vi.spyOn(service, 'stopConversation').mockResolvedValue();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.isStreaming = false;
       await (projectState as unknown as RestartInternal).notifyRestartBegin();
-      expect(stopSpy).not.toHaveBeenCalled();
+      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('stop_chat');
     });
 
     it('adopts a changed session_id from a post-resume Result (fork guard)', () => {
@@ -2238,7 +2681,7 @@ describe('ChatStateService', () => {
       expect(startTabs[1]).toBe(service.activeStore().tabId);
 
       startGate.reject(new Error('session spawn failed'));
-      await expect(stale).resolves.toBe('skipped');
+      await expect(stale).resolves.toMatchObject({ outcome: 'skipped' });
       expect(projectState.status()).toBe('ready');
       expect(projectState.error).toBe('');
     });
@@ -2351,7 +2794,7 @@ describe('ChatStateService', () => {
           return undefined;
         }
         if (cmd === 'list_projects')
-          return { projects: [{ name: 'other', dir: '/tmp/other' }], active_project: 'other' };
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
         if (cmd === 'start_chat') return startGate.promise;
         return undefined;
       };
@@ -2369,7 +2812,7 @@ describe('ChatStateService', () => {
       expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
     });
 
-    it('a stale send parked on a starting session does not re-send after a switch, even when the start finished as started', async () => {
+    it('a stale send made while a session starts is refused, so nothing re-sends after a switch', async () => {
       const startGate = createDeferred<void>();
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -2385,11 +2828,11 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
 
       startGate.resolve();
-      await expect(starting).resolves.toBe('started');
+      await expect(starting).resolves.toMatchObject({ outcome: 'started' });
       await switchProjectMidFlight();
       await stale;
 
-      expect(calls.filter((c) => c === 'send_message')).toHaveLength(1);
+      expect(calls.filter((c) => c === 'send_message')).toHaveLength(0);
     });
   });
 
@@ -2422,7 +2865,7 @@ describe('ChatStateService', () => {
     }
 
     it('claims the chat at once and replaces the session only after the restart ends', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       await new Promise((r) => setTimeout(r, 0));
 
@@ -2444,7 +2887,7 @@ describe('ChatStateService', () => {
     it('the restart-complete resume of the prior session yields to the one resumed meanwhile', async () => {
       service.seedSessionId('sess-live');
 
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       pendingRestart.resolve();
       await restart;
@@ -2456,7 +2899,7 @@ describe('ChatStateService', () => {
     });
 
     it('still resumes after the restart fails', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       pendingRestart.reject(new Error('compose failed'));
 
@@ -2479,10 +2922,10 @@ describe('ChatStateService', () => {
       projectState.onRestartComplete(() => {
         if (chained) return;
         chained = true;
-        void projectState.restartContainers();
+        void projectState.restartContainers('test');
       });
 
-      const first = projectState.restartContainers();
+      const first = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-picked');
       pendingRestart.resolve();
       await first;
@@ -2498,7 +2941,7 @@ describe('ChatStateService', () => {
     });
 
     it('drops the resume when a project switch starts before the restart ends', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
@@ -2511,8 +2954,23 @@ describe('ChatStateService', () => {
       expect(service.lastKnownSessionId).toBeNull();
     });
 
+    it('drops the resume when a project switch starts and fails back before the restart ends', async () => {
+      const restart = projectState.restartContainers('test');
+      const resume = service.resumeConversation('sess-of-test');
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
+      mockTauri.dispatchEvent('project_switch_failed', { project: 'test', error: 'switch failed' });
+      expect(projectState.isSettledOn('test')).toBe(true);
+      pendingRestart.resolve();
+      await restart;
+      await resume;
+
+      expect(resumedSessions()).toEqual([]);
+      expect(commands()).not.toContain('get_conversation');
+    });
+
     it('drops the resume when the project changes before the restart ends, and frees the chat', async () => {
-      const restart = projectState.restartContainers();
+      const restart = projectState.restartContainers('test');
       const resume = service.resumeConversation('sess-of-test');
       await new Promise((r) => setTimeout(r, 0));
       projectState.activeProject.set('other');

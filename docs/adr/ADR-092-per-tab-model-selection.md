@@ -24,4 +24,8 @@ The requested behavior: a new tab opens on the project default model, and a mode
 - Like `effort_pin`, `model_pin` is Desktop-only on both ends: the CLI neither strips the legacy `settings.json` key nor passes `--model`, so CLI sessions keep Claude Code's own persistence semantics.
 - The `get_model_hint` fallback (composer badge before the first session) now reads the config pin instead of `settings.json`.
 
+## Amendment (2026-09-28, merge of dev after SPEED-709)
+
+Decision 3's live transport changes: a composer pick on a live session is a `set_model` control request to that tab's process (`switch_chat_model` with `tab_id`), never a wire `/model` input (ADR-088 SPEED-696/SPEED-709 amendments). The pick becomes the tab override only when Claude Code confirms it (or does not answer in time); a refused pick records nothing and hands the badge back. The dev-side restore of an Anthropic `settings.json` pin for a kept session (`restore_model_pin`) is not carried over: the kept session's tab override is restored in its store instead, since no composer pick writes a project store. The 0.18 config self-heal (`config.rs::carry_anthropic_model_to_pin`) still writes the legacy `settings.json` `model` key, which decision 1's one-shot migration adopts into `model_pin`.
+
 [^1]: Claude Code settings precedence and `/model` persistence: https://docs.anthropic.com/en/docs/claude-code/settings

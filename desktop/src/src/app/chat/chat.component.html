@@ -107,8 +107,8 @@
               data-testid="effort-deferred-notice"
               role="status"
             >
-              Effort {{ deferredEffortLabel() }} applies from the next session: this one keeps its
-              current effort. Restarting applies it now and stops this session's background tasks.
+              Effort {{ deferredEffortLabel() }} is saved for new sessions, but this session did not
+              confirm it. Restarting applies it now and stops this session's background tasks.
               <button
                 type="button"
                 class="mono ml-2 underline disabled:opacity-50"
@@ -123,6 +123,8 @@
           <app-composer
             #composer
             [streaming]="chat.isStreamingFromState()"
+            [sendBlocked]="chat.sessionStartInFlightFromState"
+            [sessionAwaited]="chat.sessionAwaitedFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [pickedModel]="chat.pickedModel()"

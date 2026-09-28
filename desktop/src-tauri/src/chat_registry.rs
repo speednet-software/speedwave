@@ -94,8 +94,8 @@ impl ChatSessions {
         self.lock_tabs().remove(tab_id).map(|e| e.session)
     }
 
-    pub(crate) fn drain_all(&self) -> Vec<Arc<Mutex<ChatSession>>> {
-        self.lock_tabs().drain().map(|(_, e)| e.session).collect()
+    pub(crate) fn drain_all(&self) -> Vec<TabEntry> {
+        self.lock_tabs().drain().map(|(_, e)| e).collect()
     }
 
     pub(crate) fn entry_for_project(&self, project: &str) -> Option<TabEntry> {

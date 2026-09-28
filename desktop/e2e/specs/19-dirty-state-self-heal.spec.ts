@@ -15,7 +15,7 @@ import {
 import { waitForHealthy } from '../helpers/health';
 import { openIntegrations, rowStatus, toggleIntegration } from '../helpers/llm';
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
-import { confirmRestartAndWait, requestBackendRestart } from '../helpers/shell';
+import { confirmRestartAndWait, requestBackendRestart, RESTART_WAIT_MS } from '../helpers/shell';
 
 const PROJECT = 'e2e-test';
 const SERVICE = 'context7';
@@ -62,7 +62,7 @@ describe('Dirty-state self-heal', function () {
   });
 
   it('heals a planted name-store ghost and keeps every live entry', async function () {
-    this.timeout(300_000);
+    this.timeout(RESTART_WAIT_MS + 120_000);
     const before = projectEntries(storeSnapshot());
     plantGhost(HUB);
     await requestBackendRestart();
@@ -72,7 +72,7 @@ describe('Dirty-state self-heal', function () {
   });
 
   it('heals multiple ghosts in one pass', async function () {
-    this.timeout(300_000);
+    this.timeout(RESTART_WAIT_MS + 120_000);
     const before = projectEntries(storeSnapshot());
     plantGhost(HUB);
     plantGhost(CLAUDE);
@@ -86,7 +86,7 @@ describe('Dirty-state self-heal', function () {
     if (process.platform !== 'win32') {
       this.skip();
     }
-    this.timeout(600_000);
+    this.timeout(RESTART_WAIT_MS + 420_000);
 
     const token = serviceTokenPath();
     let before: string;

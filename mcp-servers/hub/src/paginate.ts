@@ -44,6 +44,7 @@ type PaginatedResponse<T> = {
   issues?: T[];
   /** Redmine time entries */
   time_entries?: T[];
+  versions?: T[];
   /** Redmine/GitLab projects */
   projects?: T[];
   /** GitLab merge requests */
@@ -127,6 +128,7 @@ export const ITEM_KEYS = [
   'ids',
   'issues',
   'time_entries',
+  'versions',
   'projects',
   'merge_requests',
   'pipelines',

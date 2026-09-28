@@ -6,7 +6,9 @@ paths:
 
 # Logging Rules
 
-All Rust code uses the `log` crate facade for diagnostic output. **Never use `eprintln!` or `println!` for logging** — the only acceptable use of `eprintln!` is for direct user-facing CLI output (e.g., "speedwave check FAILED") and the panic hook's last-resort fallback.
+All Rust code uses the `log` crate facade for diagnostic output. **Never use `eprintln!` or `println!` for logging** — the only acceptable use of `eprintln!` is for direct user-facing CLI output (e.g., "speedwave check FAILED").
+
+**The Desktop log path never panics on a closed stdout or stderr** (the app outlives the shell or SSH session that started it). A panic raised while the panic hook runs aborts the process; `eprintln!` and `println!` panic on a failed write, and fern's built-in stdout output panics when its stderr fallback fails too. The stdout target is therefore `main.rs::line_output` and the panic hook's stderr fallback is `main.rs::write_panic_line`; both drop write errors.
 
 ## Architecture
 

@@ -354,13 +354,21 @@ export class JSONRPCHandler {
 
     const name = params.name;
     const rawArgs = params.arguments;
-    const args: Record<string, unknown> =
+    if (
       rawArgs !== null &&
       rawArgs !== undefined &&
-      typeof rawArgs === 'object' &&
-      !Array.isArray(rawArgs)
-        ? (rawArgs as Record<string, unknown>)
-        : {};
+      (typeof rawArgs !== 'object' || Array.isArray(rawArgs))
+    ) {
+      const received = Array.isArray(rawArgs) ? 'an array' : `a ${typeof rawArgs}`;
+      return this.buildErrorResponse(
+        request.id,
+        JSONRPCErrorBuilder.invalidParams(
+          `tools/call arguments must be an object of named parameters, received ${received}; ` +
+            `call the tool as tool({ name: value })`
+        )
+      );
+    }
+    const args: Record<string, unknown> = (rawArgs as Record<string, unknown> | null) ?? {};
 
     if (!validateToolName(name)) {
       return this.buildErrorResponse(

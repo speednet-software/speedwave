@@ -89,6 +89,13 @@ for svc in $MCP_SERVICES; do
   done
 done
 
+for tree in containers mcp-servers; do
+  (cd "$DEST/build-context/$tree" &&
+    find . \( -type f -o -type l \) ! -path ./.speedwave-shipped-files | sed 's#^\./##' | LC_ALL=C sort) \
+    > "$DEST/build-context/.$tree.speedwave-shipped-files"
+  mv "$DEST/build-context/.$tree.speedwave-shipped-files" "$DEST/build-context/$tree/.speedwave-shipped-files"
+done
+
 
 if [[ "${1:-}" == "--ci" ]]; then
   (cd "$MCP_SERVERS_DIR" && npm ci \
