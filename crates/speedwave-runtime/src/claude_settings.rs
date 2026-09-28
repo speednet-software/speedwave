@@ -26,6 +26,7 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
 
 const MODEL_KEY: &str = "model";
 
+/// Removes the legacy `model` key and returns its string value, if any.
 pub fn take_legacy_model_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     take_settings_key(data_dir, project, MODEL_KEY)
 }

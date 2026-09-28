@@ -1626,9 +1626,7 @@ pub(crate) fn validate_launch_model(model: &str) -> Result<(), String> {
     let base = model
         .strip_suffix(speedwave_runtime::defaults::ONE_MILLION_SUFFIX)
         .unwrap_or(model);
-    let alias = speedwave_runtime::defaults::CLAUDE_CODE_MODEL_ALIASES
-        .iter()
-        .any(|a| *a == base);
+    let alias = speedwave_runtime::defaults::CLAUDE_CODE_MODEL_ALIASES.contains(&base);
     let claude_shaped = base.starts_with("claude-")
         && base
             .bytes()

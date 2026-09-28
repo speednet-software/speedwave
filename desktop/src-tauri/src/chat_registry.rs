@@ -191,7 +191,9 @@ mod tests {
     #[test]
     fn a_fourth_new_tab_is_rejected_at_the_cap() {
         let reg = registry_at_cap();
-        let err = reg.prepare(TAB_D, "acme").unwrap_err();
+        let Err(err) = reg.prepare(TAB_D, "acme") else {
+            panic!("a fourth new tab must be rejected at the cap");
+        };
         assert_eq!(err, MSG_TAB_LIMIT_REACHED);
         assert!(reg.entry(TAB_D).is_none(), "the rejected tab must not land");
     }
