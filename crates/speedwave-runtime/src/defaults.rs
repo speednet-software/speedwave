@@ -129,7 +129,8 @@ impl AnthropicModelInfo {
     }
 }
 
-const ONE_MILLION_SUFFIX: &str = "[1m]";
+/// The `[1m]` wire-id suffix marking a 1M-context model variant (Claude Code syntax).
+pub const ONE_MILLION_SUFFIX: &str = "[1m]";
 
 /// A catalog id, or its `[1m]` form where the model has a 1M window: every id
 /// `anthropic_wire_model_id` can produce. Validation SSOT for the model pin.

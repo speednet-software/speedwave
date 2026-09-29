@@ -236,7 +236,7 @@ pub fn invalidate_cache(project_name: &str) {
 
 /// True when trimmed `text` is exactly `/` — the slash-menu trigger. SSOT for
 /// the "lone slash" rule (mirrored in TS `isBareSlash`, slash.service.ts;
-/// consumed by composer `canSubmit` and `chat-state.service.ts`).
+/// consumed by composer `canSubmit` and `chat-session-store.ts`).
 pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }

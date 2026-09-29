@@ -1,21 +1,64 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { signal, computed } from '@angular/core';
+import { Component, signal, computed } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
 import { TauriService } from '../services/tauri.service';
 import { BetaService } from '../services/beta.service';
+import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { TranscriptionService } from '../services/transcription.service';
 
+/**
+ * Stand-in for every routed view in the test router config below — routing to `ShellComponent`
+ * itself would recreate it inside its own `<router-outlet>` on navigation (double keydown
+ * listener, double side effects), so a trivial standalone component takes its place.
+ */
+@Component({ selector: 'app-route-stub', standalone: true, template: '' })
+class RouteStubComponent {}
+
+class FakeTabStore {
+  readonly messagesFromState = (): readonly unknown[] => [];
+  readonly isStreamingFromState = (): boolean => false;
+  readonly sessionEnded = (): boolean => false;
+}
+
+class FakeChatState {
+  private readonly _tabs = signal<ReadonlyMap<string, FakeTabStore>>(
+    new Map([['t1', new FakeTabStore()]])
+  );
+  private readonly _activeTabId = signal('t1');
+  private readonly _canOpenTab = signal(true);
+
+  readonly tabs = this._tabs.asReadonly();
+  readonly activeTabId = this._activeTabId.asReadonly();
+  readonly canOpenTab = this._canOpenTab.asReadonly();
+
+  readonly openTab = vi.fn().mockResolvedValue('new-tab-id');
+  readonly closeTab = vi.fn().mockResolvedValue(undefined);
+
+  setTabCount(n: number): void {
+    const map = new Map<string, FakeTabStore>();
+    for (let i = 0; i < n; i += 1) map.set(`t${i}`, new FakeTabStore());
+    this._tabs.set(map);
+  }
+  setCanOpenTab(v: boolean): void {
+    this._canOpenTab.set(v);
+  }
+  setActiveTabId(id: string): void {
+    this._activeTabId.set(id);
+  }
+}
+
 describe('ShellComponent', () => {
   let component: ShellComponent;
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
+  let chatState: FakeChatState;
   const betaEnabled = signal(true);
   const recordingSessionId = signal<string | null>(null);
 
@@ -23,6 +66,7 @@ describe('ShellComponent', () => {
     betaEnabled.set(true);
     recordingSessionId.set(null);
     mockTauri = new MockTauriService();
+    chatState = new FakeChatState();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
         return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
@@ -38,17 +82,19 @@ describe('ShellComponent', () => {
     await TestBed.configureTestingModule({
       imports: [
         ShellComponent,
+        RouteStubComponent,
         RouterModule.forRoot([
-          { path: 'chat', component: ShellComponent },
-          { path: 'integrations', component: ShellComponent },
-          { path: 'plugins', component: ShellComponent },
-          { path: 'settings', component: ShellComponent },
-          { path: 'logs', component: ShellComponent },
+          { path: 'chat', component: RouteStubComponent },
+          { path: 'integrations', component: RouteStubComponent },
+          { path: 'plugins', component: RouteStubComponent },
+          { path: 'settings', component: RouteStubComponent },
+          { path: 'logs', component: RouteStubComponent },
         ]),
       ],
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        { provide: ChatStateService, useValue: chatState },
         {
           provide: TranscriptionService,
           useValue: {
@@ -621,7 +667,7 @@ describe('ShellComponent', () => {
       expect(ui.sidebarOpen()).toBe(false);
     });
 
-    it('does not cycle the accent theme on Cmd+T (shortcut removed)', () => {
+    it('does not cycle the accent theme on Cmd+T (theme cycling was removed)', () => {
       const theme = TestBed.inject(ThemeService);
       const before = theme.theme();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true }));
@@ -653,6 +699,167 @@ describe('ShellComponent', () => {
       const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
       pressCmd4();
       expect(nav).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Cmd+T / Ctrl+T open-tab shortcut', () => {
+    function pressCmdT(): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { key: 't', metaKey: true, cancelable: true });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('opens a new tab when beta is on and under the cap', () => {
+      pressCmdT();
+      expect(chatState.openTab).toHaveBeenCalled();
+    });
+
+    it('is inert when beta is off, and never prevents the default browser action', () => {
+      betaEnabled.set(false);
+      const event = pressCmdT();
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert at the tab cap, and never prevents the default browser action', () => {
+      chatState.setCanOpenTab(false);
+      const event = pressCmdT();
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+  });
+
+  describe('Cmd+N / Ctrl+N open-tab shortcut', () => {
+    function pressCmdN(): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { key: 'n', metaKey: true, cancelable: true });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('opens a new tab when beta is on and under the cap, same guard as ⌘T', () => {
+      pressCmdN();
+      expect(chatState.openTab).toHaveBeenCalled();
+    });
+
+    it('is inert when beta is off, and never prevents the default browser action', () => {
+      betaEnabled.set(false);
+      const event = pressCmdN();
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert at the tab cap, and never prevents the default browser action', () => {
+      chatState.setCanOpenTab(false);
+      const event = pressCmdN();
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('leaves ⌘T working too — two shortcuts, one action', () => {
+      pressCmdN();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true }));
+      expect(chatState.openTab).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Cmd+R / Ctrl+R restart-conversation shortcut', () => {
+    function pressCmdR(): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { key: 'r', metaKey: true, cancelable: true });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('requests a restart when the chat route is active and the project is ready — same gate as the header plus', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before + 1);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('is inert off the chat route (the header plus is not rendered there either)', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('is inert while the project is not ready (compact header, no plus rendered), and never prevents the default — lets WebView2 reload win', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('auth_required');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('ignores plain `r` keypress without a modifier', () => {
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'r' }));
+      expect(ui.restartRequested()).toBe(before);
+    });
+
+    it('does not fire after the component is destroyed', async () => {
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      fixture.destroy();
+      pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
+    });
+  });
+
+  describe('Cmd+W / Ctrl+W close-tab shortcut', () => {
+    function pressCmdW(): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', { key: 'w', metaKey: true, cancelable: true });
+      document.dispatchEvent(event);
+      return event;
+    }
+
+    it('closes the active tab when beta is on and more than one tab is open', () => {
+      chatState.setTabCount(2);
+      chatState.setActiveTabId('t1');
+      const event = pressCmdW();
+      expect(chatState.closeTab).toHaveBeenCalledWith('t1');
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('is inert when beta is off, and never prevents the default browser/native close', () => {
+      chatState.setTabCount(2);
+      betaEnabled.set(false);
+      const event = pressCmdW();
+      expect(chatState.closeTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('never closes the last remaining tab, and never prevents the default browser/native close', () => {
+      const event = pressCmdW();
+      expect(chatState.closeTab).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
     });
   });
 });

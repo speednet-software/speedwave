@@ -397,6 +397,7 @@ impl ModelSwitchOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ModelSwitchFailedEvent {
     pub(crate) project: String,
+    pub(crate) tab_id: String,
     pub(crate) model: String,
     pub(crate) reason: String,
 }
@@ -418,6 +419,7 @@ impl ModelSwitchOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct SessionInfoEvent {
     pub(crate) project: String,
+    pub(crate) tab_id: String,
     pub(crate) status: SessionInfoState,
 }
 
@@ -1788,6 +1790,7 @@ mod tests {
         assert_eq!(
             rust_fields(&SessionInfoEvent {
                 project: "p".to_string(),
+                tab_id: "t".to_string(),
                 status: SessionInfoState::Pending,
             }),
             ts_interface_fields(ts, "ClaudeSessionInfoEvent")
@@ -1856,6 +1859,7 @@ mod tests {
         let ts = include_str!("../../src/src/app/models/claude-control.ts");
         let event = ModelSwitchFailedEvent {
             project: "p".to_string(),
+            tab_id: "t".to_string(),
             model: "m".to_string(),
             reason: "r".to_string(),
         };

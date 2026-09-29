@@ -9,7 +9,8 @@ import {
   type ModelPickerRow,
 } from '../models/model-picker';
 
-const DEFAULT_ALIAS = 'default';
+/** Model id that stands for the row Claude Code reports as its default. */
+export const DEFAULT_ALIAS = 'default';
 
 /**
  * Anthropic model picker rows per project (`list_model_picker`) and the one display-label

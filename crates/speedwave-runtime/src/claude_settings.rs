@@ -21,6 +21,17 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
 
 /// Removes the legacy `effortLevel` key and returns its string value, if any.
 pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
+    take_settings_key(data_dir, project, "effortLevel")
+}
+
+const MODEL_KEY: &str = "model";
+
+/// Removes the legacy `model` key and returns its string value, if any.
+pub fn take_legacy_model_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
+    take_settings_key(data_dir, project, MODEL_KEY)
+}
+
+fn take_settings_key(data_dir: &Path, project: &str, key: &str) -> Result<Option<String>, String> {
     let path = settings_path(data_dir, project);
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
         let Some(contents) =
@@ -33,18 +44,16 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
         let obj = value
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("settings.json root is not an object"))?;
-        let Some(removed) = obj.remove("effortLevel") else {
+        let Some(removed) = obj.remove(key) else {
             return Ok(None);
         };
-        let level = removed.as_str().map(str::to_string);
+        let taken = removed.as_str().map(str::to_string);
         let rendered = serde_json::to_string_pretty(&value)?;
         fs_perms::write_shared_file_atomic(&path, &rendered)?;
-        Ok(level)
+        Ok(taken)
     })
     .map_err(|e| e.to_string())
 }
-
-const MODEL_KEY: &str = "model";
 
 /// Writes `model` as the pin: a Claude id the live session listed, else a selectable catalog id.
 pub fn set_model_pin(
@@ -60,22 +69,6 @@ pub fn set_model_pin(
     write_model_pin(data_dir, project, model)
 }
 
-/// Writes back a pin `get_model_pin` read, verbatim (`None` removes it); refuses a value the
-/// entrypoint's foreign-model guard would drop.
-pub fn restore_model_pin(
-    data_dir: &Path,
-    project: &str,
-    model: Option<&str>,
-) -> Result<(), String> {
-    let Some(model) = model else {
-        return clear_model_pin(data_dir, project);
-    };
-    if !crate::defaults::is_claude_code_model_setting(model) {
-        return Err(format!("not a Claude Code model setting: {model}"));
-    }
-    write_model_pin(data_dir, project, model)
-}
-
 fn write_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
     edit_settings(data_dir, project, true, |obj| {
         obj.insert(
@@ -85,39 +78,6 @@ fn write_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), St
         true
     })
     .map(|_| ())
-}
-
-/// Removes the `model` pin; a missing file or key is not an error.
-pub fn clear_model_pin(data_dir: &Path, project: &str) -> Result<(), String> {
-    edit_settings(data_dir, project, false, |obj| {
-        obj.remove(MODEL_KEY).is_some()
-    })
-    .map(|_| ())
-}
-
-/// Rewrites the pin to what `normalized` returns for it and yields the new value, if any.
-pub fn normalize_model_pin(
-    data_dir: &Path,
-    project: &str,
-    normalized: impl FnOnce(&str) -> Option<String>,
-) -> Result<Option<String>, String> {
-    let mut rewritten = None;
-    edit_settings(data_dir, project, false, |obj| {
-        let Some(next) = obj
-            .get(MODEL_KEY)
-            .and_then(serde_json::Value::as_str)
-            .and_then(normalized)
-        else {
-            return false;
-        };
-        obj.insert(
-            MODEL_KEY.to_string(),
-            serde_json::Value::String(next.clone()),
-        );
-        rewritten = Some(next);
-        true
-    })?;
-    Ok(rewritten)
 }
 
 fn edit_settings(
@@ -367,132 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn restore_model_pin_writes_back_an_alias_set_model_pin_refuses() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(set_model_pin(tmp.path(), "proj", "opus", &[]).is_err());
-        restore_model_pin(tmp.path(), "proj", Some("opus")).unwrap();
-        assert_eq!(get_model_pin(tmp.path(), "proj"), Some("opus".to_string()));
-    }
-
-    #[test]
-    fn restore_model_pin_without_a_value_removes_only_the_pin() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(
-            tmp.path(),
-            "proj",
-            r#"{"model":"claude-haiku-4-5","outputStyle":"Speedwave"}"#,
-        );
-        restore_model_pin(tmp.path(), "proj", None).unwrap();
-        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
-        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["outputStyle"], "Speedwave");
-    }
-
-    #[test]
-    fn restore_model_pin_refuses_a_value_the_entrypoint_would_drop_and_writes_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", r#"{"model":"claude-haiku-4-5"}"#);
-        let err = restore_model_pin(tmp.path(), "proj", Some("gpt-5")).unwrap_err();
-        assert!(err.contains("gpt-5"), "{err}");
-        assert_eq!(
-            get_model_pin(tmp.path(), "proj"),
-            Some("claude-haiku-4-5".to_string())
-        );
-    }
-
-    #[test]
-    fn clear_model_pin_removes_only_the_model_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(
-            tmp.path(),
-            "proj",
-            r#"{"model":"claude-opus-5[1m]","outputStyle":"Speedwave"}"#,
-        );
-        clear_model_pin(tmp.path(), "proj").unwrap();
-        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
-        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["outputStyle"], "Speedwave");
-        assert!(value.get("model").is_none());
-    }
-
-    #[test]
-    fn clear_model_pin_without_a_pin_or_a_file_changes_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        clear_model_pin(tmp.path(), "proj").unwrap();
-        assert!(!settings_path(tmp.path(), "proj").exists());
-
-        write_settings(tmp.path(), "proj", r#"{"outputStyle":"Speedwave"}"#);
-        let before = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        clear_model_pin(tmp.path(), "proj").unwrap();
-        let after = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn clear_model_pin_rejects_malformed_json_and_leaves_the_file_untouched() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", "{not json");
-        let err = clear_model_pin(tmp.path(), "proj").unwrap_err();
-        assert!(err.contains("malformed settings.json"), "{err}");
-        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        assert_eq!(raw, "{not json");
-    }
-
-    #[test]
-    fn normalize_model_pin_rewrites_the_pin_the_closure_changes() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(
-            tmp.path(),
-            "proj",
-            r#"{"model":"claude-sonnet-5","outputStyle":"Speedwave"}"#,
-        );
-        let rewritten = normalize_model_pin(tmp.path(), "proj", |pin| {
-            assert_eq!(pin, "claude-sonnet-5");
-            Some("claude-sonnet-5[1m]".to_string())
-        })
-        .unwrap();
-        assert_eq!(rewritten.as_deref(), Some("claude-sonnet-5[1m]"));
-        assert_eq!(
-            get_model_pin(tmp.path(), "proj").as_deref(),
-            Some("claude-sonnet-5[1m]")
-        );
-        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["outputStyle"], "Speedwave");
-    }
-
-    #[test]
-    fn normalize_model_pin_leaves_the_file_alone_when_nothing_changes() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", r#"{"model":"claude-opus-5[1m]"}"#);
-        let before = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        assert_eq!(
-            normalize_model_pin(tmp.path(), "proj", |_| None).unwrap(),
-            None
-        );
-        let after = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn normalize_model_pin_never_asks_about_a_missing_pin() {
-        let tmp = tempfile::tempdir().unwrap();
-        let never = |_: &str| -> Option<String> { panic!("no pin to normalize") };
-        assert_eq!(
-            normalize_model_pin(tmp.path(), "proj", never).unwrap(),
-            None
-        );
-        write_settings(tmp.path(), "proj", r#"{"model":7}"#);
-        let never = |_: &str| -> Option<String> { panic!("a non-string pin is not a pin") };
-        assert_eq!(
-            normalize_model_pin(tmp.path(), "proj", never).unwrap(),
-            None
-        );
-    }
-
-    #[test]
     fn set_model_pin_rejects_the_1m_alias_for_a_model_without_1m_pricing() {
         let tmp = tempfile::tempdir().unwrap();
         let err = set_model_pin(tmp.path(), "proj", "claude-haiku-4-5[1m]", &[]).unwrap_err();
@@ -603,5 +437,112 @@ mod tests {
         let err = set_model_pin(tmp.path(), "proj", "claude-mystery-9", &[]).unwrap_err();
         assert!(err.contains("unknown Anthropic model"));
         assert!(!crate::claude_home::claude_home_dir(tmp.path(), "proj").exists());
+    }
+
+    #[test]
+    fn take_legacy_model_pin_reads_and_removes_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"claude-fable-5[1m]","effortLevel":"high","hooks":{"PreToolUse":[]}}"#,
+        );
+        let taken = take_legacy_model_pin(tmp.path(), "proj").unwrap();
+        assert_eq!(taken, Some("claude-fable-5[1m]".to_string()));
+
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("model").is_none());
+        assert_eq!(value["effortLevel"], "high");
+        assert_eq!(value["hooks"]["PreToolUse"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn take_legacy_model_pin_missing_file_and_key_return_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(take_legacy_model_pin(tmp.path(), "proj").unwrap(), None);
+        write_settings(tmp.path(), "proj", r#"{"effortLevel":"high"}"#);
+        assert_eq!(take_legacy_model_pin(tmp.path(), "proj").unwrap(), None);
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        assert_eq!(raw, r#"{"effortLevel":"high"}"#);
+    }
+
+    #[test]
+    fn take_legacy_model_pin_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-sonnet-5"}"#);
+        assert_eq!(
+            take_legacy_model_pin(tmp.path(), "proj").unwrap(),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(take_legacy_model_pin(tmp.path(), "proj").unwrap(), None);
+    }
+
+    #[test]
+    fn take_legacy_model_pin_non_string_value_removed_but_not_returned() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":7}"#);
+        assert_eq!(take_legacy_model_pin(tmp.path(), "proj").unwrap(), None);
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("model").is_none());
+    }
+
+    #[test]
+    fn take_legacy_model_pin_rejects_malformed_json_and_leaves_the_file_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", "not json");
+        let err = take_legacy_model_pin(tmp.path(), "proj").unwrap_err();
+        assert!(err.contains("malformed settings.json"));
+        assert_eq!(
+            std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap(),
+            "not json"
+        );
+    }
+
+    #[test]
+    fn take_legacy_model_pin_rejects_non_object_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", "[]");
+        let err = take_legacy_model_pin(tmp.path(), "proj").unwrap_err();
+        assert!(err.contains("not an object"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn take_legacy_model_pin_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-sonnet-5"}"#);
+        take_legacy_model_pin(tmp.path(), "proj").unwrap();
+        let lock_path = settings_lock_path(tmp.path(), "proj");
+        let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn take_legacy_model_pin_concurrent_takers_serialize_and_exactly_one_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"model":"claude-sonnet-5","outputStyle":"Speedwave"}"#,
+        );
+        let d1 = tmp.path().to_path_buf();
+        let d2 = tmp.path().to_path_buf();
+        let t1 = std::thread::spawn(move || take_legacy_model_pin(&d1, "proj").unwrap());
+        let t2 = std::thread::spawn(move || take_legacy_model_pin(&d2, "proj").unwrap());
+        let taken: Vec<Option<String>> = vec![t1.join().unwrap(), t2.join().unwrap()];
+        assert_eq!(
+            taken.iter().flatten().count(),
+            1,
+            "exactly one taker wins: {taken:?}"
+        );
+        let raw = std::fs::read_to_string(settings_path(tmp.path(), "proj")).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("final file must be valid JSON, not torn");
+        assert!(value.get("model").is_none());
+        assert_eq!(value["outputStyle"], "Speedwave");
     }
 }

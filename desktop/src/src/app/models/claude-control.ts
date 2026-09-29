@@ -34,6 +34,7 @@ export const CLAUDE_MODEL_SWITCH_FAILED_EVENT = 'chat_model_switch_failed';
 /** Payload of the model-switch failure event. Mirror of Rust `control_channel::ModelSwitchFailedEvent`. */
 export interface ClaudeModelSwitchFailedEvent {
   project: string;
+  tab_id: string;
   model: string;
   reason: string;
 }
@@ -44,6 +45,7 @@ export const CLAUDE_SESSION_INFO_EVENT = 'chat_session_info';
 /** Payload of the session-info event. Mirror of Rust `control_channel::SessionInfoEvent`. */
 export interface ClaudeSessionInfoEvent {
   project: string;
+  tab_id: string;
   status: ClaudeSessionInfoState;
 }
 

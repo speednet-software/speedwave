@@ -1,8 +1,7 @@
-use crate::chat::SharedChatSession;
+use crate::chat_registry::SharedChatSessions;
 use crate::control_channel::{ModelRow, SessionInfo, SessionInfoState};
 use crate::types::check_project;
 use serde::Serialize;
-use speedwave_runtime::claude_settings;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
     anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
@@ -216,7 +215,7 @@ pub(crate) fn normalize_pin_for_session(
 ) {
     let plan = plan_for(kind, info);
     let picker = info.and_then(|session| build_picker(session, plan));
-    match claude_settings::normalize_model_pin(data_dir, project, |pin| {
+    match crate::pin_cmd::normalize_model_pin_in(data_dir, project, |pin| {
         if let Some(picker) = &picker {
             let id = canonical_anthropic_model_id(pin);
             picker
@@ -236,10 +235,10 @@ pub(crate) fn normalize_pin_for_session(
 }
 
 pub(crate) fn session_info_for(
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
 ) -> Option<SessionInfo> {
-    match crate::chat_session_cmd::session_info_state_inner(session_arc, project) {
+    match crate::chat_session_cmd::session_info_state_inner(registry, project) {
         SessionInfoState::Ready { info } => Some(info),
         SessionInfoState::Pending | SessionInfoState::Unavailable => None,
     }
@@ -247,14 +246,14 @@ pub(crate) fn session_info_for(
 
 pub(crate) fn picker_for(
     user_config: &config::SpeedwaveUserConfig,
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
 ) -> Result<Option<ModelPicker>, String> {
     let summary = crate::containers_cmd::active_provider_summary_from(user_config, project)?;
     if !summary.kind.is_anthropic() {
         return Err("the model picker rows exist for Anthropic providers only".to_string());
     }
-    let info = session_info_for(session_arc, project);
+    let info = session_info_for(registry, project);
     let plan = plan_for(summary.kind, info.as_ref());
     Ok(info.as_ref().and_then(|info| build_picker(info, plan)))
 }
@@ -262,7 +261,7 @@ pub(crate) fn picker_for(
 #[tauri::command]
 pub(crate) fn list_model_picker(
     project: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<Option<ModelPicker>, String> {
     check_project(&project)?;
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -835,13 +834,35 @@ mod tests {
         }
     }
 
+    fn config_with_model_pin(data_dir: &std::path::Path, pin: &str) {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+                model_pin: Some(pin.to_string()),
+                model_pin_migrated: true,
+            }],
+            ..Default::default()
+        };
+        config::save_user_config_to(&user_config, &data_dir.join("config.json")).unwrap();
+    }
+
+    fn config_model_pin(data_dir: &std::path::Path) -> Option<String> {
+        config::load_user_config_from(&data_dir.join("config.json"))
+            .unwrap()
+            .find_project("proj")
+            .and_then(|p| p.model_pin.clone())
+    }
+
     #[test]
-    fn normalize_pin_for_session_rewrites_the_settings_file() {
+    fn normalize_pin_for_session_rewrites_the_config_pin() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir =
-            speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("settings.json"), r#"{"model":"claude-opus-5-5"}"#).unwrap();
+        config_with_model_pin(tmp.path(), "claude-opus-5-5");
 
         let info = fixture_info("run_A");
         normalize_pin_for_session(
@@ -851,13 +872,13 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            config_model_pin(tmp.path()).as_deref(),
             Some("claude-opus-5-5[1m]")
         );
 
         normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
         assert_eq!(
-            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            config_model_pin(tmp.path()).as_deref(),
             Some("claude-opus-5-5[1m]"),
             "an unknown plan must not downgrade a plan-dependent pin"
         );
@@ -866,14 +887,7 @@ mod tests {
     #[test]
     fn normalize_pin_for_session_uses_the_reported_variant_not_a_synthetic_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir =
-            speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("settings.json"),
-            r#"{"model":"claude-sonnet-5[1m]"}"#,
-        )
-        .unwrap();
+        config_with_model_pin(tmp.path(), "claude-sonnet-5[1m]");
 
         let info = info_of(
             vec![listed("sonnet", Some("claude-sonnet-5"), "Sonnet")],
@@ -886,7 +900,7 @@ mod tests {
             Some(&info),
         );
         assert_eq!(
-            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            config_model_pin(tmp.path()).as_deref(),
             Some("claude-sonnet-5")
         );
     }
@@ -977,28 +991,36 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
+                model_pin: None,
+                model_pin_migrated: false,
             }],
             ..Default::default()
         }
     }
 
-    fn idle_session(project: &str) -> SharedChatSession {
-        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new(
-            project,
-        )))
+    fn idle_registry(project: &str) -> (SharedChatSessions, crate::chat_registry::TabEntry) {
+        crate::chat_registry::test_support::registry_with(project)
     }
 
     #[test]
     fn picker_offers_no_rows_until_the_session_reports_its_models() {
         let cfg = anthropic_oauth_config("proj");
-        let session = idle_session("proj");
+        let (registry, entry) = idle_registry("proj");
 
-        assert_eq!(picker_for(&cfg, &session, "proj").unwrap(), None);
+        assert_eq!(picker_for(&cfg, &registry, "proj").unwrap(), None);
 
-        let held = session.lock().unwrap();
-        let respawning = picker_for(&cfg, &session, "proj");
+        let held = entry.session.lock().unwrap();
+        let respawning = picker_for(&cfg, &registry, "proj");
         drop(held);
         assert_eq!(respawning.unwrap(), None);
+    }
+
+    #[test]
+    fn picker_offers_no_rows_for_a_project_without_a_tab() {
+        let cfg = anthropic_oauth_config("proj");
+        let registry: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        assert_eq!(picker_for(&cfg, &registry, "proj").unwrap(), None);
     }
 
     #[test]
@@ -1014,7 +1036,7 @@ mod tests {
         llm.providers[0].kind = LlmProviderKind::Local;
         llm.providers[0].base_url = Some("http://host.docker.internal:11434".to_string());
 
-        let err = picker_for(&cfg, &idle_session("proj"), "proj").unwrap_err();
+        let err = picker_for(&cfg, &idle_registry("proj").0, "proj").unwrap_err();
         assert!(err.contains("Anthropic providers only"), "{err}");
     }
 }
