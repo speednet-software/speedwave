@@ -4,7 +4,7 @@ use std::process::ExitStatus;
 
 /// Maximum number of parallel chat tabs; TS mirror in
 /// `desktop/src/src/app/services/chat-session-store.ts` (cross-read-tested).
-pub const MAX_CHAT_TABS: u32 = 3;
+pub const MAX_CHAT_TABS: u32 = 10;
 
 /// Claude container memory base in GiB, the one-tab ceiling. See ADR-091.
 pub const CLAUDE_BASE_MEMORY_GIB: u32 = 6;
@@ -285,8 +285,10 @@ mod tests {
             (10, 8),
             (12, 10),
             (14, 12),
-            (16, 12),
-            (32, 12),
+            (16, 14),
+            (32, 30),
+            (35, 33),
+            (64, 33),
         ] {
             assert_eq!(claude_memory_gib(vm), claude, "vm {vm} GiB");
         }

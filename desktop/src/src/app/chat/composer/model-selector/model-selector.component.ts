@@ -14,7 +14,7 @@ import { TooltipDirective } from '../../../shared/tooltip.directive';
 import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
-import { ModelPickerService } from '../../../services/model-picker.service';
+import { DEFAULT_ALIAS, ModelPickerService } from '../../../services/model-picker.service';
 import { DiscoveredModelsService } from '../../../services/discovered-models.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
@@ -274,6 +274,8 @@ export class ModelSelectorComponent {
 
   readonly pickedModel = input('');
 
+  readonly launchModel = input<string | null>(null);
+
   readonly sessionAwaited = input(false);
 
   readonly modelSelected = output<ModelSelection>();
@@ -466,10 +468,12 @@ export class ModelSelectorComponent {
     if (picked) return picked;
     const live = this.sessionModel();
     if (live) return s ? normalizeObserved(live, s.provider_id) : live;
+    const launched = this.isAnthropic() ? this.launchModel() : null;
+    if (launched) return s ? normalizeObserved(launched, s.provider_id) : launched;
     if (s?.model) return normalizeObserved(s.model, s.provider_id);
     const hint = this.modelHint();
     if (hint) return s ? normalizeObserved(hint, s.provider_id) : hint;
-    return 'default';
+    return DEFAULT_ALIAS;
   });
 
   readonly filteredOptions = computed<ModelOption[]>(() => {

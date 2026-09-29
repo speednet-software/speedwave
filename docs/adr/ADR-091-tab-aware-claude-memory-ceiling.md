@@ -48,6 +48,23 @@ The resolution is a render-time input, not container state: a RAM upgrade or a `
 - **Scale by live tab count instead of capacity.** Compose bakes the limit in at container create; resizing on tab open/close means recreating the container under running sessions, exactly the disruption tabs exist to avoid. Capacity-based sizing changes the limit only at render time.
 - **A Windows host-RAM probe now (`GlobalMemoryStatusEx` or PowerShell).** Rejected for this phase: it would ship an unmeasured estimate of a VM Speedwave deliberately does not manage, and phase 5's measurements decide whether the ceiling should follow the WSL2 default at all.
 
+## Amendment (2026-09-29): tab capacity raised from 3 to 10
+
+**Context.** Three tabs proved too few in daily use, and the tab strip (`desktop/src/src/app/chat/chat-tabs/chat-tabs.component.ts`) now scrolls sideways with the plus button pinned after it, so the strip no longer bounds the tab count.
+
+**Decision.** `resources.rs::MAX_CHAT_TABS` is 10 (TS mirror `chat-session-store.ts::MAX_CHAT_TABS`, still cross-read-tested). Decision 3 stands: the registry still rejects a new tab past the cap (`chat_registry.rs::ChatSessions::prepare`), so the process count stays bounded by the same constant. The formula of decision 1 is unchanged, but its tab-capacity term is now `6 + 3 * 9 = 33` GiB, above the largest VM `resources.rs::desired_vm_memory_gib` produces (32 GiB). On every Lima VM the ceiling is therefore the VM budget, `vm_gib - 2`:
+
+| VM (GiB) | Claude ceiling before (GiB) | Claude ceiling now (GiB) |
+| -------- | --------------------------- | ------------------------ |
+| 8        | 6                           | 6                        |
+| 10       | 8                           | 8                        |
+| 16       | 12                          | 14                       |
+| 32       | 12                          | 30                       |
+
+Windows keeps the 6 GiB base (decision 2's 16 GiB host fallback yields an 8 GiB VM estimate).
+
+**Consequences.** The per-tab term no longer sizes anything on real hosts: ten tabs share whatever `vm_gib - 2` allows, and on the 8 GiB VM and on Windows they share the single-tab 6 GiB. A container that reaches its ceiling hits the exit-137 class of ADR-068; nothing refuses a tab because memory runs short. The phase 5 measurement of real multi-tab footprints still decides whether the per-tab constant, the headroom or the cap change. Guards: `resources.rs::claude_memory_formula_table` (rows for 16, 32 and larger VMs) and `chat_registry.rs::registry_at_cap`, which plants `MAX_CHAT_TABS` tabs instead of a fixed three.
+
 ## References
 
 - ADR-068: resource budget SSOT (decision 1 superseded here; decisions 2-5 unchanged)

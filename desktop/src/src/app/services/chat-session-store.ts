@@ -7,6 +7,7 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { ClaudeControlService } from './claude-control.service';
 import { PlanUsageService } from './plan-usage.service';
 import { LoggerService } from './logger.service';
+import { DEFAULT_ALIAS } from './model-picker.service';
 import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
@@ -197,7 +198,7 @@ export interface ModelSelectionInput {
  * Maximum parallel chat tabs. TS mirror of `speedwave_runtime::resources::MAX_CHAT_TABS`,
  * cross-read-tested by `max_chat_tabs_matches_ts_mirror`.
  */
-export const MAX_CHAT_TABS = 3;
+export const MAX_CHAT_TABS = 10;
 
 /** Angular services and service-owned callbacks a `ChatSessionStore` needs. */
 export interface ChatStoreDeps {
@@ -531,6 +532,15 @@ export class ChatSessionStore {
   /** Catalog id of this tab's last composer pick (optimistic badge source). */
   readonly pickedModel: Signal<string> = this._pickedModel.asReadonly();
 
+  private readonly _launchModel = signal<string | null>(null);
+  private _launchRead = 0;
+  /**
+   * Anthropic model this tab's latest spawn launched with: its override, else the project pin
+   * read at the spawn, else `DEFAULT_ALIAS`; null before the first spawn. Badge source until
+   * the session reports its model.
+   */
+  readonly launchModel: Signal<string | null> = this._launchModel.asReadonly();
+
   /**
    * Takes a composer model pick for THIS TAB ONLY (SPEED-388, ADR-092): a live session gets a
    * `set_model` and records it once accepted, a busy chat queues it, an idle tab records it and
@@ -576,6 +586,27 @@ export class ChatSessionStore {
       }
     } catch (e: unknown) {
       this.reportSelectionFailure('default model persist', e);
+    }
+  }
+
+  private recordLaunchModel(): string | null {
+    const model = this._tabModel();
+    const read = ++this._launchRead;
+    this._launchModel.set(model);
+    if (model === null) void this.readLaunchPin(read);
+    return model;
+  }
+
+  private async readLaunchPin(read: number): Promise<void> {
+    const project = this.deps.projectState.activeProject();
+    if (!project) return;
+    try {
+      const pin = await this.deps.tauri.invoke<string | null>('get_model_pin', {
+        projectId: project,
+      });
+      if (read === this._launchRead) this._launchModel.set(pin ?? DEFAULT_ALIAS);
+    } catch (err) {
+      this.deps.log.debug(`[chat-state] launch model: get_model_pin failed: ${String(err)}`);
     }
   }
 
@@ -1052,7 +1083,7 @@ export class ChatSessionStore {
         await this.deps.tauri.invoke('start_chat', {
           project,
           tabId: this.tabId,
-          model: this._tabModel(),
+          model: this.recordLaunchModel(),
         });
         this.deps.log.debug('[chat-state] startChatSession: success');
         outcome = current(gen) && !this._disposed ? 'started' : 'skipped';
@@ -1227,7 +1258,7 @@ export class ChatSessionStore {
               await this.deps.tauri.invoke('start_chat', {
                 project: result.active_project,
                 tabId: this.tabId,
-                model: this._tabModel(),
+                model: this.recordLaunchModel(),
               });
             } finally {
               if (generation === this._sessionGeneration) this.startingSession = false;
@@ -1871,7 +1902,7 @@ export class ChatSessionStore {
         sessionId,
         userUuid,
         tabId: this.tabId,
-        model: this._tabModel(),
+        model: this.recordLaunchModel(),
       });
     } catch (err) {
       this.deps.log.error(`[chat-state] retryLastAssistant: invoke failed: ${String(err)}`);
@@ -1992,7 +2023,7 @@ export class ChatSessionStore {
         project,
         sessionId,
         tabId: this.tabId,
-        model: this._tabModel(),
+        model: this.recordLaunchModel(),
       });
       if (gen !== this._sessionGeneration || !sameProject()) return;
       const transcript = await this.deps.tauri

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { DEFAULT_ALIAS } from './model-picker.service';
 import { TestBed } from '@angular/core/testing';
 import { Clipboard } from '@angular/cdk/clipboard';
 import {
@@ -322,6 +323,114 @@ describe('ChatSessionStore', () => {
 
       expect(firstCallCount).toBe(1);
       expect(secondCallCount).toBe(1);
+    });
+  });
+
+  describe('launchModel', () => {
+    function handlerWithPin(pin: () => string | null | Promise<string | null>) {
+      return async (cmd: string) => {
+        if (cmd === 'get_model_pin') return pin();
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+    }
+
+    function setTabModel(model: string | null): void {
+      (store as unknown as { _tabModel: { set(m: string | null): void } })._tabModel.set(model);
+    }
+
+    async function settle(): Promise<void> {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    beforeEach(async () => {
+      await TestBed.inject(ProjectStateService).init();
+    });
+
+    it('is null before the first spawn', () => {
+      expect(store.launchModel()).toBeNull();
+    });
+
+    it('records the project pin read at the spawn when the tab has no override', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = handlerWithPin(() => 'claude-opus-5-5[1m]');
+
+      await store.init();
+      await settle();
+
+      expect(store.launchModel()).toBe('claude-opus-5-5[1m]');
+      expect(spy).toHaveBeenCalledWith('get_model_pin', { projectId: 'test' });
+      expect(spy).toHaveBeenCalledWith('start_chat', {
+        project: 'test',
+        tabId: 'test-tab-id',
+        model: null,
+      });
+    });
+
+    it('records the account default when the project has no pin', async () => {
+      mockTauri.invokeHandler = handlerWithPin(() => null);
+
+      await store.init();
+      await settle();
+
+      expect(store.launchModel()).toBe(DEFAULT_ALIAS);
+    });
+
+    it('records the tab override without reading the pin', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = handlerWithPin(() => 'claude-opus-5-5[1m]');
+      setTabModel('claude-sonnet-5');
+
+      await store.init();
+      await settle();
+
+      expect(store.launchModel()).toBe('claude-sonnet-5');
+      expect(spy).not.toHaveBeenCalledWith('get_model_pin', expect.anything());
+    });
+
+    it('keeps the pin it launched with when the project default changes afterwards', async () => {
+      let pin: string | null = 'claude-sonnet-5';
+      mockTauri.invokeHandler = handlerWithPin(() => pin);
+
+      await store.init();
+      await settle();
+      pin = 'claude-opus-5-5[1m]';
+      await settle();
+
+      expect(store.launchModel()).toBe('claude-sonnet-5');
+    });
+
+    it('drops a pin read that answers after a newer spawn recorded its own model', async () => {
+      const slowPin = createDeferred<string | null>();
+      mockTauri.invokeHandler = handlerWithPin(() => slowPin.promise);
+
+      await store.init();
+      await settle();
+      expect(store.launchModel()).toBeNull();
+      setTabModel('claude-haiku-4-5');
+      await store.startChatSession();
+      expect(store.launchModel()).toBe('claude-haiku-4-5');
+      slowPin.resolve('claude-opus-5-5[1m]');
+      await settle();
+
+      expect(store.launchModel()).toBe('claude-haiku-4-5');
+    });
+
+    it('stays unset and logs at debug when the pin cannot be read', async () => {
+      mockTauri.invokeHandler = handlerWithPin(() => {
+        throw new Error('config unreadable');
+      });
+
+      await store.init();
+      await settle();
+
+      expect(store.launchModel()).toBeNull();
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('get_model_pin failed: Error: config unreadable')
+      );
     });
   });
 

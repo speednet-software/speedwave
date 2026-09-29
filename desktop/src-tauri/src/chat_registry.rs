@@ -176,23 +176,33 @@ mod tests {
     const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const TAB_B: &str = "550e8400-e29b-41d4-a716-446655440001";
     const TAB_C: &str = "550e8400-e29b-41d4-a716-446655440002";
-    const TAB_D: &str = "550e8400-e29b-41d4-a716-446655440003";
+    const TAB_D: &str = "550e8400-e29b-41d4-a716-4466554400ff";
     const SID: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
     fn registry_at_cap() -> ChatSessions {
         let reg = ChatSessions::default();
-        for tab in [TAB_A, TAB_B, TAB_C] {
-            reg.prepare(tab, "acme").unwrap();
+        for i in 0..u64::from(MAX_CHAT_TABS) {
+            let tab = format!("550e8400-e29b-41d4-a716-{:012x}", 0x4466_5544_0000 + i);
+            reg.prepare(&tab, "acme").unwrap();
         }
-        assert_eq!(MAX_CHAT_TABS, 3, "registry_at_cap plants exactly the cap");
+        assert!(
+            [TAB_A, TAB_B, TAB_C].iter().all(|t| reg.entry(t).is_some()),
+            "registry_at_cap plants the named tabs"
+        );
+        assert!(reg.entry(TAB_D).is_none(), "TAB_D stays outside the cap");
+        assert_eq!(
+            reg.lock_tabs().len(),
+            MAX_CHAT_TABS as usize,
+            "registry_at_cap plants exactly the cap"
+        );
         reg
     }
 
     #[test]
-    fn a_fourth_new_tab_is_rejected_at_the_cap() {
+    fn a_new_tab_past_the_cap_is_rejected() {
         let reg = registry_at_cap();
         let Err(err) = reg.prepare(TAB_D, "acme") else {
-            panic!("a fourth new tab must be rejected at the cap");
+            panic!("a new tab past the cap must be rejected");
         };
         assert_eq!(err, MSG_TAB_LIMIT_REACHED);
         assert!(reg.entry(TAB_D).is_none(), "the rejected tab must not land");

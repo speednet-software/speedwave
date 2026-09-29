@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { ModelSelectorComponent, type ModelSelection } from './model-selector.component';
 import { TauriService } from '../../../services/tauri.service';
+import { DEFAULT_ALIAS } from '../../../services/model-picker.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
 import type { ActiveProviderSummary, AnthropicModel } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
@@ -1921,6 +1922,123 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
     expect(badgeText()).toBe('opus-4.8');
+  });
+
+  describe('launchModel (the model the tab spawned with)', () => {
+    const twoRows = (): ModelPicker => ({
+      rows: [
+        {
+          id: 'claude-fable-5',
+          wire_id: 'claude-fable-5[1m]',
+          is_default: true,
+          display_name: null,
+          description: null,
+          requires_usage_credits: false,
+          effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          default_effort: 'high',
+        },
+        {
+          id: 'claude-opus-4-8',
+          wire_id: 'claude-opus-4-8',
+          is_default: false,
+          display_name: null,
+          description: null,
+          requires_usage_credits: false,
+          effort_levels: ['low', 'medium', 'high'],
+          default_effort: 'high',
+        },
+      ],
+    });
+
+    async function render(): Promise<void> {
+      fixture.componentRef.setInput('projectId', 'proj-2');
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+    }
+
+    async function currentRowId(): Promise<string | null> {
+      fixture.debugElement
+        .query(By.css('[data-testid="composer-model-badge"]'))
+        .nativeElement.click();
+      await fixture.whenStable();
+      await fixture.componentInstance.whenOptionsSettled();
+      fixture.detectChanges();
+      const current = fixture.debugElement.query(By.css('[aria-current="true"]'));
+      return current
+        ? (current.nativeElement.getAttribute('data-testid') as string).replace(
+            'model-selector-option-',
+            ''
+          )
+        : null;
+    }
+
+    it('shows the launch model over a stale project hint before the session reports one', async () => {
+      pickerRows = twoRows();
+      modelHint = 'claude-fable-5[1m]';
+      fixture.componentRef.setInput('launchModel', 'claude-opus-4-8');
+      await render();
+
+      expect(badgeText()).toBe('opus-4.8');
+      expect(await currentRowId()).toBe('claude-opus-4-8');
+    });
+
+    it('shows the plan default row for a tab launched without a pin', async () => {
+      pickerRows = twoRows();
+      modelHint = 'claude-opus-4-8';
+      fixture.componentRef.setInput('launchModel', DEFAULT_ALIAS);
+      await render();
+
+      expect(badgeText()).toBe('Fable 5');
+      expect(await currentRowId()).toBe('claude-fable-5');
+    });
+
+    it('yields to the live session model and to a tab pick', async () => {
+      pickerRows = twoRows();
+      fixture.componentRef.setInput('launchModel', 'claude-opus-4-8');
+      await render();
+
+      fixture.componentRef.setInput('sessionModel', 'claude-fable-5');
+      fixture.detectChanges();
+      expect(badgeText()).toBe('Fable 5');
+
+      fixture.componentRef.setInput('sessionModel', '');
+      fixture.componentRef.setInput('pickedModel', 'claude-fable-5');
+      fixture.detectChanges();
+      expect(badgeText()).toBe('Fable 5');
+    });
+
+    it('ignores the launch model for a routed provider, whose model is container env', async () => {
+      tauriInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_active_provider_summary')
+          return {
+            provider_id: 'openrouter',
+            kind: 'open_router',
+            model: 'x-ai/grok-4.3',
+            base_url: null,
+            effort_levels: EFFORT_LEVELS,
+          };
+        if (cmd === 'list_anthropic_models') return catalog;
+        if (cmd === 'get_effort_pin') return null;
+        if (cmd === 'get_model_pin') return null;
+        if (cmd === 'get_model_hint') return modelHint;
+        throw new Error(`unexpected invoke: ${cmd}`);
+      });
+      fixture.componentRef.setInput('launchModel', DEFAULT_ALIAS);
+      await render();
+
+      expect(badgeText()).toBe('x-ai/grok-4.3');
+    });
+
+    it('falls back to the hint when the tab has not spawned yet', async () => {
+      pickerRows = twoRows();
+      modelHint = 'claude-opus-4-8';
+      fixture.componentRef.setInput('launchModel', null);
+      await render();
+
+      expect(badgeText()).toBe('opus-4.8');
+    });
   });
 
   it('shows the picked catalog id, as its family label, optimistically after a live anthropic selection', async () => {

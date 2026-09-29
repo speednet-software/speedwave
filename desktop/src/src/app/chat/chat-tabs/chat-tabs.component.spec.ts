@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
+import { By } from '@angular/platform-browser';
+import { CdkDrag, CdkDropList, type CdkDragDrop } from '@angular/cdk/drag-drop';
 import { ChatTabsComponent } from './chat-tabs.component';
-import { ChatStateService } from '../../services/chat-state.service';
+import { ChatStateService, MAX_CHAT_TABS } from '../../services/chat-state.service';
 import type { ChatMessage } from '../../models/chat';
 
 class FakeStore {
@@ -40,6 +42,7 @@ class FakeChatState {
   readonly openTab = vi.fn().mockResolvedValue('new-tab-id');
   readonly closeTab = vi.fn().mockResolvedValue(undefined);
   readonly activateTab = vi.fn((id: string) => this._activeTabId.set(id));
+  readonly moveTab = vi.fn();
 
   setTabs(entries: readonly (readonly [string, FakeStore])[]): void {
     this._tabs.set(new Map(entries));
@@ -58,6 +61,10 @@ describe('ChatTabsComponent', () => {
 
   function tabEls(): HTMLElement[] {
     return Array.from(fixture.nativeElement.querySelectorAll('[data-testid="chat-tab"]'));
+  }
+
+  function stripEl(): HTMLElement {
+    return fixture.nativeElement.querySelector('[data-testid="chat-tabs-strip"]') as HTMLElement;
   }
 
   function titleFor(tabEl: HTMLElement): string {
@@ -213,6 +220,43 @@ describe('ChatTabsComponent', () => {
     expect(chat.activateTab).not.toHaveBeenCalledWith('t2');
   });
 
+  it('moves a dropped tab to the slot it was dropped on', () => {
+    chat.setTabs([
+      ['t1', new FakeStore()],
+      ['t2', new FakeStore()],
+      ['t3', new FakeStore()],
+    ]);
+    fixture.detectChanges();
+    const list = fixture.debugElement.query(By.directive(CdkDropList)).injector.get(CdkDropList);
+    const drags = fixture.debugElement
+      .queryAll(By.directive(CdkDrag))
+      .map((el) => el.injector.get(CdkDrag<string>));
+
+    list.dropped.emit({
+      item: drags[2],
+      currentIndex: 0,
+    } as CdkDragDrop<unknown, unknown, string>);
+
+    expect(chat.moveTab).toHaveBeenCalledWith('t3', 0);
+  });
+
+  it('makes every tab draggable along the strip only', () => {
+    chat.setTabs([
+      ['t1', new FakeStore()],
+      ['t2', new FakeStore()],
+    ]);
+    fixture.detectChanges();
+    const list = fixture.debugElement.query(By.directive(CdkDropList)).injector.get(CdkDropList);
+    const drags = fixture.debugElement
+      .queryAll(By.directive(CdkDrag))
+      .map((el) => el.injector.get(CdkDrag<string>));
+
+    expect(list.orientation).toBe('horizontal');
+    expect(list.lockAxis).toBe('x');
+    expect(drags.map((d) => d.data)).toEqual(['t1', 't2']);
+    expect(drags.map((d) => d.element.nativeElement)).toEqual(tabEls());
+  });
+
   it('shows the close button on the active tab without hover', () => {
     const s1 = new FakeStore();
     chat.setTabs([['t1', s1]]);
@@ -272,7 +316,7 @@ describe('ChatTabsComponent', () => {
       '[data-testid="chat-tabs-new"]'
     ) as HTMLButtonElement;
     expect(plus.disabled).toBe(true);
-    expect(plus.title).toBe('Maximum 3 tabs');
+    expect(plus.title).toBe(`Maximum ${MAX_CHAT_TABS} tabs`);
   });
 
   it('leaves the plus button enabled with a "New tab (⌘N)" tooltip below the cap', () => {
@@ -379,6 +423,147 @@ describe('ChatTabsComponent', () => {
     const tab = tabEls()[0];
     expect(tab.classList.contains('min-w-[110px]')).toBe(true);
     expect(tab.classList.contains('max-w-[200px]')).toBe(true);
+  });
+
+  it('keeps the plus button outside the scrolling strip, pinned right after it', () => {
+    chat.setTabs(
+      Array.from({ length: MAX_CHAT_TABS }, (_, i) => [`t${i}`, new FakeStore()] as const)
+    );
+    fixture.detectChanges();
+
+    const strip = stripEl();
+    const plus = fixture.nativeElement.querySelector(
+      '[data-testid="chat-tabs-new"]'
+    ) as HTMLElement;
+    expect(strip.contains(plus)).toBe(false);
+    expect(strip.nextElementSibling).toBe(plus);
+    expect(plus.classList.contains('flex-shrink-0')).toBe(true);
+    expect(tabEls()).toHaveLength(MAX_CHAT_TABS);
+    expect(tabEls().every((tab) => strip.contains(tab))).toBe(true);
+  });
+
+  it('hides the strip scrollbar so it never eats into the header row', () => {
+    chat.setTabs([['t1', new FakeStore()]]);
+    fixture.detectChanges();
+
+    expect(stripEl().classList.contains('tab-strip')).toBe(true);
+  });
+
+  describe('overflowing strip', () => {
+    let scrollLeft: number;
+
+    function overflow(strip: HTMLElement, scrollWidth: number, clientWidth: number): void {
+      scrollLeft = 0;
+      Object.defineProperty(strip, 'scrollWidth', { configurable: true, value: scrollWidth });
+      Object.defineProperty(strip, 'clientWidth', { configurable: true, value: clientWidth });
+      Object.defineProperty(strip, 'scrollLeft', {
+        configurable: true,
+        get: () => scrollLeft,
+        set: (v: number) => (scrollLeft = v),
+      });
+    }
+
+    function wheel(deltaX: number, deltaY: number): WheelEvent {
+      const event = new WheelEvent('wheel', { deltaX, deltaY, cancelable: true });
+      stripEl().dispatchEvent(event);
+      return event;
+    }
+
+    function rect(left: number, right: number): DOMRect {
+      return { left, right, top: 0, bottom: 44, width: right - left, height: 44 } as DOMRect;
+    }
+
+    beforeEach(() => {
+      chat.setTabs([
+        ['t1', new FakeStore()],
+        ['t2', new FakeStore()],
+        ['t3', new FakeStore()],
+      ]);
+      chat.setActive('t1');
+      fixture.detectChanges();
+    });
+
+    it('turns a vertical mouse wheel into a sideways scroll', () => {
+      overflow(stripEl(), 600, 300);
+
+      const event = wheel(0, 120);
+
+      expect(scrollLeft).toBe(120);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('leaves a horizontal (trackpad) wheel to the browser', () => {
+      overflow(stripEl(), 600, 300);
+
+      const event = wheel(80, 10);
+
+      expect(scrollLeft).toBe(0);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('leaves the wheel alone while every tab fits', () => {
+      overflow(stripEl(), 300, 300);
+
+      const event = wheel(0, 120);
+
+      expect(scrollLeft).toBe(0);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('scrolls a newly activated tab past the right edge into view', async () => {
+      const strip = stripEl();
+      overflow(strip, 600, 300);
+      strip.getBoundingClientRect = () => rect(100, 400);
+      tabEls()[2].getBoundingClientRect = () => rect(420, 530);
+
+      chat.setActive('t3');
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(scrollLeft).toBe(130);
+    });
+
+    it('scrolls a newly activated tab past the left edge into view', async () => {
+      const strip = stripEl();
+      overflow(strip, 600, 300);
+      scrollLeft = 200;
+      strip.getBoundingClientRect = () => rect(100, 400);
+      tabEls()[1].getBoundingClientRect = () => rect(40, 150);
+
+      chat.setActive('t2');
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(scrollLeft).toBe(140);
+    });
+
+    it('does not move a strip whose active tab is already visible', async () => {
+      const strip = stripEl();
+      overflow(strip, 600, 300);
+      scrollLeft = 50;
+      strip.getBoundingClientRect = () => rect(100, 400);
+      tabEls()[1].getBoundingClientRect = () => rect(210, 320);
+
+      chat.setActive('t2');
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(scrollLeft).toBe(50);
+    });
+
+    it('does not pull the strip back to the active tab when only a tab title or streaming state changes', async () => {
+      const strip = stripEl();
+      overflow(strip, 600, 300);
+      scrollLeft = 250;
+      strip.getBoundingClientRect = () => rect(100, 400);
+      tabEls()[0].getBoundingClientRect = () => rect(-150, -40);
+
+      (chat.tabs().get('t2') as FakeStore).setStreaming(true);
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(scrollLeft).toBe(250);
+    });
   });
 
   it('renders Unicode titles verbatim without over-truncating', () => {

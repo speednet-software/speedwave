@@ -231,6 +231,7 @@ const PLAN_MODE_PREFIX =
             [modelError]="modelError()"
             [sessionModel]="model()"
             [pickedModel]="pickedModel()"
+            [launchModel]="launchModel()"
             [sessionAwaited]="sessionAwaited()"
             (modelSelected)="modelSelected.emit($event)"
             (defaultModelSelected)="defaultModelSelected.emit($event)"
@@ -325,6 +326,8 @@ export class ComposerComponent implements AfterViewInit {
   readonly model = input('');
 
   readonly pickedModel = input('');
+
+  readonly launchModel = input<string | null>(null);
 
   readonly sessionAwaited = input(false);
 

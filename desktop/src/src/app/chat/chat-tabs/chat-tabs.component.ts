@@ -1,4 +1,14 @@
-import { ChangeDetectionStrategy, Component, computed, inject, type Signal } from '@angular/core';
+import { CdkDrag, CdkDropList, type CdkDragDrop } from '@angular/cdk/drag-drop';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  afterRenderEffect,
+  computed,
+  inject,
+  viewChild,
+  type Signal,
+} from '@angular/core';
 import {
   ChatStateService,
   MAX_CHAT_TABS,
@@ -39,16 +49,43 @@ function tabTitle(store: ChatSessionStore): string {
 
 /**
  * Browser-style tab bar for parallel chat sessions, rendered inline inside the chat header's
- * title row. Reads `ChatStateService.tabs` directly; gating whether the strip is shown at all
+ * title row. Tabs past the row's width scroll sideways while the plus button stays pinned after
+ * the strip. Reads `ChatStateService.tabs` directly; gating whether the strip is shown at all
  * (beta + not compact) lives in the parent header.
  */
 @Component({
   selector: 'app-chat-tabs',
-  imports: [IconComponent],
+  imports: [CdkDrag, CdkDropList, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex h-full min-w-0 flex-1 items-stretch', 'data-testid': 'chat-tabs' },
+  styles: `
+    .tab-strip {
+      scrollbar-width: none;
+    }
+    .tab-strip::-webkit-scrollbar {
+      display: none;
+    }
+    .cdk-drag-placeholder {
+      opacity: 0;
+    }
+    .cdk-drag-animating,
+    .cdk-drop-list-dragging .cdk-drag:not(.cdk-drag-placeholder) {
+      transition: transform 150ms cubic-bezier(0, 0, 0.2, 1);
+    }
+  `,
   template: `
-    <div class="flex min-w-0 overflow-x-auto" role="tablist" aria-label="Chat tabs">
+    <div
+      #strip
+      class="tab-strip flex min-w-0 overflow-x-auto"
+      role="tablist"
+      aria-label="Chat tabs"
+      data-testid="chat-tabs-strip"
+      (wheel)="scrollStrip($event)"
+      cdkDropList
+      cdkDropListOrientation="horizontal"
+      cdkDropListLockAxis="x"
+      (cdkDropListDropped)="drop($event)"
+    >
       @for (row of tabRows(); track row.id) {
         <div
           class="group flex min-w-[110px] max-w-[200px] flex-1 items-stretch border-r border-[var(--line)]"
@@ -56,6 +93,10 @@ function tabTitle(store: ChatSessionStore): string {
           role="presentation"
           data-testid="chat-tab"
           [attr.data-active]="row.active ? 'true' : null"
+          cdkDrag
+          [cdkDragData]="row.id"
+          cdkDragPreviewContainer="parent"
+          cdkDragPreviewClass="bg-[var(--bg-3)]"
           (click)="chat.activateTab(row.id)"
         >
           <button
@@ -114,6 +155,18 @@ function tabTitle(store: ChatSessionStore): string {
 export class ChatTabsComponent {
   protected readonly chat = inject(ChatStateService);
   protected readonly maxTabsTooltip = `Maximum ${MAX_CHAT_TABS} tabs`;
+  private readonly strip = viewChild.required<ElementRef<HTMLElement>>('strip');
+  private readonly revealKey = computed(
+    () => `${this.chat.activeTabId()}:${this.chat.tabs().size}`
+  );
+
+  /** Scrolls the active tab into view whenever the active tab or the tab count changes. */
+  constructor() {
+    afterRenderEffect(() => {
+      this.revealKey();
+      this.revealActiveTab();
+    });
+  }
 
   protected readonly tabRows: Signal<readonly ChatTabRow[]> = computed(() => {
     const tabs = this.chat.tabs();
@@ -141,5 +194,39 @@ export class ChatTabsComponent {
   protected close(event: Event, id: string): void {
     event.stopPropagation();
     void this.chat.closeTab(id);
+  }
+
+  /**
+   * Scrolls the strip sideways on a vertical mouse wheel, so a mouse without a horizontal wheel
+   * reaches the tabs past the edge; horizontal (trackpad) scrolling and a strip that fits pass.
+   * @param event - The strip's wheel event.
+   */
+  protected scrollStrip(event: WheelEvent): void {
+    const strip = this.strip().nativeElement;
+    if (strip.scrollWidth <= strip.clientWidth) return;
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    event.preventDefault();
+    strip.scrollLeft += event.deltaY;
+  }
+
+  private revealActiveTab(): void {
+    const strip = this.strip().nativeElement;
+    const tab = strip.querySelector<HTMLElement>('[data-testid="chat-tab"][data-active="true"]');
+    if (!tab) return;
+    const view = strip.getBoundingClientRect();
+    const rect = tab.getBoundingClientRect();
+    if (rect.left < view.left) {
+      strip.scrollLeft -= view.left - rect.left;
+    } else if (rect.right > view.right) {
+      strip.scrollLeft += rect.right - view.right;
+    }
+  }
+
+  /**
+   * Moves the dragged tab to the slot it was dropped on.
+   * @param event - The drop list's drop event, carrying the dragged tab's id.
+   */
+  protected drop(event: CdkDragDrop<unknown, unknown, string>): void {
+    this.chat.moveTab(event.item.data, event.currentIndex);
   }
 }

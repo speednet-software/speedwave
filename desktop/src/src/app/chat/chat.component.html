@@ -128,6 +128,7 @@
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [pickedModel]="chat.pickedModel()"
+            [launchModel]="chat.launchModel()"
             [projectId]="projectState.activeProject() ?? ''"
             [modelError]="chat.modelSelectionError()"
             [contextLabel]="composerContextLabel()"

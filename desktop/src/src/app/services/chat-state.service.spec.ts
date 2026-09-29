@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { DEFAULT_ALIAS } from './model-picker.service';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import {
@@ -479,10 +480,11 @@ describe('ChatStateService', () => {
         expect(service.tabs().size).toBe(1);
         expect(service.canOpenTab()).toBe(true);
 
-        await service.openTab();
-        expect(service.tabs().size).toBe(2);
-        await service.openTab();
-        expect(service.tabs().size).toBe(MAX_CHAT_TABS);
+        for (let size = 2; size <= MAX_CHAT_TABS; size++) {
+          expect(service.canOpenTab()).toBe(true);
+          await service.openTab();
+          expect(service.tabs().size).toBe(size);
+        }
         expect(service.canOpenTab()).toBe(false);
 
         await expect(service.openTab()).rejects.toThrow();
@@ -568,6 +570,135 @@ describe('ChatStateService', () => {
         expect((freshStore as unknown as { _resumeDecider: unknown })._resumeDecider).toBe(decider);
       });
 
+      it('closing the active rightmost tab activates its left neighbor', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const tab3 = await service.openTab();
+
+        await service.closeTab(tab3);
+
+        expect(service.activeTabId()).toBe(tab2);
+        expect(Array.from(service.tabs().keys())).toEqual([tab1, tab2]);
+      });
+
+      it('closing the active middle tab activates its right neighbor', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const tab3 = await service.openTab();
+        service.activateTab(tab2);
+
+        await service.closeTab(tab2);
+
+        expect(service.activeTabId()).toBe(tab3);
+        expect(Array.from(service.tabs().keys())).toEqual([tab1, tab3]);
+      });
+
+      it('closing the active leftmost tab activates its right neighbor after a reorder', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const tab3 = await service.openTab();
+        service.moveTab(tab3, 0);
+        service.activateTab(tab3);
+
+        await service.closeTab(tab3);
+
+        expect(service.activeTabId()).toBe(tab1);
+        expect(Array.from(service.tabs().keys())).toEqual([tab1, tab2]);
+      });
+
+      it('removes the tab from the strip before the backend close answers', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        let answerClose: () => void = () => undefined;
+        const handler = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'close_chat_tab') {
+            return new Promise<undefined>((resolve) => {
+              answerClose = () => resolve(undefined);
+            });
+          }
+          return handler(cmd, args);
+        };
+
+        let closed = false;
+        const closing = service.closeTab(tab2).then(() => (closed = true));
+
+        expect(service.tabs().has(tab2)).toBe(false);
+        expect(service.activeTabId()).toBe(tab1);
+        await Promise.resolve();
+        expect(closed).toBe(false);
+
+        answerClose();
+        await closing;
+        expect(closed).toBe(true);
+      });
+
+      it('stops the closed store from escaping side effects before the backend close answers', async () => {
+        await service.openTab();
+        const tab2 = service.activeTabId();
+        const store2 = service.tabs().get(tab2)!;
+        const handler = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'close_chat_tab') return new Promise<undefined>(() => undefined);
+          return handler(cmd, args);
+        };
+
+        void service.closeTab(tab2);
+
+        expect((store2 as unknown as { _disposed: boolean })._disposed).toBe(true);
+      });
+
+      it('holds a new tab until the closing tab has left the backend registry', async () => {
+        await service.openTab();
+        const tab3 = await service.openTab();
+        let answerClose: () => void = () => undefined;
+        const handler = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'close_chat_tab') {
+            return new Promise<undefined>((resolve) => {
+              answerClose = () => resolve(undefined);
+            });
+          }
+          return handler(cmd, args);
+        };
+
+        const closing = service.closeTab(tab3);
+        const opening = service.openTab();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(service.tabs().size).toBe(2);
+
+        answerClose();
+        await closing;
+        const tab4 = await opening;
+
+        expect(service.tabs().size).toBe(3);
+        expect(service.activeTabId()).toBe(tab4);
+      });
+
+      it('holds a resume until the closing tab has left the backend registry', async () => {
+        const tab2 = await service.openTab();
+        let answerClose: () => void = () => undefined;
+        const handler = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'close_chat_tab') {
+            return new Promise<undefined>((resolve) => {
+              answerClose = () => resolve(undefined);
+            });
+          }
+          return handler(cmd, args);
+        };
+        const resumeSpy = vi.spyOn(service.activeStore(), 'resumeConversation');
+
+        const closing = service.closeTab(tab2);
+        const resuming = service.openConversation('sid-closed');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(resumeSpy).not.toHaveBeenCalled();
+
+        answerClose();
+        await closing;
+        await resuming;
+      });
+
       it('is a no-op for an unknown tab id', async () => {
         const invokeSpy = vi.spyOn(mockTauri, 'invoke');
         const tab1 = service.activeTabId();
@@ -577,6 +708,115 @@ describe('ChatStateService', () => {
         expect(service.tabs().size).toBe(1);
         expect(service.activeTabId()).toBe(tab1);
         expect(invokeSpy).not.toHaveBeenCalledWith('close_chat_tab', expect.anything());
+      });
+    });
+
+    describe('launchModel after Set default', () => {
+      it('gives a tab opened after Set default the new default while the older tab keeps its own', async () => {
+        let pin: string | null = 'claude-sonnet-5';
+        const handler = mockTauri.invokeHandler;
+        mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'get_model_pin') return pin;
+          if (cmd === 'set_model_pin') {
+            pin = args?.['model'] as string;
+            return undefined;
+          }
+          if (cmd === 'clear_model_pin') {
+            pin = null;
+            return undefined;
+          }
+          return handler(cmd, args);
+        };
+        await TestBed.inject(ProjectStateService).init();
+        await service.init();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const tab1 = service.activeTabId();
+        expect(service.launchModel()).toBe('claude-sonnet-5');
+
+        await service.applyDefaultModelSelection({
+          catalogId: 'claude-opus-5-5',
+          wireId: 'claude-opus-5-5[1m]',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+          isDefault: false,
+          contextTokens: 1_000_000,
+        });
+        const tab2 = await service.openTab();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(service.activeTabId()).toBe(tab2);
+        expect(service.launchModel()).toBe('claude-opus-5-5[1m]');
+        expect(service.tabs().get(tab1)!.launchModel()).toBe('claude-sonnet-5');
+
+        await service.applyDefaultModelSelection({
+          catalogId: 'claude-fable-5',
+          wireId: 'claude-fable-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+          isDefault: true,
+          contextTokens: 200_000,
+        });
+        await service.openTab();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(service.launchModel()).toBe(DEFAULT_ALIAS);
+      });
+    });
+
+    describe('moveTab', () => {
+      it('moves a tab to the given position and keeps the active tab', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const tab3 = await service.openTab();
+
+        service.moveTab(tab1, 2);
+
+        expect(Array.from(service.tabs().keys())).toEqual([tab2, tab3, tab1]);
+        expect(service.activeTabId()).toBe(tab3);
+      });
+
+      it('moves a tab leftwards', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const tab3 = await service.openTab();
+
+        service.moveTab(tab3, 0);
+
+        expect(Array.from(service.tabs().keys())).toEqual([tab3, tab1, tab2]);
+      });
+
+      it('clamps an index past either end of the strip', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+
+        service.moveTab(tab1, 99);
+        expect(Array.from(service.tabs().keys())).toEqual([tab2, tab1]);
+
+        service.moveTab(tab1, -5);
+        expect(Array.from(service.tabs().keys())).toEqual([tab1, tab2]);
+      });
+
+      it('leaves the strip untouched for an unknown tab id or an unchanged position', async () => {
+        const tab1 = service.activeTabId();
+        await service.openTab();
+        const before = service.tabs();
+
+        service.moveTab('does-not-exist', 0);
+        service.moveTab(tab1, 0);
+
+        expect(service.tabs()).toBe(before);
+      });
+
+      it('keeps every store bound to its own tab id', async () => {
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        const store1 = service.tabs().get(tab1)!;
+        const store2 = service.tabs().get(tab2)!;
+
+        service.moveTab(tab2, 0);
+
+        expect(service.tabs().get(tab1)).toBe(store1);
+        expect(service.tabs().get(tab2)).toBe(store2);
       });
     });
 
@@ -801,8 +1041,7 @@ describe('ChatStateService', () => {
         const tab1 = service.activeTabId();
         const active = service.tabs().get(tab1)!;
         active.isStreaming = true;
-        await service.openTab();
-        await service.openTab();
+        while (service.canOpenTab()) await service.openTab();
         service.activateTab(tab1);
         expect(service.tabs().size).toBe(MAX_CHAT_TABS);
         expect(service.canOpenTab()).toBe(false);

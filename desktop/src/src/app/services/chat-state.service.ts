@@ -105,6 +105,7 @@ export class ChatStateService {
 
   private readonly _tabs = signal<ReadonlyMap<string, ChatSessionStore>>(new Map());
   private readonly _activeTabId = signal<string>('');
+  private readonly _closingTabs = new Set<Promise<void>>();
 
   /** Every open chat tab keyed by its tab id. */
   readonly tabs: Signal<ReadonlyMap<string, ChatSessionStore>> = this._tabs.asReadonly();
@@ -166,6 +167,7 @@ export class ChatStateService {
    * @returns The new tab's id.
    */
   async openTab(): Promise<string> {
+    if (this._closingTabs.size > 0) await this.closingTabsSettled();
     if (!this.canOpenTab()) {
       throw new Error(`Cannot open more than ${MAX_CHAT_TABS} chat tabs`);
     }
@@ -187,25 +189,20 @@ export class ChatStateService {
   }
 
   /**
-   * Interrupts a streaming tab, closes its backend session, and activates a neighbor;
-   * closing the last tab replaces it with a fresh one instead of leaving zero tabs.
+   * Removes the tab from the strip at once and activates its right neighbor, else its left one;
+   * closing the last tab replaces it with a fresh one instead of leaving zero tabs. The backend
+   * teardown (interrupt, `close_chat_tab`) runs after the strip updates; the returned promise
+   * settles once it is done.
    * @param tabId - Id of the tab to close.
    */
   async closeTab(tabId: string): Promise<void> {
     const store = this._tabs().get(tabId);
     if (!store) return;
-    if (store.isStreaming) {
-      await store.stopConversation();
-    }
-    try {
-      await this.tauri.invoke('close_chat_tab', { tabId });
-    } catch (err) {
-      this.log.warn(`[chat-state] closeTab: close_chat_tab invoke failed: ${String(err)}`);
-    }
-    store.dispose();
-
+    const ids = Array.from(this._tabs().keys());
     const remaining = new Map(this._tabs());
     remaining.delete(tabId);
+    store.dispose();
+    const teardown = this.trackClosing(this.teardownTab(store));
 
     if (remaining.size === 0) {
       const fresh = this.makeStore();
@@ -216,15 +213,59 @@ export class ChatStateService {
       this._activeTabId.set(fresh.tabId);
       remaining.set(fresh.tabId, fresh);
       this._tabs.set(remaining);
+      await teardown;
       await fresh.init();
       return;
     }
 
     if (this._activeTabId() === tabId) {
-      const neighbor = remaining.keys().next().value as string;
-      this._activeTabId.set(neighbor);
+      const index = ids.indexOf(tabId);
+      this._activeTabId.set(ids[index + 1] ?? ids[index - 1]);
     }
     this._tabs.set(remaining);
+    await teardown;
+  }
+
+  private async teardownTab(store: ChatSessionStore): Promise<void> {
+    if (store.isStreaming) {
+      await store.stopConversation();
+    }
+    try {
+      await this.tauri.invoke('close_chat_tab', { tabId: store.tabId });
+    } catch (err) {
+      this.log.warn(`[chat-state] closeTab: close_chat_tab invoke failed: ${String(err)}`);
+    }
+  }
+
+  private trackClosing(teardown: Promise<void>): Promise<void> {
+    const settle = (): void => void this._closingTabs.delete(teardown);
+    this._closingTabs.add(teardown);
+    teardown.then(settle, settle);
+    return teardown;
+  }
+
+  private async closingTabsSettled(): Promise<void> {
+    while (this._closingTabs.size > 0) {
+      await Promise.allSettled(this._closingTabs);
+    }
+  }
+
+  /**
+   * Moves a tab to another position in the strip; a no-op for an unknown tab id or an
+   * unchanged position. The index is clamped to the strip.
+   * @param tabId - Id of the tab to move.
+   * @param toIndex - Position the tab takes after the move.
+   */
+  moveTab(tabId: string, toIndex: number): void {
+    const ids = Array.from(this._tabs().keys());
+    const from = ids.indexOf(tabId);
+    if (from === -1) return;
+    const to = Math.min(Math.max(toIndex, 0), ids.length - 1);
+    if (to === from) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, tabId);
+    const tabs = this._tabs();
+    this._tabs.set(new Map(ids.map((id) => [id, tabs.get(id) as ChatSessionStore])));
   }
 
   /**
@@ -247,6 +288,7 @@ export class ChatStateService {
    * @param sessionId - Session UUID to resume.
    */
   async openConversation(sessionId: string): Promise<void> {
+    if (this._closingTabs.size > 0) await this.closingTabsSettled();
     const owner = this.findTabOwning(sessionId);
     if (owner) {
       this.activateTab(owner.tabId);
@@ -319,6 +361,9 @@ export class ChatStateService {
 
   /** Catalog id of the active tab's last composer pick (optimistic badge source). */
   readonly pickedModel: Signal<string> = computed(() => this.activeStore().pickedModel());
+
+  /** Model the active tab's process launched with (override or project pin); null for neither. */
+  readonly launchModel: Signal<string | null> = computed(() => this.activeStore().launchModel());
 
   /**
    * Takes a composer model pick for the ACTIVE TAB ONLY (SPEED-388): a `set_model` on a live
