@@ -1,0 +1,27 @@
+[package]
+name = "speedwave-version"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Computes Speedwave's app version and release-notes ranges from git"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "speedwave_version"
+path = "src/lib.rs"
+
+[[bin]]
+name = "speedwave-version"
+path = "src/bin/speedwave-version.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
