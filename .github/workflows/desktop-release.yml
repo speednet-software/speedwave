@@ -262,6 +262,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}
         with:
           projectPath: desktop/src-tauri
           releaseId: ${{ needs.resolve.outputs.release_id }}
@@ -324,6 +325,7 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}
         run: cargo build --release --target "$TARGET" -p speedwave-cli
 
       - name: Configure Windows code signing

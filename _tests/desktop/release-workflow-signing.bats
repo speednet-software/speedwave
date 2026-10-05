@@ -231,3 +231,18 @@ EOF
     grep -qF "::error::" "$SIGNING_LOGIN_ACTION"
     grep -qF "allow-no-subscriptions: true" "$SIGNING_LOGIN_ACTION"
 }
+
+@test "the cli job exports SPEEDWAVE_VERSION from the resolve job before building, so the released CLI version matches the release tag" {
+    build_line=$(grep -n "name: Build CLI" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$build_line" ]
+    block=$(awk -v start="$build_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
+    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}'
+    echo "$block" | grep -qF 'cargo build --release'
+}
+
+@test "the publish-tauri job exports SPEEDWAVE_VERSION from the resolve job before building, so the released CLI/crates version matches the Tauri app version" {
+    tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$tauri_line" ]
+    block=$(awk -v start="$tauri_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
+    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}'
+}
