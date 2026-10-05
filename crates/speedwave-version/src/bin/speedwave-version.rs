@@ -17,6 +17,7 @@ fn emit(to_stderr: bool, line: &str) {
     }
 }
 
+#[derive(Debug)]
 struct ParsedArgs {
     repo: PathBuf,
     branch: Option<String>,
