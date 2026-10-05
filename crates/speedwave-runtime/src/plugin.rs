@@ -858,7 +858,10 @@ fn validate_slug(slug: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
+fn check_speedwave_compat_against(
+    compat: Option<&str>,
+    current_version: &semver::Version,
+) -> anyhow::Result<()> {
     let s = match compat {
         None => return Ok(()),
         Some(s) => s,
@@ -875,14 +878,7 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
             e
         )
     })?;
-    let current_version = semver::Version::parse(env!("SPEEDWAVE_VERSION")).map_err(|e| {
-        anyhow::anyhow!(
-            "internal: SPEEDWAVE_VERSION '{}' is not valid semver: {}",
-            env!("SPEEDWAVE_VERSION"),
-            e
-        )
-    })?;
-    if !req.matches(&current_version) {
+    if !req.matches(current_version) {
         anyhow::bail!(
             "Plugin requires Speedwave version matching '{}', but this Speedwave is {}. Upgrade Speedwave or install an older plugin version.",
             s,
@@ -890,6 +886,17 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
+    let current_version = semver::Version::parse(env!("SPEEDWAVE_VERSION")).map_err(|e| {
+        anyhow::anyhow!(
+            "internal: SPEEDWAVE_VERSION '{}' is not valid semver: {}",
+            env!("SPEEDWAVE_VERSION"),
+            e
+        )
+    })?;
+    check_speedwave_compat_against(compat, &current_version)
 }
 
 /// Validates manifest constraints at install time.
@@ -8548,72 +8555,91 @@ mod tests {
     }
 
     #[test]
-    fn test_compat_exact_current_version_matches() {
+    fn test_validate_speedwave_compat_reads_the_build_version() {
         let range = format!("={}", env!("SPEEDWAVE_VERSION"));
         assert!(validate_speedwave_compat(Some(&range)).is_ok());
     }
 
-    #[test]
-    fn test_compat_lower_bound_current_version_matches() {
-        let range = format!(">={}", env!("SPEEDWAVE_VERSION"));
-        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+    fn fixed_test_version() -> semver::Version {
+        semver::Version::parse("2.7.3").unwrap()
     }
 
     #[test]
-    fn test_compat_current_major_minor_range_matches() {
-        let v = semver::Version::parse(env!("SPEEDWAVE_VERSION")).unwrap();
+    fn test_compat_exact_version_matches() {
+        let v = fixed_test_version();
+        let range = format!("={v}");
+        assert!(check_speedwave_compat_against(Some(&range), &v).is_ok());
+    }
+
+    #[test]
+    fn test_compat_lower_bound_matches() {
+        let v = fixed_test_version();
+        let range = format!(">={v}");
+        assert!(check_speedwave_compat_against(Some(&range), &v).is_ok());
+    }
+
+    #[test]
+    fn test_compat_major_minor_range_matches() {
+        let v = fixed_test_version();
         let next_major = v.major + 1;
         let range = format!(">={}.{}, <{}", v.major, v.minor, next_major);
-        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+        assert!(check_speedwave_compat_against(Some(&range), &v).is_ok());
     }
 
     #[test]
     fn test_compat_legacy_wide_range_matches() {
-        assert!(validate_speedwave_compat(Some(">=0.1.0")).is_ok());
+        let v = fixed_test_version();
+        assert!(check_speedwave_compat_against(Some(">=0.1.0"), &v).is_ok());
     }
 
     #[test]
     fn test_compat_empty_string_rejected() {
-        let result = validate_speedwave_compat(Some(""));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some(""), &v);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("speedwave_compat"));
     }
 
     #[test]
     fn test_compat_whitespace_only_rejected() {
-        let result = validate_speedwave_compat(Some("   "));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some("   "), &v);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("speedwave_compat"));
     }
 
     #[test]
     fn test_compat_garbage_rejected() {
-        let result = validate_speedwave_compat(Some("banana"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some("banana"), &v);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("banana"));
     }
 
     #[test]
     fn test_compat_unsatisfied_range_rejected() {
-        let result = validate_speedwave_compat(Some(">=99.0.0"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some(">=99.0.0"), &v);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains(">=99.0.0"));
-        assert!(msg.contains(env!("SPEEDWAVE_VERSION")));
+        assert!(msg.contains(v.to_string().as_str()));
     }
 
     #[test]
     fn test_compat_unsatisfied_upper_bound_rejected() {
-        let result = validate_speedwave_compat(Some("<0.1"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some("<0.1"), &v);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("<0.1"));
-        assert!(msg.contains(env!("SPEEDWAVE_VERSION")));
+        assert!(msg.contains(v.to_string().as_str()));
     }
 
     #[test]
     fn test_compat_error_message_contains_upgrade_guidance() {
-        let result = validate_speedwave_compat(Some(">=99.0.0"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some(">=99.0.0"), &v);
         assert!(result
             .unwrap_err()
             .to_string()

@@ -295,12 +295,21 @@ pub fn compute_release_version(repo: &Path, minor: u64) -> Result<ReleaseVersion
     Ok(ReleaseVersion { minor, patch })
 }
 
-/// Computes the version for the given branch (or current branch if `None`):
-/// dev-style off a non-release branch, release-line style on `release/0.M`.
+/// Computes the version for the given branch (or current branch, or a
+/// detached `HEAD`, if `None`): dev-style off anything but `release/0.M`.
 pub fn compute_version(repo: &Path, branch: Option<&str>) -> Result<ComputedVersion, VersionError> {
     ensure_git_repo(repo)?;
-    let branch = resolve_branch(repo, branch)?;
-    match parse_release_minor_from_branch_name(&branch) {
+    let resolved_branch = match branch {
+        Some(b) => Some(b.to_string()),
+        None => match run_git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]) {
+            Ok(name) if !name.is_empty() => Some(name),
+            _ => None,
+        },
+    };
+    match resolved_branch
+        .as_deref()
+        .and_then(parse_release_minor_from_branch_name)
+    {
         Some(minor) => Ok(ComputedVersion::Release(compute_release_version(
             repo, minor,
         )?)),
@@ -539,13 +548,35 @@ mod tests {
     }
 
     #[test]
-    fn detached_head_without_an_explicit_branch_is_a_named_error() {
+    fn detached_head_without_an_explicit_branch_computes_a_dev_version() {
         let tmp = init_repo();
         commit(tmp.path(), "init");
+        git(tmp.path(), &["branch", "release/0.20"]);
+        commit(tmp.path(), "feat: a");
+        commit(tmp.path(), "feat: b");
         git(tmp.path(), &["checkout", "-q", "--detach", "HEAD"]);
 
-        let err = compute_version(tmp.path(), None).unwrap_err();
-        assert!(matches!(err, VersionError::DetachedHead));
+        let v = compute_version(tmp.path(), None).expect("compute");
+        match v {
+            ComputedVersion::Dev(d) => {
+                assert_eq!(d.base_minor, 21);
+                assert_eq!(d.build, 3);
+            }
+            ComputedVersion::Release(_) => panic!("expected a dev version, got a release one"),
+        }
+    }
+
+    #[test]
+    fn detached_head_with_an_explicit_release_branch_still_computes_release_version() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+        git(tmp.path(), &["tag", "v0.21.0"]);
+        git(tmp.path(), &["branch", "release/0.21"]);
+        commit(tmp.path(), "fix: hotfix");
+        git(tmp.path(), &["checkout", "-q", "--detach", "HEAD"]);
+
+        let v = compute_version(tmp.path(), Some("release/0.21")).expect("compute");
+        assert!(matches!(v, ComputedVersion::Release(_)));
     }
 
     #[test]
