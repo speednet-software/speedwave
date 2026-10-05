@@ -333,6 +333,7 @@ mod tests {
                 },
                 provider_kind: "local".to_string(),
                 provider_id: "local".to_string(),
+                headers: std::collections::BTreeMap::new(),
             }],
             usage_path,
             ..Default::default()
@@ -786,6 +787,7 @@ mod tests {
             auth: Auth::Bare(BareAuth::Passthrough),
             provider_kind: "anthropic_oauth".to_string(),
             provider_id: "anthropic".to_string(),
+            headers: std::collections::BTreeMap::new(),
         });
         let app = build_router(Arc::new(cfg));
 
@@ -854,6 +856,7 @@ mod tests {
             auth: Auth::Bare(BareAuth::None),
             provider_kind: "openrouter".to_string(),
             provider_id: "my-or".to_string(),
+            headers: std::collections::BTreeMap::new(),
         });
         cfg.audit_dir = Some(audit_dir.path().to_path_buf());
         let app = build_router(Arc::new(cfg));
@@ -912,6 +915,7 @@ mod tests {
             auth: Auth::Bare(BareAuth::Passthrough),
             provider_kind: "anthropic_oauth".to_string(),
             provider_id: "anthropic".to_string(),
+            headers: std::collections::BTreeMap::new(),
         });
         let app = build_router(Arc::new(cfg));
 

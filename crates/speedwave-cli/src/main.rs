@@ -546,6 +546,22 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
+    if let Err(e) = speedwave_runtime::config::check_llm_egress_policy_at_boot() {
+        err!("Organization policy error: {}", redact_err(&e));
+        err!("Contact your administrator to correct the managed configuration.");
+        std::process::exit(2);
+    }
+
+    if matches!(action, CliAction::Login(_) | CliAction::Logout(_))
+        && matches!(
+            speedwave_runtime::managed_config::load_managed_config(),
+            Ok(Some(ref m)) if m.llm_egress.is_some()
+        )
+    {
+        err!("{}", speedwave_runtime::config::LLM_ROUTE_LOCKED_MSG);
+        std::process::exit(2);
+    }
+
     if let CliAction::Init(ref custom_name) = action {
         let cwd = std::env::current_dir()?;
         let canonical = std::fs::canonicalize(&cwd)?;
@@ -885,7 +901,9 @@ fn main() -> anyhow::Result<()> {
     });
     let expected_paths =
         compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+            .with_telemetry_locked(speedwave_runtime::config::managed_settings_required(
+                &resolved.telemetry,
+            ));
 
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
 

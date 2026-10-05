@@ -361,7 +361,9 @@ pub fn update_containers(
         Vec::new()
     });
     let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(crate::config::managed_settings_required(
+            &resolved.telemetry,
+        ));
     let violations = SecurityCheck::run(&compose_yml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
@@ -490,7 +492,9 @@ pub fn rollback_containers(
         config::resolve_project_config(&project_path, &user_config, project)
     };
     let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(crate::config::managed_settings_required(
+            &resolved.telemetry,
+        ));
     let snapshot_violations = SecurityCheck::run(
         &snapshot.compose_yml,
         project,

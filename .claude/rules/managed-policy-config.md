@@ -1,6 +1,6 @@
 # Managed (MDM/org) Policy Config
 
-Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry; the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
+Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`, ADR-076), the PII policy (`pii_policy`) and the organisation's LLM gateway (`llm_egress`, ADR-090); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
 
 ## Where the policy lives
 
@@ -21,6 +21,16 @@ There is no separate `locked` flag. Any field the MDM file sets is authoritative
 2. **The process-env layer is defense-in-depth only.** MDM-locked keys are re-forced after the user merge layer (stripped from the user layer, then re-inserted) so `claude.env` cannot weaken them, and the master switch is a locked key whenever MDM sets the enable flag. Do NOT rely on process-env-beats-`settings.json`: that precedence is version-dependent in Claude Code and the in-container `~/.claude/settings.json` is a user-writable host mount.
 
 An **invalid policy is caught once, at boot.** Desktop and CLI call `config::check_telemetry_policy_at_boot()` at startup, which resolves the full global policy (`load_user_config` tolerated with defaults, `load_managed_config` fatal). Every MDM-implicated error class hard-stops the process the same way a bad plugin signature does (native `blocking_show` dialog "Organization policy error" + exit on Desktop; stderr + non-zero exit on CLI): a malformed managed file, an MDM-set endpoint rejected by URL validation, or MDM forcing telemetry on without a resolvable endpoint. An org policy must never silently vanish. One deliberate user-layer degradation: an OTLP endpoint set only in the user config that URL validation rejects (for example a stored endpoint reclassified when the validator tightened, such as 198.18.0.0/15 or 169.254.0.0/16) writes a `log::error` naming the endpoint and the block reason, resolves telemetry to disabled, and lets boot proceed. `resolve_telemetry` itself stays strict, so the Desktop save/update path still rejects the same endpoint; other pure user-layer errors (enabled without an endpoint, control characters in headers, zero export interval) remain fatal at boot. Because the policy is global, this is the single detection point: the renderer never surfaces a telemetry-policy error (an unresolvable policy resolves to `disabled()`, no mount). Do NOT add a second in-app error surface for MDM policy.
+
+## `llm_egress`: the organisation's gateway as the only AI route (ADR-090)
+
+- **The proxy stays in the path.** `anthropic_base_url` re-targets the proxy's `anthropic` route; under the block the managed settings pin `ANTHROPIC_BASE_URL` to the proxy and `lock_llm_to_policy` clears `proxy_enabled`. Never let a policy point Claude Code past the proxy.
+- **One route.** `render_proxy_config_with` renders only the Anthropic route under the block — a new provider kind must be skipped there too.
+- **No credential in the container.** The route uses the proxy's `gateway` auth mode (inbound `authorization`/`x-api-key` dropped, the policy's `headers` added); the container gets only `NO_KEY_AUTH_TOKEN`. `claude_env` locks model selection only (`consts::LLM_EGRESS_LOCKABLE_ENV`), through the one managed-settings writer.
+- **Validated at boot and at render.** `ManagedLlmEgressConfig::validate` (URL via `validate_collector_url`, header names and values, lockable env, PEM) runs in `check_llm_egress_policy_at_boot` and wherever a render loads the block; loads propagate errors, never `.ok()`.
+- **`ca_certs` extends, never replaces, the built-in roots** — the proxy's forward client, Claude Code (`NODE_EXTRA_CA_CERTS` → `/etc/claude-code/gateway-ca.pem`, `:ro`, checked by `ManagedSettingsMount` and the claude volume profile) and the desktop's gateway client.
+- **Secrets stay host-side.** Header values never reach the frontend or a log; `ManagedLlmEgressConfig` and the proxy's `Route` print names only. Gateway status shown in the desktop is display, never enforcement.
+- **Tests never read the machine's real policy**: `load_managed_config` returns `None` under `cfg(test)` or the `test-support` feature (enabled only by dependents' dev-dependencies); tests build the block in memory.
 
 ## Non-negotiables when extending this
 

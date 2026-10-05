@@ -893,6 +893,143 @@ pub struct ManagedPiiPolicyConfig {
     pub forced_policies: Vec<String>,
 }
 
+/// Refusal for any change to the AI route while an `llm_egress` policy is in force.
+pub const LLM_ROUTE_LOCKED_MSG: &str =
+    "The AI route on this computer is set by your organisation's policy and cannot be changed here.";
+
+/// MDM `llm_egress` block (ADR-090): the organisation's gateway is the only AI route.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedLlmEgressConfig {
+    /// Gateway base URL; the proxy's Anthropic route posts `{base}/v1/messages`.
+    pub anthropic_base_url: Option<String>,
+    /// Headers the proxy adds to every forwarded request, e.g. the gateway credential.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Header that names the project on every forwarded request.
+    #[serde(default)]
+    pub project_header: Option<String>,
+    /// Model env locked in the container; keys from [`crate::consts::LLM_EGRESS_LOCKABLE_ENV`].
+    #[serde(default)]
+    pub claude_env: std::collections::BTreeMap<String, String>,
+    /// PEM roots trusted for the gateway on top of the built-in ones.
+    #[serde(default)]
+    pub ca_certs: Option<String>,
+}
+
+impl ManagedLlmEgressConfig {
+    /// `ca_certs` when it holds at least one PEM certificate.
+    pub fn ca_pem(&self) -> Option<&str> {
+        self.ca_certs
+            .as_deref()
+            .filter(|p| !pem_certificates(p).is_empty())
+    }
+
+    /// The model env this policy locks in the container.
+    pub fn locked_claude_env(&self) -> std::collections::BTreeMap<String, String> {
+        self.claude_env
+            .iter()
+            .filter(|(k, _)| crate::consts::LLM_EGRESS_LOCKABLE_ENV.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Rejects a block the proxy or the container could not apply as the organisation meant it.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let base = self
+            .anthropic_base_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("llm_egress.anthropic_base_url is required"))?;
+        crate::url_validation::validate_collector_url(
+            base,
+            crate::url_validation::PrivatePolicy::AllowLoopback,
+        )
+        .map_err(|reason| {
+            anyhow::anyhow!("llm_egress.anthropic_base_url is not allowed: {reason}")
+        })?;
+        for (name, value) in &self.headers {
+            validate_egress_header_name(name)?;
+            if value.is_empty() || value.chars().any(|c| c.is_control()) {
+                anyhow::bail!("llm_egress header '{name}' has an empty or invalid value");
+            }
+        }
+        if let Some(name) = &self.project_header {
+            validate_egress_header_name(name)?;
+        }
+        for (key, value) in &self.claude_env {
+            if !crate::consts::LLM_EGRESS_LOCKABLE_ENV.contains(&key.as_str()) {
+                anyhow::bail!(
+                    "llm_egress.claude_env cannot lock '{key}': only model selection is lockable"
+                );
+            }
+            if value.chars().any(|c| c.is_control()) {
+                anyhow::bail!("llm_egress.claude_env '{key}' has an invalid value");
+            }
+        }
+        if let Some(pem) = &self.ca_certs {
+            if pem_certificates(pem).is_empty() {
+                anyhow::bail!("llm_egress.ca_certs holds no PEM certificate");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for ManagedLlmEgressConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedLlmEgressConfig")
+            .field("anthropic_base_url", &self.anthropic_base_url)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("project_header", &self.project_header)
+            .field("claude_env", &self.claude_env.keys().collect::<Vec<_>>())
+            .field("ca_certs", &self.ca_pem().is_some())
+            .finish()
+    }
+}
+
+fn validate_egress_header_name(name: &str) -> anyhow::Result<()> {
+    let token = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    let lower = name.to_ascii_lowercase();
+    if !token
+        || crate::consts::LLM_EGRESS_RESERVED_HEADERS.contains(&lower.as_str())
+        || lower == crate::compose::PROXY_CALLER_AUTH_HEADER
+        || lower.starts_with("proxy-")
+    {
+        anyhow::bail!("llm_egress cannot set the header '{name}'");
+    }
+    Ok(())
+}
+
+/// The DER of every certificate in a PEM text.
+pub fn pem_certificates(pem: &str) -> Vec<Vec<u8>> {
+    use base64::Engine as _;
+    let mut out = Vec::new();
+    let mut body: Option<String> = None;
+    for line in pem.lines().map(str::trim) {
+        match line {
+            "-----BEGIN CERTIFICATE-----" => body = Some(String::new()),
+            "-----END CERTIFICATE-----" => {
+                if let Some(der) = body
+                    .take()
+                    .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+                    .filter(|d| d.first() == Some(&0x30))
+                {
+                    out.push(der);
+                }
+            }
+            l => {
+                if let Some(b) = body.as_mut() {
+                    b.push_str(l);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 struct LegacyCategoryFlags {
@@ -1401,6 +1538,23 @@ pub fn check_telemetry_policy_at_boot() -> anyhow::Result<()> {
     check_telemetry_policy(user.telemetry.as_ref(), managed.as_ref())
 }
 
+/// Whether claude must carry the managed-settings mount: MDM locks telemetry or routes the AI.
+pub fn managed_settings_required(telemetry: &ResolvedTelemetry) -> bool {
+    telemetry.any_locked
+        || matches!(
+            crate::managed_config::load_managed_config(),
+            Ok(Some(ref m)) if m.llm_egress.is_some()
+        )
+}
+
+/// Global boot gate for the `llm_egress` block (ADR-090): an invalid one hard-stops startup.
+pub fn check_llm_egress_policy_at_boot() -> anyhow::Result<()> {
+    match crate::managed_config::load_managed_config()?.and_then(|m| m.llm_egress) {
+        Some(egress) => egress.validate(),
+        None => Ok(()),
+    }
+}
+
 /// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct SpeedwaveUserConfig {
@@ -1519,18 +1673,22 @@ pub(crate) fn resolve_project_config_in_with_load(
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     match managed_load {
         Ok(managed) => {
-            let (managed_telemetry, managed_pii_policy) = match managed {
-                Some(m) => (m.telemetry, m.pii_policy),
-                None => (None, None),
+            let (managed_telemetry, managed_pii_policy, egress_locked) = match managed {
+                Some(m) => (m.telemetry, m.pii_policy, m.llm_egress.is_some()),
+                None => (None, None, false),
             };
-            resolve_project_config_in_with_managed(
+            let (mut claude, integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
                 user_config,
                 project_name,
                 managed_telemetry.as_ref(),
                 managed_pii_policy.as_ref(),
-            )
+            );
+            if egress_locked {
+                lock_llm_to_policy(&mut claude.llm);
+            }
+            (claude, integrations)
         }
         Err(e) => {
             let (mut claude, integrations) = resolve_project_config_in_with_managed(
@@ -1791,6 +1949,34 @@ fn load_repo_config_logged(project_dir: &Path) -> Option<ProjectRepoConfig> {
             None
         }
     }
+}
+
+/// Under an `llm_egress` policy only the Anthropic route exists, through the proxy, with no
+/// model chosen on the machine.
+pub fn lock_llm_to_policy(llm: &mut LlmConfig) {
+    llm.set_active_to_anthropic();
+    llm.providers.retain(|p| p.kind.is_anthropic());
+    if let Some(active) = llm.active.as_mut() {
+        active.model = None;
+    }
+    for p in llm.providers.iter_mut() {
+        p.model = None;
+    }
+    llm.model = None;
+    llm.proxy_enabled = None;
+}
+
+/// Selects the Anthropic route for a project that names no provider; true when it changed.
+pub fn adopt_policy_provider(user_config: &mut SpeedwaveUserConfig, project: &str) -> bool {
+    let Some(entry) = user_config.find_project_mut(project) else {
+        return false;
+    };
+    let claude = entry.claude.get_or_insert_with(Default::default);
+    let llm = claude.llm.get_or_insert_with(Default::default);
+    if !llm.is_unconfigured() {
+        return false;
+    }
+    llm.set_active_to_anthropic()
 }
 
 /// Loads the user config from `~/.speedwave/config.json`.
@@ -6876,5 +7062,163 @@ mod plugin_order_tests {
             new_key.exists(),
             "the legacy key must be copied to the new llm token path"
         );
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
+mod policy_provider_tests {
+    use super::*;
+
+    fn cfg() -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: "/tmp/p".into(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            active_project: Some("p".into()),
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        }
+    }
+
+    #[test]
+    fn the_policy_locks_the_route_to_anthropic_and_drops_other_providers() {
+        let mut llm = LlmConfig::default();
+        llm.providers.push(LlmProviderEntry {
+            id: "openrouter".into(),
+            kind: LlmProviderKind::OpenRouter,
+            base_url: None,
+            model: Some("x".into()),
+            has_api_key: true,
+            context_tokens: None,
+            has_custom_headers: false,
+        });
+        llm.active = Some(LlmActive {
+            provider_id: "openrouter".into(),
+            model: Some("x".into()),
+        });
+        llm.proxy_enabled = Some(false);
+        lock_llm_to_policy(&mut llm);
+        assert_eq!(
+            llm.proxy_enabled, None,
+            "the policy's route is always the proxy"
+        );
+        assert!(
+            llm.active.as_ref().and_then(|a| a.model.clone()).is_none(),
+            "the policy's default model applies"
+        );
+        assert!(llm.providers.iter().all(|p| p.kind.is_anthropic()));
+        assert!(matches!(
+            llm.active_provider().map(|e| e.kind),
+            Some(LlmProviderKind::AnthropicOauth)
+        ));
+    }
+
+    fn gateway() -> ManagedLlmEgressConfig {
+        ManagedLlmEgressConfig {
+            anthropic_base_url: Some("https://gateway.example/llm".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_valid_egress_policy_passes_the_boot_check() {
+        let mut e = gateway();
+        e.headers.insert("Authorization".into(), "Bearer k".into());
+        e.project_header = Some("X-Gateway-Project".into());
+        e.claude_env
+            .insert("ANTHROPIC_MODEL".into(), "claude-opus-5-5".into());
+        assert!(e.validate().is_ok());
+        let local = ManagedLlmEgressConfig {
+            anthropic_base_url: Some("http://host.docker.internal:30080/llm".into()),
+            ..Default::default()
+        };
+        assert!(local.validate().is_ok());
+    }
+
+    #[test]
+    fn an_egress_policy_the_proxy_could_not_apply_is_rejected() {
+        assert!(ManagedLlmEgressConfig::default().validate().is_err());
+        for url in [
+            "ftp://gateway.example",
+            "https://user:pw@gateway.example",
+            "http://localhost:1",
+        ] {
+            let e = ManagedLlmEgressConfig {
+                anthropic_base_url: Some(url.into()),
+                ..Default::default()
+            };
+            assert!(e.validate().is_err(), "{url}");
+        }
+        for name in [
+            "Host",
+            "Content-Length",
+            "x-speedwave-proxy-auth",
+            "Proxy-Authorization",
+            "bad header",
+        ] {
+            let mut e = gateway();
+            e.headers.insert(name.into(), "v".into());
+            assert!(e.validate().is_err(), "{name}");
+        }
+        let mut e = gateway();
+        e.headers.insert("x-gateway-key".into(), "a\nb".into());
+        assert!(e.validate().is_err());
+        for key in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "NODE_OPTIONS",
+            "CLAUDE_CODE_USE_BEDROCK",
+        ] {
+            let mut e = gateway();
+            e.claude_env.insert(key.into(), "x".into());
+            assert!(e.validate().is_err(), "{key}");
+        }
+        let e = ManagedLlmEgressConfig {
+            ca_certs: Some("not a certificate".into()),
+            ..gateway()
+        };
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn the_egress_policy_never_prints_header_values() {
+        let mut e = gateway();
+        e.headers
+            .insert("x-gateway-key".into(), "secret-value".into());
+        let printed = format!("{e:?}");
+        assert!(printed.contains("x-gateway-key") && !printed.contains("secret-value"));
+    }
+
+    #[test]
+    fn a_project_without_a_provider_adopts_anthropic_under_the_policy() {
+        let mut c = cfg();
+        assert!(adopt_policy_provider(&mut c, "p"));
+        let llm = c
+            .find_project("p")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert!(!llm.is_unconfigured());
+        assert!(matches!(
+            llm.active_provider().map(|e| e.kind),
+            Some(LlmProviderKind::AnthropicOauth)
+        ));
+        assert!(!adopt_policy_provider(&mut c, "p"));
+        assert!(!adopt_policy_provider(&mut c, "missing"));
     }
 }

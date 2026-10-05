@@ -1271,6 +1271,23 @@ impl SecurityCheck {
                 remediation: "Re-render compose so the managed-settings.json mount is applied.",
             });
         }
+        let ca_target = format!("/etc/claude-code/{}", crate::consts::GATEWAY_CA_FILE);
+        let ca_source = to_engine_path(&crate::claude_managed::gateway_ca_path(data_dir, project));
+        for vol in &vols {
+            let Some(s) = vol.as_str() else { continue };
+            if let Some((host, mode)) = extract_volume_for_target(s, &ca_target) {
+                if mode.as_deref() != Some("ro") || ca_source.as_deref().ok() != Some(host.as_str())
+                {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ManagedSettingsMount,
+                        message: format!("gateway CA mount must be :ro from the managed dir: {s}"),
+                        remediation:
+                            "The gateway CA must come read-only from <data_dir>/claude-managed/<project>/.",
+                    });
+                }
+            }
+        }
         violations
     }
 
@@ -1535,6 +1552,7 @@ impl SecurityCheck {
             .unwrap_or_default();
         let expected = expected_paths.project_engine_path();
         let managed_target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
+        let gateway_ca_target = format!("/etc/claude-code/{}", crate::consts::GATEWAY_CA_FILE);
         let claude_home_suffix = format!("/{}/{project}", crate::consts::CLAUDE_HOME_SUBDIR);
         let usage_suffix = format!("/usage/{project}/proxy");
         let fixed_targets: [(&str, &str, &str); 4] = [
@@ -1593,7 +1611,7 @@ impl SecurityCheck {
                 ));
                 continue;
             }
-            if target == managed_target {
+            if target == managed_target || target == gateway_ca_target {
                 continue;
             }
             if let Some((_, suffix, want_mode)) =
@@ -2288,6 +2306,23 @@ mod tests {
     }
 
     #[test]
+    fn gateway_ca_mount_is_read_only_from_the_managed_dir() {
+        let data_dir = std::path::Path::new("/data");
+        let src = to_engine_path(&crate::claude_managed::gateway_ca_path(data_dir, "p")).unwrap();
+        let ok = claude_doc_with_volume(&format!("{src}:/etc/claude-code/gateway-ca.pem:ro"));
+        assert!(SecurityCheck::check_claude_managed_settings(&ok, data_dir, "p", false).is_empty());
+        let rw = claude_doc_with_volume(&format!("{src}:/etc/claude-code/gateway-ca.pem:rw"));
+        assert!(
+            !SecurityCheck::check_claude_managed_settings(&rw, data_dir, "p", false).is_empty()
+        );
+        let elsewhere = claude_doc_with_volume("/tmp/ca.pem:/etc/claude-code/gateway-ca.pem:ro");
+        assert!(
+            !SecurityCheck::check_claude_managed_settings(&elsewhere, data_dir, "p", false)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn managed_settings_wrong_source_fails() {
         let data_dir = std::path::Path::new("/data");
         let bad = to_engine_path(
@@ -2554,6 +2589,8 @@ mod tests {
     fn claude_full_renderer_volume_set_passes() {
         let data_dir = std::path::Path::new("/host/.speedwave");
         let managed = managed_source(data_dir, "p");
+        let gateway_ca =
+            to_engine_path(&crate::claude_managed::gateway_ca_path(data_dir, "p")).unwrap();
         let plugin_resources = plugin_resources_source(data_dir, "figma");
         let yaml = format!(
             "services:\n  claude:\n    volumes:\n      \
@@ -2563,6 +2600,7 @@ mod tests {
              - /host/.speedwave/ide-bridge:/home/speedwave/.claude/ide:ro\n      \
              - /host/.speedwave/usage/p/proxy:/usage:ro\n      \
              - {managed}:/etc/claude-code/managed-settings.json:ro\n      \
+             - {gateway_ca}:/etc/claude-code/gateway-ca.pem:ro\n      \
              - {plugin_resources}:/speedwave/plugins/figma:ro\n"
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -2572,6 +2610,8 @@ mod tests {
             v.is_empty(),
             "the renderer's own claude volume set must pass, got: {v:?}"
         );
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(v.is_empty(), "{v:?}");
     }
 
     #[test]

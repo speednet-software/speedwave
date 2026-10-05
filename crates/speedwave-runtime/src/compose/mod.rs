@@ -336,11 +336,16 @@ pub fn render_compose_in(
 
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
-    if resolved_config.telemetry.any_locked {
+    let egress = crate::managed_config::load_managed_config()?.and_then(|m| m.llm_egress);
+    if let Some(e) = &egress {
+        e.validate()?;
+    }
+    if resolved_config.telemetry.any_locked || egress.is_some() {
         crate::claude_managed::write_managed_settings(
             data_dir,
             project_name,
             &resolved_config.telemetry,
+            egress.as_ref(),
         )?;
         let src = crate::claude_managed::managed_settings_path(data_dir, project_name);
         let mount = format!(
@@ -352,8 +357,21 @@ pub fn render_compose_in(
         add_claude_volume(&mut doc, &mount)?;
         yaml = serde_yaml_ng::to_string(&doc)?;
     }
+    yaml = apply_gateway_ca(
+        &yaml,
+        data_dir,
+        project_name,
+        egress.as_ref().and_then(|e| e.ca_pem()),
+    )?;
 
     yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
+    if egress.is_some() {
+        let env = std::collections::HashMap::from([(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            llm::NO_KEY_AUTH_TOKEN.to_string(),
+        )]);
+        yaml = inject_claude_env(&yaml, &env)?;
+    }
 
     if let Some(rt) = runtime {
         let enabled_ids = integrations.enabled_plugin_service_ids();
@@ -1045,6 +1063,24 @@ pub(crate) fn inject_env_into(
         Some(idx) => env_seq[idx] = serde_yaml_ng::Value::String(new_entry),
         None => env_seq.push(serde_yaml_ng::Value::String(new_entry)),
     }
+}
+
+/// Mounts the `llm_egress` gateway CA into claude `:ro` for `NODE_EXTRA_CA_CERTS`, or drops it.
+pub(crate) fn apply_gateway_ca(
+    yaml: &str,
+    data_dir: &Path,
+    project: &str,
+    pem: Option<&str>,
+) -> anyhow::Result<String> {
+    if !crate::claude_managed::write_gateway_ca(data_dir, project, pem)? {
+        return Ok(yaml.to_string());
+    }
+    let target = format!("/etc/claude-code/{}", crate::consts::GATEWAY_CA_FILE);
+    let src = crate::claude_managed::gateway_ca_path(data_dir, project);
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
+    add_claude_volume(&mut doc, &format!("{}:{target}:ro", to_engine_path(&src)?))?;
+    let env = std::collections::HashMap::from([("NODE_EXTRA_CA_CERTS".to_string(), target)]);
+    inject_claude_env(&serde_yaml_ng::to_string(&doc)?, &env)
 }
 
 pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> anyhow::Result<()> {
@@ -3967,6 +4003,24 @@ services:
         assert!(vols
             .iter()
             .any(|v| v.as_str() == Some("/src:/etc/claude-code/managed-settings.json:ro")));
+    }
+
+    #[test]
+    fn a_gateway_ca_is_mounted_read_only_and_trusted_by_claude_code() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = "services:\n  claude:\n    image: x\n    environment:\n    - PORT=4000\n";
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+        let out = apply_gateway_ca(yaml, data_dir.path(), "p", Some(pem)).unwrap();
+        let ca = crate::claude_managed::gateway_ca_path(data_dir.path(), "p");
+        assert_eq!(std::fs::read_to_string(&ca).unwrap(), pem);
+        assert!(out.contains("/etc/claude-code/gateway-ca.pem:ro"), "{out}");
+        assert!(
+            out.contains("NODE_EXTRA_CA_CERTS=/etc/claude-code/gateway-ca.pem"),
+            "{out}"
+        );
+        let out = apply_gateway_ca(yaml, data_dir.path(), "p", None).unwrap();
+        assert!(!ca.exists());
+        assert!(!out.contains("gateway-ca") && !out.contains("NODE_EXTRA_CA_CERTS"));
     }
 
     #[test]
