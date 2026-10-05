@@ -42,6 +42,7 @@ export default {
         'config',
         'native',
         'security',
+        'version',
       ],
     ],
     'scope-empty': [1, 'never'],
