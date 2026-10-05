@@ -1,3 +1,5 @@
+//! Build script: emits `SPEEDWAVE_VERSION` for the crate.
+
 use std::path::PathBuf;
 
 fn main() {
