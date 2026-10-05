@@ -70,14 +70,16 @@ extract_embedded_plist() {
     segedit "$bin" -extract __TEXT __info_plist "$out" 2>/dev/null
 }
 
-tauri_conf_version() {
-    local conf="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
-    if command -v jq >/dev/null 2>&1; then
-        jq -r '.version // empty' "$conf"
-        return 0
+expected_app_version() {
+    local version="${SPEEDWAVE_VERSION:-}"
+    if [ -z "$version" ]; then
+        version="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version -- version 2>/dev/null)"
     fi
-    grep -E '^[[:space:]]*"version"[[:space:]]*:' "$conf" | head -1 |
-        sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+    if [ -n "$version" ]; then
+        printf '%s\n' "$version"
+    else
+        printf '0.0.0\n'
+    fi
 }
 
 assert_plist_key() {
@@ -108,9 +110,8 @@ assert_plist_key() {
 
 @test "embedded plist carries the right identifier, executable and version" {
     require_built_binaries
-    local tauri_version svc bin tmp expected
-    tauri_version="$(tauri_conf_version)"
-    [ -n "$tauri_version" ] || skip "cannot read version from tauri.conf.json"
+    local expected_version svc bin tmp expected
+    expected_version="$(expected_app_version)"
     tmp="$BATS_TEST_TMPDIR/sw-plist"
     for svc in $SERVICES; do
         bin="$(resolve_binary "$svc")"
@@ -124,8 +125,8 @@ assert_plist_key() {
             return 1
         }
         assert_plist_key "$svc" "$tmp" CFBundleExecutable "$svc-cli" || return 1
-        assert_plist_key "$svc" "$tmp" CFBundleShortVersionString "$tauri_version" || {
-            echo "  Only scripts/build-native-macos.sh re-stamps this from tauri.conf.json." >&2
+        assert_plist_key "$svc" "$tmp" CFBundleShortVersionString "$expected_version" || {
+            echo "  Only scripts/build-native-macos.sh re-stamps this, from \$SPEEDWAVE_VERSION or the speedwave-version git resolver, never from tauri.conf.json." >&2
             return 1
         }
     done
