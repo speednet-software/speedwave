@@ -90,8 +90,8 @@ dev-config: guard-dev-instance
 	@printf 'DEV_INSTANCE=%s\n' '$(DEV_INSTANCE)'
 	@printf 'SPEEDWAVE_DATA_DIR=%s\n' '$(SPEEDWAVE_DATA_DIR)'
 	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
-	dev_tauri_config="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
-	printf 'TAURI_CONFIG=%s\n' "$$dev_tauri_config"
+	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
+	printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
 
 .PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
@@ -904,8 +904,8 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
-	dev_tauri_config="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
-	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$dev_tauri_config" cargo tauri dev --config "$$dev_tauri_config"
+	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
 endif
 
 status: guard-not-prod-data-dir
