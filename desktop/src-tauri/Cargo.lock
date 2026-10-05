@@ -5153,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-desktop"
-version = "0.20.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5178,6 +5178,7 @@ dependencies = [
  "serial_test",
  "speedwave-pii-engine",
  "speedwave-runtime",
+ "speedwave-version",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -5211,7 +5212,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-runtime"
-version = "0.20.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -5237,6 +5238,7 @@ dependencies = [
  "sha2 0.11.0",
  "shlex 2.0.1",
  "speedwave-pii-engine",
+ "speedwave-version",
  "strum",
  "strum_macros",
  "tempfile",
@@ -5248,6 +5250,13 @@ dependencies = [
  "whisper-rs",
  "windows-sys 0.61.2",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "speedwave-version"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
