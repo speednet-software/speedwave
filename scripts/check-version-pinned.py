@@ -112,7 +112,7 @@ def find_errors(root: pathlib.Path) -> list[str]:
         elif isinstance(entry, dict):
             errors.append(
                 f"unsupported extra-file type '{entry.get('type')}' for "
-                f"path '{entry.get('path')}' — extend "
+                f"path '{entry.get('path')}': extend "
                 f"check-version-pinned.py to cover it"
             )
     return errors

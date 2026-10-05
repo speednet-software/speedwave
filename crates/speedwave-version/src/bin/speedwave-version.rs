@@ -1,24 +1,13 @@
-//! CLI wrapper over `speedwave_version` — prints plain values for workflows.
-//!
-//! Subcommands:
-//! - `version [--repo PATH] [--branch NAME]` — the full version string
-//!   (`0.<M+1>.0+N` on a non-release branch, `0.M.Z` on `release/0.M`).
-//! - `msi-version [--repo PATH] [--branch NAME]` — the same version mapped to
-//!   the MSI-compatible `major.minor.patch.build` form.
-//! - `notes-range [--repo PATH] [--branch NAME]` — the stable notes range as
-//!   `since..until` on the first line, then one commit per line to skip.
-//! - `validate-promotion --candidate REV --new-minor M [--repo PATH]` —
-//!   exits non-zero when `REV` is an ancestor of the previous release line.
+//! CLI wrapper over `speedwave_version`: prints plain values for workflows.
+//! Subcommands: `version`, `notes-range`, `validate-promotion`.
 
-use speedwave_version::{
-    compute_version, msi_version, notes_range, reject_if_ancestor_of_previous_line,
-};
+use speedwave_version::{compute_version, notes_range, reject_if_ancestor_of_previous_line};
 use std::path::PathBuf;
 
 #[expect(
     clippy::print_stdout,
     clippy::print_stderr,
-    reason = "this bin's single output sink — plain values for shell callers"
+    reason = "this bin's single output sink: plain values for shell callers"
 )]
 fn emit(to_stderr: bool, line: &str) {
     if to_stderr {
@@ -63,13 +52,6 @@ fn run_version(args: &CommonArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn run_msi_version(args: &CommonArgs) -> Result<(), String> {
-    let v = compute_version(&args.repo, args.branch.as_deref()).map_err(|e| e.to_string())?;
-    let msi = msi_version(&v).map_err(|e| e.to_string())?;
-    emit(false, &msi);
-    Ok(())
-}
-
 fn run_notes_range(args: &CommonArgs) -> Result<(), String> {
     let range = notes_range(&args.repo, args.branch.as_deref()).map_err(|e| e.to_string())?;
     emit(false, &format!("{}..{}", range.since, range.until));
@@ -108,7 +90,7 @@ fn main() {
     let Some(command) = all.get(1).cloned() else {
         emit(
             true,
-            "usage: speedwave-version <version|msi-version|notes-range|validate-promotion> [--repo PATH] [--branch NAME]",
+            "usage: speedwave-version <version|notes-range|validate-promotion> [--repo PATH] [--branch NAME]",
         );
         std::process::exit(2);
     };
@@ -117,7 +99,6 @@ fn main() {
 
     let result = match command.as_str() {
         "version" => run_version(&common),
-        "msi-version" => run_msi_version(&common),
         "notes-range" => run_notes_range(&common),
         "validate-promotion" => run_validate_promotion(&common, rest),
         other => Err(format!("unknown subcommand '{other}'")),

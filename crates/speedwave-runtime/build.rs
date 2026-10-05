@@ -1,7 +1,3 @@
-//! Build script: emits `SPEEDWAVE_VERSION` for `env!("SPEEDWAVE_VERSION")` call
-//! sites (CI sets the env var; local builds fall back to a git-computed dev
-//! version; no git at all falls back to `0.0.0`).
-
 use std::path::PathBuf;
 
 fn main() {

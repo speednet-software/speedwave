@@ -130,9 +130,7 @@ jobs:
         run: |
           BRANCH="${{ github.head_ref || github.ref_name }}"
           APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --branch "$BRANCH")"
-          MSI_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version -- msi-version --branch "$BRANCH")"
           echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
-          echo "SPEEDWAVE_MSI_VERSION=$MSI_VERSION" >> "$GITHUB_ENV"
 
       - name: Prepare desktop bundle
         uses: ./.github/actions/prepare-desktop-bundle
@@ -151,9 +149,9 @@ jobs:
         run: |
           read -ra ARGS <<< "$MATRIX_ARGS"
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false,\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
+            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
           else
-            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
+            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\"}"
           fi
           npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
 

@@ -308,9 +308,8 @@ else
 endif
 	@"$(MAKE)" verify-bundled-assets
 	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
-	msi_version="$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- msi-version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)"; \
 	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" cargo tauri build \
-	  --config "{\"version\":\"$$app_version\",\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$$msi_version\"}}}}"
+	  --config "{\"version\":\"$$app_version\"}"
 	@echo "\n✅ Tauri production bundle built"
 
 build-native-macos:

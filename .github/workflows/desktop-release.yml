@@ -255,7 +255,7 @@ jobs:
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          echo "config={\"version\":\"$VERSION\",\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$VERSION\"}}}}" >> "$GITHUB_OUTPUT"
+          echo "config={\"version\":\"$VERSION\"}" >> "$GITHUB_OUTPUT"
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
         env:

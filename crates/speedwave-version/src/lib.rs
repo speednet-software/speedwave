@@ -1,12 +1,5 @@
-//! Computes Speedwave's app version from git state (SPEC: `notes/speed-674-release-process/SPEC.md`,
-//! section "Kanały, wersje i promocja").
-//!
-//! Dev builds get `0.<M+1>.0+N`: `M` is the highest minor among local and remote
-//! `release/0.*` branches (or `0` when none exist yet), `N` is
-//! `git rev-list --count HEAD`. Release-line builds (on a `release/0.M` branch)
-//! get `0.M.Z`: `Z` is the commit count on that branch since the line's stable
-//! release tag (`v0.M.0+<N>`, or the old pre-734 format `v0.M.0` with no build
-//! metadata).
+//! Computes Speedwave's app version from git state (`notes/speed-674-release-process/SPEC.md`).
+//! Dev builds: `0.<M+1>.0+N`. Release-line builds (`release/0.M`): `0.M.Z`.
 
 use std::path::Path;
 
@@ -37,7 +30,7 @@ pub enum VersionError {
     /// A promoted commit is an ancestor of the previous release line: the new
     /// stable would be older than the one already shipped.
     #[error(
-        "promoted commit {0} is an ancestor of the previous release line 0.{1} — \
+        "promoted commit {0} is an ancestor of the previous release line 0.{1}: \
          the new stable would be older than the existing one"
     )]
     PromotedCommitIsAncestorOfPreviousLine(String, u64),
@@ -45,9 +38,9 @@ pub enum VersionError {
     /// promotion or a notes range against).
     #[error("no release line exists before 0.{0}")]
     NoPreviousReleaseLine(u64),
-    /// The MSI numeric build field would exceed WiX's 65535 ceiling.
-    #[error("MSI build number {0} exceeds the 65535 ceiling")]
-    MsiBuildNumberTooLarge(u64),
+    /// The build/patch number would exceed WiX's 65535 MSI ceiling.
+    #[error("build number {0} exceeds the 65535 MSI ceiling")]
+    BuildNumberExceedsMsiLimit(u64),
 }
 
 /// A dev-build version: `0.<base_minor>.0+<build>`.
@@ -98,10 +91,8 @@ impl std::fmt::Display for ComputedVersion {
     }
 }
 
-/// The stable notes range for a promotion: commits from the previous release
-/// line's stable tag (exclusive) up to the promoted commit, plus the previous
-/// line's own hotfix commits (to pass as `--skip-commit` so a stable's notes
-/// never repeat a hotfix already published on the prior line).
+/// The stable notes range for a promotion: the previous release line's
+/// stable tag to the promoted commit, plus its own hotfix commits to skip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotesRange {
     /// The previous release line's stable tag (exclusive start of the range).
@@ -113,10 +104,7 @@ pub struct NotesRange {
 }
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String, VersionError> {
-    // SSOT-allow: speedwave-version is a standalone build-dependency crate with
-    // no path to speedwave-runtime's binary.rs spawn SSOT (that would create a
-    // build-dependency cycle); it shells out to `git` directly per the
-    // SPEED-734 decision to prefer shelling out over a git library.
+    // SSOT-allow: standalone build-dependency crate, no path to speedwave-runtime's spawn SSOT; shells out to git directly (SPEED-734).
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -138,7 +126,7 @@ fn run_git_is_ancestor(
     ancestor_of: &str,
 ) -> Result<bool, VersionError> {
     let args = ["merge-base", "--is-ancestor", candidate, ancestor_of];
-    // SSOT-allow: see run_git — same standalone-crate rationale.
+    // SSOT-allow: see run_git, same standalone-crate rationale.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -279,29 +267,36 @@ pub fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, VersionErr
     }
 }
 
+fn enforce_msi_build_limit(n: u64) -> Result<(), VersionError> {
+    if n > 65535 {
+        return Err(VersionError::BuildNumberExceedsMsiLimit(n));
+    }
+    Ok(())
+}
+
 /// Computes the dev-build version (`0.<M+1>.0+N`) for the repo's current
 /// state, regardless of which branch is checked out.
 pub fn compute_dev_version(repo: &Path) -> Result<DevVersion, VersionError> {
     let m = highest_release_minor(repo)?.unwrap_or(0);
     let build = rev_list_count(repo, "HEAD")?;
+    enforce_msi_build_limit(build)?;
     Ok(DevVersion {
         base_minor: m + 1,
         build,
     })
 }
 
-/// Computes the release-line version (`0.M.Z`) for the given minor, using the
-/// line's branch tip (`HEAD` is assumed to be that tip when called during a
-/// build on that branch).
+/// Computes the release-line version (`0.M.Z`) for the given minor; `HEAD`
+/// is assumed to be that line's branch tip.
 pub fn compute_release_version(repo: &Path, minor: u64) -> Result<ReleaseVersion, VersionError> {
     let tag = stable_tag_for_line(repo, minor)?;
     let patch = rev_list_count(repo, &format!("{tag}..HEAD"))?;
+    enforce_msi_build_limit(patch)?;
     Ok(ReleaseVersion { minor, patch })
 }
 
-/// Computes the version for the given branch (or the current branch when
-/// `branch` is `None`): dev-style off any branch that is not `release/0.*`,
-/// release-line style on `release/0.M`.
+/// Computes the version for the given branch (or current branch if `None`):
+/// dev-style off a non-release branch, release-line style on `release/0.M`.
 pub fn compute_version(repo: &Path, branch: Option<&str>) -> Result<ComputedVersion, VersionError> {
     ensure_git_repo(repo)?;
     let branch = resolve_branch(repo, branch)?;
@@ -322,30 +317,8 @@ pub fn resolve_version(repo: &Path, branch: Option<&str>) -> (String, Option<Ver
     }
 }
 
-/// Maps a computed version onto the MSI-compatible `major.minor.patch.build`
-/// form `bundle.windows.wix.version` in `tauri.conf.json` accepts (WiX:
-/// numeric fields, build/4th field capped at 65535).
-pub fn msi_version(version: &ComputedVersion) -> Result<String, VersionError> {
-    match version {
-        ComputedVersion::Dev(d) => {
-            if d.build > 65535 {
-                return Err(VersionError::MsiBuildNumberTooLarge(d.build));
-            }
-            Ok(format!("0.{}.0.{}", d.base_minor, d.build))
-        }
-        ComputedVersion::Release(r) => {
-            if r.patch > 65535 {
-                return Err(VersionError::MsiBuildNumberTooLarge(r.patch));
-            }
-            Ok(format!("0.{}.{}", r.minor, r.patch))
-        }
-    }
-}
-
-/// Refuses a promotion when `candidate` (the commit `release/0.<new_minor>`
-/// would be created at) is an ancestor of the previous release line's branch
-/// tip — the new stable would be older than the one already shipped. A
-/// first-ever line (no previous `release/0.*` branch) always succeeds.
+/// Refuses a promotion when `candidate` is an ancestor of the previous
+/// release line's tip; a first-ever line always succeeds.
 pub fn reject_if_ancestor_of_previous_line(
     repo: &Path,
     candidate: &str,
@@ -367,9 +340,7 @@ pub fn reject_if_ancestor_of_previous_line(
 }
 
 /// Computes the stable notes range for a promotion on the given
-/// `release/0.M` branch (or the current branch when `branch` is `None`):
-/// from the previous release line's stable tag to the promoted commit
-/// (`HEAD`), plus the previous line's own hotfix commits to skip.
+/// `release/0.M` branch: previous line's stable tag to `HEAD`, plus hotfixes.
 pub fn notes_range(repo: &Path, branch: Option<&str>) -> Result<NotesRange, VersionError> {
     ensure_git_repo(repo)?;
     let branch_name = resolve_branch(repo, branch)?;
@@ -616,31 +587,17 @@ mod tests {
     }
 
     #[test]
-    fn msi_version_maps_dev_build_into_the_fourth_numeric_field() {
-        let v = ComputedVersion::Dev(DevVersion {
-            base_minor: 22,
-            build: 111,
-        });
-        assert_eq!(msi_version(&v).expect("msi"), "0.22.0.111");
+    fn msi_build_limit_allows_65535() {
+        assert!(enforce_msi_build_limit(65535).is_ok());
     }
 
     #[test]
-    fn msi_version_maps_release_patch_without_a_fourth_field() {
-        let v = ComputedVersion::Release(ReleaseVersion {
-            minor: 21,
-            patch: 3,
-        });
-        assert_eq!(msi_version(&v).expect("msi"), "0.21.3");
-    }
-
-    #[test]
-    fn msi_version_errors_above_the_65535_ceiling() {
-        let v = ComputedVersion::Dev(DevVersion {
-            base_minor: 22,
-            build: 65536,
-        });
-        let err = msi_version(&v).unwrap_err();
-        assert!(matches!(err, VersionError::MsiBuildNumberTooLarge(65536)));
+    fn msi_build_limit_rejects_65536() {
+        let err = enforce_msi_build_limit(65536).unwrap_err();
+        assert!(matches!(
+            err,
+            VersionError::BuildNumberExceedsMsiLimit(65536)
+        ));
     }
 
     #[test]
