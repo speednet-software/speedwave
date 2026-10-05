@@ -29,20 +29,32 @@ if [[ -f "$TAURI_CONF" ]]; then
 fi
 echo "Stamping native CLI Info.plist files with version $APP_VERSION"
 
-stamp_info_plist() {
-  local plist="$1" key actual
-  if [[ ! -f "$plist" ]]; then
-    echo "Missing Info.plist: $plist (each CLI must have Resources/Info.plist for embedded plist)" >&2
+stage_info_plist() {
+  local src="$1" dest="$2" key actual
+  local keys=(CFBundleShortVersionString CFBundleVersion) sed_args=()
+  if [[ ! -f "$src" ]]; then
+    echo "Missing Info.plist: $src (each CLI must have Resources/Info.plist for embedded plist)" >&2
     exit 1
   fi
-  for key in CFBundleShortVersionString CFBundleVersion; do
-    sed -i '' -e "/<key>$key<\/key>/{" -e n \
-      -e "s|<string>[^<]*</string>|<string>$APP_VERSION</string>|" -e "}" "$plist"
-    actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>/dev/null || true)"
+  for key in "${keys[@]}"; do
+    sed_args+=(-e "/<key>$key<\/key>/,/<string>/s|<string>[^<]*</string>|<string>$APP_VERSION</string>|")
+  done
+  mkdir -p "$(dirname "$dest")"
+  sed "${sed_args[@]}" "$src" >"$dest"
+  for key in "${keys[@]}"; do
+    actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$dest" 2>/dev/null || true)"
     if [[ "$actual" != "$APP_VERSION" ]]; then
-      echo "Failed to stamp $key in $plist (found '$actual', wanted '$APP_VERSION')" >&2
+      echo "Failed to stamp $key in $dest (found '$actual', wanted '$APP_VERSION')" >&2
       exit 1
     fi
+  done
+}
+
+stage_all_info_plists() {
+  local pkg pkg_dir
+  for pkg in "${PACKAGES[@]}"; do
+    pkg_dir="$REPO_ROOT/native/macos/$pkg"
+    stage_info_plist "$pkg_dir/Resources/Info.plist" "$pkg_dir/.build/Info.plist"
   done
 }
 
@@ -69,11 +81,15 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   return 0
 fi
 
+stage_all_info_plists
+
+if [[ "${1:-}" == "--stage-only" ]]; then
+  exit 0
+fi
+
 for pkg in "${PACKAGES[@]}"; do
   pkg_dir="$REPO_ROOT/native/macos/$pkg"
   binary_name="${pkg}-cli"
-
-  stamp_info_plist "$pkg_dir/Resources/Info.plist"
 
   echo "Building $binary_name (${ARCH_LIST[*]})"
   (
