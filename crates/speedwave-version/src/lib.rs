@@ -828,9 +828,11 @@ mod tests {
         );
 
         let (git_dir, common_dir) = git_dir_paths(&worktree_dir).expect("resolved");
-        assert_eq!(common_dir, tmp.path().join(".git"));
-        assert!(git_dir.starts_with(tmp.path().join(".git").join("worktrees")));
-        assert_ne!(git_dir, common_dir);
+        let canonical = |p: &Path| std::fs::canonicalize(p).expect("canonicalize");
+        let main_git_dir = canonical(&tmp.path().join(".git"));
+        assert_eq!(canonical(&common_dir), main_git_dir);
+        assert!(canonical(&git_dir).starts_with(main_git_dir.join("worktrees")));
+        assert_ne!(canonical(&git_dir), canonical(&common_dir));
     }
 
     #[test]
