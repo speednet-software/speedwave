@@ -32,8 +32,7 @@ JSON
 @test "the bash parser is gone — the hook is a thin python3 call" {
   grep -qF "check-version-pinned.py" "$REPO_ROOT/scripts/check-staged-version-pin.sh"
   grep -qF -- "--staged" "$REPO_ROOT/scripts/check-staged-version-pin.sh"
-  ! grep -qF "extract_toml_version" "$REPO_ROOT/scripts/check-staged-version-pin.sh"
-  ! grep -qF "extract_generic_version" "$REPO_ROOT/scripts/check-staged-version-pin.sh"
+  ! grep -qE "extract_toml_version|extract_generic_version" "$REPO_ROOT/scripts/check-staged-version-pin.sh"
 }
 
 @test "hook passes when nothing is staged" {
