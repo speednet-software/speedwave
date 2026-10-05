@@ -21,6 +21,7 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import { eventValue } from '../../shared/dom-event';
 import { AuthTerminalComponent } from '../auth-terminal.component';
 import { OauthCompletionWatcher, type SignInDisplay } from './oauth-completion-watcher';
+import { AuditorPanelComponent } from './auditor-panel.component';
 import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
   DiscoveredModel,
@@ -123,13 +124,17 @@ function classifyDiscoveryFailure(msg: string): {
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  imports: [CommonModule, TooltipDirective, AuthTerminalComponent],
+  imports: [CommonModule, TooltipDirective, AuthTerminalComponent, AuditorPanelComponent],
   providers: [OauthCompletionWatcher],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
     <section id="section-llm-provider">
       <h2 class="view-title view-title-section text-[var(--ink)]">LLM providers</h2>
+
+      @if (lockedByPolicy()) {
+        <app-auditor-panel [project]="activeProject()" />
+      }
 
       @if (legacyMigrationProvider()) {
         <div
@@ -141,418 +146,427 @@ function classifyDiscoveryFailure(msg: string): {
         </div>
       }
 
-      <div
-        class="mt-4 rounded border"
-        [class]="
-          selectedTarget() === 'anthropic'
-            ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
-            : 'border-[var(--line)] bg-[var(--bg-1)]'
-        "
-      >
-        <button
-          type="button"
-          role="radio"
-          [attr.aria-checked]="selectedTarget() === 'anthropic'"
-          class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
-          [class]="
-            selectedTarget() === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
-          "
-          data-testid="settings-llm-provider-anthropic"
-          (click)="selectProvider('anthropic')"
-        >
-          <span>
-            {{ selectedTarget() === 'anthropic' ? '● ' : '○ ' }}anthropic
-            <span class="text-[10px] text-[var(--ink-mute)]"> · cloud</span>
-          </span>
-          <span class="flex items-center gap-2" data-testid="auth-status-row">
-            @if (apiKeyConfigured() || oauthAuthenticated()) {
-              <span class="pill green" data-testid="auth-status-value">● connected</span>
-              <span class="pill green" data-testid="auth-status-method">{{
-                apiKeyConfigured() ? 'api key' : 'oauth'
-              }}</span>
-            } @else if (oauthSignIn() === 'pending') {
-              <span class="pill" data-testid="auth-status-value">checking sign-in…</span>
-            } @else if (oauthSignIn() === 'saved_unverified') {
-              <span class="pill" data-testid="auth-status-value">saved sign-in · not verified</span>
-            } @else {
-              <span class="pill amber" data-testid="auth-status-value">not configured</span>
-            }
-          </span>
-        </button>
-
-        @if (selectedTarget() === 'anthropic') {
-          <div class="border-t border-[var(--line)] px-3 py-3">
-            <div
-              class="flex overflow-hidden rounded border border-[var(--line)]"
-              role="radiogroup"
-              aria-label="Authentication method"
-            >
-              <button
-                type="button"
-                role="radio"
-                [attr.aria-checked]="authMethod() === 'oauth'"
-                class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
-                [class]="
-                  authMethod() === 'oauth'
-                    ? 'bg-[var(--bg-2)] text-[var(--ink)]'
-                    : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
-                "
-                data-testid="settings-auth-method-oauth"
-                (click)="authMethod.set('oauth')"
-              >
-                subscription (oauth · claude.ai)
-              </button>
-              <button
-                type="button"
-                role="radio"
-                [attr.aria-checked]="authMethod() === 'api_key'"
-                class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
-                [class]="
-                  authMethod() === 'api_key'
-                    ? 'bg-[var(--bg-2)] text-[var(--ink)]'
-                    : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
-                "
-                data-testid="settings-auth-method-api-key"
-                (click)="authMethod.set('api_key')"
-              >
-                api key
-              </button>
-            </div>
-
-            @if (authMethod() === 'api_key') {
-              <div class="mt-3">
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="api-key-input"
-                  >anthropic_api_key</label
-                >
-                <input
-                  id="api-key-input"
-                  type="password"
-                  autocomplete="off"
-                  spellcheck="false"
-                  [value]="anthropicApiKeyInput()"
-                  (input)="anthropicApiKeyInput.set(inputValue($event))"
-                  placeholder="sk-ant-..."
-                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  data-testid="settings-api-key"
-                />
-              </div>
-              <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                  data-testid="settings-api-key-save"
-                  (click)="saveAnthropicApiKey()"
-                  [disabled]="anthropicApiKeySaving() || !anthropicApiKeyInput()"
-                >
-                  {{ anthropicApiKeySaving() ? 'saving...' : 'save key' }}
-                </button>
-                <button
-                  type="button"
-                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
-                  data-testid="settings-api-key-remove"
-                  (click)="deleteAnthropicApiKey()"
-                  [disabled]="!apiKeyConfigured()"
-                >
-                  remove key
-                </button>
-                @if (anthropicApiKeySaved()) {
-                  <span class="mono text-[11px] text-[var(--green)]">saved!</span>
-                }
-              </div>
-            }
-            @if (authMethod() === 'oauth' && activeProject(); as project) {
-              @if (anthropicSignInUsable()) {
-                <div class="mt-3 flex items-center gap-3">
-                  <button
-                    type="button"
-                    class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                    data-testid="settings-oauth-logout"
-                    [disabled]="loggingOut()"
-                    (click)="anthropicLogout(project)"
-                  >
-                    {{ loggingOut() ? 'logging out...' : 'log out' }}
-                  </button>
-                  <span class="text-[11.5px] text-[var(--ink-dim)]"
-                    >Removes this project's Anthropic credentials.</span
-                  >
-                </div>
-              } @else if (oauthSignIn() !== 'pending') {
-                <div class="mt-3">
-                  <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
-                </div>
-              }
-            }
-
-            <div class="mt-3">
-              <p class="mono text-[11px] text-[var(--ink-mute)]">
-                Choose the model in the chat window — use the model selector in the composer.
-              </p>
-            </div>
-          </div>
-        }
-      </div>
-
-      <div
-        class="mt-2 rounded border"
-        [class]="
-          selectedTarget() === 'local'
-            ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
-            : 'border-[var(--line)] bg-[var(--bg-1)]'
-        "
-      >
-        <button
-          type="button"
-          role="radio"
-          [attr.aria-checked]="selectedTarget() === 'local'"
-          class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
-          [class]="selectedTarget() === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'"
-          data-testid="settings-llm-provider-local"
-          (click)="selectProvider('local')"
-        >
-          <span>
-            {{ selectedTarget() === 'local' ? '● ' : '○ ' }}local
-            <span class="text-[10px] text-[var(--ink-mute)]"> · own server</span>
-          </span>
-          @if (selectedTarget() !== 'local' && baseUrlByProviderView()) {
-            <span class="mono text-[10px] text-[var(--ink-mute)]">{{
-              baseUrlByProviderView()
-            }}</span>
-          }
-        </button>
-
-        @if (selectedTarget() === 'local') {
-          <div class="border-t border-[var(--line)] px-3 py-3">
-            <!-- Order: base_url → api_key → discover → model (only after a
-                 successful discover or a saved model) → advanced. -->
-            <div>
-              <label
-                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                for="llm-base-url"
-                >base_url</label
-              >
-              <input
-                id="llm-base-url"
-                type="text"
-                [value]="baseUrl()"
-                (input)="onBaseUrlInput(inputValue($event))"
-                [placeholder]="defaultBaseUrl()"
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                data-testid="settings-llm-base-url"
-              />
-            </div>
-
-            <!-- Bearer for servers requiring auth; on a load-balanced cluster
-                 a unique per-user value also pins session stickiness. -->
-            <div class="mt-3">
-              <label
-                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                for="llm-api-key"
-                >api_key (optional)</label
-              >
-              <input
-                id="llm-api-key"
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                [value]="apiKey()"
-                (input)="onApiKeyInput(inputValue($event))"
-                [placeholder]="
-                  hasApiKey()
-                    ? '••••• (key saved — type to replace, clear to remove)'
-                    : 'Bearer token (e.g. sk-…)'
-                "
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                data-testid="settings-llm-api-key"
-              />
-            </div>
-
-            <button
-              type="button"
-              data-testid="settings-llm-refresh"
-              class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-              [disabled]="discoveryState().kind === 'in-flight'"
-              (click)="discoverModels(true)"
-              appTooltip="Test the connection to this server (models list + Messages API)"
-              placement="top"
-            >
-              @if (discoveryState().kind === 'in-flight') {
-                &#8635; testing connection...
-              } @else {
-                &#8635; test connection
-              }
-            </button>
-
-            @let discovery = discoveryState();
-            @if (discovery.kind === 'failed') {
-              <p
-                class="mono mt-1 text-[11px] text-[var(--amber)]"
-                [attr.data-testid]="
-                  discovery.reason === 'messages-endpoint'
-                    ? 'settings-llm-messages-endpoint-warning'
-                    : 'settings-llm-discovery-error'
-                "
-              >
-                {{ discoveryFailureMessage() }} Fix the connection to save.
-              </p>
-            }
-            @if (discovery.kind === 'in-flight') {
-              <p
-                class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
-                data-testid="settings-llm-discovering"
-              >
-                Probing {{ discovery.url }}...
-              </p>
-            }
-
-            @if (discovery.kind === 'ready') {
-              <p
-                class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
-                data-testid="settings-llm-test-success"
-              >
-                Server OK · {{ discovery.models.length }} models · Messages API OK · new sessions
-                start on {{ localStartModel(discovery.models) }} until you pick one in chat
-              </p>
-            }
-
-            <details class="mt-3">
-              <summary
-                class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-              >
-                advanced
-              </summary>
-              <div class="mt-2">
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="llm-custom-headers"
-                  >custom_headers</label
-                >
-                <textarea
-                  id="llm-custom-headers"
-                  rows="3"
-                  spellcheck="false"
-                  [value]="customHeaders()"
-                  (input)="onCustomHeadersInput(inputValue($event))"
-                  [placeholder]="
-                    hasCustomHeaders()
-                      ? '••••• (saved — type to replace, clear to remove)'
-                      : 'X-Tenant-ID: foo'
-                  "
-                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  data-testid="settings-llm-custom-headers"
-                ></textarea>
-                <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
-                  One header per line, <code>Name: Value</code>. Cannot set Authorization. Sessions
-                  with custom headers bypass the proxy (no usage tracking).
-                </p>
-              </div>
-            </details>
-          </div>
-        }
-      </div>
-
-      @for (entry of extraProviders(); track entry.id) {
+      @if (!lockedByPolicy()) {
         <div
-          class="mt-2 rounded border"
+          class="mt-4 rounded border"
           [class]="
-            selectedTarget() === entry.id
+            selectedTarget() === 'anthropic'
               ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
               : 'border-[var(--line)] bg-[var(--bg-1)]'
           "
-          [attr.data-testid]="'settings-llm-extra-' + entry.id"
         >
           <button
             type="button"
             role="radio"
-            [attr.aria-checked]="selectedTarget() === entry.id"
-            class="mono flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium"
+            [attr.aria-checked]="selectedTarget() === 'anthropic'"
+            class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
             [class]="
-              selectedTarget() === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+              selectedTarget() === 'anthropic' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
             "
-            [attr.data-testid]="'settings-llm-extra-select-' + entry.id"
-            (click)="onExtraHeaderClick(entry)"
+            data-testid="settings-llm-provider-anthropic"
+            (click)="selectProvider('anthropic')"
           >
-            {{ selectedTarget() === entry.id ? '●' : '○' }} {{ entry.id }}
-            <span class="text-[10px] text-[var(--ink-mute)]"> · openrouter </span>
+            <span>
+              {{ selectedTarget() === 'anthropic' ? '● ' : '○ ' }}anthropic
+              <span class="text-[10px] text-[var(--ink-mute)]"> · cloud</span>
+            </span>
+            <span class="flex items-center gap-2" data-testid="auth-status-row">
+              @if (apiKeyConfigured() || oauthAuthenticated()) {
+                <span class="pill green" data-testid="auth-status-value">● connected</span>
+                <span class="pill green" data-testid="auth-status-method">{{
+                  apiKeyConfigured() ? 'api key' : 'oauth'
+                }}</span>
+              } @else if (oauthSignIn() === 'pending') {
+                <span class="pill" data-testid="auth-status-value">checking sign-in…</span>
+              } @else if (oauthSignIn() === 'saved_unverified') {
+                <span class="pill" data-testid="auth-status-value"
+                  >saved sign-in · not verified</span
+                >
+              } @else {
+                <span class="pill amber" data-testid="auth-status-value">not configured</span>
+              }
+            </span>
           </button>
-          @if (expandedExtraId === entry.id) {
-            <!-- Order: api_key → discover → model (only after catalog loads),
-                 matching the local card. -->
+
+          @if (selectedTarget() === 'anthropic') {
             <div class="border-t border-[var(--line)] px-3 py-3">
-              <label
-                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                [attr.for]="'extra-key-' + entry.id"
-                >api_key</label
+              <div
+                class="flex overflow-hidden rounded border border-[var(--line)]"
+                role="radiogroup"
+                aria-label="Authentication method"
               >
-              <input
-                [id]="'extra-key-' + entry.id"
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                [value]="entry.keyInput"
-                (input)="onExtraKeyInput(entry, inputValue($event))"
-                [placeholder]="
-                  entry.hasKey ? '••••• (key saved — type to replace, clear to remove)' : 'api key'
-                "
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
-              />
-
-              <button
-                type="button"
-                class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                [disabled]="entry.discovering || !canDiscoverExtra(entry)"
-                (click)="discoverExtraModels(entry)"
-                [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
-              >
-                {{ entry.discovering ? '↻ testing connection...' : '↻ test connection' }}
-              </button>
-
-              @if (entry.discoverError) {
-                <p
-                  class="mono mt-1 text-[11px] text-[var(--amber)]"
-                  [attr.data-testid]="'settings-llm-extra-discovery-error-' + entry.id"
+                <button
+                  type="button"
+                  role="radio"
+                  [attr.aria-checked]="authMethod() === 'oauth'"
+                  class="mono flex-1 border-r border-[var(--line)] px-3 py-2 text-[11px] transition-colors"
+                  [class]="
+                    authMethod() === 'oauth'
+                      ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                      : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+                  "
+                  data-testid="settings-auth-method-oauth"
+                  (click)="authMethod.set('oauth')"
                 >
-                  {{ extraDiscoveryErrorMessage(entry) }} Fix the connection to save.
-                </p>
+                  subscription (oauth · claude.ai)
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  [attr.aria-checked]="authMethod() === 'api_key'"
+                  class="mono flex-1 px-3 py-2 text-[11px] transition-colors"
+                  [class]="
+                    authMethod() === 'api_key'
+                      ? 'bg-[var(--bg-2)] text-[var(--ink)]'
+                      : 'text-[var(--ink-mute)] hover:text-[var(--ink)]'
+                  "
+                  data-testid="settings-auth-method-api-key"
+                  (click)="authMethod.set('api_key')"
+                >
+                  api key
+                </button>
+              </div>
+
+              @if (authMethod() === 'api_key') {
+                <div class="mt-3">
+                  <label
+                    class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    for="api-key-input"
+                    >anthropic_api_key</label
+                  >
+                  <input
+                    id="api-key-input"
+                    type="password"
+                    autocomplete="off"
+                    spellcheck="false"
+                    [value]="anthropicApiKeyInput()"
+                    (input)="anthropicApiKeyInput.set(inputValue($event))"
+                    placeholder="sk-ant-..."
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    data-testid="settings-api-key"
+                  />
+                </div>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                    data-testid="settings-api-key-save"
+                    (click)="saveAnthropicApiKey()"
+                    [disabled]="anthropicApiKeySaving() || !anthropicApiKeyInput()"
+                  >
+                    {{ anthropicApiKeySaving() ? 'saving...' : 'save key' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+                    data-testid="settings-api-key-remove"
+                    (click)="deleteAnthropicApiKey()"
+                    [disabled]="!apiKeyConfigured()"
+                  >
+                    remove key
+                  </button>
+                  @if (anthropicApiKeySaved()) {
+                    <span class="mono text-[11px] text-[var(--green)]">saved!</span>
+                  }
+                </div>
+              }
+              @if (authMethod() === 'oauth' && activeProject(); as project) {
+                @if (anthropicSignInUsable()) {
+                  <div class="mt-3 flex items-center gap-3">
+                    <button
+                      type="button"
+                      class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                      data-testid="settings-oauth-logout"
+                      [disabled]="loggingOut()"
+                      (click)="anthropicLogout(project)"
+                    >
+                      {{ loggingOut() ? 'logging out...' : 'log out' }}
+                    </button>
+                    <span class="text-[11.5px] text-[var(--ink-dim)]"
+                      >Removes this project's Anthropic credentials.</span
+                    >
+                  </div>
+                } @else if (oauthSignIn() !== 'pending') {
+                  <div class="mt-3">
+                    <app-auth-terminal [project]="project" (done)="onOAuthDone($event)" />
+                  </div>
+                }
               }
 
-              @if (entry.lastTest?.passed) {
-                <p
-                  class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
-                  [attr.data-testid]="'settings-llm-extra-test-success-' + entry.id"
-                >
-                  Key OK · new sessions start on {{ extraStartModel(entry) }} until you pick one in
-                  chat
+              <div class="mt-3">
+                <p class="mono text-[11px] text-[var(--ink-mute)]">
+                  Choose the model in the chat window — use the model selector in the composer.
                 </p>
-              }
+              </div>
             </div>
           }
         </div>
-      }
 
-      <div class="mt-4 flex items-center gap-3">
-        <button
-          type="button"
-          class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          data-testid="settings-llm-save"
-          (click)="saveConfig()"
-          [disabled]="saving() || !canSave()"
+        <div
+          class="mt-2 rounded border"
+          [class]="
+            selectedTarget() === 'local'
+              ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+              : 'border-[var(--line)] bg-[var(--bg-1)]'
+          "
         >
-          {{ saving() ? 'saving...' : 'save' }}
-        </button>
-        @if (saved()) {
-          <span class="mono text-[11px] text-[var(--green)]" data-testid="settings-llm-saved"
-            >saved!</span
+          <button
+            type="button"
+            role="radio"
+            [attr.aria-checked]="selectedTarget() === 'local'"
+            class="mono flex w-full items-center justify-between px-3 py-2 text-left text-[11px] font-medium"
+            [class]="
+              selectedTarget() === 'local' ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+            "
+            data-testid="settings-llm-provider-local"
+            (click)="selectProvider('local')"
           >
+            <span>
+              {{ selectedTarget() === 'local' ? '● ' : '○ ' }}local
+              <span class="text-[10px] text-[var(--ink-mute)]"> · own server</span>
+            </span>
+            @if (selectedTarget() !== 'local' && baseUrlByProviderView()) {
+              <span class="mono text-[10px] text-[var(--ink-mute)]">{{
+                baseUrlByProviderView()
+              }}</span>
+            }
+          </button>
+
+          @if (selectedTarget() === 'local') {
+            <div class="border-t border-[var(--line)] px-3 py-3">
+              <!-- Order: base_url → api_key → discover → model (only after a
+                 successful discover or a saved model) → advanced. -->
+              <div>
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-base-url"
+                  >base_url</label
+                >
+                <input
+                  id="llm-base-url"
+                  type="text"
+                  [value]="baseUrl()"
+                  (input)="onBaseUrlInput(inputValue($event))"
+                  [placeholder]="defaultBaseUrl()"
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-llm-base-url"
+                />
+              </div>
+
+              <!-- Bearer for servers requiring auth; on a load-balanced cluster
+                 a unique per-user value also pins session stickiness. -->
+              <div class="mt-3">
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  for="llm-api-key"
+                  >api_key (optional)</label
+                >
+                <input
+                  id="llm-api-key"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  [value]="apiKey()"
+                  (input)="onApiKeyInput(inputValue($event))"
+                  [placeholder]="
+                    hasApiKey()
+                      ? '••••• (key saved — type to replace, clear to remove)'
+                      : 'Bearer token (e.g. sk-…)'
+                  "
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  data-testid="settings-llm-api-key"
+                />
+              </div>
+
+              <button
+                type="button"
+                data-testid="settings-llm-refresh"
+                class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                [disabled]="discoveryState().kind === 'in-flight'"
+                (click)="discoverModels(true)"
+                appTooltip="Test the connection to this server (models list + Messages API)"
+                placement="top"
+              >
+                @if (discoveryState().kind === 'in-flight') {
+                  &#8635; testing connection...
+                } @else {
+                  &#8635; test connection
+                }
+              </button>
+
+              @let discovery = discoveryState();
+              @if (discovery.kind === 'failed') {
+                <p
+                  class="mono mt-1 text-[11px] text-[var(--amber)]"
+                  [attr.data-testid]="
+                    discovery.reason === 'messages-endpoint'
+                      ? 'settings-llm-messages-endpoint-warning'
+                      : 'settings-llm-discovery-error'
+                  "
+                >
+                  {{ discoveryFailureMessage() }} Fix the connection to save.
+                </p>
+              }
+              @if (discovery.kind === 'in-flight') {
+                <p
+                  class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
+                  data-testid="settings-llm-discovering"
+                >
+                  Probing {{ discovery.url }}...
+                </p>
+              }
+
+              @if (discovery.kind === 'ready') {
+                <p
+                  class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
+                  data-testid="settings-llm-test-success"
+                >
+                  Server OK · {{ discovery.models.length }} models · Messages API OK · new sessions
+                  start on {{ localStartModel(discovery.models) }} until you pick one in chat
+                </p>
+              }
+
+              <details class="mt-3">
+                <summary
+                  class="mono cursor-pointer text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                >
+                  advanced
+                </summary>
+                <div class="mt-2">
+                  <label
+                    class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                    for="llm-custom-headers"
+                    >custom_headers</label
+                  >
+                  <textarea
+                    id="llm-custom-headers"
+                    rows="3"
+                    spellcheck="false"
+                    [value]="customHeaders()"
+                    (input)="onCustomHeadersInput(inputValue($event))"
+                    [placeholder]="
+                      hasCustomHeaders()
+                        ? '••••• (saved — type to replace, clear to remove)'
+                        : 'X-Tenant-ID: foo'
+                    "
+                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                    data-testid="settings-llm-custom-headers"
+                  ></textarea>
+                  <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]">
+                    One header per line, <code>Name: Value</code>. Cannot set Authorization.
+                    Sessions with custom headers bypass the proxy (no usage tracking).
+                  </p>
+                </div>
+              </details>
+            </div>
+          }
+        </div>
+
+        @for (entry of extraProviders(); track entry.id) {
+          <div
+            class="mt-2 rounded border"
+            [class]="
+              selectedTarget() === entry.id
+                ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
+                : 'border-[var(--line)] bg-[var(--bg-1)]'
+            "
+            [attr.data-testid]="'settings-llm-extra-' + entry.id"
+          >
+            <button
+              type="button"
+              role="radio"
+              [attr.aria-checked]="selectedTarget() === entry.id"
+              class="mono flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-medium"
+              [class]="
+                selectedTarget() === entry.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
+              "
+              [attr.data-testid]="'settings-llm-extra-select-' + entry.id"
+              (click)="onExtraHeaderClick(entry)"
+            >
+              {{ selectedTarget() === entry.id ? '●' : '○' }} {{ entry.id }}
+              <span class="text-[10px] text-[var(--ink-mute)]"> · openrouter </span>
+            </button>
+            @if (expandedExtraId === entry.id) {
+              <!-- Order: api_key → discover → model (only after catalog loads),
+                 matching the local card. -->
+              <div class="border-t border-[var(--line)] px-3 py-3">
+                <label
+                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                  [attr.for]="'extra-key-' + entry.id"
+                  >api_key</label
+                >
+                <input
+                  [id]="'extra-key-' + entry.id"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  [value]="entry.keyInput"
+                  (input)="onExtraKeyInput(entry, inputValue($event))"
+                  [placeholder]="
+                    entry.hasKey
+                      ? '••••• (key saved — type to replace, clear to remove)'
+                      : 'api key'
+                  "
+                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
+                  [attr.data-testid]="'settings-llm-extra-key-' + entry.id"
+                />
+
+                <button
+                  type="button"
+                  class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                  [disabled]="entry.discovering || !canDiscoverExtra(entry)"
+                  (click)="discoverExtraModels(entry)"
+                  [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
+                >
+                  {{ entry.discovering ? '↻ testing connection...' : '↻ test connection' }}
+                </button>
+
+                @if (entry.discoverError) {
+                  <p
+                    class="mono mt-1 text-[11px] text-[var(--amber)]"
+                    [attr.data-testid]="'settings-llm-extra-discovery-error-' + entry.id"
+                  >
+                    {{ extraDiscoveryErrorMessage(entry) }} Fix the connection to save.
+                  </p>
+                }
+
+                @if (entry.lastTest?.passed) {
+                  <p
+                    class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
+                    [attr.data-testid]="'settings-llm-extra-test-success-' + entry.id"
+                  >
+                    Key OK · new sessions start on {{ extraStartModel(entry) }} until you pick one
+                    in chat
+                  </p>
+                }
+              </div>
+            }
+          </div>
         }
-      </div>
+
+        <div class="mt-4 flex items-center gap-3">
+          <button
+            type="button"
+            class="mono rounded bg-[var(--accent)] px-3 py-1 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+            data-testid="settings-llm-save"
+            (click)="saveConfig()"
+            [disabled]="saving() || !canSave()"
+          >
+            {{ saving() ? 'saving...' : 'save' }}
+          </button>
+          @if (saved()) {
+            <span class="mono text-[11px] text-[var(--green)]" data-testid="settings-llm-saved"
+              >saved!</span
+            >
+          }
+        </div>
+      }
     </section>
   `,
 })
 export class LlmProviderComponent implements OnInit, OnDestroy {
   provider = signal<FlatProviderId>('anthropic');
+  lockedByPolicy = signal(false);
   model = signal('');
   baseUrl = signal('');
   defaultBaseUrl = signal('');
@@ -707,6 +721,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param id - the clicked provider card id
    */
   async selectProvider(id: ProviderCardId): Promise<void> {
+    if (this.lockedByPolicy()) {
+      return;
+    }
     this.selectedTarget.set(id);
     if (this.provider() === id) return;
     this.provider.set(id);
@@ -1182,6 +1199,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Save is allowed only when the active non-anthropic provider has a model AND the user has actually changed something since load/last save. */
   protected readonly canSave = computed<boolean>(() => {
+    if (this.lockedByPolicy()) {
+      return false;
+    }
     if (!this.isDirty()) return false;
     const target = this.effectiveTarget();
     if (target === 'anthropic') return this.anthropicSignInUsable() || this.apiKeyConfigured();
@@ -1453,6 +1473,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         provider !== 'anthropic' ? (config.context_tokens ?? null) : null;
       this.hasApiKey.set(!!config.has_api_key);
       this.hasCustomHeaders.set(!!config.has_custom_headers);
+      this.lockedByPolicy.set(!!config.locked_by_policy);
       this.lastKnownProvider = provider;
       if (provider !== 'anthropic' && defaultBaseUrl) {
         this.defaultBaseUrlsByProvider[provider] = defaultBaseUrl;

@@ -69,6 +69,9 @@ pub(crate) fn invalidate_sign_in_verdict(project: &str) {
 #[tauri::command]
 pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
     check_project(&project)?;
+    if crate::containers_cmd::llm_locked_by_policy() {
+        return Err(crate::containers_cmd::LLM_LOCKED_MSG.to_string());
+    }
     if api_key.len() > crate::types::MAX_CREDENTIAL_BYTES {
         return Err("API key too long".to_string());
     }
@@ -86,6 +89,9 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<(), String
 #[tauri::command]
 pub async fn delete_api_key(project: String) -> Result<(), String> {
     check_project(&project)?;
+    if crate::containers_cmd::llm_locked_by_policy() {
+        return Err(crate::containers_cmd::LLM_LOCKED_MSG.to_string());
+    }
     tokio::task::spawn_blocking(move || {
         log::info!("deleting API key for project {project}");
         auth::delete_api_key(&project).map_err(|e| {
@@ -100,6 +106,9 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn anthropic_logout(project: String) -> Result<(), String> {
     check_project(&project)?;
+    if crate::containers_cmd::llm_locked_by_policy() {
+        return Err(crate::containers_cmd::LLM_LOCKED_MSG.to_string());
+    }
     tokio::task::spawn_blocking(move || {
         log::info!("logging out of Anthropic for project {project}");
         invalidate_sign_in_verdict(&project);
@@ -317,6 +326,9 @@ fn ensure_cli_installed_at(install: &std::path::Path) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
+    if crate::containers_cmd::llm_locked_by_policy() {
+        return Err(crate::containers_cmd::LLM_LOCKED_MSG.to_string());
+    }
     tokio::task::spawn_blocking(move || {
         log::info!("building auth command for project {project}");
         let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;

@@ -132,11 +132,16 @@ fn set_model_pin_inner(
     session_arc: &SharedChatSession,
 ) -> Result<(), String> {
     let project_name = resolve_project_name(project_id)?;
+    crate::auditor_cmd::check_model_allowed(&project_name, model)?;
+    let mut listed = picker_wire_ids(session_arc, &project_name);
+    if crate::containers_cmd::llm_locked_by_policy() {
+        listed.extend(crate::auditor_cmd::allowed_models(&project_name).unwrap_or_default());
+    }
     claude_settings::set_model_pin(
         speedwave_runtime::consts::data_dir(),
         &project_name,
         model,
-        &picker_wire_ids(session_arc, &project_name),
+        &listed,
     )
 }
 

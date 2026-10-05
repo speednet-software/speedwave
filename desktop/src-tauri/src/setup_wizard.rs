@@ -256,7 +256,9 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Vec::new()
     });
     let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(speedwave_runtime::config::managed_settings_required(
+            &resolved.telemetry,
+        ));
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {

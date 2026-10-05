@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod auditor_cmd;
 mod auth;
 mod auth_commands;
 mod bridges;
@@ -864,6 +865,15 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
+            if let Err(e) = speedwave_runtime::config::check_llm_egress_policy_at_boot() {
+                let body = format!(
+                    "Speedwave could not apply the organization AI route policy.\n\n{e}\n\n\
+                     Contact your administrator to correct the managed configuration."
+                );
+                log::error!("AI route policy check failed: {}", e);
+                show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
+            }
+
             if let Err(e) = speedwave_runtime::pii_policy::check_pii_policy_at_boot() {
                 let body = format!(
                     "Speedwave could not apply the organization PII policy.\n\n{e}\n\n\
@@ -1233,6 +1243,7 @@ fn main() {
             update_commands::set_update_settings,
             update_commands::get_bundle_reconcile_state,
             ui_prefs_cmd::get_beta_enabled,
+            auditor_cmd::get_auditor_status,
             export_diagnostics,
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,
