@@ -328,7 +328,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
       - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash

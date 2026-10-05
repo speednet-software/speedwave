@@ -104,3 +104,24 @@ _makefile_check_clippy_cargo_lines() {
         return 1
     fi
 }
+
+_workspace_rust_members() {
+    awk '
+        /^members = \[/ { in_members=1; next }
+        in_members && /^\]/ { exit }
+        in_members { gsub(/[ \t",]/, ""); sub(/^crates\//, ""); if ($0 != "") print }
+    ' "$REPO_ROOT/Cargo.toml" | grep -v '^pii-engine'
+}
+
+@test "every native workspace crate is tested, linted and coverage-gated" {
+    test_line="$(_makefile_test_rust_cargo_line)"
+    clippy_lines="$(_makefile_check_clippy_cargo_lines)"
+    coverage_line="$(grep -E '^[[:space:]]+cargo llvm-cov .*--fail-under-lines' "$MAKEFILE")"
+    members="$(_workspace_rust_members)"
+    [ -n "$members" ]
+    for crate in $members; do
+        [[ "$test_line" == *"-p $crate "* ]] || { echo "make test-rust misses $crate"; return 1; }
+        [[ "$clippy_lines" == *"-p $crate "* ]] || { echo "make check-clippy misses $crate"; return 1; }
+        [[ "$coverage_line" == *"-p $crate "* ]] || { echo "make coverage-rust misses $crate"; return 1; }
+    done
+}

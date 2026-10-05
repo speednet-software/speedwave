@@ -395,7 +395,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -432,7 +432,7 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -502,7 +502,7 @@ coverage: coverage-rust coverage-mcp coverage-angular
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -515,7 +515,7 @@ coverage-angular:
 
 coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --html --output-dir target/coverage/rust
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --html --output-dir target/coverage/rust
 	cd mcp-servers && $(NPM) run test:coverage
 	"$(MAKE)" coverage-angular
 	@echo "\n✅ Coverage reports generated:"
@@ -674,7 +674,7 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
@@ -757,7 +757,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
@@ -910,9 +910,9 @@ endif
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
-	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
+	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="
 	@cd mcp-servers && $(NPM) test 2>&1 | grep -E "Tests|Test Files" | tail -2 || true
 	@echo "\n=== Angular ==="
