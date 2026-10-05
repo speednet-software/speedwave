@@ -150,7 +150,6 @@ jobs:
           MATRIX_ARGS: ${{ matrix.args }}
         run: |
           read -ra ARGS <<< "$MATRIX_ARGS"
-          WIX_VERSION="{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false,\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
           else
