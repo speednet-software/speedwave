@@ -157,7 +157,7 @@ assert_plist_key() {
     for svc in $SERVICES; do
         plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
         if [ ! -f "$plist" ]; then
-            echo "Missing $plist — required by Package.swift linker -sectcreate flag" >&2
+            echo "Missing $plist — source of the .build/Info.plist copy that Package.swift links with -sectcreate" >&2
             return 1
         fi
     done
@@ -170,7 +170,7 @@ assert_plist_key() {
         [ -f "$pkg" ] || { echo "Missing $pkg" >&2; return 1; }
         if ! grep -q -- "-sectcreate" "$pkg" \
             || ! grep -q "__info_plist" "$pkg" \
-            || ! grep -q "Resources/Info.plist" "$pkg"; then
+            || ! grep -q ".build/Info.plist" "$pkg"; then
             echo "$pkg is missing -sectcreate __TEXT __info_plist linker flags" >&2
             return 1
         fi

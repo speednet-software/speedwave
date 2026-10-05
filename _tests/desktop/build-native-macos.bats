@@ -25,62 +25,90 @@ plist_fixture() {
     cp "$SPW_ROOT/native/macos/calendar/Resources/Info.plist" "$1"
 }
 
-@test "stamping rewrites both version keys" {
-    local plist="$BATS_TEST_TMPDIR/Info.plist"
-    plist_fixture "$plist"
-    stamp_info_plist "$plist"
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "9.9.9" ]
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "9.9.9" ]
+staged_fixture_repo() {
+    local root="$1" pkg
+    mkdir -p "$root/scripts" "$root/desktop/src-tauri"
+    cp -p "$SCRIPT" "$root/scripts/"
+    cp "$SPW_ROOT/.gitignore" "$root/"
+    printf '{\n  "version": "9.9.9"\n}\n' >"$root/desktop/src-tauri/tauri.conf.json"
+    for pkg in $SPW_PACKAGES; do
+        mkdir -p "$root/native/macos/$pkg/Resources"
+        cp "$SPW_ROOT/native/macos/$pkg/Resources/Info.plist" "$root/native/macos/$pkg/Resources/"
+    done
+    git -C "$root" init -q
+    git -C "$root" add -A
+    git -C "$root" -c user.name=t -c user.email=t@t commit -qm fixture
 }
 
-@test "stamping keeps the release-please marker on both version lines" {
-    local plist="$BATS_TEST_TMPDIR/Info.plist" markers
-    plist_fixture "$plist"
-    stamp_info_plist "$plist"
-    markers="$(grep -c 'x-release-please-version' "$plist" | tr -d ' ')"
-    if [ "$markers" != "2" ]; then
-        echo "expected 2 x-release-please-version markers after stamping, found $markers" >&2
-        echo "  release-please bumps these plists through the markers; without them it silently stops." >&2
-        return 1
-    fi
-    grep -qE '<string>9\.9\.9</string> <!-- x-release-please-version -->' "$plist"
+@test "staging writes both version keys into the copy" {
+    local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
+    plist_fixture "$src"
+    stage_info_plist "$src" "$dest"
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$dest")" = "9.9.9" ]
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$dest")" = "9.9.9" ]
 }
 
-@test "stamping leaves every other key untouched" {
-    local plist="$BATS_TEST_TMPDIR/Info.plist" before after
-    plist_fixture "$plist"
-    before="$(grep -vc 'x-release-please-version' "$plist" | tr -d ' ')"
-    stamp_info_plist "$plist"
-    after="$(grep -vc 'x-release-please-version' "$plist" | tr -d ' ')"
-    [ "$before" = "$after" ]
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "pl.speedwave.desktop.calendar" ]
+@test "staging leaves the source plist byte-identical" {
+    local src="$BATS_TEST_TMPDIR/Info.plist" before
+    plist_fixture "$src"
+    before="$(cat "$src")"
+    stage_info_plist "$src" "$BATS_TEST_TMPDIR/.build/Info.plist"
+    [ "$before" = "$(cat "$src")" ]
 }
 
-@test "stamping is idempotent" {
-    local plist="$BATS_TEST_TMPDIR/Info.plist" once
-    plist_fixture "$plist"
-    stamp_info_plist "$plist"
-    once="$(cat "$plist")"
-    stamp_info_plist "$plist"
-    [ "$once" = "$(cat "$plist")" ]
+@test "staging leaves every other line untouched" {
+    local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
+    plist_fixture "$src"
+    stage_info_plist "$src" "$dest"
+    diff <(grep -v 'x-release-please-version' "$src") <(grep -v 'x-release-please-version' "$dest")
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$dest")" = "pl.speedwave.desktop.calendar" ]
 }
 
-@test "stamping fails loudly when a version key is absent" {
-    local plist="$BATS_TEST_TMPDIR/Info.plist"
-    python3 - "$plist" <<'PY'
+@test "staging is idempotent" {
+    local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist" once
+    plist_fixture "$src"
+    stage_info_plist "$src" "$dest"
+    once="$(cat "$dest")"
+    stage_info_plist "$src" "$dest"
+    [ "$once" = "$(cat "$dest")" ]
+}
+
+@test "staging fails loudly when a version key is absent" {
+    local src="$BATS_TEST_TMPDIR/Info.plist"
+    python3 - "$src" <<'PY'
 import plistlib, sys
 with open(sys.argv[1], "wb") as f:
     plistlib.dump({"CFBundleIdentifier": "pl.speedwave.desktop.calendar"}, f)
 PY
-    run stamp_info_plist "$plist"
+    run stage_info_plist "$src" "$BATS_TEST_TMPDIR/.build/Info.plist"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Failed to stamp CFBundleShortVersionString"* ]]
 }
 
-@test "stamping fails loudly when the plist is missing" {
-    run stamp_info_plist "$BATS_TEST_TMPDIR/absent.plist"
+@test "staging fails loudly when the source plist is missing" {
+    run stage_info_plist "$BATS_TEST_TMPDIR/absent.plist" "$BATS_TEST_TMPDIR/.build/Info.plist"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Missing Info.plist"* ]]
+}
+
+@test "--stage-only stamps every package copy and leaves git status clean" {
+    assert_package_list
+    local root="$BATS_TEST_TMPDIR/repo" pkg dirty
+    staged_fixture_repo "$root"
+    run "$root/scripts/build-native-macos.sh" --stage-only
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    dirty="$(git -C "$root" status --porcelain)"
+    if [ -n "$dirty" ]; then
+        echo "a build step wrote to tracked files:" >&2
+        echo "$dirty" >&2
+        return 1
+    fi
+    for pkg in $SPW_PACKAGES; do
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$root/native/macos/$pkg/.build/Info.plist")" = "9.9.9" ] || {
+            echo "$pkg/.build/Info.plist was not stamped with 9.9.9" >&2
+            return 1
+        }
+    done
 }
 
 @test "every committed CLI plist carries both markers" {
