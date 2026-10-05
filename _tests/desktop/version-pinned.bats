@@ -2,7 +2,7 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 FIXTURES="$REPO_ROOT/_tests/desktop/fixtures/version-consistency"
-SCRIPT="$REPO_ROOT/scripts/check-version-consistency.py"
+SCRIPT="$REPO_ROOT/scripts/check-version-pinned.py"
 
 _write_toml_config() {
   local dest="$1" path="$2"
@@ -50,13 +50,13 @@ JSON
 }
 
 
-@test "all version files match .release-please-manifest.json (real repo)" {
+@test "real repo passes once every tracked file is pinned to 0.0.0" {
   run python3 "$SCRIPT" "$REPO_ROOT"
   [ "$status" -eq 0 ]
 }
 
 
-@test "Cargo.toml version mismatch detected" {
+@test "Cargo.toml version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
 
@@ -69,10 +69,11 @@ JSON
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Cargo.toml" ]]
+  [[ "$output" =~ "not pinned to 0.0.0" ]]
 }
 
 
-@test "package.json version mismatch detected" {
+@test "package.json version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
 
@@ -85,6 +86,7 @@ JSON
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "package.json" ]]
+  [[ "$output" =~ "not pinned to 0.0.0" ]]
 }
 
 
@@ -119,14 +121,14 @@ JSON
 }
 
 
-@test "generic plist matching version passes" {
+@test "generic plist pinned to 0.0.0 passes" {
   local fixture_root
   fixture_root="$(mktemp -d)"
 
   cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
   _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
   mkdir -p "$fixture_root/native/macos/x/Resources"
-  printf '<string>9.9.9</string> <!-- x-release-please-version -->\n' \
+  printf '<string>0.0.0</string> <!-- x-release-please-version -->\n' \
     > "$fixture_root/native/macos/x/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
@@ -134,7 +136,7 @@ JSON
   [ "$status" -eq 0 ]
 }
 
-@test "generic plist mismatched version detected" {
+@test "generic plist version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
 
@@ -148,6 +150,7 @@ JSON
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Info.plist" ]]
+  [[ "$output" =~ "not pinned to 0.0.0" ]]
 }
 
 @test "generic plist missing marker detected" {
@@ -166,20 +169,20 @@ JSON
   [[ "$output" =~ "marker" ]]
 }
 
-@test "generic plist superstring version detected (exact match)" {
+@test "generic plist superstring of 0.0.0 detected (exact match)" {
   local fixture_root
   fixture_root="$(mktemp -d)"
 
   cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
   _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
   mkdir -p "$fixture_root/native/macos/x/Resources"
-  printf '<string>19.9.9</string> <!-- x-release-please-version -->\n' \
+  printf '<string>10.0.0</string> <!-- x-release-please-version -->\n' \
     > "$fixture_root/native/macos/x/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "19.9.9" ]]
+  [[ "$output" =~ "10.0.0" ]]
 }
 
 
@@ -227,4 +230,19 @@ JSON
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "unsupported extra-file type" ]]
+}
+
+
+@test "manifest root version not pinned to 0.0.0 detected" {
+  local fixture_root
+  fixture_root="$(mktemp -d)"
+
+  printf '{".": "9.9.9"}\n' > "$fixture_root/.release-please-manifest.json"
+  printf '{"packages":{".":{"extra-files":[]}}}\n' > "$fixture_root/release-please-config.json"
+
+  run python3 "$SCRIPT" "$fixture_root"
+  rm -rf "$fixture_root"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ ".release-please-manifest.json" ]]
+  [[ "$output" =~ "not pinned to 0.0.0" ]]
 }

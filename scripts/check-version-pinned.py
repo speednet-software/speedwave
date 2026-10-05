@@ -5,6 +5,8 @@ import pathlib
 import re
 import sys
 
+PINNED_VERSION = "0.0.0"
+
 
 def _load_json(path: pathlib.Path) -> dict:
     if not path.exists():
@@ -16,17 +18,25 @@ def _load_json(path: pathlib.Path) -> dict:
 
 
 def find_errors(root: pathlib.Path) -> list[str]:
-    manifest = _load_json(root / ".release-please-manifest.json")
+    manifest_path = root / ".release-please-manifest.json"
+    manifest = _load_json(manifest_path)
     if "." not in manifest:
-        sys.exit(".release-please-manifest.json: missing '.' root-package key")
-    expected = manifest["."]
+        sys.exit(f"{manifest_path}: missing '.' root-package key")
+
+    errors: list[str] = []
+    manifest_version = manifest["."]
+    if manifest_version != PINNED_VERSION:
+        errors.append(
+            f"{manifest_path}: root package version '{manifest_version}' "
+            f"is not pinned to {PINNED_VERSION}"
+        )
+
     config = _load_json(root / "release-please-config.json")
     try:
         extra_files = config["packages"]["."]["extra-files"]
     except KeyError as e:
         sys.exit(f"release-please-config.json: missing key {e}")
 
-    errors: list[str] = []
     for entry in extra_files:
         if isinstance(entry, str):
             path = root / entry
@@ -36,9 +46,9 @@ def find_errors(root: pathlib.Path) -> list[str]:
                 errors.append(f"{path}: failed to parse JSON: {e}")
                 continue
             actual = data.get("version", "")
-            if actual != expected:
+            if actual != PINNED_VERSION:
                 errors.append(
-                    f"{path}: version '{actual}' != manifest '{expected}'"
+                    f"{path}: version '{actual}' is not pinned to {PINNED_VERSION}"
                 )
         elif isinstance(entry, dict) and entry.get("type") == "toml":
             pattern = entry["path"]
@@ -66,9 +76,9 @@ def find_errors(root: pathlib.Path) -> list[str]:
                 if not actual:
                     errors.append(f"{toml_path}: empty version string")
                     continue
-                if actual != expected:
+                if actual != PINNED_VERSION:
                     errors.append(
-                        f"{toml_path}: version '{actual}' != manifest '{expected}'"
+                        f"{toml_path}: version '{actual}' is not pinned to {PINNED_VERSION}"
                     )
         elif isinstance(entry, dict) and entry.get("type") == "generic":
             path = root / entry["path"]
@@ -95,15 +105,15 @@ def find_errors(root: pathlib.Path) -> list[str]:
                     )
                     continue
                 actual = m.group(1)
-                if actual != expected:
+                if actual != PINNED_VERSION:
                     errors.append(
-                        f"{path}: version '{actual}' != manifest '{expected}'"
+                        f"{path}: version '{actual}' is not pinned to {PINNED_VERSION}"
                     )
         elif isinstance(entry, dict):
             errors.append(
                 f"unsupported extra-file type '{entry.get('type')}' for "
                 f"path '{entry.get('path')}' — extend "
-                f"check-version-consistency.py to cover it"
+                f"check-version-pinned.py to cover it"
             )
     return errors
 
