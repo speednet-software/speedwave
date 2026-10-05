@@ -51,7 +51,7 @@ pub(crate) fn build_hardened_client(
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(DEFAULT_REQUEST_TIMEOUT)
-        .user_agent(format!("Speedwave-Desktop/{}", env!("CARGO_PKG_VERSION")));
+        .user_agent(format!("Speedwave-Desktop/{}", env!("SPEEDWAVE_VERSION")));
     if let Some(headers) = default_headers {
         builder = builder.default_headers(headers);
     }

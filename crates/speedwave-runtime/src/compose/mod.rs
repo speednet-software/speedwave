@@ -11719,7 +11719,7 @@ services:
         let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
         let env = get_service_env_seq(&doc, &plugin::derive_compose_name("verplug"));
-        let expected = format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"));
+        let expected = format!("SPEEDWAVE_VERSION={}", env!("SPEEDWAVE_VERSION"));
         assert!(
             env.iter().any(|v| v == &expected),
             "plugin service must receive the app version. Got: {env:?}"

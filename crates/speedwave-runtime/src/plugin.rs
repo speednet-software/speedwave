@@ -875,10 +875,10 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
             e
         )
     })?;
-    let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| {
+    let current_version = semver::Version::parse(env!("SPEEDWAVE_VERSION")).map_err(|e| {
         anyhow::anyhow!(
-            "internal: CARGO_PKG_VERSION '{}' is not valid semver: {}",
-            env!("CARGO_PKG_VERSION"),
+            "internal: SPEEDWAVE_VERSION '{}' is not valid semver: {}",
+            env!("SPEEDWAVE_VERSION"),
             e
         )
     })?;
@@ -2591,7 +2591,7 @@ pub fn generate_plugin_service(
 
     let mut env_lines = format!(
         "  - PORT={port}\n  - SPEEDWAVE_VERSION={}",
-        env!("CARGO_PKG_VERSION")
+        env!("SPEEDWAVE_VERSION")
     );
     if let Some(ref extra) = manifest.extra_env {
         for (k, v) in extra {
@@ -3216,7 +3216,7 @@ mod tests {
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         assert!(yaml.contains("PORT=3000"), "PORT env: {yaml}");
         assert!(
-            yaml.contains(&format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"))),
+            yaml.contains(&format!("SPEEDWAVE_VERSION={}", env!("SPEEDWAVE_VERSION"))),
             "SPEEDWAVE_VERSION env: {yaml}"
         );
         assert!(
@@ -8549,19 +8549,19 @@ mod tests {
 
     #[test]
     fn test_compat_exact_current_version_matches() {
-        let range = format!("={}", env!("CARGO_PKG_VERSION"));
+        let range = format!("={}", env!("SPEEDWAVE_VERSION"));
         assert!(validate_speedwave_compat(Some(&range)).is_ok());
     }
 
     #[test]
     fn test_compat_lower_bound_current_version_matches() {
-        let range = format!(">={}", env!("CARGO_PKG_VERSION"));
+        let range = format!(">={}", env!("SPEEDWAVE_VERSION"));
         assert!(validate_speedwave_compat(Some(&range)).is_ok());
     }
 
     #[test]
     fn test_compat_current_major_minor_range_matches() {
-        let v = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let v = semver::Version::parse(env!("SPEEDWAVE_VERSION")).unwrap();
         let next_major = v.major + 1;
         let range = format!(">={}.{}, <{}", v.major, v.minor, next_major);
         assert!(validate_speedwave_compat(Some(&range)).is_ok());
@@ -8599,7 +8599,7 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains(">=99.0.0"));
-        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
+        assert!(msg.contains(env!("SPEEDWAVE_VERSION")));
     }
 
     #[test]
@@ -8608,7 +8608,7 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("<0.1"));
-        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
+        assert!(msg.contains(env!("SPEEDWAVE_VERSION")));
     }
 
     #[test]
@@ -8648,7 +8648,7 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_accepts_compatible_compat() {
-        let range = format!(">={}", env!("CARGO_PKG_VERSION"));
+        let range = format!(">={}", env!("SPEEDWAVE_VERSION"));
         let manifest = minimal_resource_only_manifest(Some(range));
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());

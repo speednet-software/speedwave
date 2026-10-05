@@ -252,7 +252,7 @@ fn maybe_print_update_hint() {
         return;
     }
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = env!("SPEEDWAVE_VERSION");
 
     if let Some(cache) = read_update_cache() {
         let elapsed = now_secs().saturating_sub(cache.last_check);
@@ -320,7 +320,7 @@ fn run_self_update() -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to locate current binary: {e}"))?;
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = env!("SPEEDWAVE_VERSION");
     out!("Current version: {}", current);
     out!("Checking for updates...");
 
@@ -501,7 +501,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if action == CliAction::Version {
-        out!("speedwave {}", env!("CARGO_PKG_VERSION"));
+        out!("speedwave {}", env!("SPEEDWAVE_VERSION"));
         std::process::exit(0);
     }
 

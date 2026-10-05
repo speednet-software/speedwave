@@ -40,8 +40,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         allow_stubs,
     )?;
 
+    let version = std::env::var("SPEEDWAVE_VERSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let (version, warning) = speedwave_version::resolve_version(&repo_root, None);
+            if let Some(e) = warning {
+                println!(
+                    "cargo:warning=SPEEDWAVE_VERSION not set and could not compute from git ({e}); defaulting to 0.0.0"
+                );
+            }
+            version
+        });
+    println!("cargo:rustc-env=SPEEDWAVE_VERSION={version}");
+    println!("cargo:rerun-if-env-changed=SPEEDWAVE_VERSION");
+
     let manifest = speedwave_runtime::bundle::generate_bundle_manifest(
-        env!("CARGO_PKG_VERSION"),
+        &version,
         speedwave_runtime::defaults::CLAUDE_VERSION,
         &hash_root,
     )?;

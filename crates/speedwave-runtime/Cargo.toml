@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-runtime"
-version = "0.20.0"
+version = "0.0.0"
 edition = "2021"
 publish = false
 description = "Container runtime abstraction for Speedwave (Lima on macOS, WSL2 on Windows)"
@@ -75,6 +75,9 @@ mcp-os-bundle-e2e = []
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 mockito = "1"
 serial_test = "4"
+
+[build-dependencies]
+speedwave-version = { path = "../speedwave-version" }
 
 [lints]
 workspace = true
