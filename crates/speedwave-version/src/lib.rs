@@ -1,7 +1,7 @@
-//! Computes Speedwave's app version from git state (`notes/speed-674-release-process/SPEC.md`).
+//! Computes Speedwave's app version from git state.
 //! Dev builds: `0.<M+1>.0+N`. Release-line builds (`release/0.M`): `0.M.Z`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Errors from computing a version or a notes range against a git repository.
 #[derive(Debug, thiserror::Error)]
@@ -43,13 +43,10 @@ pub enum VersionError {
     BuildNumberExceedsMsiLimit(u64),
 }
 
-/// A dev-build version: `0.<base_minor>.0+<build>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DevVersion {
-    /// `M + 1`, the next minor after the highest existing `release/0.*` line.
-    pub base_minor: u64,
-    /// `N`, the commit count reachable from `HEAD`.
-    pub build: u64,
+struct DevVersion {
+    base_minor: u64,
+    build: u64,
 }
 
 impl std::fmt::Display for DevVersion {
@@ -58,13 +55,10 @@ impl std::fmt::Display for DevVersion {
     }
 }
 
-/// A release-line (stable or hotfix) version: `0.<minor>.<patch>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReleaseVersion {
-    /// `M`, the release line's minor.
-    pub minor: u64,
-    /// `Z`, commits on the line since its stable release tag.
-    pub patch: u64,
+struct ReleaseVersion {
+    minor: u64,
+    patch: u64,
 }
 
 impl std::fmt::Display for ReleaseVersion {
@@ -73,12 +67,9 @@ impl std::fmt::Display for ReleaseVersion {
     }
 }
 
-/// Either a dev-build or a release-line version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComputedVersion {
-    /// Built from `dev` (or any non-release branch).
+enum ComputedVersion {
     Dev(DevVersion),
-    /// Built from a `release/0.M` branch.
     Release(ReleaseVersion),
 }
 
@@ -92,13 +83,11 @@ impl std::fmt::Display for ComputedVersion {
 }
 
 /// The stable notes range for a promotion: the previous release line's
-/// stable tag to the promoted commit, plus its own hotfix commits to skip.
+/// stable tag to `HEAD`, plus its own hotfix commits to skip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotesRange {
     /// The previous release line's stable tag (exclusive start of the range).
     pub since: String,
-    /// The promoted commit (`HEAD` of the release branch).
-    pub until: String,
     /// Commits on the previous release line since its own stable tag.
     pub skip_commits: Vec<String>,
 }
@@ -165,10 +154,13 @@ fn parse_release_minor_from_branch_name(branch: &str) -> Option<u64> {
 }
 
 fn parse_release_minor_from_ref(refname: &str) -> Option<u64> {
-    let (_, after) = refname.rsplit_once("release/0.")?;
-    if after.is_empty() || after.contains('/') {
-        return None;
-    }
+    let after = match refname.strip_prefix("refs/heads/release/0.") {
+        Some(after) => after,
+        None => refname
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.split_once('/'))
+            .and_then(|(_, rest)| rest.strip_prefix("release/0."))?,
+    };
     after.parse::<u64>().ok()
 }
 
@@ -191,9 +183,7 @@ fn list_release_refs(repo: &Path) -> Result<Vec<(u64, String)>, VersionError> {
     Ok(result)
 }
 
-/// The highest minor among every local and remote `release/0.*` branch, or
-/// `None` when no such branch exists (yet).
-pub fn highest_release_minor(repo: &Path) -> Result<Option<u64>, VersionError> {
+fn highest_release_minor(repo: &Path) -> Result<Option<u64>, VersionError> {
     Ok(list_release_refs(repo)?.into_iter().map(|(m, _)| m).max())
 }
 
@@ -211,7 +201,7 @@ fn find_release_ref(repo: &Path, minor: u64) -> Result<String, VersionError> {
         .filter(|(m, _)| *m == minor)
         .map(|(_, r)| r)
         .collect();
-    candidates.sort_by_key(|r| u8::from(!r.starts_with("refs/heads/")));
+    candidates.sort_by_key(|r| u8::from(r.starts_with("refs/heads/")));
     candidates
         .into_iter()
         .next()
@@ -234,9 +224,7 @@ fn rev_list_lines(repo: &Path, revspec: &str) -> Result<Vec<String>, VersionErro
         .collect())
 }
 
-/// Finds the single stable release tag for a line: `v0.<minor>.0` (old,
-/// pre-734 format, no build metadata) or `v0.<minor>.0+<N>`.
-pub fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, VersionError> {
+fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, VersionError> {
     let pattern = format!("v0.{minor}.0*");
     let out = run_git(repo, &["tag", "--list", &pattern])?;
     let prefix = format!("v0.{minor}.0");
@@ -274,9 +262,7 @@ fn enforce_msi_build_limit(n: u64) -> Result<(), VersionError> {
     Ok(())
 }
 
-/// Computes the dev-build version (`0.<M+1>.0+N`) for the repo's current
-/// state, regardless of which branch is checked out.
-pub fn compute_dev_version(repo: &Path) -> Result<DevVersion, VersionError> {
+fn compute_dev_version(repo: &Path) -> Result<DevVersion, VersionError> {
     let m = highest_release_minor(repo)?.unwrap_or(0);
     let build = rev_list_count(repo, "HEAD")?;
     enforce_msi_build_limit(build)?;
@@ -286,18 +272,17 @@ pub fn compute_dev_version(repo: &Path) -> Result<DevVersion, VersionError> {
     })
 }
 
-/// Computes the release-line version (`0.M.Z`) for the given minor; `HEAD`
-/// is assumed to be that line's branch tip.
-pub fn compute_release_version(repo: &Path, minor: u64) -> Result<ReleaseVersion, VersionError> {
+fn compute_release_version(repo: &Path, minor: u64) -> Result<ReleaseVersion, VersionError> {
     let tag = stable_tag_for_line(repo, minor)?;
     let patch = rev_list_count(repo, &format!("{tag}..HEAD"))?;
     enforce_msi_build_limit(patch)?;
     Ok(ReleaseVersion { minor, patch })
 }
 
-/// Computes the version for the given branch (or current branch, or a
-/// detached `HEAD`, if `None`): dev-style off anything but `release/0.M`.
-pub fn compute_version(repo: &Path, branch: Option<&str>) -> Result<ComputedVersion, VersionError> {
+fn compute_version_kind(
+    repo: &Path,
+    branch: Option<&str>,
+) -> Result<ComputedVersion, VersionError> {
     ensure_git_repo(repo)?;
     let resolved_branch = match branch {
         Some(b) => Some(b.to_string()),
@@ -317,13 +302,71 @@ pub fn compute_version(repo: &Path, branch: Option<&str>) -> Result<ComputedVers
     }
 }
 
+/// Computes the version string for the given branch (or the checked-out
+/// branch, or a dev version off a detached `HEAD`, if `None`).
+pub fn compute_version(repo: &Path, branch: Option<&str>) -> Result<String, VersionError> {
+    compute_version_kind(repo, branch).map(|v| v.to_string())
+}
+
 /// Infallible wrapper around [`compute_version`] for build scripts: `0.0.0`
 /// plus the error that caused the fallback, never an `Err`.
 pub fn resolve_version(repo: &Path, branch: Option<&str>) -> (String, Option<VersionError>) {
     match compute_version(repo, branch) {
-        Ok(v) => (v.to_string(), None),
+        Ok(v) => (v, None),
         Err(e) => ("0.0.0".to_string(), Some(e)),
     }
+}
+
+fn git_dir_paths(repo: &Path) -> Option<(PathBuf, PathBuf)> {
+    let git_dir = run_git(repo, &["rev-parse", "--git-dir"]).ok()?;
+    let common_dir = run_git(repo, &["rev-parse", "--git-common-dir"]).ok()?;
+    let resolve = |raw: String| -> PathBuf {
+        let p = PathBuf::from(raw);
+        if p.is_absolute() {
+            p
+        } else {
+            repo.join(p)
+        }
+    };
+    Some((resolve(git_dir), resolve(common_dir)))
+}
+
+/// Emits `SPEEDWAVE_VERSION` for a build script (env override, else computed
+/// from git, else `0.0.0`) plus `cargo:rerun-if-changed` for git HEAD/refs.
+#[expect(
+    clippy::print_stdout,
+    reason = "shared build.rs helper: cargo reads build directives from stdout by convention"
+)]
+pub fn emit_cargo_version(repo_root: &Path) -> String {
+    let version = std::env::var("SPEEDWAVE_VERSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let (version, warning) = resolve_version(repo_root, None);
+            if let Some(e) = warning {
+                println!(
+                    "cargo:warning=SPEEDWAVE_VERSION not set and could not compute from git ({e}); defaulting to 0.0.0"
+                );
+            }
+            version
+        });
+
+    println!("cargo:rustc-env=SPEEDWAVE_VERSION={version}");
+    println!("cargo:rerun-if-env-changed=SPEEDWAVE_VERSION");
+
+    if let Some((git_dir, common_dir)) = git_dir_paths(repo_root) {
+        println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            common_dir.join("refs").display()
+        );
+        let packed_refs = common_dir.join("packed-refs");
+        if packed_refs.exists() {
+            println!("cargo:rerun-if-changed={}", packed_refs.display());
+        }
+    }
+
+    version
 }
 
 /// Refuses a promotion when `candidate` is an ancestor of the previous
@@ -362,7 +405,6 @@ pub fn notes_range(repo: &Path, branch: Option<&str>) -> Result<NotesRange, Vers
     let skip_commits = rev_list_lines(repo, &format!("{previous_tag}..{previous_ref}"))?;
     Ok(NotesRange {
         since: previous_tag,
-        until: "HEAD".to_string(),
         skip_commits,
     })
 }
@@ -375,7 +417,6 @@ pub fn notes_range(repo: &Path, branch: Option<&str>) -> Result<NotesRange, Vers
 )]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -498,6 +539,37 @@ mod tests {
     }
 
     #[test]
+    fn release_line_patch_counts_from_the_tag_not_from_a_backport_shifted_merge_base() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+        commit(tmp.path(), "feat: a");
+        git(tmp.path(), &["tag", "v0.20.0"]);
+        git(tmp.path(), &["branch", "release/0.20"]);
+        commit(tmp.path(), "feat: b");
+        git(tmp.path(), &["checkout", "-q", "release/0.20"]);
+        commit(tmp.path(), "fix: hotfix one");
+        git(tmp.path(), &["checkout", "-q", "dev"]);
+        git(
+            tmp.path(),
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-X",
+                "ours",
+                "release/0.20",
+                "-m",
+                "merge: backport release/0.20 into dev",
+            ],
+        );
+        git(tmp.path(), &["checkout", "-q", "release/0.20"]);
+        commit(tmp.path(), "fix: hotfix two");
+
+        let v = compute_release_version(tmp.path(), 20).expect("compute");
+        assert_eq!(v.patch, 2);
+    }
+
+    #[test]
     fn release_line_with_no_stable_tag_is_a_named_error() {
         let tmp = init_repo();
         commit(tmp.path(), "init");
@@ -520,6 +592,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_release_minor_from_ref_rejects_a_prefixed_branch_name() {
+        assert_eq!(
+            parse_release_minor_from_ref("refs/heads/release/0.21"),
+            Some(21)
+        );
+        assert_eq!(
+            parse_release_minor_from_ref("refs/remotes/origin/release/0.21"),
+            Some(21)
+        );
+        assert_eq!(
+            parse_release_minor_from_ref("refs/heads/x-release/0.99"),
+            None
+        );
+        assert_eq!(
+            parse_release_minor_from_ref("refs/remotes/origin/x-release/0.99"),
+            None
+        );
+    }
+
+    #[test]
+    fn find_release_ref_prefers_the_remote_tracking_ref_over_a_local_branch() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+        git(tmp.path(), &["branch", "release/0.20"]);
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/release/0.20", "HEAD"],
+        );
+
+        let found = find_release_ref(tmp.path(), 20).expect("found");
+        assert_eq!(found, "refs/remotes/origin/release/0.20");
+    }
+
+    #[test]
     fn compute_version_dispatches_on_branch_name() {
         let tmp = init_repo();
         commit(tmp.path(), "init");
@@ -527,10 +633,10 @@ mod tests {
         git(tmp.path(), &["tag", "v0.21.0+2"]);
         git(tmp.path(), &["branch", "release/0.21"]);
 
-        let dev = compute_version(tmp.path(), Some("dev")).expect("dev");
+        let dev = compute_version_kind(tmp.path(), Some("dev")).expect("dev");
         assert!(matches!(dev, ComputedVersion::Dev(_)));
 
-        let release = compute_version(tmp.path(), Some("release/0.21")).expect("release");
+        let release = compute_version_kind(tmp.path(), Some("release/0.21")).expect("release");
         assert!(matches!(release, ComputedVersion::Release(_)));
     }
 
@@ -543,7 +649,7 @@ mod tests {
         git(tmp.path(), &["branch", "release/0.21"]);
         git(tmp.path(), &["checkout", "-q", "release/0.21"]);
 
-        let v = compute_version(tmp.path(), None).expect("compute");
+        let v = compute_version_kind(tmp.path(), None).expect("compute");
         assert!(matches!(v, ComputedVersion::Release(_)));
     }
 
@@ -556,7 +662,7 @@ mod tests {
         commit(tmp.path(), "feat: b");
         git(tmp.path(), &["checkout", "-q", "--detach", "HEAD"]);
 
-        let v = compute_version(tmp.path(), None).expect("compute");
+        let v = compute_version_kind(tmp.path(), None).expect("compute");
         match v {
             ComputedVersion::Dev(d) => {
                 assert_eq!(d.base_minor, 21);
@@ -575,7 +681,7 @@ mod tests {
         commit(tmp.path(), "fix: hotfix");
         git(tmp.path(), &["checkout", "-q", "--detach", "HEAD"]);
 
-        let v = compute_version(tmp.path(), Some("release/0.21")).expect("compute");
+        let v = compute_version_kind(tmp.path(), Some("release/0.21")).expect("compute");
         assert!(matches!(v, ComputedVersion::Release(_)));
     }
 
@@ -649,7 +755,6 @@ mod tests {
 
         let range = notes_range(tmp.path(), None).expect("notes range");
         assert_eq!(range.since, "v0.20.0");
-        assert_eq!(range.until, "HEAD");
         assert_eq!(range.skip_commits, vec![hotfix_sha]);
     }
 
@@ -693,5 +798,53 @@ mod tests {
     fn nonexistent_repo_path_is_a_named_error() {
         let err = compute_version(&PathBuf::from("/no/such/path/at/all"), None).unwrap_err();
         assert!(matches!(err, VersionError::NotAGitRepository(_)));
+    }
+
+    #[test]
+    fn git_dir_paths_resolves_a_plain_repo() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+
+        let (git_dir, common_dir) = git_dir_paths(tmp.path()).expect("resolved");
+        assert_eq!(git_dir, tmp.path().join(".git"));
+        assert_eq!(common_dir, tmp.path().join(".git"));
+    }
+
+    #[test]
+    fn git_dir_paths_resolves_a_worktree_to_the_shared_common_dir() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+        let worktree_dir = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                "wt-branch",
+                worktree_dir.to_str().expect("utf8 path"),
+            ],
+        );
+
+        let (git_dir, common_dir) = git_dir_paths(&worktree_dir).expect("resolved");
+        assert_eq!(common_dir, tmp.path().join(".git"));
+        assert!(git_dir.starts_with(tmp.path().join(".git").join("worktrees")));
+        assert_ne!(git_dir, common_dir);
+    }
+
+    #[test]
+    fn git_dir_paths_is_none_without_a_git_repository() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(git_dir_paths(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn emit_cargo_version_returns_the_env_override_without_touching_git() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("SPEEDWAVE_VERSION", "9.9.9");
+        let version = emit_cargo_version(tmp.path());
+        std::env::remove_var("SPEEDWAVE_VERSION");
+        assert_eq!(version, "9.9.9");
     }
 }
