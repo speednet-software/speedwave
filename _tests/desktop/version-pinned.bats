@@ -56,6 +56,37 @@ JSON
 }
 
 
+@test "standalone speedwave-version Cargo.toml not pinned to 0.0.0 detected" {
+  local fixture_root
+  fixture_root="$(mktemp -d)"
+
+  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
+  printf '{"packages":{".":{"extra-files":[]}}}\n' > "$fixture_root/release-please-config.json"
+  mkdir -p "$fixture_root/crates/speedwave-version"
+  printf '[package]\nname = "speedwave-version"\nversion = "9.9.9"\n' \
+    > "$fixture_root/crates/speedwave-version/Cargo.toml"
+
+  run python3 "$SCRIPT" "$fixture_root"
+  rm -rf "$fixture_root"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "speedwave-version/Cargo.toml" ]]
+  [[ "$output" =~ "not pinned to 0.0.0" ]]
+}
+
+
+@test "standalone speedwave-version Cargo.toml is skipped when absent from a fixture root" {
+  local fixture_root
+  fixture_root="$(mktemp -d)"
+
+  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
+  printf '{"packages":{".":{"extra-files":[]}}}\n' > "$fixture_root/release-please-config.json"
+
+  run python3 "$SCRIPT" "$fixture_root"
+  rm -rf "$fixture_root"
+  [ "$status" -eq 0 ]
+}
+
+
 @test "Cargo.toml version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"

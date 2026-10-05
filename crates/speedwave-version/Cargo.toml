@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-version"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 publish = false
 description = "Computes Speedwave's app version and release-notes ranges from git"
