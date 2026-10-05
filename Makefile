@@ -89,7 +89,9 @@ guard-dev-port: guard-dev-instance
 dev-config: guard-dev-instance
 	@printf 'DEV_INSTANCE=%s\n' '$(DEV_INSTANCE)'
 	@printf 'SPEEDWAVE_DATA_DIR=%s\n' '$(SPEEDWAVE_DATA_DIR)'
-	@printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
+	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	dev_tauri_config="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
+	printf 'TAURI_CONFIG=%s\n' "$$dev_tauri_config"
 
 .PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
@@ -305,7 +307,10 @@ else
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && cargo tauri build
+	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	msi_version="$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- msi-version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)"; \
+	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" cargo tauri build \
+	  --config "{\"version\":\"$$app_version\",\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$$msi_version\"}}}}"
 	@echo "\n✅ Tauri production bundle built"
 
 build-native-macos:
@@ -570,7 +575,7 @@ test-native-cli-plist:
 
 test-desktop-config:
 	@$(REQUIRE_BATS)
-	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
+	bats _tests/desktop/updater-config.bats _tests/desktop/version-pinned.bats \
 	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
 	  _tests/desktop/e2e-invoke-helper.bats \
 	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \
@@ -899,7 +904,9 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	chmod +x desktop/src-tauri/cli/speedwave
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
+	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	dev_tauri_config="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$dev_tauri_config" cargo tauri dev --config "$$dev_tauri_config"
 endif
 
 status: guard-not-prod-data-dir

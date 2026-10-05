@@ -5,7 +5,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGES=(reminders calendar mail notes audio-capture)
 ARCHS="${SPEEDWAVE_SWIFT_ARCHS:-arm64 x86_64}"
-TAURI_CONF="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
 
 if [[ "$(uname)" != "Darwin" ]]; then
   echo "Skipping macOS native CLI build on non-macOS host"
@@ -18,15 +17,11 @@ for arch in "${ARCH_LIST[@]}"; do
   BUILD_ARGS+=(--arch "$arch")
 done
 
-APP_VERSION="0.0.0"
-if [[ -f "$TAURI_CONF" ]]; then
-  if command -v jq >/dev/null 2>&1; then
-    APP_VERSION="$(jq -r '.version // "0.0.0"' "$TAURI_CONF")"
-  else
-    APP_VERSION="$(grep -E '^\s*"version"\s*:' "$TAURI_CONF" | head -1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/')"
-    [[ -z "$APP_VERSION" ]] && APP_VERSION="0.0.0"
-  fi
+APP_VERSION="${SPEEDWAVE_VERSION:-}"
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version -- version 2>/dev/null || true)"
 fi
+[[ -z "$APP_VERSION" ]] && APP_VERSION="0.0.0"
 echo "Stamping native CLI Info.plist files with version $APP_VERSION"
 
 stage_info_plist() {

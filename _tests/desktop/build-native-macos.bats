@@ -30,7 +30,6 @@ staged_fixture_repo() {
     mkdir -p "$root/scripts" "$root/desktop/src-tauri"
     cp -p "$SCRIPT" "$root/scripts/"
     cp "$SPW_ROOT/.gitignore" "$root/"
-    printf '{\n  "version": "9.9.9"\n}\n' >"$root/desktop/src-tauri/tauri.conf.json"
     for pkg in $SPW_PACKAGES; do
         mkdir -p "$root/native/macos/$pkg/Resources"
         cp "$SPW_ROOT/native/macos/$pkg/Resources/Info.plist" "$root/native/macos/$pkg/Resources/"
@@ -95,7 +94,7 @@ PY
     assert_package_list
     local root="$BATS_TEST_TMPDIR/repo" pkg dirty
     staged_fixture_repo "$root"
-    run "$root/scripts/build-native-macos.sh" --stage-only
+    run env SPEEDWAVE_VERSION=9.9.9 "$root/scripts/build-native-macos.sh" --stage-only
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     dirty="$(git -C "$root" status --porcelain)"
     if [ -n "$dirty" ]; then
@@ -106,6 +105,20 @@ PY
     for pkg in $SPW_PACKAGES; do
         [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$root/native/macos/$pkg/.build/Info.plist")" = "9.9.9" ] || {
             echo "$pkg/.build/Info.plist was not stamped with 9.9.9" >&2
+            return 1
+        }
+    done
+}
+
+@test "--stage-only falls back to 0.0.0 without SPEEDWAVE_VERSION or a usable cargo workspace" {
+    assert_package_list
+    local root="$BATS_TEST_TMPDIR/repo" pkg
+    staged_fixture_repo "$root"
+    run env -u SPEEDWAVE_VERSION "$root/scripts/build-native-macos.sh" --stage-only
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    for pkg in $SPW_PACKAGES; do
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$root/native/macos/$pkg/.build/Info.plist")" = "0.0.0" ] || {
+            echo "$pkg/.build/Info.plist was not stamped with 0.0.0" >&2
             return 1
         }
     done

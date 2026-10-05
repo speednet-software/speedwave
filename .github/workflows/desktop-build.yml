@@ -89,6 +89,12 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        shell: bash
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
 
       - name: Use a short cargo target dir (Windows)
         if: matrix.platform == 'windows-latest'
@@ -118,6 +124,16 @@ jobs:
         run: npm ci
         working-directory: desktop/src
 
+      - name: Compute app version
+        id: version
+        shell: bash
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --branch "$BRANCH")"
+          MSI_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version -- msi-version --branch "$BRANCH")"
+          echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "SPEEDWAVE_MSI_VERSION=$MSI_VERSION" >> "$GITHUB_ENV"
+
       - name: Prepare desktop bundle
         uses: ./.github/actions/prepare-desktop-bundle
         with:
@@ -133,16 +149,20 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           MATRIX_ARGS: ${{ matrix.args }}
         run: |
-          # Split MATRIX_ARGS into an array (word-split, no glob expansion).
           read -ra ARGS <<< "$MATRIX_ARGS"
-          # No signing key (fork PR / Dependabot) → unsigned bundle.
+          WIX_VERSION="{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            npx --prefix ../src tauri build "${ARGS[@]}" --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false,\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
           else
-            npx --prefix ../src tauri build "${ARGS[@]}"
+            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$SPEEDWAVE_MSI_VERSION\"}}}}"
           fi
+          npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
 
       - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: ./scripts/check-nsis-update-reset.ps1 -BundleDir "$env:CARGO_TARGET_DIR\release\bundle\nsis"
+
+      - name: Check the build did not modify a tracked file
+        shell: bash
+        run: git diff --exit-code

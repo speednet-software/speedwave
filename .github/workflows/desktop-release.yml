@@ -118,6 +118,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Use a short cargo target dir (Windows)
         if: matrix.platform == 'windows-latest'
@@ -248,6 +249,14 @@ jobs:
           platform: ${{ matrix.platform }}
           args: ${{ matrix.args }}
 
+      - name: Compute Tauri version config
+        id: version_config
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          echo "config={\"version\":\"$VERSION\",\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$VERSION\"}}}}" >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -261,8 +270,12 @@ jobs:
           releaseBody: ${{ needs.resolve.outputs.release_id == '' && 'See the assets to download and install this version.' || '' }}
           releaseDraft: ${{ needs.resolve.outputs.release_id == '' && 'true' || 'false' }}
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ format('{0} --config {1}', matrix.args, steps.version_config.outputs.config) }}
           releaseAssetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
+
+      - name: Check the build did not modify a tracked file
+        shell: bash
+        run: git diff --exit-code
 
   cli:
     needs: [resolve, publish-tauri]
