@@ -129,7 +129,7 @@ jobs:
         shell: bash
         run: |
           BRANCH="${{ github.head_ref || github.ref_name }}"
-          APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --branch "$BRANCH")"
+          APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")"
           echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
       - name: Prepare desktop bundle

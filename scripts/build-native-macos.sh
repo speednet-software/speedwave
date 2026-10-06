@@ -19,7 +19,7 @@ done
 
 APP_VERSION="${SPEEDWAVE_VERSION:-}"
 if [[ -z "$APP_VERSION" ]]; then
-  APP_VERSION="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version -- version 2>/dev/null || true)"
+  APP_VERSION="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version 2>/dev/null || true)"
 fi
 [[ -z "$APP_VERSION" ]] && APP_VERSION="0.0.0"
 echo "Stamping native CLI Info.plist files with version $APP_VERSION"

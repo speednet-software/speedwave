@@ -73,7 +73,7 @@ extract_embedded_plist() {
 expected_app_version() {
     local version="${SPEEDWAVE_VERSION:-}"
     if [ -z "$version" ]; then
-        version="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version -- version 2>/dev/null)"
+        version="$(cd "$REPO_ROOT" && cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version 2>/dev/null)"
     fi
     if [ -n "$version" ]; then
         printf '%s\n' "$version"

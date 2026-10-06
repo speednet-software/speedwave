@@ -16,9 +16,14 @@ path = "src/lib.rs"
 [[bin]]
 name = "speedwave-version"
 path = "src/bin/speedwave-version.rs"
+required-features = ["cli"]
 
 [dependencies]
 thiserror = { workspace = true }
+clap = { workspace = true, optional = true }
+
+[features]
+cli = ["dep:clap"]
 
 [dev-dependencies]
 tempfile = "3"

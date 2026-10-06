@@ -287,7 +287,7 @@ jobs:
 
       - name: Compute app version
         run: |
-          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --branch '${{ github.head_ref || github.ref_name }}')" >> "$GITHUB_ENV"
+          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch '${{ github.head_ref || github.ref_name }}')" >> "$GITHUB_ENV"
 
       - name: Build native macOS CLI binaries (universal)
         run: scripts/build-native-macos.sh
@@ -328,7 +328,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
       - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash

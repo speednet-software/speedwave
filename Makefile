@@ -89,7 +89,7 @@ guard-dev-port: guard-dev-instance
 dev-config: guard-dev-instance
 	@printf 'DEV_INSTANCE=%s\n' '$(DEV_INSTANCE)'
 	@printf 'SPEEDWAVE_DATA_DIR=%s\n' '$(SPEEDWAVE_DATA_DIR)'
-	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
 	printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
 
@@ -307,7 +307,7 @@ else
 	chmod +x desktop/src-tauri/cli/speedwave
 endif
 	@"$(MAKE)" verify-bundled-assets
-	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	@app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
 	cd desktop/src-tauri && SPEEDWAVE_VERSION="$$app_version" cargo tauri build \
 	  --config "{\"version\":\"$$app_version\"}"
 	@echo "\n✅ Tauri production bundle built"
@@ -395,7 +395,7 @@ endif
 	@echo "✅ Build phase complete"
 
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -432,7 +432,7 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -502,7 +502,7 @@ coverage: coverage-rust coverage-mcp coverage-angular
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -515,7 +515,7 @@ coverage-angular:
 
 coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --html --output-dir target/coverage/rust
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --html --output-dir target/coverage/rust
 	cd mcp-servers && $(NPM) run test:coverage
 	"$(MAKE)" coverage-angular
 	@echo "\n✅ Coverage reports generated:"
@@ -675,7 +675,7 @@ setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli --all-targets -- -D warnings
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
@@ -758,7 +758,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
@@ -904,16 +904,16 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	chmod +x desktop/src-tauri/cli/speedwave
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
-	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
+	app_version="$${SPEEDWAVE_VERSION:-$$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo $(CURDIR) 2>/dev/null || echo 0.0.0)}"; \
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
 	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 SPEEDWAVE_VERSION="$$app_version" TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
 endif
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
-	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version 2>&1 | grep -c '^warning' || echo 0)"
+	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-version/cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="
 	@cd mcp-servers && $(NPM) test 2>&1 | grep -E "Tests|Test Files" | tail -2 || true
 	@echo "\n=== Angular ==="
