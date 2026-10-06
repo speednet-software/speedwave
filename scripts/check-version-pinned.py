@@ -4,7 +4,6 @@ import json
 import os
 import pathlib
 import re
-import subprocess
 import sys
 
 PINNED_VERSION = "0.0.0"
@@ -24,43 +23,14 @@ def _load_json(path: pathlib.Path) -> dict:
     return _load_json_from_text(path.read_text(), path)
 
 
-def _is_staged(root: pathlib.Path, rel_path: str) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(root), "diff", "--cached", "--name-only", "--", rel_path],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return bool(result.stdout.strip())
-
-
-def _read_staged_text(root: pathlib.Path, rel_path: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), "show", f":{rel_path}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise FileNotFoundError(f"{rel_path}: not found in the git index")
-    return result.stdout
-
-
-def _read_text(root: pathlib.Path, rel_path: str, staged: bool) -> str:
-    if staged:
-        return _read_staged_text(root, rel_path)
-    return (root / rel_path).read_text()
-
-
 def _check_toml_path(
     root: pathlib.Path,
     rel_path: str,
     display_path: pathlib.Path,
-    staged: bool,
     errors: list[str],
 ) -> None:
     try:
-        content = _read_text(root, rel_path, staged)
+        content = (root / rel_path).read_text()
     except Exception as e:
         errors.append(f"{display_path}: read error: {e}")
         return
@@ -86,11 +56,10 @@ def _check_generic_path(
     root: pathlib.Path,
     rel_path: str,
     display_path: pathlib.Path,
-    staged: bool,
     errors: list[str],
 ) -> None:
     try:
-        content = _read_text(root, rel_path, staged)
+        content = (root / rel_path).read_text()
     except Exception as e:
         errors.append(f"{display_path}: read error: {e}")
         return
@@ -115,25 +84,24 @@ def _check_generic_path(
             )
 
 
-def find_errors(root: pathlib.Path, staged: bool = False) -> list[str]:
+def find_errors(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
 
     manifest_rel = ".release-please-manifest.json"
     manifest_path = root / manifest_rel
-    if not staged or _is_staged(root, manifest_rel):
-        try:
-            manifest_text = _read_text(root, manifest_rel, staged)
-        except FileNotFoundError:
-            sys.exit(f"{manifest_path}: file not found")
-        manifest = _load_json_from_text(manifest_text, manifest_path)
-        if "." not in manifest:
-            sys.exit(f"{manifest_path}: missing '.' root-package key")
-        manifest_version = manifest["."]
-        if manifest_version != PINNED_VERSION:
-            errors.append(
-                f"{manifest_path}: root package version '{manifest_version}' "
-                f"is not pinned to {PINNED_VERSION}"
-            )
+    try:
+        manifest_text = (root / manifest_rel).read_text()
+    except FileNotFoundError:
+        sys.exit(f"{manifest_path}: file not found")
+    manifest = _load_json_from_text(manifest_text, manifest_path)
+    if "." not in manifest:
+        sys.exit(f"{manifest_path}: missing '.' root-package key")
+    manifest_version = manifest["."]
+    if manifest_version != PINNED_VERSION:
+        errors.append(
+            f"{manifest_path}: root package version '{manifest_version}' "
+            f"is not pinned to {PINNED_VERSION}"
+        )
 
     config = _load_json(root / "release-please-config.json")
     try:
@@ -145,10 +113,8 @@ def find_errors(root: pathlib.Path, staged: bool = False) -> list[str]:
         if isinstance(entry, str):
             rel_path = entry
             path = root / rel_path
-            if staged and not _is_staged(root, rel_path):
-                continue
             try:
-                content = _read_text(root, rel_path, staged)
+                content = path.read_text()
                 data = json.loads(content)
             except Exception as e:
                 errors.append(f"{path}: failed to parse JSON: {e}")
@@ -166,15 +132,11 @@ def find_errors(root: pathlib.Path, staged: bool = False) -> list[str]:
                 continue
             for toml_path in matches:
                 rel_path = toml_path.relative_to(root).as_posix()
-                if staged and not _is_staged(root, rel_path):
-                    continue
-                _check_toml_path(root, rel_path, toml_path, staged, errors)
+                _check_toml_path(root, rel_path, toml_path, errors)
         elif isinstance(entry, dict) and entry.get("type") == "generic":
             rel_path = entry["path"]
             path = root / rel_path
-            if staged and not _is_staged(root, rel_path):
-                continue
-            _check_generic_path(root, rel_path, path, staged, errors)
+            _check_generic_path(root, rel_path, path, errors)
         elif isinstance(entry, dict):
             errors.append(
                 f"unsupported extra-file type '{entry.get('type')}' for "
@@ -183,12 +145,9 @@ def find_errors(root: pathlib.Path, staged: bool = False) -> list[str]:
             )
 
     for rel_path in STANDALONE_PINNED_TOML_FILES:
-        if staged:
-            if not _is_staged(root, rel_path):
-                continue
-        elif not (root / rel_path).exists():
+        if not (root / rel_path).exists():
             continue
-        _check_toml_path(root, rel_path, root / rel_path, staged, errors)
+        _check_toml_path(root, rel_path, root / rel_path, errors)
 
     return errors
 
@@ -205,18 +164,12 @@ def resolve_root(root_arg: str | None) -> pathlib.Path:
 def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("root", nargs="?")
-    parser.add_argument(
-        "--staged",
-        action="store_true",
-        help="check only files staged for commit, reading their staged blob "
-        "via 'git show' instead of the working tree",
-    )
     return parser.parse_args(argv)
 
 
 def main() -> int:
     args = parse_cli_args(sys.argv[1:])
-    errors = find_errors(resolve_root(args.root), staged=args.staged)
+    errors = find_errors(resolve_root(args.root))
     if errors:
         for e in errors:
             print(e, file=sys.stderr)
