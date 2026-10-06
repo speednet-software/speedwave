@@ -131,12 +131,29 @@ fn migrated_llm_for(
     project: &str,
     evidence: speedwave_runtime::config::AnthropicEvidence,
 ) -> speedwave_runtime::config::LlmConfig {
+    migrated_llm_for_in(
+        user_config,
+        project,
+        evidence,
+        crate::containers_cmd::llm_locked_by_policy(),
+    )
+}
+
+fn migrated_llm_for_in(
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+    evidence: speedwave_runtime::config::AnthropicEvidence,
+    locked_by_policy: bool,
+) -> speedwave_runtime::config::LlmConfig {
     let mut llm = user_config
         .find_project(project)
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.clone())
         .unwrap_or_default();
     speedwave_runtime::config::migrate_llm(&mut llm, evidence);
+    if locked_by_policy {
+        speedwave_runtime::config::lock_llm_to_policy(&mut llm);
+    }
     llm
 }
 
@@ -705,6 +722,25 @@ mod tests {
             !provider_configured,
             "a never-touched LlmConfig::default() must read as not configured"
         );
+    }
+
+    #[test]
+    fn provider_configured_under_an_egress_policy_for_a_project_naming_none() {
+        let mut user_config = speedwave_runtime::config::SpeedwaveUserConfig::default();
+        user_config
+            .projects
+            .push(speedwave_runtime::config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            });
+        let evidence = speedwave_runtime::config::AnthropicEvidence::None;
+        assert!(migrated_llm_for_in(&user_config, "proj", evidence, false).is_unconfigured());
+        assert!(!migrated_llm_for_in(&user_config, "proj", evidence, true).is_unconfigured());
     }
 
     #[test]
