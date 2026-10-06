@@ -88,7 +88,6 @@ fn run_validate_promotion(args: &ValidatePromotionArgs) -> Result<(), String> {
 
 #[cfg(test)]
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panics on failure are acceptable assertions"
 )]

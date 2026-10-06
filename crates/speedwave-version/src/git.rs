@@ -2,7 +2,7 @@ use crate::error::VersionError;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn run_git(repo: &Path, args: &[&str]) -> Result<String, VersionError> {
-    // SSOT-allow: standalone build-dependency crate, no path to speedwave-runtime's spawn SSOT; shells out to git directly (SPEED-734).
+    // SSOT-allow: build-dependency of speedwave-runtime, so it cannot use its binary:: helpers.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -90,7 +90,6 @@ pub(crate) fn git_dir_paths(repo: &Path) -> Option<(PathBuf, PathBuf)> {
 
 #[cfg(test)]
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panics on failure are acceptable assertions"
 )]

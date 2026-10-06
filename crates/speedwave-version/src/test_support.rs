@@ -1,26 +1,16 @@
 use std::path::Path;
 
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panics on failure are acceptable assertions"
 )]
 pub(crate) fn git(dir: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .status()
-        .expect("git invocation for test fixture");
-    assert!(status.success(), "git {args:?} failed");
+    let identity: &[&str] = &["-c", "user.name=t", "-c", "user.email=t@t"];
+    let with_identity = [identity, args].concat();
+    crate::git::run_git(dir, &with_identity).expect("git invocation for test fixture");
 }
 
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panics on failure are acceptable assertions"
 )]
@@ -31,7 +21,6 @@ pub(crate) fn init_repo() -> tempfile::TempDir {
 }
 
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panics on failure are acceptable assertions"
 )]

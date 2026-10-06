@@ -42,7 +42,6 @@ pub fn emit_cargo_version(repo_root: &Path) -> String {
 
 #[cfg(test)]
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code: panics on failure are acceptable assertions"
 )]
