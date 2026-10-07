@@ -194,32 +194,7 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
-fn release_list_url(channel: UpdateChannel) -> String {
-    match channel {
-        UpdateChannel::Stable => {
-            format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest")
-        }
-        UpdateChannel::Beta => {
-            format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases?per_page=1")
-        }
-    }
-}
-
-fn parse_latest_tag(body: &str) -> anyhow::Result<String> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| anyhow::anyhow!("GitHub API response is not valid JSON: {e}"))?;
-    let entry = value
-        .as_array()
-        .and_then(|list| list.first())
-        .unwrap_or(&value);
-    entry
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("GitHub API response has no tag_name"))
-}
-
-fn fetch_release_tag(url: &str) -> anyhow::Result<String> {
+fn fetch_release_body(url: &str) -> anyhow::Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("Speedwave-CLI/{}", env!("SPEEDWAVE_VERSION")))
         .build()
@@ -232,14 +207,24 @@ fn fetch_release_tag(url: &str) -> anyhow::Result<String> {
     if !status.is_success() {
         anyhow::bail!("GitHub API returned HTTP {status}");
     }
-    let body = resp
-        .text()
-        .map_err(|e| anyhow::anyhow!("Failed to read GitHub API response: {e}"))?;
-    parse_latest_tag(&body)
+    resp.text()
+        .map_err(|e| anyhow::anyhow!("Failed to read GitHub API response: {e}"))
 }
 
 fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
-    fetch_release_tag(&release_list_url(channel))
+    let url = update_channel::release_list_url(channel);
+    let body = fetch_release_body(&url)?;
+    update_channel::parse_release_tag(body.as_bytes()).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `true` when `tag` is a strictly newer release than `current` (full `Ord`, build metadata included).
+fn tag_is_newer_than(current: &str, tag: &str) -> anyhow::Result<bool> {
+    let current_version = semver::Version::parse(current)
+        .map_err(|e| anyhow::anyhow!("Cannot parse current version {current}: {e}"))?;
+    let candidate = tag.trim_start_matches('v');
+    let candidate_version = semver::Version::parse(candidate)
+        .map_err(|e| anyhow::anyhow!("Cannot parse release tag {tag}: {e}"))?;
+    Ok(candidate_version > current_version)
 }
 
 fn skip_plugin_audit(action: &CliAction) -> bool {
@@ -323,23 +308,14 @@ fn maybe_print_update_hint() {
     }
 
     std::thread::spawn(move || {
-        let latest = match self_update::backends::github::Update::configure()
-            .repo_owner(REPO_OWNER)
-            .repo_name(REPO_NAME)
-            .bin_name(consts::CLI_BINARY)
-            .current_version(current)
-            .build()
-        {
-            Ok(updater) => match updater.get_latest_release() {
-                Ok(release) => release.version,
-                Err(_) => return,
-            },
-            Err(_) => return,
+        let channel = update_channel::read_update_channel();
+        let Ok(target_tag) = target_release_tag(channel) else {
+            return;
         };
 
         write_update_cache(&UpdateCheckCache {
             last_check: now_secs(),
-            latest_version: latest,
+            latest_version: target_tag.trim_start_matches('v').to_string(),
         });
     });
 }
@@ -377,6 +353,15 @@ fn run_self_update() -> anyhow::Result<()> {
     out!("Checking for updates...");
 
     let target_tag = target_release_tag(channel)?;
+
+    if !tag_is_newer_than(current, &target_tag)? {
+        out!("Already up to date ({}).", current);
+        write_update_cache(&UpdateCheckCache {
+            last_check: now_secs(),
+            latest_version: target_tag.trim_start_matches('v').to_string(),
+        });
+        return Ok(());
+    }
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -2073,54 +2058,62 @@ mod tests {
     }
 
     #[test]
-    fn release_list_url_stable_uses_releases_latest() {
+    fn run_self_update_blocks_downgrade_before_configuring_self_update() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let newer_check = fn_body
+            .find("tag_is_newer_than(")
+            .expect("run_self_update must gate on tag_is_newer_than before installing");
+        let configure_call = fn_body
+            .find("self_update::backends::github::Update::configure()")
+            .expect("run_self_update must configure self_update");
+        assert!(
+            newer_check < configure_call,
+            "the no-downgrade check must run before self_update is configured"
+        );
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_a_higher_version_tag_as_newer() {
+        assert!(tag_is_newer_than("0.21.0", "v0.22.0+41").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_the_same_version_as_not_newer() {
+        assert!(!tag_is_newer_than("0.21.0+37", "v0.21.0+37").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_a_lower_version_tag_as_not_newer() {
+        assert!(!tag_is_newer_than("0.21.1", "v0.21.0").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_compares_build_metadata() {
+        assert!(tag_is_newer_than("0.21.0+37", "v0.21.0+38").unwrap());
+        assert!(!tag_is_newer_than("0.21.0+38", "v0.21.0+37").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_errors_on_unparsable_current_version() {
+        assert!(tag_is_newer_than("not-a-version", "v0.21.0").is_err());
+    }
+
+    #[test]
+    fn tag_is_newer_than_errors_on_unparsable_tag() {
+        assert!(tag_is_newer_than("0.21.0", "not-a-tag").is_err());
+    }
+
+    #[test]
+    fn target_release_tag_uses_the_shared_release_list_url() {
         assert_eq!(
-            release_list_url(UpdateChannel::Stable),
+            update_channel::release_list_url(UpdateChannel::Stable),
             "https://api.github.com/repos/speednet-software/speedwave/releases/latest"
         );
-    }
-
-    #[test]
-    fn release_list_url_beta_uses_releases_list() {
         assert_eq!(
-            release_list_url(UpdateChannel::Beta),
+            update_channel::release_list_url(UpdateChannel::Beta),
             "https://api.github.com/repos/speednet-software/speedwave/releases?per_page=1"
         );
-    }
-
-    #[test]
-    fn parse_latest_tag_single_release_object() {
-        let body = r#"{"tag_name":"v0.20.1","assets":[]}"#;
-        assert_eq!(parse_latest_tag(body).unwrap(), "v0.20.1");
-    }
-
-    #[test]
-    fn parse_latest_tag_release_list_takes_first_entry() {
-        let body = r#"[{"tag_name":"v0.22.0+41"},{"tag_name":"v0.21.0+37"}]"#;
-        assert_eq!(parse_latest_tag(body).unwrap(), "v0.22.0+41");
-    }
-
-    #[test]
-    fn parse_latest_tag_preserves_literal_plus() {
-        let body = r#"{"tag_name":"v0.21.0+110"}"#;
-        let tag = parse_latest_tag(body).unwrap();
-        assert_eq!(tag, "v0.21.0+110");
-        assert!(!tag.contains("%2B"));
-    }
-
-    #[test]
-    fn parse_latest_tag_empty_list_errors() {
-        assert!(parse_latest_tag("[]").is_err());
-    }
-
-    #[test]
-    fn parse_latest_tag_missing_tag_name_errors() {
-        assert!(parse_latest_tag(r#"{"name":"x"}"#).is_err());
-    }
-
-    #[test]
-    fn parse_latest_tag_invalid_json_errors() {
-        assert!(parse_latest_tag("not json").is_err());
     }
 
     #[test]
@@ -2497,6 +2490,24 @@ mod tests {
     }
 
     #[test]
+    fn maybe_print_update_hint_resolves_tag_by_channel() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn maybe_print_update_hint(");
+        assert!(
+            fn_body.contains("read_update_channel()"),
+            "the background hint must read the installation channel"
+        );
+        assert!(
+            fn_body.contains("target_release_tag("),
+            "the background hint must resolve the same tag self-update would"
+        );
+        assert!(
+            !fn_body.contains("get_latest_release()"),
+            "the hint must not use self_update's own channel-blind release lookup"
+        );
+    }
+
+    #[test]
     fn now_secs_is_nonzero() {
         assert!(now_secs() > 0);
     }
@@ -2824,7 +2835,7 @@ mod tests {
             .expect("must check status.updated()");
         let rebuild_call = fn_body.find("run_rebuild(").expect("must call run_rebuild");
         let already_up_to_date = fn_body
-            .find("Already up to date")
+            .rfind("Already up to date")
             .expect("must have 'Already up to date' branch");
 
         assert!(
