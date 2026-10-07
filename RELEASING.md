@@ -472,7 +472,7 @@ The `publish-release` job runs three steps:
 2. **Publish:** flips the draft release to live via `gh api --method PATCH … -f draft=false`.
 3. **Post-publish safety net:** re-runs `scripts/verify-release-assets.sh` against the live release; if it fails, the workflow reverts back to draft so the broken release is not user-visible.
 
-At PR time, `_tests/desktop/updater-config.bats` enforces `tauri.conf.json` updater-plugin shape (`createUpdaterArtifacts`, `endpoints`, `pubkey`) and `_tests/desktop/version-consistency.bats` enforces anti-drift between all release-please-managed version sources.
+At PR time, `_tests/desktop/updater-config.bats` enforces `tauri.conf.json` updater-plugin shape (`createUpdaterArtifacts`, `endpoints`, `pubkey`) and `_tests/desktop/version-pinned.bats` enforces that every release-please-managed version source stays pinned to `0.0.0`.
 
 ### Changing release artifact naming or target set
 

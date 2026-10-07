@@ -69,7 +69,8 @@ _dev_config() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"DEV_INSTANCE=dev"* ]]
     [[ "$output" == *"SPEEDWAVE_DATA_DIR=$HOME/.speedwave-dev"* ]]
-    [[ "$output" == *'TAURI_CONFIG={"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}'* ]]
+    [[ "$output" == *'TAURI_CONFIG={"version":"'* ]]
+    [[ "$output" == *'","identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}'* ]]
 }
 
 @test "default instance overrides no port, so angular.json stays the source" {

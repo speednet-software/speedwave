@@ -27,7 +27,7 @@ This is described here, not in another ADR. The legacy TCC.db rows were keyed by
 - Sub-identifier + TCC-service mapping and error text — `subBundleIdentifier(for:)`, `tccServiceName(for:)`, `composeErrorMessage` in `native/macos/shared/Sources/SharedCLI/Utilities.swift`
 - Canonical status enum + Apple Events OSStatus mapping (`noErr`→granted, `errAEEventNotPermitted` -1743→denied, `errAEEventWouldRequireUserConsent` -1744→notDetermined, `procNotFound` -600→targetNotRunning, else unknown)[^3] and the second-phase data-access probe — `native/macos/shared/Sources/SharedCLI/AppleEventsGate.swift`. The `typeKernelProcessID` addressing that backs the `procNotFound` fix is detailed in [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md).
 - Per-CLI embedded plists and `-sectcreate` linker flag — `native/macos/{calendar,reminders,mail,notes}/Resources/Info.plist` and each `Package.swift`
-- Build-time version stamping from `desktop/src-tauri/tauri.conf.json` — `scripts/build-native-macos.sh`
+- Build-time version stamping from git (`crates/speedwave-version`, `SPEEDWAVE_VERSION` env override) — `scripts/build-native-macos.sh`
 - Post-sign identifier assertion — `verify_identifier` in `scripts/sign-bundled-binaries.sh`
 - Startup auto-validation Tauri command (iterates `TOGGLEABLE_OS_SERVICES`, auto-disables stale toggles) — `validate_os_integrations_on_startup` in `desktop/src-tauri/src/integrations_cmd.rs`; OS-service list SSOT is `speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES`
 - Auto-disable banner UI — `desktop/src/src/app/integrations/integrations.component.ts`

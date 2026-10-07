@@ -2,6 +2,7 @@
 members = [
     "crates/speedwave-runtime",
     "crates/speedwave-cli",
+    "crates/speedwave-version",
     "crates/pii-engine",
     "crates/pii-engine-wasm",
 ]
@@ -21,6 +22,7 @@ serde_yaml_ng = "0.10"
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
+clap = { version = "4.6.7", features = ["derive"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

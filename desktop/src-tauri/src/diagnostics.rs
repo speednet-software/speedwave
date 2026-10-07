@@ -113,7 +113,7 @@ pub(crate) fn build_diagnostics_zip(
         "os: {}\narch: {}\nversion: {}\nclaude_pinned: {}\n",
         std::env::consts::OS,
         std::env::consts::ARCH,
-        env!("CARGO_PKG_VERSION"),
+        env!("SPEEDWAVE_VERSION"),
         speedwave_runtime::defaults::CLAUDE_VERSION,
     );
     zip.start_file("system-info.txt", options)?;

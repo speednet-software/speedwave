@@ -267,7 +267,7 @@ pub(crate) fn dispatch_method(
                     },
                     "serverInfo": {
                         "name": IDE_BRIDGE_DISPLAY_NAME,
-                        "version": env!("CARGO_PKG_VERSION")
+                        "version": env!("SPEEDWAVE_VERSION")
                     }
                 }),
             )

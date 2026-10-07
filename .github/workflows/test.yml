@@ -276,6 +276,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+      - name: Compute app version
+        run: |
+          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch '${{ github.head_ref || github.ref_name }}')" >> "$GITHUB_ENV"
 
       - name: Build native macOS CLI binaries (universal)
         run: scripts/build-native-macos.sh
@@ -288,6 +300,9 @@ jobs:
 
       - name: Native CLI embedded-plist guards
         run: make test-native-cli-plist
+
+      - name: Check the build did not modify a tracked file
+        run: git diff --exit-code
 
   runtime-windows:
     runs-on: windows-latest
@@ -313,7 +328,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
       - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash
