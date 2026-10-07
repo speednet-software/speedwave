@@ -59,6 +59,8 @@ pub struct Inventory {
     pub written_at: String,
     /// The managed policy's state.
     pub policy: InventoryPolicy,
+    /// The top-level policy keys this Speedwave applies.
+    pub policy_keys: &'static [&'static str],
     /// Every project.
     pub projects: Vec<InventoryProject>,
 }
@@ -168,6 +170,7 @@ pub fn inventory_of(
         speedwave_version: env!("CARGO_PKG_VERSION"),
         written_at: chrono::Utc::now().to_rfc3339(),
         policy,
+        policy_keys: crate::managed_config::MANAGED_POLICY_KEYS,
         projects,
     }
 }
@@ -321,5 +324,33 @@ mod tests {
         );
         assert!(!inv.policy.present && inv.projects.is_empty());
         assert!(inventory_path(tmp.path()).ends_with("management/inventory.json"));
+    }
+
+    #[test]
+    fn the_inventory_names_every_policy_key_this_speedwave_takes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inv = inventory_of(
+            tmp.path(),
+            &SpeedwaveUserConfig::default(),
+            Ok(None),
+            &HashMap::new(),
+        );
+        let json = serde_json::to_value(&inv).unwrap();
+        let keys: Vec<&str> = json["policy_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|k| k.as_str())
+            .collect();
+        assert!(keys.contains(&"services") && keys.contains(&"management"));
+        let all = keys
+            .iter()
+            .map(|k| format!("\"{k}\":null"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            serde_json::from_str::<crate::managed_config::ManagedConfig>(&format!("{{{all}}}"))
+                .is_ok()
+        );
     }
 }

@@ -7,6 +7,17 @@ use crate::config::{
 };
 use std::path::{Path, PathBuf};
 
+/// Every top-level key `ManagedConfig` takes, for a management agent to write only what this
+/// Speedwave applies (ADR-091).
+pub const MANAGED_POLICY_KEYS: &[&str] = &[
+    "schema_version",
+    "management",
+    "telemetry",
+    "pii_policy",
+    "llm_egress",
+    "services",
+];
+
 /// Root policy object read from the system-level managed-config file. Rejects
 /// unknown keys so an admin typo fails closed instead of silently dropping.
 #[derive(serde::Deserialize, Debug, Default)]
