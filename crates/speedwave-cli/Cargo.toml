@@ -14,13 +14,12 @@ name = "speedwave"
 path = "src/main.rs"
 
 [dependencies]
-speedwave-runtime = { path = "../speedwave-runtime" }
+speedwave-runtime = { path = "../speedwave-runtime", features = ["update-check"] }
 anyhow = { workspace = true }
 strum = { version = "0.28", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "rustls"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 semver = "1"
 log = { workspace = true }
 env_logger = "0.11"
@@ -32,7 +31,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 anstyle-query = "1.1"
 
 [dev-dependencies]
-speedwave-runtime = { path = "../speedwave-runtime", features = ["test-support"] }
+speedwave-runtime = { path = "../speedwave-runtime", features = ["test-support", "update-check"] }
 tempfile = "3"
 
 [build-dependencies]

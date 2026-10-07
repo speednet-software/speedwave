@@ -194,27 +194,8 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
-fn fetch_release_body(url: &str) -> anyhow::Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("Speedwave-CLI/{}", env!("SPEEDWAVE_VERSION")))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {e}"))?;
-    let resp = client
-        .get(url)
-        .send()
-        .map_err(|e| anyhow::anyhow!("GitHub API request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        anyhow::bail!("GitHub API returned HTTP {status}");
-    }
-    resp.text()
-        .map_err(|e| anyhow::anyhow!("Failed to read GitHub API response: {e}"))
-}
-
 fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
-    let url = update_channel::release_list_url(channel);
-    let body = fetch_release_body(&url)?;
-    update_channel::parse_release_tag(body.as_bytes()).map_err(|e| anyhow::anyhow!(e))
+    update_channel::fetch_release_tag(channel).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// `true` when `tag` is a strictly newer release than `current` (full `Ord`, build metadata included).
