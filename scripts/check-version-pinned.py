@@ -7,20 +7,43 @@ import re
 import sys
 
 PINNED_VERSION = "0.0.0"
+
+PINNED_JSON_FILES = (
+    "package.json",
+    "desktop/src/package.json",
+    "desktop/src-tauri/tauri.conf.json",
+    "desktop/src/package-lock.json",
+    "mcp-servers/hub/package.json",
+    "mcp-servers/shared/package.json",
+    "mcp-servers/policies/package.json",
+    "mcp-servers/slack/package.json",
+    "mcp-servers/sharepoint/package.json",
+    "mcp-servers/redmine/package.json",
+    "mcp-servers/gitlab/package.json",
+    "mcp-servers/github/package.json",
+    "mcp-servers/atlassian/package.json",
+    "mcp-servers/office/package.json",
+    "mcp-servers/os/package.json",
+    "mcp-servers/oauth/package.json",
+    "mcp-servers/context7/package.json",
+    "mcp-servers/playwright/package.json",
+)
+
+PINNED_TOML_GLOBS = (
+    "crates/speedwave-runtime/Cargo.toml",
+    "crates/speedwave-cli/Cargo.toml",
+    "desktop/src-tauri/Cargo.toml",
+)
+
+PINNED_GENERIC_FILES = (
+    "native/macos/calendar/Resources/Info.plist",
+    "native/macos/reminders/Resources/Info.plist",
+    "native/macos/mail/Resources/Info.plist",
+    "native/macos/notes/Resources/Info.plist",
+    "native/macos/audio-capture/Resources/Info.plist",
+)
+
 STANDALONE_PINNED_TOML_FILES = ("crates/speedwave-version/Cargo.toml",)
-
-
-def _load_json_from_text(text: str, path_for_errors: pathlib.Path) -> dict:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        sys.exit(f"{path_for_errors}: invalid JSON: {e}")
-
-
-def _load_json(path: pathlib.Path) -> dict:
-    if not path.exists():
-        sys.exit(f"{path}: file not found")
-    return _load_json_from_text(path.read_text(), path)
 
 
 def _check_toml_path(
@@ -84,65 +107,36 @@ def _check_generic_path(
             )
 
 
+def _check_json_path(root: pathlib.Path, rel_path: str, errors: list[str]) -> None:
+    path = root / rel_path
+    try:
+        content = path.read_text()
+        data = json.loads(content)
+    except Exception as e:
+        errors.append(f"{path}: failed to parse JSON: {e}")
+        return
+    actual = data.get("version", "")
+    if actual != PINNED_VERSION:
+        errors.append(f"{path}: version '{actual}' is not pinned to {PINNED_VERSION}")
+
+
 def find_errors(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
 
-    manifest_rel = ".release-please-manifest.json"
-    manifest_path = root / manifest_rel
-    try:
-        manifest_text = (root / manifest_rel).read_text()
-    except FileNotFoundError:
-        sys.exit(f"{manifest_path}: file not found")
-    manifest = _load_json_from_text(manifest_text, manifest_path)
-    if "." not in manifest:
-        sys.exit(f"{manifest_path}: missing '.' root-package key")
-    manifest_version = manifest["."]
-    if manifest_version != PINNED_VERSION:
-        errors.append(
-            f"{manifest_path}: root package version '{manifest_version}' "
-            f"is not pinned to {PINNED_VERSION}"
-        )
+    for rel_path in PINNED_JSON_FILES:
+        _check_json_path(root, rel_path, errors)
 
-    config = _load_json(root / "release-please-config.json")
-    try:
-        extra_files = config["packages"]["."]["extra-files"]
-    except KeyError as e:
-        sys.exit(f"release-please-config.json: missing key {e}")
+    for pattern in PINNED_TOML_GLOBS:
+        matches = list(root.glob(pattern))
+        if not matches:
+            errors.append(f"no matches for glob: {pattern}")
+            continue
+        for toml_path in matches:
+            rel_path = toml_path.relative_to(root).as_posix()
+            _check_toml_path(root, rel_path, toml_path, errors)
 
-    for entry in extra_files:
-        if isinstance(entry, str):
-            rel_path = entry
-            path = root / rel_path
-            try:
-                content = path.read_text()
-                data = json.loads(content)
-            except Exception as e:
-                errors.append(f"{path}: failed to parse JSON: {e}")
-                continue
-            actual = data.get("version", "")
-            if actual != PINNED_VERSION:
-                errors.append(
-                    f"{path}: version '{actual}' is not pinned to {PINNED_VERSION}"
-                )
-        elif isinstance(entry, dict) and entry.get("type") == "toml":
-            pattern = entry["path"]
-            matches = list(root.glob(pattern))
-            if not matches:
-                errors.append(f"no matches for glob: {pattern}")
-                continue
-            for toml_path in matches:
-                rel_path = toml_path.relative_to(root).as_posix()
-                _check_toml_path(root, rel_path, toml_path, errors)
-        elif isinstance(entry, dict) and entry.get("type") == "generic":
-            rel_path = entry["path"]
-            path = root / rel_path
-            _check_generic_path(root, rel_path, path, errors)
-        elif isinstance(entry, dict):
-            errors.append(
-                f"unsupported extra-file type '{entry.get('type')}' for "
-                f"path '{entry.get('path')}': extend "
-                f"check-version-pinned.py to cover it"
-            )
+    for rel_path in PINNED_GENERIC_FILES:
+        _check_generic_path(root, rel_path, root / rel_path, errors)
 
     for rel_path in STANDALONE_PINNED_TOML_FILES:
         if not (root / rel_path).exists():

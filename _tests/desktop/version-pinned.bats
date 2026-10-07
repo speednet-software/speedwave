@@ -1,53 +1,7 @@
 #!/usr/bin/env bats
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
-FIXTURES="$REPO_ROOT/_tests/desktop/fixtures/version-consistency"
 SCRIPT="$REPO_ROOT/scripts/check-version-pinned.py"
-
-_write_toml_config() {
-  local dest="$1" path="$2"
-  cat > "$dest/release-please-config.json" <<JSON
-{
-  "packages": {
-    ".": {
-      "extra-files": [
-        {"type": "toml", "path": "${path}"}
-      ]
-    }
-  }
-}
-JSON
-}
-
-_write_string_config() {
-  local dest="$1" path="$2"
-  cat > "$dest/release-please-config.json" <<JSON
-{
-  "packages": {
-    ".": {
-      "extra-files": [
-        "${path}"
-      ]
-    }
-  }
-}
-JSON
-}
-
-_write_generic_config() {
-  local dest="$1" path="$2"
-  cat > "$dest/release-please-config.json" <<JSON
-{
-  "packages": {
-    ".": {
-      "extra-files": [
-        {"type": "generic", "path": "${path}"}
-      ]
-    }
-  }
-}
-JSON
-}
 
 
 @test "real repo passes once every tracked file is pinned to 0.0.0" {
@@ -59,9 +13,8 @@ JSON
 @test "standalone speedwave-version Cargo.toml not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  printf '{"packages":{".":{"extra-files":[]}}}\n' > "$fixture_root/release-please-config.json"
   mkdir -p "$fixture_root/crates/speedwave-version"
   printf '[package]\nname = "speedwave-version"\nversion = "9.9.9"\n' \
     > "$fixture_root/crates/speedwave-version/Cargo.toml"
@@ -77,9 +30,7 @@ JSON
 @test "standalone speedwave-version Cargo.toml is skipped when absent from a fixture root" {
   local fixture_root
   fixture_root="$(mktemp -d)"
-
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  printf '{"packages":{".":{"extra-files":[]}}}\n' > "$fixture_root/release-please-config.json"
+  _seed_pinned_fixture "$fixture_root"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -90,16 +41,15 @@ JSON
 @test "Cargo.toml version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_toml_config "$fixture_root" "crates/speedwave-runtime/Cargo.toml"
-  mkdir -p "$fixture_root/crates/speedwave-runtime"
-  cp "$FIXTURES/Cargo.toml.fixture.mismatched" "$fixture_root/crates/speedwave-runtime/Cargo.toml"
+  printf '[package]\nname = "speedwave-runtime"\nversion = "9.9.9"\n' \
+    > "$fixture_root/crates/speedwave-runtime/Cargo.toml"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "Cargo.toml" ]]
+  [[ "$output" =~ "speedwave-runtime/Cargo.toml" ]]
   [[ "$output" =~ "not pinned to 0.0.0" ]]
 }
 
@@ -107,42 +57,40 @@ JSON
 @test "package.json version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_string_config "$fixture_root" "mcp-servers/hub/package.json"
-  mkdir -p "$fixture_root/mcp-servers/hub"
-  cp "$FIXTURES/package.fixture.mismatched.json" "$fixture_root/mcp-servers/hub/package.json"
+  printf '{"name": "hub", "version": "9.9.9"}\n' \
+    > "$fixture_root/mcp-servers/hub/package.json"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "package.json" ]]
+  [[ "$output" =~ "mcp-servers/hub/package.json" ]]
   [[ "$output" =~ "not pinned to 0.0.0" ]]
 }
 
 
-@test "empty glob fails with 'no matches for glob' message" {
+@test "missing Cargo.toml glob target fails with 'no matches for glob' message" {
   local fixture_root
   fixture_root="$(mktemp -d)"
-
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_toml_config "$fixture_root" "crates/nonexistent-crate/Cargo.toml"
+  _seed_pinned_fixture "$fixture_root"
+  rm -f "$fixture_root/crates/speedwave-cli/Cargo.toml"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "no matches for glob" ]]
+  [[ "$output" =~ "speedwave-cli" ]]
 }
 
 
 @test "empty version string in Cargo.toml fails with file name" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_toml_config "$fixture_root" "crates/test-crate/Cargo.toml"
-  mkdir -p "$fixture_root/crates/test-crate"
-  printf '[package]\nname = "test-crate"\nversion = ""\n' > "$fixture_root/crates/test-crate/Cargo.toml"
+  printf '[package]\nname = "speedwave-runtime"\nversion = ""\n' \
+    > "$fixture_root/crates/speedwave-runtime/Cargo.toml"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -155,12 +103,7 @@ JSON
 @test "generic plist pinned to 0.0.0 passes" {
   local fixture_root
   fixture_root="$(mktemp -d)"
-
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
-  mkdir -p "$fixture_root/native/macos/x/Resources"
-  printf '<string>0.0.0</string> <!-- x-release-please-version -->\n' \
-    > "$fixture_root/native/macos/x/Resources/Info.plist"
+  _seed_pinned_fixture "$fixture_root"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -170,12 +113,10 @@ JSON
 @test "generic plist version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
-  mkdir -p "$fixture_root/native/macos/x/Resources"
   printf '<string>9.9.8</string> <!-- x-release-please-version -->\n' \
-    > "$fixture_root/native/macos/x/Resources/Info.plist"
+    > "$fixture_root/native/macos/calendar/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -187,12 +128,10 @@ JSON
 @test "generic plist missing marker detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
-  mkdir -p "$fixture_root/native/macos/x/Resources"
-  printf '<string>9.9.9</string>\n' \
-    > "$fixture_root/native/macos/x/Resources/Info.plist"
+  printf '<string>0.0.0</string>\n' \
+    > "$fixture_root/native/macos/calendar/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -203,12 +142,10 @@ JSON
 @test "generic plist superstring of 0.0.0 detected (exact match)" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
-  mkdir -p "$fixture_root/native/macos/x/Resources"
   printf '<string>10.0.0</string> <!-- x-release-please-version -->\n' \
-    > "$fixture_root/native/macos/x/Resources/Info.plist"
+    > "$fixture_root/native/macos/calendar/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -220,9 +157,8 @@ JSON
 @test "generic plist file missing causes read error" {
   local fixture_root
   fixture_root="$(mktemp -d)"
-
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
+  _seed_pinned_fixture "$fixture_root"
+  rm -f "$fixture_root/native/macos/calendar/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -234,12 +170,10 @@ JSON
 @test "generic plist marker without string tag causes extraction error" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  _write_generic_config "$fixture_root" "native/macos/x/Resources/Info.plist"
-  mkdir -p "$fixture_root/native/macos/x/Resources"
   printf '9.9.9 <!-- x-release-please-version -->\n' \
-    > "$fixture_root/native/macos/x/Resources/Info.plist"
+    > "$fixture_root/native/macos/calendar/Resources/Info.plist"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
@@ -248,32 +182,71 @@ JSON
 }
 
 
-@test "unsupported extra-file type is reported" {
+@test "tauri.conf.json version not pinned to 0.0.0 detected" {
   local fixture_root
   fixture_root="$(mktemp -d)"
+  _seed_pinned_fixture "$fixture_root"
 
-  cp "$FIXTURES/release-please-manifest.fixture.json" "$fixture_root/.release-please-manifest.json"
-  cat > "$fixture_root/release-please-config.json" <<'JSON'
-{"packages":{".":{"extra-files":[{"type":"xml","path":"some/file.xml"}]}}}
-JSON
+  printf '{"version": "9.9.9"}\n' > "$fixture_root/desktop/src-tauri/tauri.conf.json"
 
   run python3 "$SCRIPT" "$fixture_root"
   rm -rf "$fixture_root"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "unsupported extra-file type" ]]
+  [[ "$output" =~ "tauri.conf.json" ]]
+  [[ "$output" =~ "not pinned to 0.0.0" ]]
 }
 
 
-@test "manifest root version not pinned to 0.0.0 detected" {
-  local fixture_root
-  fixture_root="$(mktemp -d)"
+# Seeds a fixture root with every file the script hardcodes, all pinned to
+# 0.0.0, so a single test can mutate one file and still get a clean baseline
+# for every other pinned source.
+_seed_pinned_fixture() {
+  local root="$1"
 
-  printf '{".": "9.9.9"}\n' > "$fixture_root/.release-please-manifest.json"
-  printf '{"packages":{".":{"extra-files":[]}}}\n' > "$fixture_root/release-please-config.json"
+  local json_files=(
+    package.json
+    desktop/src/package.json
+    desktop/src-tauri/tauri.conf.json
+    desktop/src/package-lock.json
+    mcp-servers/hub/package.json
+    mcp-servers/shared/package.json
+    mcp-servers/policies/package.json
+    mcp-servers/slack/package.json
+    mcp-servers/sharepoint/package.json
+    mcp-servers/redmine/package.json
+    mcp-servers/gitlab/package.json
+    mcp-servers/github/package.json
+    mcp-servers/atlassian/package.json
+    mcp-servers/office/package.json
+    mcp-servers/os/package.json
+    mcp-servers/oauth/package.json
+    mcp-servers/context7/package.json
+    mcp-servers/playwright/package.json
+  )
+  for f in "${json_files[@]}"; do
+    mkdir -p "$root/$(dirname "$f")"
+    printf '{"version": "0.0.0"}\n' > "$root/$f"
+  done
 
-  run python3 "$SCRIPT" "$fixture_root"
-  rm -rf "$fixture_root"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ ".release-please-manifest.json" ]]
-  [[ "$output" =~ "not pinned to 0.0.0" ]]
+  local toml_files=(
+    crates/speedwave-runtime/Cargo.toml
+    crates/speedwave-cli/Cargo.toml
+    desktop/src-tauri/Cargo.toml
+  )
+  for f in "${toml_files[@]}"; do
+    mkdir -p "$root/$(dirname "$f")"
+    printf '[package]\nname = "x"\nversion = "0.0.0"\n' > "$root/$f"
+  done
+
+  local plist_files=(
+    native/macos/calendar/Resources/Info.plist
+    native/macos/reminders/Resources/Info.plist
+    native/macos/mail/Resources/Info.plist
+    native/macos/notes/Resources/Info.plist
+    native/macos/audio-capture/Resources/Info.plist
+  )
+  for f in "${plist_files[@]}"; do
+    mkdir -p "$root/$(dirname "$f")"
+    printf '<string>0.0.0</string> <!-- x-release-please-version -->\n' > "$root/$f"
+  done
 }
