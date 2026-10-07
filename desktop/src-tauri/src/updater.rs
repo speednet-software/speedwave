@@ -13,34 +13,17 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 const UPDATE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
 
-async fn fetch_latest_release_tag(
-    client: &reqwest::Client,
-    list_url: &str,
-) -> Result<String, String> {
-    let resp = client
-        .get(list_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to list GitHub releases: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("GitHub releases list returned HTTP {status}"));
-    }
-    let body = crate::http_util::read_body_limited(resp, "GitHub releases list").await?;
-    update_channel::parse_release_tag(&body)
-}
-
 /// Resolves the update manifest URL for `channel`: the fixed stable endpoint,
 /// or the manifest built from the latest beta release's tag.
 async fn resolve_update_endpoint(channel: UpdateChannel) -> Result<String, String> {
     match channel {
         UpdateChannel::Stable => Ok(UPDATE_ENDPOINT.to_string()),
-        UpdateChannel::Beta => {
-            let client = crate::http_util::build_hardened_client(None)?;
-            let list_url = update_channel::release_list_url(UpdateChannel::Beta);
-            let tag = fetch_latest_release_tag(&client, &list_url).await?;
-            Ok(update_channel::release_manifest_url(&tag))
-        }
+        UpdateChannel::Beta => tokio::task::spawn_blocking(move || {
+            update_channel::fetch_release_tag(UpdateChannel::Beta)
+        })
+        .await
+        .map_err(|e| format!("Release tag fetch task failed: {e}"))?
+        .map(|tag| update_channel::release_manifest_url(&tag)),
     }
 }
 
@@ -341,66 +324,6 @@ mod tests {
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         assert!(json.contains(r#""channel":"beta""#));
-    }
-
-    #[tokio::test]
-    async fn fetch_latest_release_tag_parses_first_entry_from_mocked_api() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/releases")
-            .match_query(mockito::Matcher::UrlEncoded("per_page".into(), "1".into()))
-            .with_status(200)
-            .with_header("Content-Type", "application/json")
-            .with_body(r#"[{"tag_name":"v0.22.0+41"}]"#)
-            .create_async()
-            .await;
-
-        let client = crate::http_util::build_hardened_client(None).expect("client");
-        let list_url = format!("{}/releases?per_page=1", server.url());
-        let tag = fetch_latest_release_tag(&client, &list_url)
-            .await
-            .expect("fetch tag");
-
-        assert_eq!(tag, "v0.22.0+41");
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn fetch_latest_release_tag_empty_list_errors() {
-        let mut server = mockito::Server::new_async().await;
-        let _mock = server
-            .mock("GET", "/releases")
-            .match_query(mockito::Matcher::UrlEncoded("per_page".into(), "1".into()))
-            .with_status(200)
-            .with_header("Content-Type", "application/json")
-            .with_body("[]")
-            .create_async()
-            .await;
-
-        let client = crate::http_util::build_hardened_client(None).expect("client");
-        let list_url = format!("{}/releases?per_page=1", server.url());
-        let result = fetch_latest_release_tag(&client, &list_url).await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("tag_name"));
-    }
-
-    #[tokio::test]
-    async fn fetch_latest_release_tag_http_error_status_errors() {
-        let mut server = mockito::Server::new_async().await;
-        let _mock = server
-            .mock("GET", "/releases")
-            .match_query(mockito::Matcher::UrlEncoded("per_page".into(), "1".into()))
-            .with_status(500)
-            .create_async()
-            .await;
-
-        let client = crate::http_util::build_hardened_client(None).expect("client");
-        let list_url = format!("{}/releases?per_page=1", server.url());
-        let result = fetch_latest_release_tag(&client, &list_url).await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("500"));
     }
 
     #[tokio::test]
