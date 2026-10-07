@@ -106,17 +106,17 @@ PY
 }
 
 
-@test "endpoints[0] equals STABLE_ENDPOINT from updater.rs (real file)" {
+@test "endpoints[0] equals UPDATE_ENDPOINT from updater.rs (real file)" {
   run python3 - "$(conf_file)" "$UPDATER_RS" <<'PY'
 import json, sys, re
 conf_path, rs_path = sys.argv[1], sys.argv[2]
 with open(rs_path) as f:
     content = f.read()
-matches = re.findall(r'^const STABLE_ENDPOINT:\s*&str\s*=\s*"([^"]+)"', content, re.MULTILINE)
+matches = re.findall(r'^const UPDATE_ENDPOINT:\s*&str\s*=\s*"([^"]+)"', content, re.MULTILINE)
 if len(matches) == 0:
-    sys.exit("STABLE_ENDPOINT not found in updater.rs — renamed or removed?")
+    sys.exit("UPDATE_ENDPOINT not found in updater.rs — renamed or removed?")
 if len(matches) > 1:
-    sys.exit(f"STABLE_ENDPOINT defined {len(matches)} times in updater.rs — duplicate?")
+    sys.exit(f"UPDATE_ENDPOINT defined {len(matches)} times in updater.rs — duplicate?")
 stable = matches[0]
 with open(conf_path) as f:
     c = json.load(f)
@@ -124,22 +124,22 @@ eps = c.get("plugins", {}).get("updater", {}).get("endpoints", [])
 if not eps:
     sys.exit("endpoints is empty")
 if eps[0] != stable:
-    sys.exit(f"endpoints[0] {eps[0]!r} != STABLE_ENDPOINT {stable!r}")
+    sys.exit(f"endpoints[0] {eps[0]!r} != UPDATE_ENDPOINT {stable!r}")
 PY
   [ "$status" -eq 0 ]
 }
 
-@test "endpoints[0] equals STABLE_ENDPOINT from updater.rs (fixture: wrong endpoint)" {
+@test "endpoints[0] equals UPDATE_ENDPOINT from updater.rs (fixture: wrong endpoint)" {
   run python3 - "$FIXTURES/tauri.conf.wrong-endpoint.json" "$UPDATER_RS" <<'PY'
 import json, sys, re
 conf_path, rs_path = sys.argv[1], sys.argv[2]
 with open(rs_path) as f:
     content = f.read()
-matches = re.findall(r'^const STABLE_ENDPOINT:\s*&str\s*=\s*"([^"]+)"', content, re.MULTILINE)
+matches = re.findall(r'^const UPDATE_ENDPOINT:\s*&str\s*=\s*"([^"]+)"', content, re.MULTILINE)
 if len(matches) == 0:
-    sys.exit("STABLE_ENDPOINT not found in updater.rs — renamed or removed?")
+    sys.exit("UPDATE_ENDPOINT not found in updater.rs — renamed or removed?")
 if len(matches) > 1:
-    sys.exit(f"STABLE_ENDPOINT defined {len(matches)} times in updater.rs — duplicate?")
+    sys.exit(f"UPDATE_ENDPOINT defined {len(matches)} times in updater.rs — duplicate?")
 stable = matches[0]
 with open(conf_path) as f:
     c = json.load(f)
@@ -147,10 +147,10 @@ eps = c.get("plugins", {}).get("updater", {}).get("endpoints", [])
 if not eps:
     sys.exit("endpoints is empty")
 if eps[0] != stable:
-    sys.exit(f"endpoints[0] {eps[0]!r} != STABLE_ENDPOINT {stable!r}")
+    sys.exit(f"endpoints[0] {eps[0]!r} != UPDATE_ENDPOINT {stable!r}")
 PY
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "STABLE_ENDPOINT" ]]
+  [[ "$output" =~ "UPDATE_ENDPOINT" ]]
 }
 
 

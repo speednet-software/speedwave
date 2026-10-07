@@ -9,9 +9,63 @@ use tauri_plugin_updater::UpdaterExt;
 /// Mutex to serialize load-modify-save cycles on update-settings.json.
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
-/// Stable update endpoint — GitHub Releases latest. Mirrors `plugins.updater.endpoints` in tauri.conf.json.
-const STABLE_ENDPOINT: &str =
+/// Stable-channel update endpoint. Mirrors `plugins.updater.endpoints` in tauri.conf.json.
+const UPDATE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
+
+/// GitHub releases list, newest first — used to find the latest beta.
+const GITHUB_RELEASES_LIST_URL: &str =
+    "https://api.github.com/repos/speednet-software/speedwave/releases?per_page=1";
+
+/// Single field parsed out of a GitHub releases-list response entry.
+#[derive(Debug, Deserialize)]
+struct GithubReleaseSummary {
+    tag_name: String,
+}
+
+/// Picks the newest release's tag from a releases-list response (first entry, per GitHub's API order).
+fn select_latest_release_tag(releases: &[GithubReleaseSummary]) -> Option<&str> {
+    releases.first().map(|r| r.tag_name.as_str())
+}
+
+/// Builds the beta manifest URL for a release tag; a literal `+` is a valid path segment and stays unescaped.
+fn beta_manifest_url(tag: &str) -> String {
+    format!("https://github.com/speednet-software/speedwave/releases/download/{tag}/latest.json")
+}
+
+async fn fetch_latest_release_tag(
+    client: &reqwest::Client,
+    list_url: &str,
+) -> Result<String, String> {
+    let resp = client
+        .get(list_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to list GitHub releases: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("GitHub releases list returned HTTP {status}"));
+    }
+    let body = crate::http_util::read_body_limited(resp, "GitHub releases list").await?;
+    let releases: Vec<GithubReleaseSummary> = serde_json::from_slice(&body)
+        .map_err(|e| format!("GitHub releases list is not valid JSON: {e}"))?;
+    select_latest_release_tag(&releases)
+        .map(str::to_string)
+        .ok_or_else(|| "No beta releases found".to_string())
+}
+
+/// Resolves the update manifest URL for `channel`: the fixed stable endpoint,
+/// or the beta endpoint built from the latest release tag.
+async fn resolve_update_endpoint(channel: UpdateChannel) -> Result<String, String> {
+    match channel {
+        UpdateChannel::Stable => Ok(UPDATE_ENDPOINT.to_string()),
+        UpdateChannel::Beta => {
+            let client = crate::http_util::build_hardened_client(None)?;
+            let tag = fetch_latest_release_tag(&client, GITHUB_RELEASES_LIST_URL).await?;
+            Ok(beta_manifest_url(&tag))
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -106,9 +160,13 @@ fn detect_critical(body: &Option<String>) -> bool {
     })
 }
 
-/// Builds a stable-channel Tauri Updater. `version_comparator` allows upgrades only (remote > current).
-fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
-    let parsed_url: url::Url = STABLE_ENDPOINT
+/// Builds a Tauri Updater for `channel`. `version_comparator` allows upgrades only (remote > current), on either channel.
+async fn build_updater(
+    app: &AppHandle,
+    channel: UpdateChannel,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoint = resolve_update_endpoint(channel).await?;
+    let parsed_url: url::Url = endpoint
         .parse()
         .map_err(|e: url::ParseError| e.to_string())?;
     app.updater_builder()
@@ -120,7 +178,8 @@ fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, Strin
 }
 
 pub async fn check_for_update(app: &AppHandle) -> Result<UpdateCheckOutcome, String> {
-    let updater = build_updater(app)?;
+    let settings = load_update_settings();
+    let updater = build_updater(app, settings.channel).await?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     match update {
         Some(u) => Ok(UpdateCheckOutcome::UpdateAvailable(UpdateInfo {
@@ -152,7 +211,8 @@ pub async fn verify_update_installable(
 }
 
 pub async fn install_update(app: &AppHandle, expected_version: String) -> Result<(), String> {
-    let updater = build_updater(app)?;
+    let settings = load_update_settings();
+    let updater = build_updater(app, settings.channel).await?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     let update = update.ok_or("No update available")?;
 
@@ -206,6 +266,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn update_endpoint_is_unchanged_stable_url() {
+        assert_eq!(
+            UPDATE_ENDPOINT,
+            "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json"
+        );
+    }
+
+    #[test]
     fn update_settings_missing_channel_field_defaults_to_stable() {
         let json = r#"{"auto_check":true,"check_interval_hours":24}"#;
         let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
@@ -248,6 +316,107 @@ mod tests {
         let contents = std::fs::read_to_string(&path).expect("read");
         let settings: UpdateSettings = serde_json::from_str(&contents).unwrap_or_default();
         assert_eq!(settings.channel, UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn select_latest_release_tag_returns_first_entry() {
+        let releases = vec![
+            GithubReleaseSummary {
+                tag_name: "v0.22.0+41".to_string(),
+            },
+            GithubReleaseSummary {
+                tag_name: "v0.21.0+37".to_string(),
+            },
+        ];
+        assert_eq!(select_latest_release_tag(&releases), Some("v0.22.0+41"));
+    }
+
+    #[test]
+    fn select_latest_release_tag_empty_list_returns_none() {
+        assert_eq!(select_latest_release_tag(&[]), None);
+    }
+
+    #[test]
+    fn beta_manifest_url_builds_releases_download_path() {
+        assert_eq!(
+            beta_manifest_url("v0.22.0+41"),
+            "https://github.com/speednet-software/speedwave/releases/download/v0.22.0+41/latest.json"
+        );
+    }
+
+    #[test]
+    fn beta_manifest_url_preserves_literal_plus_without_percent_encoding() {
+        let url = beta_manifest_url("v0.21.0+110");
+        assert!(url.contains("v0.21.0+110"));
+        assert!(!url.contains("%2B"));
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_tag_parses_first_entry_from_mocked_api() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/releases")
+            .match_query(mockito::Matcher::UrlEncoded("per_page".into(), "1".into()))
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(r#"[{"tag_name":"v0.22.0+41"}]"#)
+            .create_async()
+            .await;
+
+        let client = crate::http_util::build_hardened_client(None).expect("client");
+        let list_url = format!("{}/releases?per_page=1", server.url());
+        let tag = fetch_latest_release_tag(&client, &list_url)
+            .await
+            .expect("fetch tag");
+
+        assert_eq!(tag, "v0.22.0+41");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_tag_empty_list_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/releases")
+            .match_query(mockito::Matcher::UrlEncoded("per_page".into(), "1".into()))
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let client = crate::http_util::build_hardened_client(None).expect("client");
+        let list_url = format!("{}/releases?per_page=1", server.url());
+        let result = fetch_latest_release_tag(&client, &list_url).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No beta releases"));
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_tag_http_error_status_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/releases")
+            .match_query(mockito::Matcher::UrlEncoded("per_page".into(), "1".into()))
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = crate::http_util::build_hardened_client(None).expect("client");
+        let list_url = format!("{}/releases?per_page=1", server.url());
+        let result = fetch_latest_release_tag(&client, &list_url).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn resolve_update_endpoint_stable_returns_update_endpoint() {
+        let endpoint = resolve_update_endpoint(UpdateChannel::Stable)
+            .await
+            .expect("resolve");
+        assert_eq!(endpoint, UPDATE_ENDPOINT);
     }
 
     #[test]
