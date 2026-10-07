@@ -21,6 +21,10 @@ assert_package_list() {
     }
 }
 
+without_version_values() {
+    awk 'skip { skip = 0; next } /<key>(CFBundleShortVersionString|CFBundleVersion)<\/key>/ { skip = 1 } { print }' "$1"
+}
+
 plist_fixture() {
     cp "$SPW_ROOT/native/macos/calendar/Resources/Info.plist" "$1"
 }
@@ -59,7 +63,7 @@ staged_fixture_repo() {
     local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
     plist_fixture "$src"
     stage_info_plist "$src" "$dest"
-    diff "$src" "$dest"
+    diff <(without_version_values "$src") <(without_version_values "$dest")
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$dest")" = "pl.speedwave.desktop.calendar" ]
 }
 

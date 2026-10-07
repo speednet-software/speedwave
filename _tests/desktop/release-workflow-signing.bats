@@ -313,36 +313,20 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
 RELEASE_PREFLIGHT_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/release-preflight/action.yml"
 
 @test "no actions/checkout carries persist-credentials: true or a token: input (the PAT stays out of .git/config while third-party code runs)" {
-    node -e '
-        const yaml = require("js-yaml");
-        const fs = require("fs");
-        const files = [
-            process.argv[1],
-            process.argv[2],
-            process.argv[3],
-        ];
-        let failed = false;
-        for (const file of files) {
-            const doc = yaml.load(fs.readFileSync(file, "utf8"));
-            const jobs = doc.jobs || {};
-            for (const [jobName, job] of Object.entries(jobs)) {
-                for (const step of job.steps || []) {
-                    if (step.uses && step.uses.startsWith("actions/checkout@")) {
-                        const w = step.with || {};
-                        if (Object.prototype.hasOwnProperty.call(w, "token")) {
-                            console.error(`ERROR: ${file} job ${jobName} passes a token: input to actions/checkout`);
-                            failed = true;
-                        }
-                        if (w["persist-credentials"] !== false) {
-                            console.error(`ERROR: ${file} job ${jobName} checkout does not set persist-credentials: false`);
-                            failed = true;
-                        }
-                    }
-                }
+    local file
+    for file in "$BETA_WORKFLOW" "$RELEASE_WORKFLOW" "$WORKFLOW"; do
+        awk -v f="$file" '
+            function close_step() {
+                if (in_step && !persisted) { printf "ERROR: %s:%d checkout does not set persist-credentials: false\n", f, start > "/dev/stderr"; bad = 1 }
+                in_step = 0
             }
-        }
-        process.exit(failed ? 1 : 0);
-    ' "$BETA_WORKFLOW" "$RELEASE_WORKFLOW" "$WORKFLOW"
+            /^ *- / { close_step() }
+            /^ *- uses: actions\/checkout@/ { in_step = 1; persisted = 0; start = NR; next }
+            in_step && /^ *persist-credentials: *false *$/ { persisted = 1 }
+            in_step && /^ *token:/ { printf "ERROR: %s:%d passes a token: input to actions/checkout\n", f, NR > "/dev/stderr"; bad = 1 }
+            END { close_step(); exit bad }
+        ' "$file"
+    done
 }
 
 @test "release-preflight has no checkout of its own and never references GH_AUTOMATION_PAT (caller supplies both checkout and credentials)" {
@@ -358,24 +342,11 @@ RELEASE_PREFLIGHT_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/release-prefl
 }
 
 @test "GH_AUTOMATION_PAT is never set in a job-level env: (only in the steps that push or call gh)" {
-    node -e '
-        const yaml = require("js-yaml");
-        const fs = require("fs");
-        const files = [process.argv[1], process.argv[2], process.argv[3]];
-        let failed = false;
-        for (const file of files) {
-            const doc = yaml.load(fs.readFileSync(file, "utf8"));
-            if (doc.env && JSON.stringify(doc.env).includes("GH_AUTOMATION_PAT")) {
-                console.error(`ERROR: ${file} sets GH_AUTOMATION_PAT at the workflow level`);
-                failed = true;
-            }
-            for (const [jobName, job] of Object.entries(doc.jobs || {})) {
-                if (job.env && JSON.stringify(job.env).includes("GH_AUTOMATION_PAT")) {
-                    console.error(`ERROR: ${file} job ${jobName} sets GH_AUTOMATION_PAT at job-level env:`);
-                    failed = true;
-                }
-            }
-        }
-        process.exit(failed ? 1 : 0);
-    ' "$BETA_WORKFLOW" "$RELEASE_WORKFLOW" "$WORKFLOW"
+    local hits
+    hits=$(grep -nE '^ {0,9}[A-Za-z_][A-Za-z0-9_]*: .*secrets\.GH_AUTOMATION_PAT' "$BETA_WORKFLOW" "$RELEASE_WORKFLOW" "$WORKFLOW" || true)
+    if [ -n "$hits" ]; then
+        echo "ERROR: GH_AUTOMATION_PAT set above step level (workflow or job env):" >&2
+        echo "$hits" >&2
+        return 1
+    fi
 }
