@@ -1,21 +1,16 @@
-//! Shared update-channel model for `update-settings.json`. The desktop app
-//! and the CLI self-updater read the same file and must apply the same
-//! stable-by-default tolerance to the `channel` field.
+//! Shared update-channel model for `update-settings.json`: the channel enum
+//! and the pure GitHub release URL/tag helpers both the desktop updater and
+//! the CLI self-updater build on.
 
 use serde::{Deserialize, Serialize};
 
 /// Which GitHub release stream an installation follows.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateChannel {
+    #[default]
     Stable,
     Beta,
-}
-
-impl Default for UpdateChannel {
-    fn default() -> Self {
-        Self::Stable
-    }
 }
 
 impl std::fmt::Display for UpdateChannel {
@@ -27,18 +22,17 @@ impl std::fmt::Display for UpdateChannel {
     }
 }
 
-/// `serde(deserialize_with)` for a `channel` field: anything other than the
-/// exact string `"beta"` (missing — handled by `#[serde(default)]` on the
-/// field — wrong type, or an unrecognized string) deserializes as `stable`
-/// without ever failing the surrounding document.
-pub fn deserialize_channel<'de, D>(deserializer: D) -> Result<UpdateChannel, D::Error>
+/// `serde(deserialize_with)` for an optional `channel` field: anything other
+/// than the strings `"beta"`/`"stable"` deserializes as `None`.
+pub fn deserialize_channel<'de, D>(deserializer: D) -> Result<Option<UpdateChannel>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(match value.as_str() {
-        Some("beta") => UpdateChannel::Beta,
-        _ => UpdateChannel::Stable,
+        Some("beta") => Some(UpdateChannel::Beta),
+        Some("stable") => Some(UpdateChannel::Stable),
+        _ => None,
     })
 }
 
@@ -50,10 +44,48 @@ pub fn settings_path() -> std::path::PathBuf {
     crate::consts::data_dir().join(SETTINGS_FILE_NAME)
 }
 
+const REPO_OWNER: &str = "speednet-software";
+const REPO_NAME: &str = "speedwave";
+
+/// GitHub API URL for the release to check on `channel`: `/releases/latest`
+/// for stable, the newest-first releases page for beta.
+pub fn release_list_url(channel: UpdateChannel) -> String {
+    match channel {
+        UpdateChannel::Stable => {
+            format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest")
+        }
+        UpdateChannel::Beta => {
+            format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases?per_page=1")
+        }
+    }
+}
+
+/// Extracts `tag_name` from a GitHub releases API response: a single release
+/// object (`/releases/latest`) or a list (`/releases?per_page=1`, newest first).
+pub fn parse_release_tag(body: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("GitHub API response is not valid JSON: {e}"))?;
+    let entry = value
+        .as_array()
+        .and_then(|list| list.first())
+        .unwrap_or(&value);
+    entry
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "GitHub API response has no tag_name".to_string())
+}
+
+/// Builds the GitHub release-download manifest URL for a tag; a literal `+`
+/// in the tag is a valid path segment and stays unescaped.
+pub fn release_manifest_url(tag: &str) -> String {
+    format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}/latest.json")
+}
+
 #[derive(Deserialize)]
 struct ChannelOnly {
     #[serde(default, deserialize_with = "deserialize_channel")]
-    channel: UpdateChannel,
+    channel: Option<UpdateChannel>,
 }
 
 fn read_update_channel_at(path: &std::path::Path) -> UpdateChannel {
@@ -61,13 +93,13 @@ fn read_update_channel_at(path: &std::path::Path) -> UpdateChannel {
         return UpdateChannel::default();
     };
     serde_json::from_str::<ChannelOnly>(&contents)
-        .map(|c| c.channel)
+        .ok()
+        .and_then(|c| c.channel)
         .unwrap_or_default()
 }
 
-/// Reads just the `channel` field from the shared settings file. A missing
-/// file, unparsable JSON, a missing field and an unrecognized value all read
-/// as `stable`.
+/// Reads the effective `channel` from the shared settings file; missing,
+/// unparsable, or unrecognized content all read as `stable`.
 pub fn read_update_channel() -> UpdateChannel {
     read_update_channel_at(&settings_path())
 }
@@ -89,39 +121,39 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_channel_missing_field_is_stable() {
+    fn deserialize_channel_missing_field_is_none() {
         let parsed: ChannelOnly = serde_json::from_str("{}").unwrap();
-        assert_eq!(parsed.channel, UpdateChannel::Stable);
+        assert_eq!(parsed.channel, None);
     }
 
     #[test]
     fn deserialize_channel_stable_value() {
         let parsed: ChannelOnly = serde_json::from_str(r#"{"channel":"stable"}"#).unwrap();
-        assert_eq!(parsed.channel, UpdateChannel::Stable);
+        assert_eq!(parsed.channel, Some(UpdateChannel::Stable));
     }
 
     #[test]
     fn deserialize_channel_beta_value() {
         let parsed: ChannelOnly = serde_json::from_str(r#"{"channel":"beta"}"#).unwrap();
-        assert_eq!(parsed.channel, UpdateChannel::Beta);
+        assert_eq!(parsed.channel, Some(UpdateChannel::Beta));
     }
 
     #[test]
-    fn deserialize_channel_unknown_value_is_stable() {
+    fn deserialize_channel_unknown_value_is_none() {
         let parsed: ChannelOnly = serde_json::from_str(r#"{"channel":"nightly"}"#).unwrap();
-        assert_eq!(parsed.channel, UpdateChannel::Stable);
+        assert_eq!(parsed.channel, None);
     }
 
     #[test]
-    fn deserialize_channel_wrong_type_is_stable() {
+    fn deserialize_channel_wrong_type_is_none() {
         let parsed: ChannelOnly = serde_json::from_str(r#"{"channel":42}"#).unwrap();
-        assert_eq!(parsed.channel, UpdateChannel::Stable);
+        assert_eq!(parsed.channel, None);
     }
 
     #[test]
-    fn deserialize_channel_null_is_stable() {
+    fn deserialize_channel_null_is_none() {
         let parsed: ChannelOnly = serde_json::from_str(r#"{"channel":null}"#).unwrap();
-        assert_eq!(parsed.channel, UpdateChannel::Stable);
+        assert_eq!(parsed.channel, None);
     }
 
     #[test]
@@ -152,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn read_update_channel_unknown_value_does_not_invalidate_other_fields() {
+    fn read_update_channel_unknown_value_reads_stable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(SETTINGS_FILE_NAME);
         std::fs::write(
@@ -160,17 +192,71 @@ mod tests {
             r#"{"auto_check":false,"check_interval_hours":6,"channel":"nightly"}"#,
         )
         .unwrap();
-        let contents = std::fs::read_to_string(&path).unwrap();
-        #[derive(Deserialize)]
-        struct Full {
-            auto_check: bool,
-            check_interval_hours: u32,
-            #[serde(default, deserialize_with = "deserialize_channel")]
-            channel: UpdateChannel,
-        }
-        let full: Full = serde_json::from_str(&contents).unwrap();
-        assert!(!full.auto_check);
-        assert_eq!(full.check_interval_hours, 6);
-        assert_eq!(full.channel, UpdateChannel::Stable);
+        assert_eq!(read_update_channel_at(&path), UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn release_list_url_stable_uses_releases_latest() {
+        assert_eq!(
+            release_list_url(UpdateChannel::Stable),
+            "https://api.github.com/repos/speednet-software/speedwave/releases/latest"
+        );
+    }
+
+    #[test]
+    fn release_list_url_beta_uses_releases_list() {
+        assert_eq!(
+            release_list_url(UpdateChannel::Beta),
+            "https://api.github.com/repos/speednet-software/speedwave/releases?per_page=1"
+        );
+    }
+
+    #[test]
+    fn parse_release_tag_single_release_object() {
+        let body = br#"{"tag_name":"v0.20.1","assets":[]}"#;
+        assert_eq!(parse_release_tag(body).unwrap(), "v0.20.1");
+    }
+
+    #[test]
+    fn parse_release_tag_list_takes_first_entry() {
+        let body = br#"[{"tag_name":"v0.22.0+41"},{"tag_name":"v0.21.0+37"}]"#;
+        assert_eq!(parse_release_tag(body).unwrap(), "v0.22.0+41");
+    }
+
+    #[test]
+    fn parse_release_tag_preserves_literal_plus() {
+        let tag = parse_release_tag(br#"{"tag_name":"v0.21.0+110"}"#).unwrap();
+        assert_eq!(tag, "v0.21.0+110");
+        assert!(!tag.contains("%2B"));
+    }
+
+    #[test]
+    fn parse_release_tag_empty_list_errors() {
+        assert!(parse_release_tag(b"[]").is_err());
+    }
+
+    #[test]
+    fn parse_release_tag_missing_tag_name_errors() {
+        assert!(parse_release_tag(br#"{"name":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn parse_release_tag_invalid_json_errors() {
+        assert!(parse_release_tag(b"not json").is_err());
+    }
+
+    #[test]
+    fn release_manifest_url_builds_releases_download_path() {
+        assert_eq!(
+            release_manifest_url("v0.22.0+41"),
+            "https://github.com/speednet-software/speedwave/releases/download/v0.22.0+41/latest.json"
+        );
+    }
+
+    #[test]
+    fn release_manifest_url_preserves_literal_plus() {
+        let url = release_manifest_url("v0.21.0+110");
+        assert!(url.contains("v0.21.0+110"));
+        assert!(!url.contains("%2B"));
     }
 }

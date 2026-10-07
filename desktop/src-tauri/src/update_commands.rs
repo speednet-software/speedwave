@@ -131,7 +131,7 @@ pub(crate) fn set_update_settings(settings: updater::UpdateSettings) -> Result<(
         "saving update settings: auto_check={}, interval={}h, channel={}",
         settings.auto_check,
         settings.check_interval_hours,
-        settings.channel
+        settings.effective_channel()
     );
     updater::save_update_settings(&settings)
 }
