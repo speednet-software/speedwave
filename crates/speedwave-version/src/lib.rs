@@ -13,4 +13,5 @@ mod version;
 pub use build_script::emit_cargo_version;
 pub use error::VersionError;
 pub use notes::{notes_range, reject_if_ancestor_of_previous_line, NotesRange};
+pub use release_line::stable_tag_for_line;
 pub use version::{compute_version, resolve_version};
