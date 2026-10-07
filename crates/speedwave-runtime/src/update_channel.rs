@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateChannel {
+    /// Published stable releases only.
     #[default]
     Stable,
+    /// Every published release, including betas.
     Beta,
 }
 
