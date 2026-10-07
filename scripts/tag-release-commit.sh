@@ -21,4 +21,18 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
 fi
 
 git tag "$TAG"
-git push origin "$TAG"
+
+REMOTE_URL="$(git remote get-url origin)"
+case "$REMOTE_URL" in
+  https://*|http://*)
+    if [ -z "${GH_AUTOMATION_PAT:-}" ]; then
+      echo "::error::GH_AUTOMATION_PAT is required to push tags to $REMOTE_URL" >&2
+      exit 1
+    fi
+    AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_AUTOMATION_PAT" | base64 | tr -d '\n')"
+    git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "$TAG"
+    ;;
+  *)
+    git push origin "$TAG"
+    ;;
+esac

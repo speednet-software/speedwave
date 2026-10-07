@@ -309,3 +309,73 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
     fi
     grep -qF 'secrets.GH_AUTOMATION_PAT' "$WORKFLOW"
 }
+
+RELEASE_PREFLIGHT_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/release-preflight/action.yml"
+
+@test "no actions/checkout carries persist-credentials: true or a token: input (the PAT stays out of .git/config while third-party code runs)" {
+    node -e '
+        const yaml = require("js-yaml");
+        const fs = require("fs");
+        const files = [
+            process.argv[1],
+            process.argv[2],
+            process.argv[3],
+        ];
+        let failed = false;
+        for (const file of files) {
+            const doc = yaml.load(fs.readFileSync(file, "utf8"));
+            const jobs = doc.jobs || {};
+            for (const [jobName, job] of Object.entries(jobs)) {
+                for (const step of job.steps || []) {
+                    if (step.uses && step.uses.startsWith("actions/checkout@")) {
+                        const w = step.with || {};
+                        if (Object.prototype.hasOwnProperty.call(w, "token")) {
+                            console.error(`ERROR: ${file} job ${jobName} passes a token: input to actions/checkout`);
+                            failed = true;
+                        }
+                        if (w["persist-credentials"] !== false) {
+                            console.error(`ERROR: ${file} job ${jobName} checkout does not set persist-credentials: false`);
+                            failed = true;
+                        }
+                    }
+                }
+            }
+        }
+        process.exit(failed ? 1 : 0);
+    ' "$BETA_WORKFLOW" "$RELEASE_WORKFLOW" "$WORKFLOW"
+}
+
+@test "release-preflight has no checkout of its own and never references GH_AUTOMATION_PAT (caller supplies both checkout and credentials)" {
+    [ -f "$RELEASE_PREFLIGHT_ACTION" ]
+    if grep -qF 'actions/checkout' "$RELEASE_PREFLIGHT_ACTION"; then
+        echo "ERROR: release-preflight checks out the repo itself; the caller must do it so persist-credentials stays scoped to the caller's checkout" >&2
+        return 1
+    fi
+    if grep -qF 'GH_AUTOMATION_PAT' "$RELEASE_PREFLIGHT_ACTION"; then
+        echo "ERROR: release-preflight (npm/cargo audit, third-party installs) must never see GH_AUTOMATION_PAT" >&2
+        return 1
+    fi
+}
+
+@test "GH_AUTOMATION_PAT is never set in a job-level env: (only in the steps that push or call gh)" {
+    node -e '
+        const yaml = require("js-yaml");
+        const fs = require("fs");
+        const files = [process.argv[1], process.argv[2], process.argv[3]];
+        let failed = false;
+        for (const file of files) {
+            const doc = yaml.load(fs.readFileSync(file, "utf8"));
+            if (doc.env && JSON.stringify(doc.env).includes("GH_AUTOMATION_PAT")) {
+                console.error(`ERROR: ${file} sets GH_AUTOMATION_PAT at the workflow level`);
+                failed = true;
+            }
+            for (const [jobName, job] of Object.entries(doc.jobs || {})) {
+                if (job.env && JSON.stringify(job.env).includes("GH_AUTOMATION_PAT")) {
+                    console.error(`ERROR: ${file} job ${jobName} sets GH_AUTOMATION_PAT at job-level env:`);
+                    failed = true;
+                }
+            }
+        }
+        process.exit(failed ? 1 : 0);
+    ' "$BETA_WORKFLOW" "$RELEASE_WORKFLOW" "$WORKFLOW"
+}

@@ -23,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Fetch release lines and tags
@@ -90,8 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          persist-credentials: true
-          token: ${{ secrets.GH_AUTOMATION_PAT }}
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: ./.github/actions/release-preflight
@@ -143,8 +143,6 @@ jobs:
 
       - name: Compute the stable notes range
         id: range
-        env:
-          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
         run: |
           set -euo pipefail
           mapfile -t LINES < <(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- notes-range --repo "$PWD")
@@ -215,7 +213,8 @@ jobs:
 
           printf '%s\n' "$CONTENT" | bash scripts/prepend-changelog-entry.sh "$BASE_VERSION" "$COMPARE_URL"
 
-          git push origin "$BRANCH" --force
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "$BRANCH" --force
 
           EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --base dev --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING_PR" ]; then
@@ -246,8 +245,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          persist-credentials: true
-          token: ${{ secrets.GH_AUTOMATION_PAT }}
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: ./.github/actions/release-preflight
@@ -279,6 +277,7 @@ jobs:
       - name: Tag the hotfix commit
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          GH_AUTOMATION_PAT: ${{ secrets.GH_AUTOMATION_PAT }}
         run: bash scripts/tag-release-commit.sh "$TAG"
 
       - name: Generate hotfix release notes
@@ -324,8 +323,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          persist-credentials: true
-          token: ${{ secrets.GH_AUTOMATION_PAT }}
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Open the backport PR to dev
@@ -351,7 +349,8 @@ jobs:
 
           printf '%s\n' "$NOTES" | bash scripts/prepend-changelog-entry.sh "$VERSION" "$COMPARE_URL"
 
-          git push origin "$BRANCH" --force
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "$BRANCH" --force
 
           EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --base dev --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING_PR" ]; then

@@ -53,3 +53,19 @@ setup() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "usage: tag-release-commit.sh" ]]
 }
+
+@test "push to a local path remote needs no token" {
+  unset GH_AUTOMATION_PAT
+  run bash "$SCRIPT" v1.0.0
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$ORIGIN" tag -l v1.0.0)" = "v1.0.0" ]
+}
+
+@test "push to an https remote without GH_AUTOMATION_PAT fails with a named error" {
+  git remote set-url origin https://github.com/example/example.git
+  unset GH_AUTOMATION_PAT
+  run bash "$SCRIPT" v1.0.0
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "::error::GH_AUTOMATION_PAT is required to push tags to https://github.com/example/example.git" ]]
+  [ "$(git -C "$ORIGIN" tag -l v1.0.0)" = "" ]
+}

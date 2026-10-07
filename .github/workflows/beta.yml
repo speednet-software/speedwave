@@ -25,8 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          persist-credentials: true
-          token: ${{ secrets.GH_AUTOMATION_PAT }}
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Fetch release lines and tags
@@ -55,6 +54,7 @@ jobs:
       - name: Tag the release commit
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          GH_AUTOMATION_PAT: ${{ secrets.GH_AUTOMATION_PAT }}
         run: bash scripts/tag-release-commit.sh --allow-reuse-same-commit "$TAG"
 
       - name: Generate beta release notes
