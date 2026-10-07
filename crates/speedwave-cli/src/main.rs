@@ -7,6 +7,7 @@ use speedwave_runtime::engine_path;
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
+use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
 use strum::IntoEnumIterator;
 
@@ -193,6 +194,54 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
+fn release_list_url(channel: UpdateChannel) -> String {
+    match channel {
+        UpdateChannel::Stable => {
+            format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest")
+        }
+        UpdateChannel::Beta => {
+            format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases?per_page=1")
+        }
+    }
+}
+
+fn parse_latest_tag(body: &str) -> anyhow::Result<String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| anyhow::anyhow!("GitHub API response is not valid JSON: {e}"))?;
+    let entry = value
+        .as_array()
+        .and_then(|list| list.first())
+        .unwrap_or(&value);
+    entry
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("GitHub API response has no tag_name"))
+}
+
+fn fetch_release_tag(url: &str) -> anyhow::Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("Speedwave-CLI/{}", env!("SPEEDWAVE_VERSION")))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|e| anyhow::anyhow!("GitHub API request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("GitHub API returned HTTP {status}");
+    }
+    let body = resp
+        .text()
+        .map_err(|e| anyhow::anyhow!("Failed to read GitHub API response: {e}"))?;
+    parse_latest_tag(&body)
+}
+
+fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
+    fetch_release_tag(&release_list_url(channel))
+}
+
 fn skip_plugin_audit(action: &CliAction) -> bool {
     matches!(
         action,
@@ -322,7 +371,12 @@ fn run_self_update() -> anyhow::Result<()> {
 
     let current = env!("SPEEDWAVE_VERSION");
     out!("Current version: {}", current);
+
+    let channel = update_channel::read_update_channel();
+    out!("Update channel: {}", channel);
     out!("Checking for updates...");
+
+    let target_tag = target_release_tag(channel)?;
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -330,6 +384,7 @@ fn run_self_update() -> anyhow::Result<()> {
         .bin_name(consts::CLI_BINARY)
         .show_download_progress(true)
         .current_version(current)
+        .target_version_tag(&target_tag)
         .build()?
         .update()?;
 
@@ -1985,6 +2040,87 @@ mod tests {
             .find("run_rebuild(")
             .expect("run_self_update must call run_rebuild()");
         assert!(probe < rebuild, "version gate must precede the rebuild");
+    }
+
+    #[test]
+    fn run_self_update_resolves_target_tag_before_building() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let channel_read = fn_body
+            .find("read_update_channel()")
+            .expect("run_self_update must read the installation channel");
+        let tag_resolution = fn_body
+            .find("target_release_tag(")
+            .expect("run_self_update must resolve a target release tag");
+        let target_version_tag_call = fn_body
+            .find(".target_version_tag(")
+            .expect("run_self_update must pass target_version_tag to self_update");
+        let build_call = fn_body
+            .find(".build()?")
+            .expect("run_self_update must call .build()");
+        assert!(
+            channel_read < tag_resolution,
+            "the channel must be read before resolving a tag"
+        );
+        assert!(
+            tag_resolution < target_version_tag_call,
+            "the resolved tag must be passed to target_version_tag"
+        );
+        assert!(
+            target_version_tag_call < build_call,
+            "target_version_tag must be set before build()"
+        );
+    }
+
+    #[test]
+    fn release_list_url_stable_uses_releases_latest() {
+        assert_eq!(
+            release_list_url(UpdateChannel::Stable),
+            "https://api.github.com/repos/speednet-software/speedwave/releases/latest"
+        );
+    }
+
+    #[test]
+    fn release_list_url_beta_uses_releases_list() {
+        assert_eq!(
+            release_list_url(UpdateChannel::Beta),
+            "https://api.github.com/repos/speednet-software/speedwave/releases?per_page=1"
+        );
+    }
+
+    #[test]
+    fn parse_latest_tag_single_release_object() {
+        let body = r#"{"tag_name":"v0.20.1","assets":[]}"#;
+        assert_eq!(parse_latest_tag(body).unwrap(), "v0.20.1");
+    }
+
+    #[test]
+    fn parse_latest_tag_release_list_takes_first_entry() {
+        let body = r#"[{"tag_name":"v0.22.0+41"},{"tag_name":"v0.21.0+37"}]"#;
+        assert_eq!(parse_latest_tag(body).unwrap(), "v0.22.0+41");
+    }
+
+    #[test]
+    fn parse_latest_tag_preserves_literal_plus() {
+        let body = r#"{"tag_name":"v0.21.0+110"}"#;
+        let tag = parse_latest_tag(body).unwrap();
+        assert_eq!(tag, "v0.21.0+110");
+        assert!(!tag.contains("%2B"));
+    }
+
+    #[test]
+    fn parse_latest_tag_empty_list_errors() {
+        assert!(parse_latest_tag("[]").is_err());
+    }
+
+    #[test]
+    fn parse_latest_tag_missing_tag_name_errors() {
+        assert!(parse_latest_tag(r#"{"name":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn parse_latest_tag_invalid_json_errors() {
+        assert!(parse_latest_tag("not json").is_err());
     }
 
     #[test]
