@@ -24,6 +24,7 @@ pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;
 pub mod managed_config;
+pub mod management;
 pub mod mcp_os_process;
 pub mod model_id;
 pub mod native_slash;

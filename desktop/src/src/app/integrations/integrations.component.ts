@@ -369,6 +369,8 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                       [attr.aria-pressed]="os.enabled"
                       [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
                       [attr.data-testid]="'integrations-os-toggle-' + os.service"
+                      [disabled]="!!os.blocked_by_policy"
+                      [attr.title]="os.blocked_by_policy ? blockedByPolicy : null"
                       (click)="onOsToggleClick(os, $event)"
                     ></button>
                   </div>
@@ -385,6 +387,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
+  readonly blockedByPolicy = "Blocked by your organisation's policy";
   private static readonly BETA_ONLY_SERVICES = new Set(['office']);
 
   /** List of container-based MCP service integrations. */
@@ -414,6 +417,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private oauthProjectAtStart: string | null = null;
   private oauthStartNonce = 0;
   private unlistenOAuth: (() => void) | null = null;
+  private unlistenPolicy: (() => void) | null = null;
   private unlistenGithubOAuth: (() => void) | null = null;
   private unlistenSlackOAuth: (() => void) | null = null;
 
@@ -450,6 +454,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       await this.loadIntegrations();
     });
     this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
+      void this.loadIntegrations();
+    });
+    this.unlistenPolicy = await this.tauri.listen<string | null>('managed_policy_changed', () => {
       void this.loadIntegrations();
     });
 
@@ -513,6 +520,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   /** Cleans up event listeners. */
   ngOnDestroy(): void {
+    this.unlistenPolicy?.();
+    this.unlistenPolicy = null;
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;

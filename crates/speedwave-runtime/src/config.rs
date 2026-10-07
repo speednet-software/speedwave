@@ -3,7 +3,7 @@
 use crate::defaults;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// LLM config schema version. v2: provider list + active (ADR-073). v3:
@@ -645,6 +645,60 @@ impl ResolvedIntegrationsConfig {
             _ => None,
         }
     }
+
+    /// Every service by its services-policy key with its enabled state: built-ins, macOS, plugins.
+    pub fn service_states(&self) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = crate::consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .filter_map(|s| {
+                self.is_service_enabled(s.config_key)
+                    .map(|on| (s.config_key.to_string(), on))
+            })
+            .collect();
+        out.extend(
+            crate::consts::TOGGLEABLE_OS_SERVICES
+                .iter()
+                .filter_map(|s| {
+                    self.is_os_service_enabled(s.config_key)
+                        .map(|on| (format!("{OS_SERVICE_PREFIX}{}", s.config_key), on))
+                }),
+        );
+        let mut plugins: Vec<(String, bool)> = self
+            .plugins
+            .iter()
+            .map(|(id, on)| (format!("{PLUGIN_SERVICE_PREFIX}{id}"), *on))
+            .collect();
+        plugins.sort();
+        out.extend(plugins);
+        out
+    }
+
+    fn service_flag_mut(&mut self, key: &str) -> Option<&mut bool> {
+        if let Some(id) = key.strip_prefix(PLUGIN_SERVICE_PREFIX) {
+            return self.plugins.get_mut(id);
+        }
+        if let Some(os) = key.strip_prefix(OS_SERVICE_PREFIX) {
+            return match os {
+                "reminders" => Some(&mut self.os_reminders),
+                "calendar" => Some(&mut self.os_calendar),
+                "mail" => Some(&mut self.os_mail),
+                "notes" => Some(&mut self.os_notes),
+                _ => None,
+            };
+        }
+        match key {
+            "slack" => Some(&mut self.slack),
+            "sharepoint" => Some(&mut self.sharepoint),
+            "redmine" => Some(&mut self.redmine),
+            "gitlab" => Some(&mut self.gitlab),
+            "github" => Some(&mut self.github),
+            "atlassian" => Some(&mut self.atlassian),
+            "office" => Some(&mut self.office),
+            "playwright" => Some(&mut self.playwright),
+            "context7" => Some(&mut self.context7),
+            _ => None,
+        }
+    }
 }
 
 /// Repo-side `.speedwave.json` — restricted subset a cloned repo may set.
@@ -896,6 +950,98 @@ pub struct ManagedPiiPolicyConfig {
 /// Refusal for any change to the AI route while an `llm_egress` policy is in force.
 pub const LLM_ROUTE_LOCKED_MSG: &str =
     "The AI route on this computer is set by your organisation's policy and cannot be changed here.";
+
+/// Prefix of a plugin's key in the services policy and the inventory (ADR-091).
+pub const PLUGIN_SERVICE_PREFIX: &str = "plugin:";
+/// Prefix of a macOS native integration's key in the services policy and the inventory (ADR-091).
+pub const OS_SERVICE_PREFIX: &str = "os.";
+
+/// Whether the organisation's policy lets a service run (ADR-091).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceAccess {
+    /// The service runs when the user enables it.
+    #[default]
+    Allow,
+    /// The service never runs and the user cannot enable it.
+    Deny,
+}
+
+/// MDM `services` block (ADR-091): which integrations, macOS integrations and plugins may run.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedServicesConfig {
+    /// Access for a service no rule names.
+    #[serde(default)]
+    pub default: ServiceAccess,
+    /// Access per service key: `slack`, `os.mail`, `plugin:<service_id>`.
+    #[serde(default)]
+    pub rules: BTreeMap<String, ServiceAccess>,
+}
+
+impl ManagedServicesConfig {
+    /// Every service denied: what an unreadable policy means for the services.
+    pub fn deny_all() -> Self {
+        Self {
+            default: ServiceAccess::Deny,
+            rules: BTreeMap::new(),
+        }
+    }
+
+    /// Whether the service under `key` may run.
+    pub fn allows(&self, key: &str) -> bool {
+        self.rules.get(key).copied().unwrap_or(self.default) == ServiceAccess::Allow
+    }
+
+    /// Rejects a rule whose key names no built-in service, macOS integration or plugin.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for key in self.rules.keys() {
+            if !is_service_key(key) {
+                anyhow::bail!(
+                    "managed services policy: '{key}' names no service (a built-in like 'slack', 'os.<integration>' or 'plugin:<service_id>')"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_service_key(key: &str) -> bool {
+    if let Some(id) = key.strip_prefix(PLUGIN_SERVICE_PREFIX) {
+        return !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    }
+    if let Some(os) = key.strip_prefix(OS_SERVICE_PREFIX) {
+        return crate::consts::TOGGLEABLE_OS_SERVICES
+            .iter()
+            .any(|s| s.config_key == os);
+    }
+    crate::consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .any(|s| s.config_key == key)
+}
+
+/// Turns off every service the organisation's policy denies; returns the keys it turned off.
+pub fn apply_services_policy(
+    integrations: &mut ResolvedIntegrationsConfig,
+    policy: &ManagedServicesConfig,
+) -> Vec<String> {
+    let mut blocked = Vec::new();
+    for (key, _) in integrations.service_states() {
+        if policy.allows(&key) {
+            continue;
+        }
+        if let Some(flag) = integrations.service_flag_mut(&key) {
+            if *flag {
+                blocked.push(key.clone());
+            }
+            *flag = false;
+        }
+    }
+    blocked
+}
 
 /// MDM `llm_egress` block (ADR-090): the organisation's gateway is the only AI route.
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -1549,10 +1695,16 @@ pub fn managed_settings_required(telemetry: &ResolvedTelemetry) -> bool {
 
 /// Global boot gate for the `llm_egress` block (ADR-090): an invalid one hard-stops startup.
 pub fn check_llm_egress_policy_at_boot() -> anyhow::Result<()> {
-    match crate::managed_config::load_managed_config()?.and_then(|m| m.llm_egress) {
-        Some(egress) => egress.validate(),
-        None => Ok(()),
+    let Some(managed) = crate::managed_config::load_managed_config()? else {
+        return Ok(());
+    };
+    if let Some(egress) = managed.llm_egress {
+        egress.validate()?;
     }
+    if let Some(services) = managed.services {
+        services.validate()?;
+    }
+    Ok(())
 }
 
 /// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
@@ -1673,11 +1825,17 @@ pub(crate) fn resolve_project_config_in_with_load(
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     match managed_load {
         Ok(managed) => {
-            let (managed_telemetry, managed_pii_policy, egress_locked) = match managed {
-                Some(m) => (m.telemetry, m.pii_policy, m.llm_egress.is_some()),
-                None => (None, None, false),
-            };
-            let (mut claude, integrations) = resolve_project_config_in_with_managed(
+            let (managed_telemetry, managed_pii_policy, egress_locked, managed_services) =
+                match managed {
+                    Some(m) => (
+                        m.telemetry,
+                        m.pii_policy,
+                        m.llm_egress.is_some(),
+                        m.services,
+                    ),
+                    None => (None, None, false, None),
+                };
+            let (mut claude, mut integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
                 user_config,
@@ -1688,10 +1846,13 @@ pub(crate) fn resolve_project_config_in_with_load(
             if egress_locked {
                 lock_llm_to_policy(&mut claude.llm);
             }
+            if let Some(services) = &managed_services {
+                apply_services_policy(&mut integrations, services);
+            }
             (claude, integrations)
         }
         Err(e) => {
-            let (mut claude, integrations) = resolve_project_config_in_with_managed(
+            let (mut claude, mut integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
                 user_config,
@@ -1712,6 +1873,7 @@ pub(crate) fn resolve_project_config_in_with_load(
             claude.pii_policy = Err(format!(
                 "cannot resolve PII policy: organization policy configuration is unreadable: {e}"
             ));
+            apply_services_policy(&mut integrations, &ManagedServicesConfig::deny_all());
             (claude, integrations)
         }
     }
@@ -1999,7 +2161,9 @@ pub fn load_user_config_from(path: &Path) -> anyhow::Result<SpeedwaveUserConfig>
 /// Durably saves the user config to `~/.speedwave/config.json`.
 pub fn save_user_config(config: &SpeedwaveUserConfig) -> anyhow::Result<()> {
     let config_path = crate::consts::data_dir().join("config.json");
-    save_user_config_to(config, &config_path)
+    save_user_config_to(config, &config_path)?;
+    crate::management::refresh_inventory();
+    Ok(())
 }
 
 /// `path`-parameterized variant of [`save_user_config`]; use in tests and any
@@ -7220,5 +7384,209 @@ mod policy_provider_tests {
         ));
         assert!(!adopt_policy_provider(&mut c, "p"));
         assert!(!adopt_policy_provider(&mut c, "missing"));
+    }
+
+    fn services_user_config(dir: &Path) -> SpeedwaveUserConfig {
+        let on = || {
+            Some(IntegrationConfig {
+                enabled: Some(true),
+            })
+        };
+        SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: dir.to_string_lossy().to_string(),
+                claude: None,
+                integrations: Some(IntegrationsConfig {
+                    slack: on(),
+                    github: on(),
+                    os: Some(OsIntegrationsConfig {
+                        mail: on(),
+                        ..Default::default()
+                    }),
+                    plugins: Some(HashMap::from([(
+                        "acme-crm".to_string(),
+                        IntegrationConfig {
+                            enabled: Some(true),
+                        },
+                    )])),
+                    ..Default::default()
+                }),
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn services_policy(
+        default: ServiceAccess,
+        rules: &[(&str, ServiceAccess)],
+    ) -> ManagedServicesConfig {
+        ManagedServicesConfig {
+            default,
+            rules: rules.iter().map(|(k, v)| ((*k).to_string(), *v)).collect(),
+        }
+    }
+
+    #[test]
+    fn services_policy_turns_off_denied_services_and_leaves_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = services_user_config(tmp.path());
+        let managed = crate::managed_config::ManagedConfig {
+            services: Some(services_policy(
+                ServiceAccess::Allow,
+                &[
+                    ("github", ServiceAccess::Deny),
+                    ("os.mail", ServiceAccess::Deny),
+                    ("plugin:acme-crm", ServiceAccess::Deny),
+                ],
+            )),
+            ..Default::default()
+        };
+        let i = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &cfg,
+            "p",
+            Ok(Some(managed)),
+        )
+        .1;
+        assert!(i.slack);
+        assert!(!i.github && !i.os_mail && !i.is_plugin_enabled("acme-crm"));
+        assert!(!i.any_os_enabled());
+    }
+
+    #[test]
+    fn services_policy_default_deny_runs_only_the_services_it_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = services_user_config(tmp.path());
+        let managed = crate::managed_config::ManagedConfig {
+            services: Some(services_policy(
+                ServiceAccess::Deny,
+                &[("slack", ServiceAccess::Allow)],
+            )),
+            ..Default::default()
+        };
+        let i = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &cfg,
+            "p",
+            Ok(Some(managed)),
+        )
+        .1;
+        assert!(i.slack);
+        assert!(!i.github && !i.os_mail && !i.is_plugin_enabled("acme-crm"));
+    }
+
+    #[test]
+    fn services_policy_absent_leaves_the_users_choice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = services_user_config(tmp.path());
+        let i = resolve_project_config_in_with_load(tmp.path(), tmp.path(), &cfg, "p", Ok(None)).1;
+        assert!(i.slack && i.github && i.os_mail && i.is_plugin_enabled("acme-crm"));
+    }
+
+    #[test]
+    fn services_fail_closed_when_the_managed_policy_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = services_user_config(tmp.path());
+        let i = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &cfg,
+            "p",
+            Err(anyhow::anyhow!("managed config /x is invalid: boom")),
+        )
+        .1;
+        assert!(!i.slack && !i.github && !i.os_mail && !i.is_plugin_enabled("acme-crm"));
+    }
+
+    #[test]
+    fn apply_services_policy_reports_only_the_services_it_turned_off() {
+        let mut i = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+        let blocked = apply_services_policy(
+            &mut i,
+            &services_policy(
+                ServiceAccess::Allow,
+                &[
+                    ("slack", ServiceAccess::Deny),
+                    ("gitlab", ServiceAccess::Deny),
+                ],
+            ),
+        );
+        assert_eq!(blocked, vec!["slack".to_string()]);
+        assert!(!i.slack);
+        assert!(apply_services_policy(&mut i, &ManagedServicesConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn service_states_name_builtins_os_and_plugins_by_policy_key() {
+        let i = ResolvedIntegrationsConfig {
+            github: true,
+            os_notes: true,
+            plugins: HashMap::from([("zeta".to_string(), true), ("alpha".to_string(), false)]),
+            ..Default::default()
+        };
+        let states = i.service_states();
+        assert!(states.contains(&("github".to_string(), true)));
+        assert!(states.contains(&("slack".to_string(), false)));
+        assert!(states.contains(&("os.notes".to_string(), true)));
+        let plugins: Vec<&str> = states
+            .iter()
+            .filter(|(k, _)| k.starts_with(PLUGIN_SERVICE_PREFIX))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(plugins, vec!["plugin:alpha", "plugin:zeta"]);
+    }
+
+    #[test]
+    fn services_policy_validation_names_the_unknown_key() {
+        let ok = services_policy(
+            ServiceAccess::Deny,
+            &[
+                ("slack", ServiceAccess::Allow),
+                ("os.mail", ServiceAccess::Allow),
+                ("plugin:acme-crm", ServiceAccess::Allow),
+            ],
+        );
+        assert!(ok.validate().is_ok());
+        for bad in ["slakc", "os.fax", "plugin:", "plugin:bad id", "Slack"] {
+            let err = services_policy(ServiceAccess::Allow, &[(bad, ServiceAccess::Deny)])
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("'{bad}'")), "{err}");
+        }
+    }
+
+    #[test]
+    fn services_policy_parses_from_the_managed_file_and_rejects_typos() {
+        let m: crate::managed_config::ManagedConfig =
+            serde_json::from_str(r#"{"services":{"default":"deny","rules":{"slack":"allow"}}}"#)
+                .unwrap();
+        let s = m.services.unwrap();
+        assert_eq!(s.default, ServiceAccess::Deny);
+        assert!(s.allows("slack") && !s.allows("github"));
+        assert!(
+            serde_json::from_str::<crate::managed_config::ManagedConfig>(
+                r#"{"services":{"defualt":"deny"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<crate::managed_config::ManagedConfig>(
+                r#"{"services":{"rules":{"slack":"maybe"}}}"#
+            )
+            .is_err()
+        );
+        let empty: crate::managed_config::ManagedConfig =
+            serde_json::from_str(r#"{"services":{}}"#).unwrap();
+        assert!(empty.services.unwrap().allows("anything"));
     }
 }

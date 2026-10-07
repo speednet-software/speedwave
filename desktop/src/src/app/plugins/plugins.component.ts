@@ -258,12 +258,14 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                         [attr.aria-pressed]="plugin.enabled"
                         [attr.aria-label]="(plugin.enabled ? 'Disable ' : 'Enable ') + plugin.name"
                         [attr.data-testid]="'plugins-row-toggle-' + plugin.slug"
-                        [disabled]="!isVerified(plugin)"
+                        [disabled]="!isVerified(plugin) || !!plugin.blocked_by_policy"
                         [attr.title]="
-                          isVerified(plugin)
-                            ? null
-                            : 'Plugin cannot be enabled: ' +
-                              (plugin.verification_error || verificationStatusLabel(plugin))
+                          plugin.blocked_by_policy
+                            ? blockedByPolicy
+                            : isVerified(plugin)
+                              ? null
+                              : 'Plugin cannot be enabled: ' +
+                                (plugin.verification_error || verificationStatusLabel(plugin))
                         "
                         (click)="onRowToggle(plugin, $event)"
                       ></button>
@@ -282,6 +284,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
   },
 })
 export class PluginsComponent implements OnInit, OnDestroy {
+  readonly blockedByPolicy = "Blocked by your organisation's policy";
   plugins: PluginStatusEntry[] = [];
   expandedPlugin: string | null = null;
   installing = false;
@@ -297,6 +300,7 @@ export class PluginsComponent implements OnInit, OnDestroy {
   private currentZipPath: string | null = null;
   /** Tauri event listener cleanup; null when no install is in flight. */
   private unlistenInstall: (() => void) | null = null;
+  private unlistenPolicy: (() => void) | null = null;
 
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
@@ -312,6 +316,9 @@ export class PluginsComponent implements OnInit, OnDestroy {
       await this.loadActiveProject();
       await this.loadPlugins();
     });
+    this.unlistenPolicy = await this.tauri.listen<string | null>('managed_policy_changed', () => {
+      void this.loadPlugins();
+    });
   }
 
   /** Cleans up project ready listener and install event listener. */
@@ -322,6 +329,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
     }
     this.unlistenInstall?.();
     this.unlistenInstall = null;
+    this.unlistenPolicy?.();
+    this.unlistenPolicy = null;
   }
 
   /** Syncs the active project from ProjectStateService. */

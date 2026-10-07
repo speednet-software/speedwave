@@ -1,7 +1,9 @@
 //! MDM-deployed managed policy (read-only, fail-closed): a malformed
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
-use crate::config::{ManagedLlmEgressConfig, ManagedPiiPolicyConfig, ManagedTelemetryConfig};
+use crate::config::{
+    ManagedLlmEgressConfig, ManagedPiiPolicyConfig, ManagedServicesConfig, ManagedTelemetryConfig,
+};
 use std::path::{Path, PathBuf};
 
 /// Root policy object read from the system-level managed-config file. Rejects
@@ -15,6 +17,8 @@ pub struct ManagedConfig {
     pub pii_policy: Option<ManagedPiiPolicyConfig>,
     /// MDM-forced LLM egress gateway (ADR-090); absent = Speedwave's default upstream.
     pub llm_egress: Option<ManagedLlmEgressConfig>,
+    /// MDM-forced access to integrations and plugins (ADR-091); absent = every service allowed.
+    pub services: Option<ManagedServicesConfig>,
 }
 
 /// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,

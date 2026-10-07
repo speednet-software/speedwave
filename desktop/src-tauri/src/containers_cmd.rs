@@ -300,6 +300,30 @@ pub(crate) fn llm_locked_by_policy() -> bool {
     managed_llm_egress().is_some()
 }
 
+/// The machine's MDM `services` policy, if any (ADR-091).
+pub(crate) fn managed_services() -> Option<speedwave_runtime::config::ManagedServicesConfig> {
+    speedwave_runtime::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.services)
+}
+
+/// Whether the organisation's policy keeps the service under `key` from running.
+pub(crate) fn service_blocked(key: &str) -> bool {
+    service_blocked_in(managed_services().as_ref(), key)
+}
+
+pub(crate) fn service_blocked_in(
+    policy: Option<&speedwave_runtime::config::ManagedServicesConfig>,
+    key: &str,
+) -> bool {
+    policy.is_some_and(|p| !p.allows(key))
+}
+
+pub(crate) fn blocked_service_error(name: &str) -> String {
+    format!("{name} is blocked by your organisation's policy")
+}
+
 pub(crate) const LLM_LOCKED_MSG: &str = config::LLM_ROUTE_LOCKED_MSG;
 
 pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String> {
@@ -2269,6 +2293,28 @@ fn mirror_local_key_to_llm_namespace(
     reason = "test assertions may unwrap/expect freely"
 )]
 mod tests {
+    #[test]
+    fn a_service_is_blocked_only_by_a_policy_that_denies_it() {
+        use speedwave_runtime::config::{ManagedServicesConfig, ServiceAccess};
+        let policy = ManagedServicesConfig {
+            default: ServiceAccess::Allow,
+            rules: [("slack".to_string(), ServiceAccess::Deny)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(service_blocked_in(Some(&policy), "slack"));
+        assert!(!service_blocked_in(Some(&policy), "github"));
+        assert!(!service_blocked_in(None, "slack"));
+        assert!(service_blocked_in(
+            Some(&ManagedServicesConfig::deny_all()),
+            "plugin:acme-crm"
+        ));
+        assert_eq!(
+            blocked_service_error("slack"),
+            "slack is blocked by your organisation's policy"
+        );
+    }
+
     use super::*;
     use crate::types::{CustomPolicyDtoInput, SecurityPolicyCustomPatternInput};
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};

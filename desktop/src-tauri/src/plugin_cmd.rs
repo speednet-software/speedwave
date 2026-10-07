@@ -17,6 +17,7 @@ pub(crate) struct PluginStatusEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) changelog: Option<String>,
     pub(crate) enabled: bool,
+    pub(crate) blocked_by_policy: bool,
     pub(crate) configured: bool,
     pub(crate) auth_fields: Vec<plugin::AuthFieldDef>,
     pub(crate) current_values: HashMap<String, String>,
@@ -104,6 +105,15 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         .ok_or_else(|| format!("project '{}' not found in config", project))?;
     let integrations =
         config::resolve_integrations(std::path::Path::new(project_dir), &user_config, &project);
+    let services_policy = crate::containers_cmd::managed_services();
+    let plugin_blocked = |service_id: Option<&str>| {
+        service_id.is_some_and(|id| {
+            crate::containers_cmd::service_blocked_in(
+                services_policy.as_ref(),
+                &format!("{}{id}", config::PLUGIN_SERVICE_PREFIX),
+            )
+        })
+    };
 
     let ui_entries = plugin::list_for_ui();
 
@@ -119,6 +129,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 instructions: None,
                 changelog: None,
                 enabled: false,
+                blocked_by_policy: false,
                 configured: false,
                 auth_fields: Vec::new(),
                 current_values: HashMap::new(),
@@ -201,6 +212,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             instructions: instructions_for_ui(verified, manifest.instructions.as_deref()),
             changelog: ui.changelog.clone(),
             enabled,
+            blocked_by_policy: plugin_blocked(manifest.service_id.as_deref()),
             configured,
             auth_fields,
             current_values,
@@ -478,6 +490,14 @@ pub fn set_plugin_enabled(
     check_project(&project)?;
     log::info!("setting plugin enabled={enabled} for project={project} service_id={service_id}");
 
+    if enabled
+        && crate::containers_cmd::service_blocked(&format!(
+            "{}{service_id}",
+            config::PLUGIN_SERVICE_PREFIX
+        ))
+    {
+        return Err(crate::containers_cmd::blocked_service_error(&service_id));
+    }
     if enabled {
         let entries = plugin::list_for_ui();
         let matches_id = |m: &plugin::PluginManifest| {
@@ -809,6 +829,7 @@ mod tests {
             instructions: None,
             changelog: None,
             enabled: true,
+            blocked_by_policy: false,
             configured: false,
             auth_fields: vec![plugin::AuthFieldDef {
                 key: "api_key".into(),
@@ -856,6 +877,7 @@ mod tests {
             instructions: Some("# Setup\n1. Import the bridge plugin".into()),
             changelog: Some("# Changelog\n\n## 0.1.4 (2026-07-01)\n- fix".into()),
             enabled: false,
+            blocked_by_policy: false,
             configured: false,
             auth_fields: vec![],
             current_values: HashMap::new(),
@@ -907,6 +929,7 @@ mod tests {
             instructions: None,
             changelog: None,
             enabled: true,
+            blocked_by_policy: false,
             configured: true,
             auth_fields: vec![],
             current_values: HashMap::new(),

@@ -32,6 +32,7 @@ mod ide_bridge_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
+mod managed_policy_watch;
 mod mic_permission_cmd;
 mod mirror_relay;
 mod model_picker;
@@ -848,6 +849,15 @@ fn main() {
 
             if let Ok(mut slot) = clipboard_bridge_slot.lock() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
+            }
+
+            speedwave_runtime::management::refresh_inventory();
+            match managed_policy_watch::start(app.handle().clone()) {
+                Ok(Some(watch)) => {
+                    app.manage(std::sync::Mutex::new(watch));
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("the organisation's policy is not watched: {e:#}"),
             }
 
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {

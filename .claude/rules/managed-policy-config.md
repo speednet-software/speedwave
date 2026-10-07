@@ -1,6 +1,6 @@
 # Managed (MDM/org) Policy Config
 
-Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`, ADR-076), the PII policy (`pii_policy`) and the organisation's LLM gateway (`llm_egress`, ADR-090); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
+Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`, ADR-076), the PII policy (`pii_policy`), the organisation's LLM gateway (`llm_egress`, ADR-090) and which services may run (`services`, ADR-091); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
 
 ## Where the policy lives
 
@@ -31,6 +31,14 @@ An **invalid policy is caught once, at boot.** Desktop and CLI call `config::che
 - **`ca_certs` extends, never replaces, the built-in roots** — the proxy's forward client, Claude Code (`NODE_EXTRA_CA_CERTS` → `/etc/claude-code/gateway-ca.pem`, `:ro`, checked by `ManagedSettingsMount` and the claude volume profile) and the desktop's gateway client.
 - **Secrets stay host-side.** Header values never reach the frontend or a log; `ManagedLlmEgressConfig` and the proxy's `Route` print names only. Gateway status shown in the desktop is display, never enforcement.
 - **Tests never read the machine's real policy**: `load_managed_config` returns `None` under `cfg(test)` or the `test-support` feature (enabled only by dependents' dev-dependencies); tests build the block in memory.
+
+## `services`: which integrations and plugins may run (ADR-091)
+
+- **One enforcement point.** `apply_services_policy` runs inside `resolve_project_config_in_with_load` on `ResolvedIntegrationsConfig`; never filter services anywhere else. An unreadable policy denies every service.
+- **Keys are the SSOT's.** A built-in by `config_key`, a macOS integration as `os.<key>` (`OS_SERVICE_PREFIX`), a plugin as `plugin:<service_id>` (`PLUGIN_SERVICE_PREFIX`); `ManagedServicesConfig::validate` rejects anything else and runs in the boot check.
+- **Refused server-side.** Enabling a denied service fails in the command; the UI only mirrors `blocked_by_policy`.
+- **Inventory, not inspection.** `management::refresh_inventory` writes `<data_dir>/management/inventory.json` after every `save_user_config`, at startup and on a policy change; it carries names and states, never secrets.
+- **Live.** `managed_policy_watch` re-applies a changed policy: validate, refresh the inventory, emit `managed_policy_changed`, restart the active project's running containers.
 
 ## Non-negotiables when extending this
 

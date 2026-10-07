@@ -281,6 +281,7 @@ pub(crate) struct AuthField {
 pub(crate) struct IntegrationStatusEntry {
     pub(crate) service: String,
     pub(crate) enabled: bool,
+    pub(crate) blocked_by_policy: bool,
     pub(crate) configured: bool,
     pub(crate) display_name: String,
     pub(crate) description: String,
@@ -297,6 +298,7 @@ pub(crate) struct IntegrationStatusEntry {
 pub(crate) struct OsIntegrationStatusEntry {
     pub(crate) service: String,
     pub(crate) enabled: bool,
+    pub(crate) blocked_by_policy: bool,
     pub(crate) display_name: String,
     pub(crate) description: String,
 }
