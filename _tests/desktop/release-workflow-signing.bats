@@ -1,11 +1,16 @@
 #!/usr/bin/env bats
 
 
-WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
+WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/build-publish.yml"
 VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
 
-@test "desktop-release.yml exists" {
+@test "build-publish.yml exists" {
     [ -f "$WORKFLOW" ]
+}
+
+@test "build-publish.yml is a reusable workflow with no other trigger" {
+    grep -qF "workflow_call:" "$WORKFLOW"
+    ! grep -qE "^  (push|pull_request|workflow_dispatch):" "$WORKFLOW"
 }
 
 @test "workflow imports Apple certificate into keychain before tauri-action" {
@@ -68,6 +73,26 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     done
 }
 
+@test "tauri-action never gets a tagName/releaseDraft input (the draft job owns release creation)" {
+    for input in tagName releaseDraft releaseName releaseBody; do
+        if grep -qE "^[[:space:]]+${input}:" "$WORKFLOW"; then
+            echo "ERROR: '${input}' belongs to the old create-on-demand flow; the draft job always creates the release first" >&2
+            return 1
+        fi
+    done
+}
+
+@test "the build never produces a macOS Intel or Windows ARM leg" {
+    if grep -qF "x86_64-apple-darwin" "$WORKFLOW"; then
+        echo "ERROR: macOS Intel target found in build-publish.yml; the new process never builds it" >&2
+        return 1
+    fi
+    if grep -qF "macOS_Intel" "$WORKFLOW"; then
+        echo "ERROR: macOS Intel asset label found in build-publish.yml" >&2
+        return 1
+    fi
+}
+
 @test "verify-release-assets.sh enumerates macOS updater assets" {
     grep -qF "macOS_Apple_Silicon.app.tar.gz" "$VERIFY_SCRIPT"
 }
@@ -81,14 +106,51 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     grep -qF "signature file empty" "$VERIFY_SCRIPT"
 }
 
+@test "verify-release-assets.sh never expects a macOS Intel asset" {
+    if grep -qF "Intel" "$VERIFY_SCRIPT"; then
+        echo "ERROR: verify-release-assets.sh still expects a macOS Intel asset" >&2
+        return 1
+    fi
+}
+
 @test "verify-release-assets.sh enforces required latest.json platform keys" {
-    grep -qF '"darwin-x86_64"' "$VERIFY_SCRIPT"
-    grep -qF '"darwin-x86_64-app"' "$VERIFY_SCRIPT"
     grep -qF '"darwin-aarch64"' "$VERIFY_SCRIPT"
     grep -qF '"darwin-aarch64-app"' "$VERIFY_SCRIPT"
     grep -qF '"windows-x86_64"' "$VERIFY_SCRIPT"
     grep -qF '"windows-x86_64-msi"' "$VERIFY_SCRIPT"
     grep -qF '"windows-x86_64-nsis"' "$VERIFY_SCRIPT"
+}
+
+@test "verify-release-assets.sh no longer requires the darwin-x86_64 platform keys" {
+    if grep -qF '"darwin-x86_64"' "$VERIFY_SCRIPT"; then
+        echo "ERROR: darwin-x86_64 is a dropped Intel platform key" >&2
+        return 1
+    fi
+}
+
+@test "the publish job runs verify-release-assets.sh exactly once (no post-publish revert-to-draft)" {
+    [ "$(grep -cF 'verify-release-assets.sh' "$WORKFLOW")" -eq 1 ]
+    if grep -qF 'draft=true' "$WORKFLOW"; then
+        echo "ERROR: a revert-to-draft step remains; immutable releases + delete-draft-on-failure replace it" >&2
+        return 1
+    fi
+}
+
+@test "a failed run deletes its own draft release instead of leaving it for manual cleanup" {
+    job_line=$(grep -n "^  delete-draft-on-failure:$" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$job_line" ]
+    block=$(awk -v start="$job_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
+    echo "$block" | grep -qF 'if: failure()'
+    grep -qF 'gh release delete' "$WORKFLOW"
+}
+
+@test "the delete-draft-on-failure job needs every other job (sees every possible failure)" {
+    job_line=$(grep -n "^  delete-draft-on-failure:$" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$job_line" ]
+    block=$(awk -v start="$job_line" 'NR>=start && NR<=start+2' "$WORKFLOW")
+    for j in draft publish-tauri cli publish; do
+        echo "$block" | grep -qF "$j" || { echo "ERROR: delete-draft-on-failure does not need '$j'" >&2; return 1; }
+    done
 }
 
 SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
@@ -123,7 +185,8 @@ SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 
 
 SIGNING_LOGIN_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/azure-signing-login/action.yml"
-RELEASE_PLEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release-please.yml"
+BETA_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/beta.yml"
+RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
 
 @test "workflow configures Windows signing before tauri-action" {
     login_line=$(grep -n "name: Configure Windows code signing" "$WORKFLOW" | head -1 | cut -d: -f1)
@@ -145,30 +208,22 @@ RELEASE_PLEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release-plea
     [ "$(grep -c "uses: ./.github/actions/azure-signing-login" "$WORKFLOW")" -eq 2 ]
 }
 
-@test "jobs that sign grant id-token: write and run in the release environment" {
+@test "jobs that sign grant id-token: write and run in the caller's environment" {
     [ "$(grep -c "^      id-token: write$" "$WORKFLOW")" -eq 2 ]
-    [ "$(grep -c "^    environment: release$" "$WORKFLOW")" -eq 2 ]
+    [ "$(grep -cF '    environment: ${{ inputs.environment }}' "$WORKFLOW")" -eq 4 ]
 }
 
-@test "release-please grants the release build every permission its jobs request" {
-    caller=$(awk '/^  build-and-publish:$/ { found = 1; next } found && /^  [^ ]/ { exit } found' "$RELEASE_PLEASE_WORKFLOW")
-    echo "$caller" | grep -qxF "    uses: ./.github/workflows/desktop-release.yml"
-    requested=$(grep -E "^      [a-z-]+: (read|write)$" "$WORKFLOW" | sed 's/^ *//' | sort -u)
-    [ -n "$requested" ]
-    while IFS= read -r perm; do
-        name=${perm%%:*}
-        if [ "${perm#*: }" = "read" ]; then
-            granted="^      $name: (read|write)$"
-        else
-            granted="^      $name: write$"
-        fi
-        if ! echo "$caller" | grep -qE "$granted"; then
-            echo "ERROR: desktop-release.yml requests '$perm' but release-please.yml build-and-publish does not grant it" >&2
-            return 1
-        fi
-    done <<EOF
-$requested
-EOF
+@test "every caller of build-publish.yml grants it contents: read and id-token: write" {
+    for caller in "$BETA_WORKFLOW" "$RELEASE_WORKFLOW"; do
+        [ -f "$caller" ]
+        call_line=$(grep -n "uses: ./.github/workflows/build-publish.yml" "$caller" | head -1 | cut -d: -f1)
+        [ -n "$call_line" ]
+        job_start=$(awk -v stop="$call_line" '/^  [a-zA-Z0-9_-]+:$/ { line = NR } NR==stop { print line; exit }' "$caller")
+        [ -n "$job_start" ]
+        job_block=$(awk -v start="$job_start" -v stop="$call_line" 'NR>=start && NR<=stop' "$caller")
+        echo "$job_block" | grep -qE "^      contents: read$" || { echo "ERROR: $(basename "$caller") does not grant contents: read to its build-publish.yml caller job" >&2; return 1; }
+        echo "$job_block" | grep -qE "^      id-token: write$" || { echo "ERROR: $(basename "$caller") does not grant id-token: write to its build-publish.yml caller job" >&2; return 1; }
+    done
 }
 
 @test "every signing login is followed at once by the Artifact Signing token fetch" {
@@ -232,17 +287,25 @@ EOF
     grep -qF "allow-no-subscriptions: true" "$SIGNING_LOGIN_ACTION"
 }
 
-@test "the cli job exports SPEEDWAVE_VERSION from the resolve job before building, so the released CLI version matches the release tag" {
+@test "the cli job builds with SPEEDWAVE_VERSION from the caller's computed version, so the released CLI version matches the release tag" {
     build_line=$(grep -n "name: Build CLI" "$WORKFLOW" | head -1 | cut -d: -f1)
     [ -n "$build_line" ]
     block=$(awk -v start="$build_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
-    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}'
+    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ inputs.version }}'
     echo "$block" | grep -qF 'cargo build --release'
 }
 
-@test "the publish-tauri job exports SPEEDWAVE_VERSION from the resolve job before building, so the released CLI/crates version matches the Tauri app version" {
+@test "the publish-tauri job builds with SPEEDWAVE_VERSION from the caller's computed version, so the released CLI/crates version matches the Tauri app version" {
     tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
     [ -n "$tauri_line" ]
     block=$(awk -v start="$tauri_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
-    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}'
+    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ inputs.version }}'
+}
+
+@test "GH_AUTOMATION_PAT is used for every release write; RELEASE_TOKEN is gone" {
+    if grep -qF 'RELEASE_TOKEN' "$WORKFLOW"; then
+        echo "ERROR: RELEASE_TOKEN must not appear; GH_AUTOMATION_PAT replaces it (SPEED-674 ticket 13)" >&2
+        return 1
+    fi
+    grep -qF 'secrets.GH_AUTOMATION_PAT' "$WORKFLOW"
 }
