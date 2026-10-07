@@ -29,7 +29,7 @@ PINNED_JSON_FILES = (
     "mcp-servers/playwright/package.json",
 )
 
-PINNED_TOML_GLOBS = (
+PINNED_TOML_FILES = (
     "crates/speedwave-runtime/Cargo.toml",
     "crates/speedwave-cli/Cargo.toml",
     "desktop/src-tauri/Cargo.toml",
@@ -54,7 +54,7 @@ def _check_toml_path(
 ) -> None:
     try:
         content = (root / rel_path).read_text()
-    except Exception as e:
+    except (OSError, UnicodeDecodeError) as e:
         errors.append(f"{display_path}: read error: {e}")
         return
     pkg = re.search(r"\[package\](.*?)(?:\n\[|\Z)", content, re.DOTALL)
@@ -83,7 +83,7 @@ def _check_generic_path(
 ) -> None:
     try:
         content = (root / rel_path).read_text()
-    except Exception as e:
+    except (OSError, UnicodeDecodeError) as e:
         errors.append(f"{display_path}: read error: {e}")
         return
     marked = [
@@ -112,7 +112,7 @@ def _check_json_path(root: pathlib.Path, rel_path: str, errors: list[str]) -> No
     try:
         content = path.read_text()
         data = json.loads(content)
-    except Exception as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         errors.append(f"{path}: failed to parse JSON: {e}")
         return
     actual = data.get("version", "")
@@ -126,14 +126,12 @@ def find_errors(root: pathlib.Path) -> list[str]:
     for rel_path in PINNED_JSON_FILES:
         _check_json_path(root, rel_path, errors)
 
-    for pattern in PINNED_TOML_GLOBS:
-        matches = list(root.glob(pattern))
-        if not matches:
-            errors.append(f"no matches for glob: {pattern}")
+    for rel_path in PINNED_TOML_FILES:
+        toml_path = root / rel_path
+        if not toml_path.exists():
+            errors.append(f"{toml_path}: file not found")
             continue
-        for toml_path in matches:
-            rel_path = toml_path.relative_to(root).as_posix()
-            _check_toml_path(root, rel_path, toml_path, errors)
+        _check_toml_path(root, rel_path, toml_path, errors)
 
     for rel_path in PINNED_GENERIC_FILES:
         _check_generic_path(root, rel_path, root / rel_path, errors)
