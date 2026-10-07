@@ -9,7 +9,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
-import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
+import { UpdateChannel, UpdateCheckOutcome, UpdateSettings } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
@@ -112,8 +112,8 @@ export class UpdateSectionComponent implements OnInit {
   /** Always true; auto-check is non-negotiable. */
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
-  /** `undefined` until settings load; a save omits `channel` while it stays `undefined`, so opening Settings never writes a `channel` the file never had. */
-  updateChannel?: 'stable' | 'beta';
+  /** Loaded channel; `undefined` until settings load. */
+  updateChannel?: UpdateChannel;
   updateChecking = false;
   updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
@@ -148,7 +148,7 @@ export class UpdateSectionComponent implements OnInit {
   }
 
   /** Current channel for display; missing settings read as `stable`. */
-  channelLabel(): 'stable' | 'beta' {
+  channelLabel(): UpdateChannel {
     return this.updateChannel ?? 'stable';
   }
 
@@ -156,7 +156,7 @@ export class UpdateSectionComponent implements OnInit {
    * Tailwind class for a channel button: highlighted when it is the active channel.
    * @param channel - The channel this button represents.
    */
-  channelButtonClass(channel: 'stable' | 'beta'): string {
+  channelButtonClass(channel: UpdateChannel): string {
     return channel === this.channelLabel()
       ? 'border-[var(--accent)] text-[var(--ink)]'
       : 'border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink)] hover:bg-[var(--bg-3)]';
@@ -204,7 +204,7 @@ export class UpdateSectionComponent implements OnInit {
    * Switches the update channel, persists it and immediately checks for updates on the new channel.
    * @param channel - The channel to switch to.
    */
-  async setChannel(channel: 'stable' | 'beta'): Promise<void> {
+  async setChannel(channel: UpdateChannel): Promise<void> {
     if (this.updateInstalling || channel === this.channelLabel()) return;
     this.updateChannel = channel;
     this.cdr.markForCheck();

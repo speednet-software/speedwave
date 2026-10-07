@@ -10,11 +10,14 @@ export interface UpdateInfo {
 export type UpdateCheckOutcome =
   { kind: 'up_to_date' } | ({ kind: 'update_available' } & UpdateInfo);
 
+/** Mirrors Rust `speedwave_runtime::update_channel::UpdateChannel`. */
+export type UpdateChannel = 'stable' | 'beta';
+
 /** User-configurable auto-update check preferences. */
 export interface UpdateSettings {
   auto_check: boolean;
   check_interval_hours: number;
-  channel?: 'stable' | 'beta';
+  channel?: UpdateChannel;
 }
 
 /** A configured project entry from ~/.speedwave/config.json. */
