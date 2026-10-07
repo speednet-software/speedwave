@@ -7,6 +7,10 @@ trim = true
 postprocessors = []
 body = """
 {%- set section_order = ["Breaking changes", "Security", "Features", "Bug Fixes", "Performance"] -%}
+{%- set security_commits = commits | filter(attribute="group", value="Security") -%}
+{%- if security_commits %}
+[SECURITY]
+{% endif -%}
 {%- for section in section_order -%}
 {%- set section_commits = commits | filter(attribute="group", value=section) -%}
 {%- if section_commits %}
