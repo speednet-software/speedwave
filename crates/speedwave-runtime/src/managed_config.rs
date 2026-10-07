@@ -2,7 +2,8 @@
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
 use crate::config::{
-    ManagedLlmEgressConfig, ManagedPiiPolicyConfig, ManagedServicesConfig, ManagedTelemetryConfig,
+    ManagedLlmEgressConfig, ManagedManagementConfig, ManagedPiiPolicyConfig, ManagedServicesConfig,
+    ManagedTelemetryConfig,
 };
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,10 @@ use std::path::{Path, PathBuf};
 #[derive(serde::Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedConfig {
+    /// The policy's schema (ADR-091); a newer one than this Speedwave applies is refused at boot.
+    pub schema_version: Option<u32>,
+    /// Who manages the machine and where its status is read (ADR-091).
+    pub management: Option<ManagedManagementConfig>,
     /// MDM-forced OTLP telemetry policy (absent = user fully self-service).
     pub telemetry: Option<ManagedTelemetryConfig>,
     /// MDM-forced PII policy ids (absent = user fully self-service).

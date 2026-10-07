@@ -1043,6 +1043,47 @@ pub fn apply_services_policy(
     blocked
 }
 
+/// Newest `managed-config.json` schema this Speedwave applies (ADR-091).
+pub const MANAGED_POLICY_SCHEMA_VERSION: u32 = 1;
+
+/// MDM `management` block (ADR-091): who manages the machine and where its status is read.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedManagementConfig {
+    /// The management provider's name, shown to the user.
+    pub name: Option<String>,
+    /// Endpoint answering the management status contract, called with the gateway's headers.
+    pub status_url: Option<String>,
+    /// The provider's console, linked from the status view.
+    pub console_url: Option<String>,
+}
+
+impl ManagedManagementConfig {
+    /// Rejects a status or console address the desktop must not call or link.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (field, url) in [
+            ("status_url", &self.status_url),
+            ("console_url", &self.console_url),
+        ] {
+            if let Some(u) = url {
+                crate::url_validation::validate_collector_url(
+                    u,
+                    crate::url_validation::PrivatePolicy::AllowLoopback,
+                )
+                .map_err(|reason| anyhow::anyhow!("management.{field} is not allowed: {reason}"))?;
+            }
+        }
+        if self
+            .name
+            .as_deref()
+            .is_some_and(|n| n.chars().count() > 120 || n.chars().any(char::is_control))
+        {
+            anyhow::bail!("management.name must be at most 120 printable characters");
+        }
+        Ok(())
+    }
+}
+
 /// MDM `llm_egress` block (ADR-090): the organisation's gateway is the only AI route.
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -1695,13 +1736,31 @@ pub fn managed_settings_required(telemetry: &ResolvedTelemetry) -> bool {
 
 /// Global boot gate for the `llm_egress` block (ADR-090): an invalid one hard-stops startup.
 pub fn check_llm_egress_policy_at_boot() -> anyhow::Result<()> {
-    let Some(managed) = crate::managed_config::load_managed_config()? else {
-        return Ok(());
-    };
-    if let Some(egress) = managed.llm_egress {
+    match crate::managed_config::load_managed_config()? {
+        Some(managed) => validate_managed_policy(&managed),
+        None => Ok(()),
+    }
+}
+
+/// Rejects a policy this Speedwave cannot apply as the organisation meant it (newer schema, bad
+/// management, gateway or services block).
+pub fn validate_managed_policy(
+    managed: &crate::managed_config::ManagedConfig,
+) -> anyhow::Result<()> {
+    if let Some(v) = managed.schema_version {
+        if v > MANAGED_POLICY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "the organisation's policy uses schema {v}; this Speedwave applies up to {MANAGED_POLICY_SCHEMA_VERSION} — update Speedwave"
+            );
+        }
+    }
+    if let Some(management) = &managed.management {
+        management.validate()?;
+    }
+    if let Some(egress) = &managed.llm_egress {
         egress.validate()?;
     }
-    if let Some(services) = managed.services {
+    if let Some(services) = &managed.services {
         services.validate()?;
     }
     Ok(())
@@ -7588,5 +7647,54 @@ mod policy_provider_tests {
         let empty: crate::managed_config::ManagedConfig =
             serde_json::from_str(r#"{"services":{}}"#).unwrap();
         assert!(empty.services.unwrap().allows("anything"));
+    }
+
+    #[test]
+    fn the_management_block_parses_and_rejects_addresses_it_must_not_call() {
+        let m: crate::managed_config::ManagedConfig = serde_json::from_str(
+            r#"{"schema_version":1,"management":{"name":"Auditor","status_url":"https://auditor.example.com/api/ai-egress/host/self"}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.schema_version, Some(1));
+        let mg = m.management.unwrap();
+        assert!(mg.validate().is_ok());
+        assert_eq!(mg.name.as_deref(), Some("Auditor"));
+        let bad = ManagedManagementConfig {
+            status_url: Some("ftp://auditor.example.com".into()),
+            ..Default::default()
+        };
+        assert!(bad
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("management.status_url"));
+        let long = ManagedManagementConfig {
+            name: Some("x".repeat(121)),
+            ..Default::default()
+        };
+        assert!(long.validate().is_err());
+        assert!(
+            serde_json::from_str::<crate::managed_config::ManagedConfig>(
+                r#"{"management":{"nmae":"x"}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_policy_newer_than_this_speedwave_is_refused() {
+        let newer: crate::managed_config::ManagedConfig =
+            serde_json::from_str(r#"{"schema_version":2}"#).unwrap();
+        assert!(validate_managed_policy(&newer)
+            .unwrap_err()
+            .to_string()
+            .contains("schema 2"));
+        let current: crate::managed_config::ManagedConfig =
+            serde_json::from_str(r#"{"schema_version":1,"services":{"rules":{"slack":"deny"}}}"#)
+                .unwrap();
+        assert!(validate_managed_policy(&current).is_ok());
+        let typo: crate::managed_config::ManagedConfig =
+            serde_json::from_str(r#"{"services":{"rules":{"slakc":"deny"}}}"#).unwrap();
+        assert!(validate_managed_policy(&typo).is_err());
     }
 }

@@ -1,27 +1,32 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input } from '@angular/core';
-import { AuditorMarkComponent } from '../../shared/auditor-mark.component';
-import { AuditorService } from '../../services/auditor.service';
+import { ManagedMarkComponent } from '../../shared/managed-mark.component';
+import { ManagementService } from '../../services/management.service';
 import { ModelPickerService } from '../../services/model-picker.service';
-import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../../models/auditor';
+import {
+  complianceLabel,
+  complianceTone,
+  deploymentLabel,
+  riskLabel,
+} from '../../models/management';
 
-/** Settings › LLM providers under Auditor: what it applies to the project, read-only. */
+/** Settings › LLM providers under the organisation's management: what it applies to the project, read-only. */
 @Component({
-  selector: 'app-auditor-panel',
-  imports: [AuditorMarkComponent],
+  selector: 'app-management-panel',
+  imports: [ManagedMarkComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
     <div
       class="mt-3 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)]"
-      data-testid="settings-auditor-panel"
+      data-testid="settings-management-panel"
     >
       <div class="flex items-center gap-3 border-b border-[var(--line)] px-4 py-3">
-        <app-auditor-mark class="h-5 w-5 text-[var(--ink)]" />
+        <app-managed-mark class="h-5 w-5 text-[var(--ink)]" />
         <div class="min-w-0 flex-1">
-          <div class="text-[13px] text-[var(--ink)]">Auditor</div>
+          <div class="text-[13px] text-[var(--ink)]">{{ status()?.provider || 'Managed' }}</div>
           <div
             class="mono truncate text-[11px] text-[var(--ink-mute)]"
-            data-testid="settings-auditor-org"
+            data-testid="settings-management-org"
           >
             Managed by {{ status()?.organization || 'your organisation' }}
             @if (status()?.host?.name) {
@@ -42,22 +47,22 @@ import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../
       @if (status()?.error) {
         <div
           class="mono border-b border-[var(--line)] px-4 py-2 text-[11px] text-[var(--amber)]"
-          data-testid="settings-auditor-error"
+          data-testid="settings-management-error"
         >
           {{ status()?.error }}
         </div>
       }
       <dl class="mono grid grid-cols-[120px_1fr] gap-x-4 gap-y-2.5 px-4 py-3 text-[12px]">
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">gateway</dt>
-        <dd class="truncate text-[var(--ink)]">{{ status()?.auditor_url || '—' }}</dd>
+        <dd class="truncate text-[var(--ink)]">{{ status()?.status_url || '—' }}</dd>
 
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">deployment</dt>
-        <dd class="text-[var(--ink)]" data-testid="settings-auditor-deployment">
+        <dd class="text-[var(--ink)]" data-testid="settings-management-deployment">
           {{ deployment() }}
         </dd>
 
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">models</dt>
-        <dd class="flex flex-wrap items-center gap-2" data-testid="settings-auditor-models">
+        <dd class="flex flex-wrap items-center gap-2" data-testid="settings-management-models">
           @for (m of models(); track m) {
             <span
               class="rounded border border-[var(--line-strong)] px-1.5 py-0.5 text-[11px] text-[var(--ink)]"
@@ -80,14 +85,14 @@ import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../
         </dd>
 
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">use case</dt>
-        <dd class="text-[var(--ink)]" data-testid="settings-auditor-use-case">
+        <dd class="text-[var(--ink)]" data-testid="settings-management-use-case">
           {{ applied()?.use_case?.name || 'Not assigned to a use case' }}
         </dd>
 
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">compliance</dt>
         <dd
           class="flex items-center gap-1.5 text-[var(--ink)]"
-          data-testid="settings-auditor-compliance"
+          data-testid="settings-management-compliance"
         >
           <span [style.color]="toneColour()">●</span>{{ compliance() }}
           <span class="text-[var(--ink-mute)]">· risk {{ risk() }}</span>
@@ -108,15 +113,15 @@ import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../
     </div>
   `,
 })
-export class AuditorPanelComponent {
-  private readonly auditor = inject(AuditorService);
+export class ManagementPanelComponent {
+  private readonly management = inject(ManagementService);
   private readonly picker = inject(ModelPickerService);
 
   /** The project whose route is shown (the active one). */
   readonly project = input<string | null>(null);
 
   protected readonly status = computed(
-    () => this.auditor.statusFor(this.project()) ?? this.auditor.active()
+    () => this.management.statusFor(this.project()) ?? this.management.active()
   );
   protected readonly applied = computed(() => this.status()?.project ?? null);
   protected readonly reachable = computed(() => !!this.status()?.reachable);
@@ -136,17 +141,16 @@ export class AuditorPanelComponent {
   });
   protected readonly agent = computed(() => {
     const s = this.status();
-    if (s?.agent_version) return `Auditor for macOS ${s.agent_version}`;
-    return s?.package_version ? `Auditor ${s.package_version}` : '—';
+    return s?.package_version ? `${s.provider ?? 'Agent'} ${s.package_version}` : '—';
   });
 
   protected readonly label = (model: string): string => this.picker.label(model, this.project());
 
-  /** Asks Auditor about the project when it changes. */
+  /** Asks the provider about the project when it changes. */
   constructor() {
     effect(() => {
       const p = this.project();
-      if (p) void this.auditor.refresh(p);
+      if (p) void this.management.refresh(p);
     });
   }
 }

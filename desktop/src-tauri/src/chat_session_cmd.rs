@@ -397,7 +397,7 @@ pub(crate) async fn switch_chat_model(
 ) -> Result<ModelSwitchOutcome, String> {
     check_project(&project)?;
     validate_model_pick(&model)?;
-    crate::auditor_cmd::check_model_allowed(&project, &model)?;
+    crate::management_cmd::check_model_allowed(&project, &model)?;
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || switch_model_inner(&session_arc, &project, &model))
         .await

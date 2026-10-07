@@ -28,8 +28,8 @@ import type { RefusedModelPick } from '../../../services/chat-state.service';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 import { SpinIconComponent } from '../../../shared/spin-icon.component';
-import { AuditorMarkComponent } from '../../../shared/auditor-mark.component';
-import { AuditorService } from '../../../services/auditor.service';
+import { ManagedMarkComponent } from '../../../shared/managed-mark.component';
+import { ManagementService } from '../../../services/management.service';
 
 const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
 const LOAD_FAILED = 'Failed to load models.';
@@ -69,7 +69,7 @@ export interface ModelSelection {
     TooltipDirective,
     EffortSliderComponent,
     SpinIconComponent,
-    AuditorMarkComponent,
+    ManagedMarkComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
@@ -84,8 +84,8 @@ export interface ModelSelection {
         (click)="openCombobox()"
       >
         @if (managed()) {
-          <app-auditor-mark
-            data-testid="composer-model-auditor-mark"
+          <app-managed-mark
+            data-testid="composer-model-managed-mark"
             class="h-3 w-3 text-[var(--ink)]"
           />
         }
@@ -123,12 +123,14 @@ export interface ModelSelection {
         >
           @if (managed()) {
             <div
-              data-testid="model-selector-auditor"
+              data-testid="model-selector-managed"
               class="mono flex items-center gap-2 border-b border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
             >
-              <app-auditor-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
-              <span class="text-[var(--ink)]">Auditor</span>
-              <span class="truncate">· {{ auditorOrganization() }}</span>
+              <app-managed-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
+              <span class="text-[var(--ink)]">{{
+                management.active()?.provider || 'Managed'
+              }}</span>
+              <span class="truncate">· {{ managedOrganization() }}</span>
             </div>
           }
           <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
@@ -276,7 +278,7 @@ export class ModelSelectorComponent {
   private readonly picker = inject(ModelPickerService);
   private readonly discovered = inject(DiscoveredModelsService);
   private readonly log = inject(LoggerService);
-  private readonly auditor = inject(AuditorService);
+  protected readonly management = inject(ManagementService);
 
   readonly projectId = input.required<string>();
   readonly streaming = input(false);
@@ -331,15 +333,17 @@ export class ModelSelectorComponent {
 
   protected readonly awaitingSession = computed(() => this.isAnthropic() && this.sessionAwaited());
 
-  /** Auditor's policy is on this machine: the models are the ones Auditor allows the project. */
-  protected readonly managed = computed(() => !!this.auditor.statusFor(this.projectId())?.managed);
-
-  protected readonly auditorOrganization = computed(
-    () => this.auditor.statusFor(this.projectId())?.organization ?? 'your organisation'
+  /** A managed policy is on this machine: the models are the ones the organisation allows the project. */
+  protected readonly managed = computed(
+    () => !!this.management.statusFor(this.projectId())?.managed
   );
 
-  private readonly auditorOptions = computed<ModelOption[]>(() => {
-    const project = this.auditor.statusFor(this.projectId())?.project;
+  protected readonly managedOrganization = computed(
+    () => this.management.statusFor(this.projectId())?.organization ?? 'your organisation'
+  );
+
+  private readonly managedOptions = computed<ModelOption[]>(() => {
+    const project = this.management.statusFor(this.projectId())?.project;
     if (!project) return [];
     return project.models.map((m) => ({
       id: m,
@@ -347,13 +351,13 @@ export class ModelSelectorComponent {
       wireId: m,
       isDefault: m === project.default_model,
       contextTokens: null,
-      description: project.pinned ? `${m} · pinned by ${this.auditorOrganization()}` : m,
+      description: project.pinned ? `${m} · pinned by ${this.managedOrganization()}` : m,
       requiresUsageCredits: false,
     }));
   });
 
   private readonly options = computed<ModelOption[]>(() => {
-    if (this.managed()) return this.auditorOptions();
+    if (this.managed()) return this.managedOptions();
     if (!this.isAnthropic()) return this.discoveredOptions();
     const projectId = this.projectId();
     const held = this.picker.picker(projectId);
@@ -450,7 +454,7 @@ export class ModelSelectorComponent {
     });
     effect(() => {
       const id = this.projectId();
-      if (id) void this.auditor.refresh(id);
+      if (id) void this.management.refresh(id);
     });
     effect(() => {
       const id = this.projectId();
@@ -600,10 +604,10 @@ export class ModelSelectorComponent {
     this.stale.set(false);
     try {
       if (this.managed()) {
-        const status = await this.auditor.refresh(this.projectId(), force);
+        const status = await this.management.refresh(this.projectId(), force);
         if (!latest()) return;
         if (this.options().length === 0) {
-          this.error.set(status?.error ?? 'Auditor allows no model for this project.');
+          this.error.set(status?.error ?? 'Your organisation allows no model for this project.');
         }
         return;
       }

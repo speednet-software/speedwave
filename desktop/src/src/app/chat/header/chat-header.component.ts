@@ -2,9 +2,14 @@ import { ChangeDetectionStrategy, Component, computed, inject, input, output } f
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
-import { AuditorMarkComponent } from '../../shared/auditor-mark.component';
-import { AuditorService } from '../../services/auditor.service';
-import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../../models/auditor';
+import { ManagedMarkComponent } from '../../shared/managed-mark.component';
+import { ManagementService } from '../../services/management.service';
+import {
+  complianceLabel,
+  complianceTone,
+  deploymentLabel,
+  riskLabel,
+} from '../../models/management';
 
 /**
  * Chat header strip — terminal-minimal layout. Full mode shows conversation controls (history/memory/new) plus the project pill.
@@ -12,7 +17,7 @@ import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../
  */
 @Component({
   selector: 'app-chat-header',
-  imports: [ProjectPillComponent, IconComponent, TooltipDirective, AuditorMarkComponent],
+  imports: [ProjectPillComponent, IconComponent, TooltipDirective, ManagedMarkComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block flex-shrink-0' },
   template: `
@@ -67,20 +72,22 @@ import { complianceLabel, complianceTone, deploymentLabel, riskLabel } from '../
       </h1>
 
       <div class="ml-auto flex min-w-0 items-center gap-3">
-        @if (auditorProject(); as p) {
+        @if (managedProject(); as p) {
           <span
-            data-testid="chat-header-auditor"
+            data-testid="chat-header-managed"
             class="mono hidden min-w-0 max-w-[420px] items-center gap-2 rounded border border-[var(--line)] px-2 py-0.5 text-[11px] sm:inline-flex"
-            [appTooltip]="auditorDetail()"
+            [appTooltip]="managedDetail()"
             placement="bottom"
           >
-            <app-auditor-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
-            <span class="truncate text-[var(--ink)]" data-testid="chat-header-auditor-use-case">{{
+            <app-managed-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
+            <span class="truncate text-[var(--ink)]" data-testid="chat-header-managed-use-case">{{
               p.use_case?.name || 'No use case'
             }}</span>
             <span class="flex flex-shrink-0 items-center gap-1 text-[var(--ink-mute)]">
-              <span [style.color]="auditorTone()">●</span
-              ><span data-testid="chat-header-auditor-compliance">{{ auditorCompliance() }}</span>
+              <span [style.color]="managedTone()">●</span
+              ><span data-testid="chat-header-managed-compliance">{{
+                managedComplianceLabel()
+              }}</span>
             </span>
           </span>
         }
@@ -106,29 +113,29 @@ export class ChatHeaderComponent {
   /** Start a new conversation (plus button → ⌘N). */
   readonly newConversation = output<void>();
 
-  private readonly auditor = inject(AuditorService);
+  private readonly management = inject(ManagementService);
 
-  /** Under Auditor's policy: the use case this project realises, and its compliance in Auditor. */
-  protected readonly auditorProject = computed(() => {
-    const s = this.auditor.active();
+  /** Under a managed policy: the use case this project realises, and its compliance with the provider. */
+  protected readonly managedProject = computed(() => {
+    const s = this.management.active();
     return s?.managed ? s.project : null;
   });
-  protected readonly auditorCompliance = computed(() =>
-    complianceLabel(this.auditorProject()?.use_case?.compliance)
+  protected readonly managedComplianceLabel = computed(() =>
+    complianceLabel(this.managedProject()?.use_case?.compliance)
   );
-  protected readonly auditorTone = computed(
+  protected readonly managedTone = computed(
     () =>
       ({ ok: 'var(--green)', warn: 'var(--amber)', bad: 'var(--red)', none: 'var(--ink-mute)' })[
-        complianceTone(this.auditorProject()?.use_case?.compliance)
+        complianceTone(this.managedProject()?.use_case?.compliance)
       ]
   );
-  protected readonly auditorDetail = computed(() => {
-    const p = this.auditorProject();
-    const s = this.auditor.active();
+  protected readonly managedDetail = computed(() => {
+    const p = this.managedProject();
+    const s = this.management.active();
     if (!p) return '';
     const uc = p.use_case;
     return [
-      `Auditor · ${s?.organization ?? 'your organisation'}`,
+      `${s?.provider ?? 'Managed'} · ${s?.organization ?? 'your organisation'}`,
       uc ? `Use case: ${uc.name ?? uc.node_id}` : 'No use case',
       `Compliance: ${complianceLabel(uc?.compliance)} · risk ${riskLabel(uc?.compliance?.riskCategory)}`,
       `Deployment: ${deploymentLabel(p.deployment)}`,

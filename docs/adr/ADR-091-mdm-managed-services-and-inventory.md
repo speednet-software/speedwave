@@ -22,9 +22,12 @@ Until now a policy change reached Speedwave only at its next start, so a managem
 
 **The policy is live.** The desktop watches the policy's directory (`managed_policy_watch`); when the file changes it validates it, refreshes the inventory, tells the UI (`managed_policy_changed`) and, when the active project's containers run, re-renders and restarts them (`integrations_cmd::restart_project_containers`). A policy that fails validation is reported and not applied; the running containers keep the last one.
 
+**Who manages the machine is named by the policy, not built in.** A `management` block (`ManagedManagementConfig`) carries the provider's `name`, the `status_url` the desktop reads the management status from (with the gateway's headers) and an optional `console_url`; the desktop's status view (`management_cmd`) and its UI show the provider by that name, with a neutral mark. Nothing in Speedwave names a vendor or a vendor's path. A top-level `schema_version` lets an organisation's tooling say which policy schema it writes; one newer than `MANAGED_POLICY_SCHEMA_VERSION` is refused like any invalid policy (`config::validate_managed_policy`, run at boot and by the watcher).
+
 ## Consequences
 
 - An organisation can deny a whole class of data flows (a chat tool, a document store, a plugin) on every machine it manages, and see per project which services each machine uses.
 - The inventory carries service names, never credentials or content.
 - A service turned off by the policy keeps the user's own choice: removing the rule brings it back.
 - Applying a changed policy restarts the active project's containers, as toggling an integration does.
+- Any management agent can drive Speedwave by writing `managed-config.json` and reading the inventory; the management status contract is the one `management_cmd` reads (organization, host, access, deployments, use cases, project).

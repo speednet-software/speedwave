@@ -25,8 +25,8 @@ import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/servi
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
-import { AuditorMarkComponent } from '../shared/auditor-mark.component';
-import { AuditorService } from '../services/auditor.service';
+import { ManagedMarkComponent } from '../shared/managed-mark.component';
+import { ManagementService } from '../services/management.service';
 
 /** Per-service dot colour cycle used in the table. */
 const SERVICE_DOT_COLOURS: readonly string[] = [
@@ -55,7 +55,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
     RedmineConfigComponent,
     IdeBridgeComponent,
     ProjectPillComponent,
-    AuditorMarkComponent,
+    ManagedMarkComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -152,13 +152,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
               </tr>
             </thead>
             <tbody class="divide-y divide-[var(--line)]">
-              @if (auditor.active(); as a) {
+              @if (management.active(); as a) {
                 @if (a.managed) {
-                  <tr data-testid="integrations-row-auditor">
+                  <tr data-testid="integrations-row-management">
                     <td class="px-4 py-2.5">
                       <div class="flex items-center gap-2">
-                        <app-auditor-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
-                        <span class="text-[var(--ink)]">auditor</span>
+                        <app-managed-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
+                        <span class="text-[var(--ink)]">{{ a.provider || 'management' }}</span>
                         @if (a.organization) {
                           <span class="mono text-[11px] text-[var(--ink-mute)]"
                             >· {{ a.organization }}</span
@@ -168,20 +168,20 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                     </td>
                     <td class="px-4 py-2.5">
                       @if (a.reachable) {
-                        <span class="pill green" data-testid="integrations-auditor-status"
+                        <span class="pill green" data-testid="integrations-management-status"
                           >connected</span
                         >
                       } @else {
-                        <span class="pill amber" data-testid="integrations-auditor-status"
+                        <span class="pill amber" data-testid="integrations-management-status"
                           >unreachable</span
                         >
                       }
                     </td>
                     <td
                       class="mono hidden px-4 py-2.5 text-[var(--ink)] md:table-cell"
-                      data-testid="integrations-auditor-ver"
+                      data-testid="integrations-management-ver"
                     >
-                      {{ a.agent_version || a.package_version || '—' }}
+                      {{ a.package_version || '—' }}
                     </td>
                     <td class="mono hidden px-4 py-2.5 text-[var(--ink-mute)] lg:table-cell">
                       {{ a.reachable && a.latency_ms !== null ? a.latency_ms + ' ms' : '—' }}
@@ -426,8 +426,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
   private beta = inject(BetaService);
-  /** Auditor on this machine — shown first in Services when its policy is present. */
-  protected readonly auditor = inject(AuditorService);
+  /** The organisation's management on this machine — shown first in Services when its policy is present. */
+  protected readonly management = inject(ManagementService);
   private unsubProjectSettled: (() => void) | null = null;
   private unsubStatusRefresher: (() => void) | null = null;
 

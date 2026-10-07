@@ -39,6 +39,7 @@ An **invalid policy is caught once, at boot.** Desktop and CLI call `config::che
 - **Refused server-side.** Enabling a denied service fails in the command; the UI only mirrors `blocked_by_policy`.
 - **Inventory, not inspection.** `management::refresh_inventory` writes `<data_dir>/management/inventory.json` after every `save_user_config`, at startup and on a policy change; it carries names and states, never secrets.
 - **Live.** `managed_policy_watch` re-applies a changed policy: validate, refresh the inventory, emit `managed_policy_changed`, restart the active project's running containers.
+- **No vendor in core.** The provider is named by the `management` block (`name`, `status_url`, `console_url`); the status view reads `status_url`, never a vendor path, and the UI shows the provider's name with the neutral `ManagedMarkComponent`. `schema_version` above `MANAGED_POLICY_SCHEMA_VERSION` is refused by `config::validate_managed_policy`.
 
 ## Non-negotiables when extending this
 

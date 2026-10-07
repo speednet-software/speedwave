@@ -300,6 +300,14 @@ pub(crate) fn llm_locked_by_policy() -> bool {
     managed_llm_egress().is_some()
 }
 
+/// The machine's MDM `management` block, if any (ADR-091).
+pub(crate) fn managed_management() -> Option<speedwave_runtime::config::ManagedManagementConfig> {
+    speedwave_runtime::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.management)
+}
+
 /// The machine's MDM `services` policy, if any (ADR-091).
 pub(crate) fn managed_services() -> Option<speedwave_runtime::config::ManagedServicesConfig> {
     speedwave_runtime::managed_config::load_managed_config()

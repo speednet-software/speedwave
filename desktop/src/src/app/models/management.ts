@@ -1,7 +1,7 @@
-/** What Auditor (the organisation's AI control point) applies on this machine — `get_auditor_status`. */
+/** What the organisation's management provider applies on this machine — `get_management_status` (ADR-091). */
 
-/** A use case's evidence status in Auditor's registry (its approval) and its risk category. */
-export interface AuditorCompliance {
+/** A use case's evidence status in the provider's registry (its approval) and its risk category. */
+export interface ManagedCompliance {
   state: 'AWAITING_PROFILES' | 'INCOMPLETE' | 'COMPLETE' | 'NOT_REGISTERED' | string;
   open?: number;
   requirementsOpen?: number;
@@ -10,8 +10,8 @@ export interface AuditorCompliance {
   riskCategory?: string | null;
 }
 
-/** An AI deployment registered in Auditor (where a project's requests go). */
-export interface AuditorDeployment {
+/** An AI deployment registered with the provider (where a project's requests go). */
+export interface ManagedDeployment {
   id: string;
   name: string | null;
   deploymentType?: string | null;
@@ -22,34 +22,36 @@ export interface AuditorDeployment {
   dataScope?: string | null;
 }
 
-/** A use case placed on this machine, as Auditor attributes and judges it. */
-export interface AuditorUseCase {
+/** A use case placed on this machine, as the provider attributes and judges it. */
+export interface ManagedUseCase {
   node_id: string;
   name: string | null;
   attribution?: string;
   state?: string;
   reason?: string | null;
-  compliance?: AuditorCompliance | null;
+  compliance?: ManagedCompliance | null;
 }
 
 /** What the gateway applies to one project: its use case, deployment and models. */
-export interface AuditorProject {
+export interface ManagedProject {
   name: string | null;
-  use_case: AuditorUseCase | null;
-  deployment: AuditorDeployment | null;
+  use_case: ManagedUseCase | null;
+  deployment: ManagedDeployment | null;
   models: string[];
   default_model: string | null;
   pinned: boolean;
   access: 'ALLOWED' | 'SUSPENDED' | string;
 }
 
-/** The answer of `get_auditor_status`; `managed: false` = no Auditor policy on the machine. */
-export interface AuditorStatus {
+/** The answer of `get_management_status`; `managed: false` = no managed policy on the machine. */
+export interface ManagementStatus {
   managed: boolean;
   reachable: boolean;
   error: string | null;
-  auditor_url: string | null;
-  agent_version: string | null;
+  /** The management provider's name. */
+  provider: string | null;
+  console_url: string | null;
+  status_url: string | null;
   latency_ms: number | null;
   checked_at: string | null;
   organization: string | null;
@@ -62,9 +64,9 @@ export interface AuditorStatus {
     pinned_model?: string | null;
     default_model?: string | null;
   } | null;
-  deployments: AuditorDeployment[];
-  use_cases: AuditorUseCase[];
-  project: AuditorProject | null;
+  deployments: ManagedDeployment[];
+  use_cases: ManagedUseCase[];
+  project: ManagedProject | null;
   package_version: string | null;
 }
 
@@ -72,11 +74,11 @@ export interface AuditorStatus {
 export type Tone = 'ok' | 'warn' | 'bad' | 'none';
 
 /**
- * The registry's approval of a use case, in the words Auditor uses.
+ * The registry's approval of a use case, in the provider's words.
  * @param c - The use case's evidence status.
  * @returns The label.
  */
-export function complianceLabel(c: AuditorCompliance | null | undefined): string {
+export function complianceLabel(c: ManagedCompliance | null | undefined): string {
   if (!c) return 'Compliance unknown';
   switch (c.state) {
     case 'COMPLETE':
@@ -97,7 +99,7 @@ export function complianceLabel(c: AuditorCompliance | null | undefined): string
  * @param c - The use case's evidence status.
  * @returns The tone.
  */
-export function complianceTone(c: AuditorCompliance | null | undefined): Tone {
+export function complianceTone(c: ManagedCompliance | null | undefined): Tone {
   if (!c) return 'none';
   if (c.riskCategory === 'UNACCEPTABLE') return 'bad';
   if (c.state === 'COMPLETE') return 'ok';
@@ -120,7 +122,7 @@ export function riskLabel(category: string | null | undefined): string {
  * @param d - The deployment.
  * @returns The label.
  */
-export function deploymentLabel(d: AuditorDeployment | null | undefined): string {
+export function deploymentLabel(d: ManagedDeployment | null | undefined): string {
   if (!d) return '—';
   const kind =
     d.deploymentType === 'SUBSCRIPTION' ? 'subscription' : d.deploymentType?.toLowerCase();

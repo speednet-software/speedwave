@@ -1865,7 +1865,7 @@ impl ChatSession {
             flags.push(level);
         }
 
-        if let Some(model) = crate::auditor_cmd::policy_model_flag(project_name) {
+        if let Some(model) = crate::management_cmd::policy_model_flag(project_name) {
             flags.push("--model".to_string());
             flags.push(model);
         }

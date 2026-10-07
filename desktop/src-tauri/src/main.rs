@@ -3,7 +3,6 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod auditor_cmd;
 mod auth;
 mod auth_commands;
 mod bridges;
@@ -33,6 +32,7 @@ mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
 mod managed_policy_watch;
+mod management_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
 mod model_picker;
@@ -1253,7 +1253,7 @@ fn main() {
             update_commands::set_update_settings,
             update_commands::get_bundle_reconcile_state,
             ui_prefs_cmd::get_beta_enabled,
-            auditor_cmd::get_auditor_status,
+            management_cmd::get_management_status,
             export_diagnostics,
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,

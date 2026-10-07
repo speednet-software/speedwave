@@ -2,20 +2,21 @@ import { describe, it, expect, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { TauriService } from './tauri.service';
-import { AuditorService } from './auditor.service';
-import { complianceLabel, riskLabel, type AuditorStatus } from '../models/auditor';
+import { ManagementService } from './management.service';
+import { complianceLabel, riskLabel, type ManagementStatus } from '../models/management';
 import { ModelSelectorComponent } from '../chat/composer/model-selector/model-selector.component';
 import { ChatHeaderComponent } from '../chat/header/chat-header.component';
-import { AuditorPanelComponent } from '../settings/llm-provider/auditor-panel.component';
+import { ManagementPanelComponent } from '../settings/llm-provider/management-panel.component';
 import type { ActiveProviderSummary } from '../models/llm';
 import { ModelPickerService } from './model-picker.service';
 
-const managed: AuditorStatus = {
+const managed: ManagementStatus = {
   managed: true,
   reachable: true,
   error: null,
-  auditor_url: 'http://127.0.0.1:30080',
-  agent_version: '1.0.3',
+  provider: 'Acme Control',
+  console_url: null,
+  status_url: 'http://127.0.0.1:30080/status',
   latency_ms: 42,
   checked_at: '2026-10-05T08:00:00Z',
   organization: 'Speednet',
@@ -56,9 +57,9 @@ const summary: ActiveProviderSummary = {
   effort_levels: ['low', 'medium', 'high'],
 };
 
-function tauri(status: AuditorStatus | null) {
+function tauri(status: ManagementStatus | null) {
   return vi.fn(async (cmd: string) => {
-    if (cmd === 'get_auditor_status')
+    if (cmd === 'get_management_status')
       return status ?? { ...managed, managed: false, project: null };
     if (cmd === 'get_active_provider_summary') return summary;
     if (cmd === 'get_effort_pin') return null;
@@ -81,7 +82,7 @@ async function settle(fixture: {
   }
 }
 
-describe('Auditor labels', () => {
+describe('Management labels', () => {
   it('names the registry approval and the risk category', () => {
     expect(complianceLabel({ state: 'INCOMPLETE', open: 3 })).toBe('Evidence incomplete · 3 open');
     expect(complianceLabel({ state: 'AWAITING_PROFILES' })).toBe('Awaiting profiles');
@@ -91,10 +92,10 @@ describe('Auditor labels', () => {
   });
 });
 
-describe('Speedwave under Auditor', () => {
+describe("Speedwave under its organisation's management", () => {
   let invoke: ReturnType<typeof vi.fn>;
 
-  function setup(status: AuditorStatus | null): void {
+  function setup(status: ManagementStatus | null): void {
     invoke = tauri(status);
     TestBed.configureTestingModule({
       providers: [{ provide: TauriService, useValue: { invoke } }],
@@ -103,14 +104,17 @@ describe('Speedwave under Auditor', () => {
 
   it('the store asks the desktop backend about a project and keeps the answer', async () => {
     setup(managed);
-    const auditor = TestBed.inject(AuditorService);
-    await auditor.refresh('proj-1');
-    expect(invoke).toHaveBeenCalledWith('get_auditor_status', { project: 'proj-1', force: false });
-    expect(auditor.statusFor('proj-1')?.project?.use_case?.name).toBe('Coding assistant');
-    expect(auditor.managed()).toBe(true);
+    const management = TestBed.inject(ManagementService);
+    await management.refresh('proj-1');
+    expect(invoke).toHaveBeenCalledWith('get_management_status', {
+      project: 'proj-1',
+      force: false,
+    });
+    expect(management.statusFor('proj-1')?.project?.use_case?.name).toBe('Coding assistant');
+    expect(management.managed()).toBe(true);
   });
 
-  it('the model list holds only the models Auditor allows, marked with the Auditor mark', async () => {
+  it('the model list holds only the models the organisation allows, marked as managed', async () => {
     setup(managed);
     const fixture = TestBed.createComponent(ModelSelectorComponent);
     fixture.componentRef.setInput('projectId', 'proj-1');
@@ -119,7 +123,7 @@ describe('Speedwave under Auditor', () => {
     const label = TestBed.inject(ModelPickerService).label('claude-opus-4-8', 'proj-1');
     expect(badge.nativeElement.textContent).toContain(label);
     expect(
-      fixture.debugElement.query(By.css('[data-testid="composer-model-auditor-mark"]'))
+      fixture.debugElement.query(By.css('[data-testid="composer-model-managed-mark"]'))
     ).not.toBeNull();
     badge.nativeElement.click();
     await settle(fixture);
@@ -128,7 +132,7 @@ describe('Speedwave under Auditor', () => {
       .map((o) => o.nativeElement.getAttribute('data-testid'));
     expect(ids).toEqual(['model-selector-option-claude-opus-4-8']);
     expect(
-      fixture.debugElement.query(By.css('[data-testid="model-selector-auditor"]')).nativeElement
+      fixture.debugElement.query(By.css('[data-testid="model-selector-managed"]')).nativeElement
         .textContent
     ).toContain('Speednet');
   });
@@ -139,24 +143,24 @@ describe('Speedwave under Auditor', () => {
     fixture.componentRef.setInput('projectId', 'proj-1');
     await settle(fixture);
     expect(
-      fixture.debugElement.query(By.css('[data-testid="composer-model-auditor-mark"]'))
+      fixture.debugElement.query(By.css('[data-testid="composer-model-managed-mark"]'))
     ).toBeNull();
   });
 
   it('the project header shows the use case and its compliance', async () => {
     setup(managed);
-    const auditor = TestBed.inject(AuditorService);
-    await auditor.refresh('');
+    const management = TestBed.inject(ManagementService);
+    await management.refresh('');
     const fixture = TestBed.createComponent(ChatHeaderComponent);
     await settle(fixture);
-    const chip = fixture.debugElement.query(By.css('[data-testid="chat-header-auditor"]'));
+    const chip = fixture.debugElement.query(By.css('[data-testid="chat-header-managed"]'));
     expect(chip.nativeElement.textContent).toContain('Coding assistant');
     expect(chip.nativeElement.textContent).toContain('Awaiting profiles');
   });
 
-  it('Settings › LLM providers shows what Auditor applies, read-only', async () => {
+  it('Settings › LLM providers shows what the provider applies, read-only', async () => {
     setup(managed);
-    const fixture = TestBed.createComponent(AuditorPanelComponent);
+    const fixture = TestBed.createComponent(ManagementPanelComponent);
     fixture.componentRef.setInput('project', 'proj-1');
     await settle(fixture);
     const text = fixture.nativeElement.textContent as string;
@@ -165,7 +169,8 @@ describe('Speedwave under Auditor', () => {
     expect(text).toContain(TestBed.inject(ModelPickerService).label('claude-opus-4-8', 'proj-1'));
     expect(text).toContain('pinned by Speednet');
     expect(text).toContain('Coding assistant');
-    expect(text).toContain('Auditor for macOS 1.0.3');
+    expect(text).toContain('Acme Control 1.0.3');
+    expect(text).not.toContain('Auditor');
     expect(fixture.nativeElement.querySelector('button')).toBeNull();
   });
 });

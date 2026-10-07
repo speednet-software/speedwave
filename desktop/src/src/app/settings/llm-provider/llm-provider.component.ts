@@ -21,7 +21,7 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import { eventValue } from '../../shared/dom-event';
 import { AuthTerminalComponent } from '../auth-terminal.component';
 import { OauthCompletionWatcher, type SignInDisplay } from './oauth-completion-watcher';
-import { AuditorPanelComponent } from './auditor-panel.component';
+import { ManagementPanelComponent } from './management-panel.component';
 import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
   DiscoveredModel,
@@ -124,7 +124,7 @@ function classifyDiscoveryFailure(msg: string): {
 /** Manages LLM provider selection and configuration. */
 @Component({
   selector: 'app-llm-provider',
-  imports: [CommonModule, TooltipDirective, AuthTerminalComponent, AuditorPanelComponent],
+  imports: [CommonModule, TooltipDirective, AuthTerminalComponent, ManagementPanelComponent],
   providers: [OauthCompletionWatcher],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
@@ -133,7 +133,7 @@ function classifyDiscoveryFailure(msg: string): {
       <h2 class="view-title view-title-section text-[var(--ink)]">LLM providers</h2>
 
       @if (lockedByPolicy()) {
-        <app-auditor-panel [project]="activeProject()" />
+        <app-management-panel [project]="activeProject()" />
       }
 
       @if (legacyMigrationProvider()) {

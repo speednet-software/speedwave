@@ -1,5 +1,5 @@
-//! The Auditor integration: on a machine under an `llm_egress` policy (ADR-090), what the
-//! organisation's Auditor applies to the machine and each project, for display.
+//! The organisation's management status (ADR-091): on a machine under a managed policy, what its
+//! management provider applies to the machine and each project, for display.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -8,21 +8,20 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const SELF_PATH: &str = "/api/ai-egress/host/self";
-const EGRESS_PATH: &str = "/api/ai-egress";
-const AGENT_STATE_PATH: &str = "/Library/Application Support/Auditor/state.json";
 const FRESH_FOR: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_PROJECT_LEN: usize = 200;
+const UNNAMED: &str = "Your organisation's management";
 
-/// What the UI shows about Auditor; `managed == false` means no policy on the machine.
+/// What the UI shows about the machine's management; `managed == false` means no policy on it.
 #[derive(Serialize, Clone, Default)]
-pub struct AuditorStatus {
+pub struct ManagementStatus {
     pub managed: bool,
+    pub provider: Option<String>,
+    pub console_url: Option<String>,
+    pub status_url: Option<String>,
     pub reachable: bool,
     pub error: Option<String>,
-    pub auditor_url: Option<String>,
-    pub agent_version: Option<String>,
     pub latency_ms: Option<u64>,
     pub checked_at: Option<String>,
     pub organization: Option<String>,
@@ -35,45 +34,35 @@ pub struct AuditorStatus {
 }
 
 struct Endpoint {
-    root: String,
+    url: String,
     headers: BTreeMap<String, String>,
     ca: Option<String>,
 }
 
-fn endpoint() -> Option<Endpoint> {
-    let eg = crate::containers_cmd::managed_llm_egress()?;
-    let mut url = reqwest::Url::parse(eg.anthropic_base_url.as_deref()?).ok()?;
+fn endpoint(
+    management: &speedwave_runtime::config::ManagedManagementConfig,
+    egress: Option<speedwave_runtime::config::ManagedLlmEgressConfig>,
+) -> Option<Endpoint> {
+    let mut url = reqwest::Url::parse(management.status_url.as_deref()?).ok()?;
     let loopback = url
         .host_str()
         .and_then(crate::http_util::rewrite_container_alias_to_loopback);
     if let Some(host) = loopback {
         url.set_host(Some(host)).ok()?;
     }
-    let base = url.as_str().trim_end_matches('/');
-    let root = base
-        .split(EGRESS_PATH)
-        .next()
-        .unwrap_or(base)
-        .trim_end_matches('/');
+    let (headers, ca) = egress
+        .map(|e| (e.headers.clone(), e.ca_pem().map(str::to_string)))
+        .unwrap_or_default();
     Some(Endpoint {
-        root: root.to_string(),
-        ca: eg.ca_pem().map(str::to_string),
-        headers: eg.headers,
+        url: url.to_string(),
+        headers,
+        ca,
     })
 }
 
-fn agent_version() -> Option<String> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    let text = std::fs::read_to_string(AGENT_STATE_PATH).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    v.get("agent_version")?.as_str().map(str::to_string)
-}
+static CACHE: Mutex<Vec<(String, Instant, ManagementStatus)>> = Mutex::new(Vec::new());
 
-static CACHE: Mutex<Vec<(String, Instant, AuditorStatus)>> = Mutex::new(Vec::new());
-
-fn cached(key: &str) -> Option<(Instant, AuditorStatus)> {
+fn cached(key: &str) -> Option<(Instant, ManagementStatus)> {
     CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -82,7 +71,7 @@ fn cached(key: &str) -> Option<(Instant, AuditorStatus)> {
         .map(|(_, at, s)| (*at, s.clone()))
 }
 
-fn store(key: &str, status: &AuditorStatus) {
+fn store(key: &str, status: &ManagementStatus) {
     let mut c = CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -100,7 +89,7 @@ fn pick(v: &Value, keys: &[&str]) -> Value {
     Value::Object(out)
 }
 
-fn fill(status: &mut AuditorStatus, v: &Value) {
+fn fill(status: &mut ManagementStatus, v: &Value) {
     status.reachable = true;
     status.error = None;
     status.organization = v
@@ -174,14 +163,32 @@ fn fill(status: &mut AuditorStatus, v: &Value) {
         .map(str::to_string);
 }
 
-/// What Auditor applies on this machine, and to `project` when named; the last answer on failure.
+/// What the management provider applies on this machine, and to `project` when named; the last
+/// answer on failure.
 #[tauri::command]
-pub async fn get_auditor_status(
+pub async fn get_management_status(
     project: Option<String>,
     force: Option<bool>,
-) -> Result<AuditorStatus, String> {
-    let Some(ep) = endpoint() else {
-        return Ok(AuditorStatus::default());
+) -> Result<ManagementStatus, String> {
+    let management = crate::containers_cmd::managed_management();
+    let egress = crate::containers_cmd::managed_llm_egress();
+    let Some(management) = management else {
+        return Ok(ManagementStatus {
+            managed: egress.is_some(),
+            ..Default::default()
+        });
+    };
+    let provider = management
+        .name
+        .clone()
+        .unwrap_or_else(|| UNNAMED.to_string());
+    let Some(ep) = endpoint(&management, egress) else {
+        return Ok(ManagementStatus {
+            managed: true,
+            provider: Some(provider),
+            console_url: management.console_url.clone(),
+            ..Default::default()
+        });
     };
     let project = project.filter(|p| !p.trim().is_empty());
     if project.as_ref().is_some_and(|p| p.len() > MAX_PROJECT_LEN) {
@@ -199,10 +206,10 @@ pub async fn get_auditor_status(
     let previous_error = last.as_ref().and_then(|(_, s)| s.error.clone());
     let mut status = last.map(|(_, s)| s).unwrap_or_default();
     status.managed = true;
-    status.auditor_url = Some(ep.root.clone());
-    status.agent_version = agent_version();
-    let mut url =
-        reqwest::Url::parse(&format!("{}{SELF_PATH}", ep.root)).map_err(|e| e.to_string())?;
+    status.provider = Some(provider.clone());
+    status.console_url = management.console_url.clone();
+    status.status_url = Some(ep.url.clone());
+    let mut url = reqwest::Url::parse(&ep.url).map_err(|e| e.to_string())?;
     if let Some(p) = &project {
         url.query_pairs_mut().append_pair("project", p);
     }
@@ -218,7 +225,7 @@ pub async fn get_auditor_status(
             Ok(v) => fill(&mut status, &v),
             Err(e) => {
                 status.reachable = false;
-                status.error = Some(format!("Auditor sent an unreadable answer: {e}"));
+                status.error = Some(format!("{provider} sent an unreadable answer: {e}"));
             }
         },
         Ok(r) => {
@@ -229,26 +236,29 @@ pub async fn get_auditor_status(
                 .ok()
                 .and_then(|v| v.get("detail").and_then(Value::as_str).map(str::to_string));
             status.reachable = false;
-            status.error = Some(detail.unwrap_or_else(|| format!("Auditor answered {code}")));
+            status.error = Some(detail.unwrap_or_else(|| format!("{provider} answered {code}")));
         }
         Err(e) => {
             status.reachable = false;
-            status.error = Some(format!("Auditor could not be reached: {}", e.without_url()));
+            status.error = Some(format!(
+                "{provider} could not be reached: {}",
+                e.without_url()
+            ));
         }
     }
     status.latency_ms = Some(started.elapsed().as_millis() as u64);
     status.checked_at = Some(chrono::Utc::now().to_rfc3339());
     if status.error != previous_error {
         match &status.error {
-            Some(e) => log::warn!("Auditor status is unavailable: {e}"),
-            None => log::info!("Auditor status is available again"),
+            Some(e) => log::warn!("management status is unavailable: {e}"),
+            None => log::info!("management status is available again"),
         }
     }
     store(&key, &status);
     Ok(status)
 }
 
-/// The models Auditor allows for `project`, from its last answer.
+/// The models the management provider allows for `project`, from its last answer.
 pub(crate) fn allowed_models(project: &str) -> Option<Vec<String>> {
     let (_, s) = cached(project)?;
     let models = s
@@ -269,7 +279,7 @@ fn check_against(allowed: Option<&[String]>, model: &str) -> Result<(), String> 
     match allowed {
         Some(list) if !list.is_empty() && !list.iter().any(|m| same_model(m, model)) => {
             Err(format!(
-                "Auditor does not allow {model} for this project ({})",
+                "Your organisation does not allow {model} for this project ({})",
                 list.join(", ")
             ))
         }
@@ -283,7 +293,7 @@ fn allowed_pin(pin: String, allowed: Option<&[String]>) -> Option<String> {
         .then_some(pin)
 }
 
-/// Under the policy a pick must be one of the models Auditor allows for the project.
+/// Under the policy a pick must be one of the models the organisation allows for the project.
 pub(crate) fn check_model_allowed(project: &str, model: &str) -> Result<(), String> {
     if !crate::containers_cmd::llm_locked_by_policy() {
         return Ok(());
@@ -291,7 +301,7 @@ pub(crate) fn check_model_allowed(project: &str, model: &str) -> Result<(), Stri
     check_against(allowed_models(project).as_deref(), model)
 }
 
-/// The project's pinned model when Auditor allows it, for `--model` over the policy's default.
+/// The project's pinned model when the organisation allows it, for `--model` over the policy's default.
 pub(crate) fn policy_model_flag(project: &str) -> Option<String> {
     if !crate::containers_cmd::llm_locked_by_policy() {
         return None;
@@ -304,13 +314,17 @@ pub(crate) fn policy_model_flag(project: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
     fn fill_keeps_what_the_ui_shows_and_drops_the_rest() {
-        let mut s = AuditorStatus::default();
+        let mut s = ManagementStatus::default();
         fill(
             &mut s,
             &json!({
@@ -335,6 +349,34 @@ mod tests {
         assert_eq!(s.package_version.as_deref(), Some("1.0.3"));
         let text = serde_json::to_string(&s).unwrap();
         assert!(!text.contains("never"));
+    }
+
+    #[test]
+    fn the_status_is_read_where_the_policy_says_with_the_gateways_headers() {
+        use speedwave_runtime::config::{ManagedLlmEgressConfig, ManagedManagementConfig};
+        let management = ManagedManagementConfig {
+            name: Some("Auditor".into()),
+            status_url: Some("https://auditor.example.com/api/ai-egress/host/self".into()),
+            console_url: None,
+        };
+        let egress = ManagedLlmEgressConfig {
+            headers: [("X-Host-Token".to_string(), "t".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let ep = endpoint(&management, Some(egress)).unwrap();
+        assert_eq!(
+            ep.url,
+            "https://auditor.example.com/api/ai-egress/host/self"
+        );
+        assert_eq!(
+            ep.headers.get("X-Host-Token").map(String::as_str),
+            Some("t")
+        );
+        assert!(endpoint(&management, None).unwrap().headers.is_empty());
+        let none = ManagedManagementConfig::default();
+        assert!(endpoint(&none, None).is_none());
     }
 
     #[test]
