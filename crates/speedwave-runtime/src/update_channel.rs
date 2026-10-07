@@ -84,15 +84,8 @@ pub fn release_manifest_url(tag: &str) -> String {
     format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}/latest.json")
 }
 
-/// Request timeout for a release-list fetch, matching the desktop updater's
-/// `http_util::DEFAULT_REQUEST_TIMEOUT` (ADR-041).
 #[cfg(feature = "update-check")]
-const RELEASE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Maximum release-list response body, matching the desktop updater's
-/// `http_util::MAX_RESPONSE_BODY_BYTES`.
-#[cfg(feature = "update-check")]
-const MAX_RELEASE_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_RELEASE_RESPONSE_BYTES: u64 = crate::consts::HTTP_MAX_RESPONSE_BODY_BYTES as u64;
 
 /// Builds a blocking client hardened per ADR-041: no redirects, bounded
 /// timeout, Speedwave UA.
@@ -100,7 +93,7 @@ const MAX_RELEASE_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
 fn build_release_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(RELEASE_FETCH_TIMEOUT)
+        .timeout(crate::consts::HTTP_REQUEST_TIMEOUT)
         .user_agent(format!("Speedwave/{}", env!("SPEEDWAVE_VERSION")))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
