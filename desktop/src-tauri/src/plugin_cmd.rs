@@ -490,14 +490,6 @@ pub fn set_plugin_enabled(
     check_project(&project)?;
     log::info!("setting plugin enabled={enabled} for project={project} service_id={service_id}");
 
-    if enabled
-        && crate::containers_cmd::service_blocked(&format!(
-            "{}{service_id}",
-            config::PLUGIN_SERVICE_PREFIX
-        ))
-    {
-        return Err(crate::containers_cmd::blocked_service_error(&service_id));
-    }
     if enabled {
         let entries = plugin::list_for_ui();
         let matches_id = |m: &plugin::PluginManifest| {

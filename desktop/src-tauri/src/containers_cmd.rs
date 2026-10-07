@@ -317,19 +317,11 @@ pub(crate) fn managed_services() -> Option<speedwave_runtime::config::ManagedSer
 }
 
 /// Whether the organisation's policy keeps the service under `key` from running.
-pub(crate) fn service_blocked(key: &str) -> bool {
-    service_blocked_in(managed_services().as_ref(), key)
-}
-
 pub(crate) fn service_blocked_in(
     policy: Option<&speedwave_runtime::config::ManagedServicesConfig>,
     key: &str,
 ) -> bool {
     policy.is_some_and(|p| !p.allows(key))
-}
-
-pub(crate) fn blocked_service_error(name: &str) -> String {
-    format!("{name} is blocked by your organisation's policy")
 }
 
 pub(crate) const LLM_LOCKED_MSG: &str = config::LLM_ROUTE_LOCKED_MSG;
@@ -2317,10 +2309,6 @@ mod tests {
             Some(&ManagedServicesConfig::deny_all()),
             "plugin:acme-crm"
         ));
-        assert_eq!(
-            blocked_service_error("slack"),
-            "slack is blocked by your organisation's policy"
-        );
     }
 
     use super::*;

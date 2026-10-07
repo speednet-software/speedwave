@@ -386,7 +386,6 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                       [attr.aria-pressed]="os.enabled"
                       [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
                       [attr.data-testid]="'integrations-os-toggle-' + os.service"
-                      [disabled]="!!os.blocked_by_policy"
                       [attr.title]="os.blocked_by_policy ? blockedByPolicy : null"
                       (click)="onOsToggleClick(os, $event)"
                     ></button>
@@ -404,7 +403,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
-  readonly blockedByPolicy = "Blocked by your organisation's policy";
+  readonly blockedByPolicy = 'Runs once your organisation allows it';
   private static readonly BETA_ONLY_SERVICES = new Set(['office']);
 
   /** List of container-based MCP service integrations. */

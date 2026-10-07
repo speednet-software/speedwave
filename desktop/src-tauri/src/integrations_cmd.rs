@@ -541,9 +541,6 @@ pub fn set_integration_enabled(
         "setting integration enabled state project={project} service={service} enabled={enabled}"
     );
 
-    if enabled && crate::containers_cmd::service_blocked(&service) {
-        return Err(crate::containers_cmd::blocked_service_error(&service));
-    }
     if enabled && !is_service_configured(&project, &service) {
         return Err(format!("{service} has no credentials configured"));
     }
@@ -737,14 +734,6 @@ pub fn set_os_integration_enabled(
         "setting OS integration enabled state project={project} service={service} enabled={enabled}"
     );
 
-    if enabled
-        && crate::containers_cmd::service_blocked(&format!(
-            "{}{service}",
-            config::OS_SERVICE_PREFIX
-        ))
-    {
-        return Err(crate::containers_cmd::blocked_service_error(&service));
-    }
     if enabled {
         if let Err(reason) = check_os_permission(&service, true) {
             log::warn!("rejecting enable for {service} (project={project}) — {reason}");

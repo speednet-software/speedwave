@@ -274,7 +274,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                         [attr.aria-pressed]="plugin.enabled"
                         [attr.aria-label]="(plugin.enabled ? 'Disable ' : 'Enable ') + plugin.name"
                         [attr.data-testid]="'plugins-row-toggle-' + plugin.slug"
-                        [disabled]="!isVerified(plugin) || !!plugin.blocked_by_policy"
+                        [disabled]="!isVerified(plugin)"
                         [attr.title]="
                           plugin.blocked_by_policy
                             ? blockedByPolicy
@@ -300,7 +300,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
   },
 })
 export class PluginsComponent implements OnInit, OnDestroy {
-  readonly blockedByPolicy = "Blocked by your organisation's policy";
+  readonly blockedByPolicy = 'Runs once your organisation allows it';
   plugins: PluginStatusEntry[] = [];
   expandedPlugin: string | null = null;
   installing = false;

@@ -51,6 +51,7 @@ export interface SaveCredentialsEvent {
           <span
             class="mono text-[10px] px-2 py-0.5 rounded font-medium uppercase tracking-widest"
             data-testid="badge"
+            [attr.title]="svc().blocked_by_policy ? blockedByPolicy : null"
             [attr.data-status]="
               svc().blocked_by_policy
                 ? 'blocked'
@@ -64,7 +65,7 @@ export interface SaveCredentialsEvent {
           >
             {{
               svc().blocked_by_policy
-                ? 'Blocked by organisation'
+                ? 'Not allowed yet'
                 : svc().configured
                   ? 'Configured'
                   : 'Not Configured'
@@ -74,8 +75,6 @@ export interface SaveCredentialsEvent {
         <div class="flex items-center gap-3">
           <app-toggle
             [checked]="svc().enabled"
-            [disabled]="!!svc().blocked_by_policy"
-            [disabledTitle]="svc().blocked_by_policy ? blockedByPolicy : ''"
             [testId]="'integrations-toggle-' + svc().service"
             [ariaLabel]="'Enable ' + svc().service"
             (changed)="onToggle($event)"
@@ -196,7 +195,7 @@ export class ServiceCardComponent {
   readonly oauthStatusMessage = input('');
   readonly redirectUri = input<string | null>(null);
 
-  readonly blockedByPolicy = "Blocked by your organisation's policy";
+  readonly blockedByPolicy = 'Runs once your organisation allows it';
   readonly toggleExpand = output<string>();
   readonly toggleService = output<{ svc: IntegrationStatusEntry; event: Event }>();
   readonly saveCredentials = output<SaveCredentialsEvent>();
