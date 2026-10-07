@@ -1,15 +1,12 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, input } from '@angular/core';
 import { ManagedMarkComponent } from '../../shared/managed-mark.component';
 import { ManagementService } from '../../services/management.service';
-import { ModelPickerService } from '../../services/model-picker.service';
-import {
-  complianceLabel,
-  complianceTone,
-  deploymentLabel,
-  riskLabel,
-} from '../../models/management';
 
-/** Settings › LLM providers under the organisation's management: what it applies to the project, read-only. */
+/**
+ * Settings › LLM providers under the organisation's management: who manages the machine and whether
+ * it answers, read-only. What it allows — each project, service, integration, plugin and agent, a
+ * use case of its own — is marked beside each of them, never here (ADR-091).
+ */
 @Component({
   selector: 'app-management-panel',
   imports: [ManagedMarkComponent],
@@ -56,57 +53,6 @@ import {
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">gateway</dt>
         <dd class="truncate text-[var(--ink)]">{{ status()?.status_url || '—' }}</dd>
 
-        <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">deployment</dt>
-        <dd class="text-[var(--ink)]" data-testid="settings-management-deployment">
-          {{ deployment() }}
-        </dd>
-
-        <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">models</dt>
-        <dd class="flex flex-wrap items-center gap-2" data-testid="settings-management-models">
-          @for (m of models(); track m) {
-            <span
-              class="rounded border border-[var(--line-strong)] px-1.5 py-0.5 text-[11px] text-[var(--ink)]"
-            >
-              {{ label(m) }}
-              @if (m === applied()?.default_model) {
-                <span class="ml-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
-                  >default</span
-                >
-              }
-            </span>
-          } @empty {
-            <span class="text-[var(--ink-mute)]">—</span>
-          }
-          @if (applied()?.pinned) {
-            <span class="text-[11px] text-[var(--ink-mute)]"
-              >pinned by {{ status()?.organization || 'the organisation' }}</span
-            >
-          }
-        </dd>
-
-        <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">use case</dt>
-        <dd class="text-[var(--ink)]" data-testid="settings-management-use-case">
-          {{ applied()?.use_case?.name || 'Not assigned to a use case' }}
-        </dd>
-
-        <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">compliance</dt>
-        <dd
-          class="flex items-center gap-1.5 text-[var(--ink)]"
-          data-testid="settings-management-compliance"
-        >
-          <span [style.color]="toneColour()">●</span>{{ compliance() }}
-          <span class="text-[var(--ink-mute)]">· risk {{ risk() }}</span>
-        </dd>
-
-        <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">access</dt>
-        <dd [style.color]="applied()?.access === 'SUSPENDED' ? 'var(--red)' : 'var(--ink)'">
-          {{
-            applied()?.access === 'SUSPENDED'
-              ? 'suspended by ' + (status()?.organization || 'the organisation')
-              : 'allowed'
-          }}
-        </dd>
-
         <dt class="text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">agent</dt>
         <dd class="text-[var(--ink)]">{{ agent() }}</dd>
       </dl>
@@ -115,38 +61,20 @@ import {
 })
 export class ManagementPanelComponent {
   private readonly management = inject(ManagementService);
-  private readonly picker = inject(ModelPickerService);
 
-  /** The project whose route is shown (the active one). */
+  /** The active project (the provider is asked through it). */
   readonly project = input<string | null>(null);
 
   protected readonly status = computed(
     () => this.management.statusFor(this.project()) ?? this.management.active()
   );
-  protected readonly applied = computed(() => this.status()?.project ?? null);
   protected readonly reachable = computed(() => !!this.status()?.reachable);
-  protected readonly models = computed(() => this.applied()?.models ?? []);
-  protected readonly deployment = computed(() => deploymentLabel(this.applied()?.deployment));
-  protected readonly compliance = computed(() =>
-    complianceLabel(this.applied()?.use_case?.compliance)
-  );
-  protected readonly risk = computed(() =>
-    riskLabel(this.applied()?.use_case?.compliance?.riskCategory)
-  );
-  protected readonly toneColour = computed(() => {
-    const tone = complianceTone(this.applied()?.use_case?.compliance);
-    return { ok: 'var(--green)', warn: 'var(--amber)', bad: 'var(--red)', none: 'var(--ink-mute)' }[
-      tone
-    ];
-  });
   protected readonly agent = computed(() => {
     const s = this.status();
     return s?.package_version ? `${s.provider ?? 'Agent'} ${s.package_version}` : '—';
   });
 
-  protected readonly label = (model: string): string => this.picker.label(model, this.project());
-
-  /** Asks the provider about the project when it changes. */
+  /** Asks the provider when the project changes. */
   constructor() {
     effect(() => {
       const p = this.project();

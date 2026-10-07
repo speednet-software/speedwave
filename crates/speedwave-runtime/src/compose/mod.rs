@@ -336,16 +336,31 @@ pub fn render_compose_in(
 
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
-    let egress = crate::managed_config::load_managed_config()?.and_then(|m| m.llm_egress);
+    let managed = crate::managed_config::load_managed_config()?;
+    if let Some(m) = &managed {
+        if m.projects.as_ref().is_some_and(|p| !p.allows(project_name)) {
+            anyhow::bail!(
+                "project '{project_name}' is not allowed by {} — it runs once allowed",
+                crate::config::management_provider_name(m)
+            );
+        }
+    }
+    crate::management::refresh_inventory();
+    let denied_agents = crate::management::denied_agents(
+        Path::new(project_dir),
+        managed.as_ref().and_then(|m| m.agents.as_ref()),
+    );
+    let egress = managed.and_then(|m| m.llm_egress);
     if let Some(e) = &egress {
         e.validate()?;
     }
-    if resolved_config.telemetry.any_locked || egress.is_some() {
+    if resolved_config.telemetry.any_locked || egress.is_some() || !denied_agents.is_empty() {
         crate::claude_managed::write_managed_settings(
             data_dir,
             project_name,
             &resolved_config.telemetry,
             egress.as_ref(),
+            &denied_agents,
         )?;
         let src = crate::claude_managed::managed_settings_path(data_dir, project_name);
         let mount = format!(

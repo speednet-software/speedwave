@@ -13,6 +13,8 @@ import { A11yModule } from '@angular/cdk/a11y';
 import { CdkListbox, CdkOption, type ListboxValueChangeEvent } from '@angular/cdk/listbox';
 import { SlashService, type SlashCommand } from './slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { ManagedMarkComponent } from '../../shared/managed-mark.component';
+import { ManagedAccessService } from '../../services/managed-access.service';
 
 /**
  * Popover listing every slash command Claude Code exposes for the active session. Filters by the
@@ -21,7 +23,7 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 @Component({
   selector: 'app-slash-menu',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [A11yModule, CdkListbox, CdkOption, TooltipDirective],
+  imports: [A11yModule, CdkListbox, CdkOption, TooltipDirective, ManagedMarkComponent],
   host: {
     class: 'block',
     '[class.hidden]': '!open()',
@@ -151,6 +153,14 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
                         [class.amber]="entry.cmd.kind === 'Agent'"
                         >{{ badgeText(entry.cmd) }}</span
                       >
+                      @if (entry.cmd.kind === 'Agent' && access.agent(entry.cmd.name); as lamp) {
+                        <app-managed-mark
+                          data-testid="slash-menu-managed"
+                          class="h-3 w-3 text-[var(--ink)]"
+                          [lamp]="lamp"
+                          [provider]="access.provider()"
+                        />
+                      }
                       @if (entry.cmd.argument_hint) {
                         <span class="mono text-[10px] text-[var(--ink-mute)]">{{
                           entry.cmd.argument_hint
@@ -190,6 +200,8 @@ export class SlashMenuComponent {
   readonly closed = output<void>();
 
   readonly service = inject(SlashService);
+  /** Whether the organisation's policy lets Claude call each agent — the lamp beside it. */
+  protected readonly access = inject(ManagedAccessService);
 
   protected readonly activeIndex = signal(0);
 

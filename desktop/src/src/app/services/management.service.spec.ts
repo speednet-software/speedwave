@@ -147,29 +147,28 @@ describe("Speedwave under its organisation's management", () => {
     ).toBeNull();
   });
 
-  it('the project header shows the use case and its compliance', async () => {
+  it('the chat header shows no use case or compliance of its own — a use case is per item', async () => {
     setup(managed);
     const management = TestBed.inject(ManagementService);
     await management.refresh('');
     const fixture = TestBed.createComponent(ChatHeaderComponent);
     await settle(fixture);
-    const chip = fixture.debugElement.query(By.css('[data-testid="chat-header-managed"]'));
-    expect(chip.nativeElement.textContent).toContain('Coding assistant');
-    expect(chip.nativeElement.textContent).toContain('Awaiting profiles');
+    expect(fixture.debugElement.query(By.css('[data-testid="chat-header-managed"]'))).toBeNull();
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).not.toContain('Coding assistant');
+    expect(text).not.toContain('Awaiting profiles');
   });
 
-  it('Settings › LLM providers shows what the provider applies, read-only', async () => {
+  it('Settings › LLM providers names who manages the machine, never a use case or its compliance', async () => {
     setup(managed);
     const fixture = TestBed.createComponent(ManagementPanelComponent);
     fixture.componentRef.setInput('project', 'proj-1');
     await settle(fixture);
     const text = fixture.nativeElement.textContent as string;
     expect(text).toContain('Managed by Speednet');
-    expect(text).toContain('Claude Code subscription · Anthropic · subscription');
-    expect(text).toContain(TestBed.inject(ModelPickerService).label('claude-opus-4-8', 'proj-1'));
-    expect(text).toContain('pinned by Speednet');
-    expect(text).toContain('Coding assistant');
     expect(text).toContain('Acme Control 1.0.3');
+    expect(text).not.toContain('Coding assistant');
+    expect(text).not.toContain('Awaiting profiles');
     expect(text).not.toContain('Auditor');
     expect(fixture.nativeElement.querySelector('button')).toBeNull();
   });

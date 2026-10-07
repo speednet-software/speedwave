@@ -10,10 +10,13 @@ import {
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { swatchFor } from './project-swatch';
+import { ManagedMarkComponent } from '../shared/managed-mark.component';
+import { ManagedAccessService } from '../services/managed-access.service';
 
 /** Header pill showing the active project; opens the project switcher on click. */
 @Component({
   selector: 'app-project-pill',
+  imports: [ManagedMarkComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'inline-flex' },
   template: `
@@ -32,11 +35,20 @@ import { swatchFor } from './project-swatch';
         >{{ monogram() }}</span
       >
       <span>{{ projectName() || 'no project' }}</span>
+      @if (access.project(projectName()); as lamp) {
+        <app-managed-mark
+          data-testid="project-pill-managed"
+          class="h-3 w-3 text-[var(--ink)]"
+          [lamp]="lamp"
+          [provider]="access.provider()"
+        />
+      }
     </button>
   `,
 })
 export class ProjectPillComponent implements OnInit, OnDestroy {
   readonly ui = inject(UiStateService);
+  protected readonly access = inject(ManagedAccessService);
   private readonly projectState = inject(ProjectStateService);
 
   /** Active project name. */

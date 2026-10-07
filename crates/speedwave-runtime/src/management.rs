@@ -1,9 +1,9 @@
-//! Management inventory (ADR-091): what each project runs, read by the organisation's management
-//! agent from `<data_dir>/management/inventory.json`.
+//! Management inventory (ADR-091): what each project runs — its services and its Claude Code
+//! agents — read by the organisation's management agent from `<data_dir>/management/inventory.json`.
 
 use crate::config::{
-    self, ManagedServicesConfig, ResolvedIntegrationsConfig, SpeedwaveUserConfig,
-    OS_SERVICE_PREFIX, PLUGIN_SERVICE_PREFIX,
+    self, ManagedAccessList, ManagedServicesConfig, ResolvedIntegrationsConfig,
+    SpeedwaveUserConfig, OS_SERVICE_PREFIX, PLUGIN_SERVICE_PREFIX,
 };
 use crate::managed_config::ManagedConfig;
 use serde::Serialize;
@@ -28,13 +28,31 @@ pub struct InventoryService {
     pub blocked: bool,
 }
 
-/// One project and the services its user turned on.
+/// Prefix of an agent's inventory key: `agent:<name>`.
+pub const AGENT_KEY_PREFIX: &str = "agent:";
+
+/// One Claude Code agent a project defines, and whether the policy keeps Claude from calling it.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct InventoryAgent {
+    /// `agent:<name>`.
+    pub key: String,
+    /// The agent's name, as Claude Code calls it.
+    pub name: String,
+    /// The policy keeps Claude from calling it.
+    pub blocked: bool,
+}
+
+/// One project, the services its user turned on and the agents it defines.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct InventoryProject {
     /// Project name.
     pub name: String,
+    /// The policy keeps the project from running.
+    pub blocked: bool,
     /// The services, built-ins first, then macOS, then plugins.
     pub services: Vec<InventoryService>,
+    /// The project's Claude Code agents (`.claude/agents`), by name.
+    pub agents: Vec<InventoryAgent>,
 }
 
 /// Whether a managed policy applies and whether it was readable.
@@ -44,6 +62,10 @@ pub struct InventoryPolicy {
     pub present: bool,
     /// It carries a `services` block.
     pub services: bool,
+    /// It carries a `projects` block.
+    pub projects: bool,
+    /// It carries an `agents` block.
+    pub agents: bool,
     /// Why it could not be read (every service is then off).
     pub error: Option<String>,
 }
@@ -114,6 +136,71 @@ pub fn services_of(
         .collect()
 }
 
+/// The Claude Code agents a project defines (`.claude/agents/*.md`), by name — the frontmatter's
+/// `name`, else the file's stem — sorted; a name an agent key cannot carry is left out.
+pub fn project_agents(project_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(project_dir.join(".claude").join("agents")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md") && p.is_file())
+        .filter_map(|p| agent_name(&p))
+        .filter(|n| is_agent_name(n))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn agent_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Some(stem);
+    };
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return Some(stem);
+    }
+    let named = lines
+        .take_while(|l| l.trim() != "---")
+        .find_map(|l| l.strip_prefix("name:"))
+        .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        .filter(|v| !v.is_empty());
+    Some(named.unwrap_or(stem))
+}
+
+fn is_agent_name(name: &str) -> bool {
+    (1..=120).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The agents `names` a project defines, with what `policy` keeps Claude from calling.
+pub fn agents_of(names: &[String], policy: Option<&ManagedAccessList>) -> Vec<InventoryAgent> {
+    names
+        .iter()
+        .map(|n| InventoryAgent {
+            key: format!("{AGENT_KEY_PREFIX}{n}"),
+            name: n.clone(),
+            blocked: policy.is_some_and(|p| !p.allows(n)),
+        })
+        .collect()
+}
+
+/// The agents of `project_dir` the managed policy keeps Claude from calling.
+pub fn denied_agents(project_dir: &Path, policy: Option<&ManagedAccessList>) -> Vec<String> {
+    let Some(policy) = policy else {
+        return Vec::new();
+    };
+    project_agents(project_dir)
+        .into_iter()
+        .filter(|n| !policy.allows(n))
+        .collect()
+}
+
 /// The inventory of `user_config`'s projects under the managed policy `managed`.
 pub fn inventory_of(
     data_dir: &Path,
@@ -121,30 +208,42 @@ pub fn inventory_of(
     managed: anyhow::Result<Option<ManagedConfig>>,
     plugin_names: &HashMap<String, String>,
 ) -> Inventory {
-    let (policy, services) = match managed {
+    let (policy, services, projects_policy, agents_policy) = match managed {
         Ok(Some(m)) => (
             InventoryPolicy {
                 present: true,
                 services: m.services.is_some(),
+                projects: m.projects.is_some(),
+                agents: m.agents.is_some(),
                 error: None,
             },
             m.services,
+            m.projects,
+            m.agents,
         ),
         Ok(None) => (
             InventoryPolicy {
                 present: false,
                 services: false,
+                projects: false,
+                agents: false,
                 error: None,
             },
+            None,
+            None,
             None,
         ),
         Err(e) => (
             InventoryPolicy {
                 present: true,
                 services: false,
+                projects: false,
+                agents: false,
                 error: Some(e.to_string()),
             },
             Some(ManagedServicesConfig::deny_all()),
+            Some(ManagedAccessList::deny_all()),
+            Some(ManagedAccessList::deny_all()),
         ),
     };
     let projects = user_config
@@ -161,7 +260,9 @@ pub fn inventory_of(
             .1;
             InventoryProject {
                 name: p.name.clone(),
+                blocked: projects_policy.as_ref().is_some_and(|x| !x.allows(&p.name)),
                 services: services_of(&wanted, services.as_ref(), plugin_names),
+                agents: agents_of(&project_agents(Path::new(&p.dir)), agents_policy.as_ref()),
             }
         })
         .collect();
@@ -302,12 +403,15 @@ mod tests {
             InventoryPolicy {
                 present: true,
                 services: false,
+                projects: false,
+                agents: false,
                 error: Some("boom".into())
             }
         );
         assert_eq!(inv.projects.len(), 1);
         assert!(inv.projects[0].services.iter().all(|s| s.blocked));
         assert_eq!(inv.projects[0].services.len(), 2);
+        assert!(inv.projects[0].blocked);
         let json = serde_json::to_value(&inv).unwrap();
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["projects"][0]["services"][0]["key"], "slack");
@@ -343,6 +447,7 @@ mod tests {
             .filter_map(|k| k.as_str())
             .collect();
         assert!(keys.contains(&"services") && keys.contains(&"management"));
+        assert!(keys.contains(&"projects") && keys.contains(&"agents"));
         let all = keys
             .iter()
             .map(|k| format!("\"{k}\":null"))
@@ -352,5 +457,55 @@ mod tests {
             serde_json::from_str::<crate::managed_config::ManagedConfig>(&format!("{{{all}}}"))
                 .is_ok()
         );
+    }
+
+    fn write(dir: &Path, file: &str, text: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(file), text).unwrap();
+    }
+
+    #[test]
+    fn a_projects_agents_are_named_by_frontmatter_or_file_and_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join(".claude").join("agents");
+        write(
+            &agents,
+            "review.md",
+            "---\nname: code-reviewer\ndescription: x\n---\nbody",
+        );
+        write(&agents, "planner.md", "no frontmatter");
+        write(&agents, "bad name.md", "---\nname: \"not valid!\"\n---\n");
+        write(&agents, "notes.txt", "---\nname: ignored\n---\n");
+        assert_eq!(
+            project_agents(tmp.path()),
+            vec!["code-reviewer".to_string(), "planner".to_string()]
+        );
+        assert!(project_agents(&tmp.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn the_policy_names_the_agents_and_projects_it_keeps_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join(".claude").join("agents"),
+            "a.md",
+            "---\nname: reviewer\n---\n",
+        );
+        write(&tmp.path().join(".claude").join("agents"), "b.md", "x");
+        let policy = ManagedAccessList {
+            default: ServiceAccess::Deny,
+            rules: [("reviewer".to_string(), ServiceAccess::Allow)]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            denied_agents(tmp.path(), Some(&policy)),
+            vec!["b".to_string()]
+        );
+        assert!(denied_agents(tmp.path(), None).is_empty());
+        let listed = agents_of(&["reviewer".to_string(), "b".to_string()], Some(&policy));
+        assert_eq!(listed[0].key, "agent:reviewer");
+        assert!(!listed[0].blocked && listed[1].blocked);
+        assert!(policy.allows("reviewer") && !policy.allows("other"));
     }
 }

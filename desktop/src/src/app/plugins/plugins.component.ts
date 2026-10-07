@@ -7,6 +7,8 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { ManagedMarkComponent } from '../shared/managed-mark.component';
+import { ManagedAccessService } from '../services/managed-access.service';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
@@ -87,7 +89,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent],
+  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent, ManagedMarkComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
@@ -205,8 +207,22 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                       <div class="flex items-center gap-2">
                         <span [style.color]="dotColour(idx)" aria-hidden="true">●</span>
                         <div>
-                          <div class="text-[var(--ink)]" data-testid="plugins-row-name">
+                          <div
+                            class="flex items-center gap-1.5 text-[var(--ink)]"
+                            data-testid="plugins-row-name"
+                          >
                             {{ plugin.name }}
+                            @if (
+                              plugin.service_id && access.service('plugin:' + plugin.service_id);
+                              as lamp
+                            ) {
+                              <app-managed-mark
+                                [attr.data-testid]="'plugins-managed-' + plugin.slug"
+                                class="h-3 w-3 text-[var(--ink)]"
+                                [lamp]="lamp"
+                                [provider]="access.provider()"
+                              />
+                            }
                           </div>
                           <div
                             class="mono text-[10px] text-[var(--ink-mute)]"
@@ -305,6 +321,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private tauri = inject(TauriService);
+  /** Whether the organisation's policy lets each plugin's service run — the lamp beside it. */
+  protected readonly access = inject(ManagedAccessService);
   private projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
 

@@ -1,6 +1,6 @@
 # Managed (MDM/org) Policy Config
 
-Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`, ADR-076), the PII policy (`pii_policy`), the organisation's LLM gateway (`llm_egress`, ADR-090) and which services may run (`services`, ADR-091); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
+Speedwave supports organization-forced policy that a user cannot bypass. Today this drives OTLP telemetry (`telemetry`, ADR-076), the PII policy (`pii_policy`), the organisation's LLM gateway (`llm_egress`, ADR-090) and which services, projects and agents may run (`services`, `projects`, `agents`, ADR-091); the mechanism is general — reuse it for any future org policy rather than inventing a second channel.
 
 ## Where the policy lives
 
@@ -39,6 +39,8 @@ An **invalid policy is caught once, at boot.** Desktop and CLI call `config::che
 - **Refused server-side.** Enabling a denied service fails in the command; the UI only mirrors `blocked_by_policy`.
 - **Inventory, not inspection.** `management::refresh_inventory` writes `<data_dir>/management/inventory.json` after every `save_user_config`, at startup and on a policy change; it carries names and states, never secrets. Its `policy_keys` (`managed_config::MANAGED_POLICY_KEYS`) tell an agent which top-level keys this Speedwave applies — add a new block's key there in the same change.
 - **Live.** `managed_policy_watch` re-applies a changed policy: validate, refresh the inventory, emit `managed_policy_changed`, restart the active project's running containers.
+- **Projects and agents, by name.** `projects` and `agents` are `ManagedAccessList` blocks (`default` + `rules` by name). A denied project is refused in `compose::render_compose_in` — the one point every start path renders through — so it never starts and a running one stops at the policy's restart. A denied agent of the project (`management::project_agents`, `.claude/agents/*.md`) is denied to Claude by name (`Agent(<name>)`, `Task(<name>)`) in the one managed-settings writer; Claude Code's own agents are not governed. The inventory lists each project's agents (`agent:<name>`) and whether the policy blocks the project and each agent.
+- **Marked per item, never globally.** The UI reads the policy through `get_managed_access` (`ManagedAccessService`) and puts `ManagedMarkComponent` with its lamp (allowed / not allowed) beside each project, service, OS integration, plugin and agent. What the provider says about a use case — its compliance, its deployment — is per item and never shown as a machine-wide setting.
 - **No vendor in core.** The provider is named by the `management` block (`name`, `status_url`, `console_url`); the status view reads `status_url`, never a vendor path, and the UI shows the provider's name with the neutral `ManagedMarkComponent`. `schema_version` above `MANAGED_POLICY_SCHEMA_VERSION` is refused by `config::validate_managed_policy`.
 
 ## Non-negotiables when extending this

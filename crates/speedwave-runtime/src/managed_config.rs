@@ -2,8 +2,8 @@
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
 use crate::config::{
-    ManagedLlmEgressConfig, ManagedManagementConfig, ManagedPiiPolicyConfig, ManagedServicesConfig,
-    ManagedTelemetryConfig,
+    ManagedAccessList, ManagedLlmEgressConfig, ManagedManagementConfig, ManagedPiiPolicyConfig,
+    ManagedServicesConfig, ManagedTelemetryConfig,
 };
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,8 @@ pub const MANAGED_POLICY_KEYS: &[&str] = &[
     "pii_policy",
     "llm_egress",
     "services",
+    "projects",
+    "agents",
 ];
 
 /// Root policy object read from the system-level managed-config file. Rejects
@@ -35,6 +37,11 @@ pub struct ManagedConfig {
     pub llm_egress: Option<ManagedLlmEgressConfig>,
     /// MDM-forced access to integrations and plugins (ADR-091); absent = every service allowed.
     pub services: Option<ManagedServicesConfig>,
+    /// MDM-forced access to projects, by name (ADR-091); absent = every project runs.
+    pub projects: Option<ManagedAccessList>,
+    /// MDM-forced access to the projects' Claude Code agents, by name (ADR-091); absent = every
+    /// agent may be called.
+    pub agents: Option<ManagedAccessList>,
 }
 
 /// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,

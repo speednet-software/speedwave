@@ -27,6 +27,7 @@ import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { ManagedMarkComponent } from '../shared/managed-mark.component';
 import { ManagementService } from '../services/management.service';
+import { ManagedAccessService } from '../services/managed-access.service';
 
 /** Per-service dot colour cycle used in the table. */
 const SERVICE_DOT_COLOURS: readonly string[] = [
@@ -220,6 +221,14 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                       >
                         {{ svc.service }}
                       </span>
+                      @if (access.service(svc.service); as lamp) {
+                        <app-managed-mark
+                          [attr.data-testid]="'integrations-managed-' + svc.service"
+                          class="h-3 w-3 text-[var(--ink)]"
+                          [lamp]="lamp"
+                          [provider]="access.provider()"
+                        />
+                      }
                     </div>
                   </td>
                   <td class="px-4 py-2.5">
@@ -359,6 +368,14 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                 @for (os of osIntegrations; track os.service) {
                   <div class="flex items-center gap-3 px-4 py-2.5">
                     <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
+                    @if (access.service('os.' + os.service); as lamp) {
+                      <app-managed-mark
+                        [attr.data-testid]="'integrations-os-managed-' + os.service"
+                        class="h-3 w-3 text-[var(--ink)]"
+                        [lamp]="lamp"
+                        [provider]="access.provider()"
+                      />
+                    }
                     <span class="mono text-[11px] text-[var(--ink-mute)]">{{
                       os.description
                     }}</span>
@@ -428,6 +445,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private beta = inject(BetaService);
   /** The organisation's management on this machine — shown first in Services when its policy is present. */
   protected readonly management = inject(ManagementService);
+  /** Whether the organisation's policy lets each service run — the lamp beside it. */
+  protected readonly access = inject(ManagedAccessService);
   private unsubProjectSettled: (() => void) | null = null;
   private unsubStatusRefresher: (() => void) | null = null;
 

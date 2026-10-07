@@ -128,3 +128,25 @@ export function deploymentLabel(d: ManagedDeployment | null | undefined): string
     d.deploymentType === 'SUBSCRIPTION' ? 'subscription' : d.deploymentType?.toLowerCase();
   return [d.name, d.providerName, kind, d.region].filter(Boolean).join(' · ');
 }
+
+/** Allow or deny, as the organisation's policy says (ADR-091). */
+export type PolicyAccess = 'allow' | 'deny';
+
+/** A block of the policy: the default for a name no rule names, and a rule per name or key. */
+export interface ManagedAccessList {
+  default: PolicyAccess;
+  rules: Record<string, PolicyAccess>;
+}
+
+/** The answer of `get_managed_access`: what the organisation's policy lets run on this machine. */
+export interface ManagedAccess {
+  managed: boolean;
+  provider: string | null;
+  error: string | null;
+  projects: ManagedAccessList | null;
+  services: ManagedAccessList | null;
+  agents: ManagedAccessList | null;
+}
+
+/** The lamp beside a managed project, service, integration, plugin or agent. */
+export type ManagedLamp = 'allowed' | 'not-allowed';

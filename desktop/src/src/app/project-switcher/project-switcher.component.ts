@@ -19,6 +19,8 @@ import { IconComponent } from '../shared/icon.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
 import { TooltipDirective } from '../shared/tooltip.directive';
 import { swatchFor } from './project-swatch';
+import { ManagedMarkComponent } from '../shared/managed-mark.component';
+import { ManagedAccessService } from '../services/managed-access.service';
 
 /**
  * Sentinel prefix used by the runtime to mark "active project removal rejected".
@@ -41,7 +43,13 @@ export function cleanRemoveErrorMessage(msg: string): string {
  */
 @Component({
   selector: 'app-project-switcher',
-  imports: [CreateProjectModalComponent, IconComponent, SpinIconComponent, TooltipDirective],
+  imports: [
+    CreateProjectModalComponent,
+    IconComponent,
+    SpinIconComponent,
+    TooltipDirective,
+    ManagedMarkComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (ui.projectSwitcherOpen()) {
@@ -118,6 +126,14 @@ export function cleanRemoveErrorMessage(msg: string): string {
                       [class]="entry.isActive ? 'text-[var(--ink-mute)]' : 'text-[var(--ink-dim)]'"
                       >{{ entry.project.name }}</span
                     >
+                    @if (access.project(entry.project.name); as lamp) {
+                      <app-managed-mark
+                        [attr.data-testid]="'project-switcher-managed-' + entry.project.name"
+                        class="h-3 w-3 flex-shrink-0 text-[var(--ink)]"
+                        [lamp]="lamp"
+                        [provider]="access.provider()"
+                      />
+                    }
                     @if (entry.isActive) {
                       <span class="sr-only">current project</span>
                     }
@@ -223,6 +239,7 @@ export class ProjectSwitcherComponent implements OnInit, OnDestroy {
 
   /** UI state service — exposed to the template for the visibility binding. */
   readonly ui = inject(UiStateService);
+  protected readonly access = inject(ManagedAccessService);
   /** Current projects + filter, decorated with swatch + shortcut + active flag. */
   readonly visibleProjects = computed(() => this.projectsWithMeta());
 

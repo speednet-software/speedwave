@@ -18,7 +18,11 @@ Until now a policy change reached Speedwave only at its next start, so a managem
 
 **The policy is applied where the enabled set is computed.** `apply_services_policy` turns off every denied service in `ResolvedIntegrationsConfig` inside `resolve_project_config_in_with_load`, so the compose filter drops the denied workers and `ENABLED_SERVICES` (hub and Claude) never names them — one point, every consumer. An unreadable policy denies every service (fail-closed, like telemetry and the PII policy). The desktop shows a denied service as blocked by the organisation and refuses to enable it (`set_integration_enabled`, `set_os_integration_enabled`, `set_plugin_enabled`).
 
-**Speedwave reports what it runs.** `management::refresh_inventory` writes `<data_dir>/management/inventory.json` — every project with the services its user turned on, each with its policy key, kind, name, whether it runs and whether the policy blocks it, plus the policy's state — at startup, after every save of the user config and after a policy change. A management agent reads it instead of inspecting processes.
+**Speedwave reports what it runs.** `management::refresh_inventory` writes `<data_dir>/management/inventory.json` — every project with the services its user turned on, each with its policy key, kind, name, whether it runs and whether the policy blocks it, the Claude Code agents the project defines (`agent:<name>`), whether the policy blocks the project, plus the policy's state — at startup, after every save of the user config, before every start of a project and after a policy change. A management agent reads it instead of inspecting processes.
+
+**Projects and agents are governed by name, like services by key.** An organisation that treats every project, service, integration, plugin and agent as an item of its own — each runs only once the organisation allows it — needs to say so for projects and agents too. `projects` and `agents` blocks (`ManagedAccessList`: `default` and `rules` by name) carry it. A project the policy denies is refused where every start renders its compose file (`compose::render_compose_in`), so it never starts, and one running stops when the changed policy restarts it. An agent the policy denies is denied to Claude by name in the project's managed settings (`permissions.deny`: `Agent(<name>)`, `Task(<name>)`) — mounted read-only, above the user's settings. Claude Code's built-in agents are not the organisation's items and are not governed.
+
+**Each item is marked where it appears, never the machine as a whole.** The desktop reads the policy itself (`get_managed_access`) and marks each project (switcher, project pill), service and OS integration (Integrations), plugin (Plugins) and agent (slash menu) with the neutral mark and a lamp: allowed or not allowed. A kind the policy says nothing about is not marked. What a provider says about one item — its compliance, its deployment — belongs to that item and is not shown as a machine-wide setting.
 
 **The policy is live.** The desktop watches the policy's directory (`managed_policy_watch`); when the file changes it validates it, refreshes the inventory, tells the UI (`managed_policy_changed`) and, when the active project's containers run, re-renders and restarts them (`integrations_cmd::restart_project_containers`). A policy that fails validation is reported and not applied; the running containers keep the last one.
 
@@ -27,6 +31,7 @@ Until now a policy change reached Speedwave only at its next start, so a managem
 ## Consequences
 
 - An organisation can deny a whole class of data flows (a chat tool, a document store, a plugin) on every machine it manages, and see per project which services each machine uses.
+- An organisation can let a project or an agent run only once it allows it (a `deny` default with rules for what it allowed); the user sees which, beside each.
 - The inventory carries service names, never credentials or content.
 - A service turned off by the policy keeps the user's own choice: removing the rule brings it back.
 - Applying a changed policy restarts the active project's containers, as toggling an integration does.

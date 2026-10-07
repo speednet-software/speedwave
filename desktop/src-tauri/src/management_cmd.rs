@@ -313,6 +313,50 @@ pub(crate) fn policy_model_flag(project: &str) -> Option<String> {
     allowed_pin(pin, allowed_models(project).as_deref())
 }
 
+/// What the organisation's policy lets run on this machine (ADR-091): its provider and its
+/// `projects`, `services` and `agents` blocks — each absent when the policy has none, each denying
+/// everything when the policy cannot be read. The UI marks every project, service and agent by it.
+#[derive(Serialize, Clone, Default, Debug, PartialEq)]
+pub struct ManagedAccess {
+    pub managed: bool,
+    pub provider: Option<String>,
+    pub error: Option<String>,
+    pub projects: Option<speedwave_runtime::config::ManagedAccessList>,
+    pub services: Option<speedwave_runtime::config::ManagedServicesConfig>,
+    pub agents: Option<speedwave_runtime::config::ManagedAccessList>,
+}
+
+fn managed_access_of(
+    managed: anyhow::Result<Option<speedwave_runtime::managed_config::ManagedConfig>>,
+) -> ManagedAccess {
+    use speedwave_runtime::config::{ManagedAccessList, ManagedServicesConfig};
+    match managed {
+        Ok(None) => ManagedAccess::default(),
+        Ok(Some(m)) => ManagedAccess {
+            managed: true,
+            provider: Some(speedwave_runtime::config::management_provider_name(&m)),
+            error: None,
+            projects: m.projects,
+            services: m.services,
+            agents: m.agents,
+        },
+        Err(e) => ManagedAccess {
+            managed: true,
+            provider: None,
+            error: Some(e.to_string()),
+            projects: Some(ManagedAccessList::deny_all()),
+            services: Some(ManagedServicesConfig::deny_all()),
+            agents: Some(ManagedAccessList::deny_all()),
+        },
+    }
+}
+
+/// What the organisation's policy lets run on this machine, read from the policy file itself.
+#[tauri::command]
+pub fn get_managed_access() -> ManagedAccess {
+    managed_access_of(speedwave_runtime::managed_config::load_managed_config())
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -403,5 +447,24 @@ mod tests {
         );
         assert!(allowed_pin("claude-sonnet-5".into(), Some(&allowed)).is_none());
         assert!(allowed_pin("claude-opus-5-5".into(), None).is_none());
+    }
+
+    #[test]
+    fn managed_access_carries_the_policy_blocks_and_denies_all_when_unreadable() {
+        assert_eq!(managed_access_of(Ok(None)), ManagedAccess::default());
+        let m: speedwave_runtime::managed_config::ManagedConfig = serde_json::from_str(
+            r#"{"management":{"name":"Auditor"},"projects":{"default":"deny","rules":{"billing":"allow"}}}"#,
+        )
+        .unwrap();
+        let a = managed_access_of(Ok(Some(m)));
+        assert!(a.managed && a.services.is_none() && a.agents.is_none());
+        assert_eq!(a.provider.as_deref(), Some("Auditor"));
+        assert!(a.projects.as_ref().unwrap().allows("billing"));
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!(json["projects"]["default"], "deny");
+        let broken = managed_access_of(Err(anyhow::anyhow!("boom")));
+        assert_eq!(broken.error.as_deref(), Some("boom"));
+        assert!(!broken.projects.unwrap().allows("billing"));
+        assert!(!broken.services.unwrap().allows("slack"));
     }
 }

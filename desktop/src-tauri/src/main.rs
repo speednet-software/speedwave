@@ -1254,6 +1254,7 @@ fn main() {
             update_commands::get_bundle_reconcile_state,
             ui_prefs_cmd::get_beta_enabled,
             management_cmd::get_management_status,
+            management_cmd::get_managed_access,
             export_diagnostics,
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,

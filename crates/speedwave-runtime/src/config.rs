@@ -1006,6 +1006,44 @@ impl ManagedServicesConfig {
     }
 }
 
+/// MDM `projects` and `agents` blocks (ADR-091): which projects may run and which of their Claude
+/// Code agents Claude may call, by name.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedAccessList {
+    /// Access for a name no rule names.
+    #[serde(default)]
+    pub default: ServiceAccess,
+    /// Access per name.
+    #[serde(default)]
+    pub rules: BTreeMap<String, ServiceAccess>,
+}
+
+impl ManagedAccessList {
+    /// Every name denied: what an unreadable policy means.
+    pub fn deny_all() -> Self {
+        Self {
+            default: ServiceAccess::Deny,
+            rules: BTreeMap::new(),
+        }
+    }
+
+    /// Whether `name` may run.
+    pub fn allows(&self, name: &str) -> bool {
+        self.rules.get(name).copied().unwrap_or(self.default) == ServiceAccess::Allow
+    }
+
+    /// Rejects an empty, overlong or control-character name; `what` names the block in the error.
+    pub fn validate(&self, what: &str) -> anyhow::Result<()> {
+        for name in self.rules.keys() {
+            if name.trim().is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
+                anyhow::bail!("managed {what} policy: '{name}' is not a valid name");
+            }
+        }
+        Ok(())
+    }
+}
+
 fn is_service_key(key: &str) -> bool {
     if let Some(id) = key.strip_prefix(PLUGIN_SERVICE_PREFIX) {
         return !id.is_empty()
@@ -1056,6 +1094,16 @@ pub struct ManagedManagementConfig {
     pub status_url: Option<String>,
     /// The provider's console, linked from the status view.
     pub console_url: Option<String>,
+}
+
+/// The management provider's name as the policy gives it, else "your organisation".
+pub fn management_provider_name(managed: &crate::managed_config::ManagedConfig) -> String {
+    managed
+        .management
+        .as_ref()
+        .and_then(|m| m.name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "your organisation".to_string())
 }
 
 impl ManagedManagementConfig {
@@ -1762,6 +1810,12 @@ pub fn validate_managed_policy(
     }
     if let Some(services) = &managed.services {
         services.validate()?;
+    }
+    if let Some(projects) = &managed.projects {
+        projects.validate("projects")?;
+    }
+    if let Some(agents) = &managed.agents {
+        agents.validate("agents")?;
     }
     Ok(())
 }
@@ -7622,6 +7676,31 @@ mod policy_provider_tests {
                 .to_string();
             assert!(err.contains(&format!("'{bad}'")), "{err}");
         }
+    }
+
+    #[test]
+    fn projects_and_agents_policies_parse_validate_and_name_the_provider() {
+        let m: crate::managed_config::ManagedConfig = serde_json::from_str(
+            r#"{"management":{"name":"Auditor"},"projects":{"default":"deny","rules":{"billing":"allow"}},"agents":{"rules":{"reviewer":"deny"}}}"#,
+        )
+        .unwrap();
+        let projects = m.projects.as_ref().unwrap();
+        assert!(projects.allows("billing") && !projects.allows("scratch"));
+        let agents = m.agents.as_ref().unwrap();
+        assert!(!agents.allows("reviewer") && agents.allows("planner"));
+        assert!(validate_managed_policy(&m).is_ok());
+        assert_eq!(management_provider_name(&m), "Auditor");
+        let bad: crate::managed_config::ManagedConfig =
+            serde_json::from_str(r#"{"projects":{"rules":{" ":"deny"}}}"#).unwrap();
+        assert!(validate_managed_policy(&bad).is_err());
+        assert_eq!(management_provider_name(&bad), "your organisation");
+        assert!(
+            serde_json::from_str::<crate::managed_config::ManagedConfig>(
+                r#"{"agents":{"rules":{"x":"maybe"}}}"#
+            )
+            .is_err()
+        );
+        assert!(!ManagedAccessList::deny_all().allows("anything"));
     }
 
     #[test]

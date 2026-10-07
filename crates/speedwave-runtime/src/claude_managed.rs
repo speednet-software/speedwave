@@ -70,12 +70,14 @@ pub fn project_resource_attributes(telemetry: &ResolvedTelemetry, project: &str)
 }
 
 /// Writes managed-settings.json with the MDM-locked keys in an `env` block: the OTEL_* locks
-/// and, under an `llm_egress` policy (ADR-090), the proxy route and the locked model env.
+/// and, under an `llm_egress` policy (ADR-090), the proxy route and the locked model env; the
+/// agents the `agents` policy keeps off (ADR-091) are denied to Claude by name.
 pub fn write_managed_settings(
     data_dir: &Path,
     project: &str,
     telemetry: &ResolvedTelemetry,
     egress: Option<&ManagedLlmEgressConfig>,
+    denied_agents: &[String],
 ) -> anyhow::Result<()> {
     let dir = claude_managed_dir(data_dir, project);
     create_owner_only_dir_chain(&dir)?;
@@ -93,7 +95,14 @@ pub fn write_managed_settings(
             env.insert("OTEL_RESOURCE_ATTRIBUTES".to_string(), ra);
         }
     }
-    let doc = serde_json::json!({ "env": env });
+    let mut doc = serde_json::json!({ "env": env });
+    if !denied_agents.is_empty() {
+        let deny: Vec<String> = denied_agents
+            .iter()
+            .flat_map(|a| [format!("Agent({a})"), format!("Task({a})")])
+            .collect();
+        doc["permissions"] = serde_json::json!({ "deny": deny });
+    }
     let content = serde_json::to_string_pretty(&doc)?;
     crate::fs_perms::write_restricted_file_atomic(
         &managed_settings_path(data_dir, project),
@@ -173,7 +182,7 @@ mod tests {
     #[test]
     fn writes_managed_settings_with_locked_env_only() {
         let tmp = tempfile::tempdir().unwrap();
-        write_managed_settings(tmp.path(), "proj", &locked_sample(), None).unwrap();
+        write_managed_settings(tmp.path(), "proj", &locked_sample(), None, &[]).unwrap();
         let p = managed_settings_path(tmp.path(), "proj");
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
@@ -191,7 +200,7 @@ mod tests {
     #[test]
     fn intermediate_claude_managed_dir_is_owner_only_on_first_render() {
         let tmp = tempfile::tempdir().unwrap();
-        write_managed_settings(tmp.path(), "proj", &locked_sample(), None).unwrap();
+        write_managed_settings(tmp.path(), "proj", &locked_sample(), None, &[]).unwrap();
         let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
         assert!(top.is_dir());
         #[cfg(unix)]
@@ -205,8 +214,8 @@ mod tests {
     #[test]
     fn second_project_render_leaves_shared_parent_owner_only() {
         let tmp = tempfile::tempdir().unwrap();
-        write_managed_settings(tmp.path(), "proj-a", &locked_sample(), None).unwrap();
-        write_managed_settings(tmp.path(), "proj-b", &locked_sample(), None).unwrap();
+        write_managed_settings(tmp.path(), "proj-a", &locked_sample(), None, &[]).unwrap();
+        write_managed_settings(tmp.path(), "proj-b", &locked_sample(), None, &[]).unwrap();
         let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
         #[cfg(unix)]
         {
@@ -235,7 +244,7 @@ mod tests {
         egress
             .claude_env
             .insert("ANTHROPIC_AUTH_TOKEN".into(), "secret".into());
-        write_managed_settings(tmp.path(), "proj", &locked_sample(), Some(&egress)).unwrap();
+        write_managed_settings(tmp.path(), "proj", &locked_sample(), Some(&egress), &[]).unwrap();
         let v: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(managed_settings_path(tmp.path(), "proj")).unwrap(),
         )
@@ -252,7 +261,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut t = locked_sample();
         t.resource_attributes = Some("team=payments".into());
-        write_managed_settings(tmp.path(), "billing-bot", &t, Some(&gateway())).unwrap();
+        write_managed_settings(tmp.path(), "billing-bot", &t, Some(&gateway()), &[]).unwrap();
         let v: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(managed_settings_path(tmp.path(), "billing-bot")).unwrap(),
         )
@@ -261,7 +270,7 @@ mod tests {
             v["env"]["OTEL_RESOURCE_ATTRIBUTES"],
             "team=payments,speedwave.project=billing-bot"
         );
-        write_managed_settings(tmp.path(), "plain", &t, None).unwrap();
+        write_managed_settings(tmp.path(), "plain", &t, None, &[]).unwrap();
         let plain = std::fs::read_to_string(managed_settings_path(tmp.path(), "plain")).unwrap();
         assert!(!plain.contains(PROJECT_ATTRIBUTE), "{plain}");
         t.resource_attributes = None;
@@ -284,7 +293,7 @@ mod tests {
         t.locked_keys.clear();
         t.any_locked = false;
         let tmp = tempfile::tempdir().unwrap();
-        write_managed_settings(tmp.path(), "proj", &t, None).unwrap();
+        write_managed_settings(tmp.path(), "proj", &t, None, &[]).unwrap();
         let p = managed_settings_path(tmp.path(), "proj");
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
@@ -293,5 +302,32 @@ mod tests {
             env.is_empty(),
             "no locked keys must yield an empty env object"
         );
+    }
+
+    #[test]
+    fn the_agents_the_policy_keeps_off_are_denied_to_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_settings(
+            tmp.path(),
+            "proj",
+            &locked_sample(),
+            None,
+            &["reviewer".to_string()],
+        )
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(managed_settings_path(tmp.path(), "proj")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            doc["permissions"]["deny"],
+            serde_json::json!(["Agent(reviewer)", "Task(reviewer)"])
+        );
+        write_managed_settings(tmp.path(), "proj", &locked_sample(), None, &[]).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(managed_settings_path(tmp.path(), "proj")).unwrap(),
+        )
+        .unwrap();
+        assert!(doc.get("permissions").is_none());
     }
 }
