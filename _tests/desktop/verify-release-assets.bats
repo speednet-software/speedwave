@@ -195,7 +195,7 @@ setup() {
 @test "empty sig file fails with 'signature file empty' message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
-  export EMPTY_SIG_NAME="Speedwave_0.8.1_macOS_Intel.app.tar.gz.sig"
+  export EMPTY_SIG_NAME="Speedwave_0.8.1_x64_en-US.msi.zip.sig"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "signature file empty:" ]]
@@ -253,7 +253,7 @@ setup() {
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-missing-platform-key.json"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "latest.json missing required platform key: darwin-x86_64" ]]
+  [[ "$output" =~ "latest.json missing required platform key: windows-x86_64-msi" ]]
 }
 
 
@@ -280,7 +280,7 @@ setup() {
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-browser-download-url.json"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "platforms.darwin-x86_64.url does not start with" ]]
+  [[ "$output" =~ "platforms.darwin-aarch64.url does not start with" ]]
 }
 
 

@@ -15,7 +15,6 @@ V="$VERSION"
 
 SIGNED_ASSETS=(
   "Speedwave_${V}_macOS_Apple_Silicon.app.tar.gz"
-  "Speedwave_${V}_macOS_Intel.app.tar.gz"
   "Speedwave_${V}_x64-setup.exe"
   "Speedwave_${V}_x64-setup.nsis.zip"
   "Speedwave_${V}_x64_en-US.msi"
@@ -25,9 +24,7 @@ SIGNED_ASSETS=(
 UNSIGNED_ASSETS=(
   "latest.json"
   "Speedwave_${V}_macOS_Apple_Silicon.dmg"
-  "Speedwave_${V}_macOS_Intel.dmg"
   "speedwave-v${V}-aarch64-apple-darwin.tar.gz"
-  "speedwave-v${V}-x86_64-apple-darwin.tar.gz"
   "speedwave-v${V}-x86_64-pc-windows-msvc.zip"
 )
 
@@ -77,7 +74,6 @@ if not isinstance(platforms, dict) or not platforms:
     sys.exit("latest.json platforms is empty")
 # Missing keys = auto-update broken for that platform. Extra keys are allowed.
 required_keys = (
-    "darwin-x86_64", "darwin-x86_64-app",
     "darwin-aarch64", "darwin-aarch64-app",
     "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis",
 )
