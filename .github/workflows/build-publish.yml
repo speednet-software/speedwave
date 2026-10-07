@@ -135,19 +135,20 @@ jobs:
           APPLE_TEAM_ID_VAL: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -n "$CERT" ]; then
-            # Mask all secrets before writing to GITHUB_ENV
             echo "::add-mask::$CERT"
             echo "::add-mask::$CERT_PASSWORD"
             echo "::add-mask::$SIGNING_IDENTITY"
             echo "::add-mask::$APPLE_ID_VAL"
             echo "::add-mask::$APPLE_PASSWORD_VAL"
             echo "::add-mask::$APPLE_TEAM_ID_VAL"
-            echo "APPLE_CERTIFICATE=$CERT" >> "$GITHUB_ENV"
-            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
-            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
-            echo "APPLE_ID=$APPLE_ID_VAL" >> "$GITHUB_ENV"
-            echo "APPLE_PASSWORD=$APPLE_PASSWORD_VAL" >> "$GITHUB_ENV"
-            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_VAL" >> "$GITHUB_ENV"
+            {
+              echo "APPLE_CERTIFICATE=$CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY"
+              echo "APPLE_ID=$APPLE_ID_VAL"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD_VAL"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_VAL"
+            } >> "$GITHUB_ENV"
             echo "::notice::macOS code signing configured"
           else
             echo "::notice::macOS code signing skipped (no APPLE_CERTIFICATE secret)"

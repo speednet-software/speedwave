@@ -135,9 +135,11 @@ jobs:
             echo "::error::the beta release for $TAG is still a draft (build in progress) — re-run this job (Re-run jobs) once it publishes."
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "release_id=$RELEASE_ID"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Compute the stable notes range
         id: range
