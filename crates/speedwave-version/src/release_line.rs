@@ -34,6 +34,8 @@ pub(crate) fn find_release_ref(repo: &Path, minor: u64) -> Result<String, Versio
         .ok_or(VersionError::NoReleaseLineMinor(minor))
 }
 
+/// The stable tag for release line `0.minor` (`v0.minor.0[+N]`): the lone
+/// match, or the highest build number among those on the line's ancestry.
 pub fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, VersionError> {
     ensure_git_repo(repo)?;
     let pattern = format!("v0.{minor}.0*");
