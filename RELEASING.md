@@ -1,484 +1,79 @@
 # Releasing Speedwave
 
-This document describes how releases are created, how to troubleshoot build failures, and how the update system works. For architectural decisions behind this flow, see [ADR-019](docs/adr/ADR-019-git-branching-model-and-release-flow.md).
-
-## Prerequisites
-
-Before your first release, ensure these GitHub repository secrets are configured:
-
-| Secret                               | Required | Purpose                                                                                                    |
-| ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------- |
-| `RELEASE_TOKEN`                      | Yes      | PAT or GitHub App token — used by release-please to create release PRs and push to branch-protected `main` |
-| `TAURI_SIGNING_PRIVATE_KEY`          | Yes      | Ed25519 private key for Tauri updater signatures                                                           |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Yes      | Passphrase for the signing key (can be empty string)                                                       |
-| `APPLE_CERTIFICATE`                  | No       | macOS code signing (.p12, base64)                                                                          |
-| `APPLE_CERTIFICATE_PASSWORD`         | No       | Passphrase for macOS certificate                                                                           |
-| `APPLE_SIGNING_IDENTITY`             | No       | Developer ID Application identity                                                                          |
-| `APPLE_ID`                           | No       | Apple ID email for notarization                                                                            |
-| `APPLE_PASSWORD`                     | No       | App-specific password for notarization                                                                     |
-| `APPLE_TEAM_ID`                      | No       | Apple Developer Team ID                                                                                    |
-
-Windows code signing uses no secret: it runs through Azure Artifact Signing with an OIDC federated credential ([ADR-086](docs/adr/ADR-086-windows-code-signing-azure-artifact-signing.md)), configured as **variables on the `release` GitHub environment**:
-
-| Variable                                     | Purpose                                                                                                         |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `AZURE_CLIENT_ID`                            | Entra app registration whose federated credential trusts `repo:speednet-software/speedwave:environment:release` |
-| `AZURE_TENANT_ID`                            | Entra tenant id                                                                                                 |
-| `AZURE_SUBSCRIPTION_ID`                      | Subscription holding the Artifact Signing account                                                               |
-| `AZURE_ARTIFACT_SIGNING_ENDPOINT`            | Regional endpoint of the account, e.g. `https://plc.codesigning.azure.net`                                      |
-| `AZURE_ARTIFACT_SIGNING_ACCOUNT`             | Artifact Signing account name                                                                                   |
-| `AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE` | Public Trust certificate profile name                                                                           |
-
-All six empty = unsigned Windows build. `AZURE_CLIENT_ID` set while any other is empty = the release job fails on purpose.
-
-The `release` environment only admits runs whose ref is the `main` branch (deployment branch policy; tags are deliberately not allowed, because tag creation is not protected). The federated credential in Azure trusts only the `environment:release` OIDC subject, so no other branch, tag, fork or manual run can obtain a signing session. A `workflow_dispatch` of `desktop-release.yml` must therefore select `main` as the run ref (the build still checks out the release tag it is given); any other ref fails at the `publish-tauri` job with an environment rejection.
-
-Generate the Tauri signing keypair (one-time setup):
-
-```bash
-cargo tauri signer generate -w ~/.tauri/speedwave.key
-```
-
-Store the private key as `TAURI_SIGNING_PRIVATE_KEY`. The public key is already embedded in `desktop/src-tauri/tauri.conf.json`.
-
-**What happens when secrets are missing:**
-
-- `RELEASE_TOKEN` missing — release-please cannot create PRs or push to `main`. The workflow fails with a permissions error.
-- `TAURI_SIGNING_PRIVATE_KEY` missing — tauri-action produces unsigned bundles. The Tauri updater will **refuse to install** them (signature verification fails). Users cannot auto-update.
-- Apple signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open).
-- Windows signing variables missing — builds succeed but produce unsigned binaries; Windows SmartScreen shows a warning. A partially filled set fails the release job instead (see the variables table above).
-- Entitlements plists missing — builds and notarization succeed, but binaries crash at runtime when they attempt to use restricted platform APIs (Virtualization.framework, Apple Events, EventKit for Calendars/Reminders). This is NOT caught by CI — only by manual testing. The accompanying `Info.plist` TCC usage-description keys (`NSFileProviderDomainUsageDescription`, `NSAppleEventsUsageDescription`, `NSCalendarsUsageDescription`, etc.) are equally critical — without them macOS silently blocks the API without displaying a consent dialog.
-
-The architectural rationale for signing — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md); the Windows counterpart (Azure Artifact Signing, OIDC login, in-build `signCommand`) is [ADR-086](docs/adr/ADR-086-windows-code-signing-azure-artifact-signing.md).
-
-## How release-please Works
-
-Speedwave uses [release-please](https://github.com/googleapis/release-please) to automate version bumping and release creation from [Conventional Commits](https://www.conventionalcommits.org/) (already enforced via commitlint).
-
-**How version bumps are determined:**
-
-| Commit type       | Version bump                                             | Example                  |
-| ----------------- | -------------------------------------------------------- | ------------------------ |
-| `fix(...): ...`   | Patch (`0.3.0` → `0.3.1`)                                | `fix(cli): handle ...`   |
-| `feat(...): ...`  | Minor (`0.3.0` → `0.4.0`)                                | `feat(runtime): add ...` |
-| `BREAKING CHANGE` | Minor while `0.x` (`0.3.0` → `0.4.0`), Major after `1.0` | footer in any commit     |
-
-**The flow:**
-
-1. Developers merge PRs into `dev` (conventional commits)
-2. When ready to release, merge `dev` → `main` via PR
-3. On push to `main`, release-please analyzes new commits since the last release
-4. If there are releasable changes, release-please opens (or updates) a **release PR** on `main`
-5. The release PR updates `CHANGELOG.md`, bumps version in all configured version files, and shows a summary of changes
-6. **Merge the release PR** — this triggers release-please to create a draft GitHub Release + tag
-7. The draft release triggers `desktop-release.yml` to build all platforms
-8. After all builds succeed, `publish-release` flips the release from draft → published
-
-## Pipeline Overview
-
-```
-                        RELEASE PIPELINE
- ═══════════════════════════════════════════════════════════════
-
-  Push to main (merge dev → main)
-        │
-        ▼
-  ┌────────────── release-please.yml ──────────────────────────┐
-  │                                                             │
-  │  [job: release-please]                                      │
-  │    analyzes conventional commits since last release          │
-  │    opens/updates release PR (version bump + CHANGELOG)      │
-  │                                                             │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │
-  Merge the release PR       │
-        │                    │
-        ▼                    ▼
-  ┌────────────── release-please.yml ──────────────────────────┐
-  │                                                             │
-  │  [job: release-please]                                      │
-  │    creates draft GitHub Release + tag (vX.Y.Z)              │
-  │        │                                                    │
-  │        ▼                                                    │
-  │  [job: build-and-publish]                                   │
-  │    calls desktop-release.yml via workflow_call               │
-  │    passes: version, tag_name                                │
-  │                                                             │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │
-                             ▼
-  ┌──────────────────────── desktop-release.yml ──────────────────────────────────┐
-  │                                                                               │
-  │  [job: resolve]  validate inputs, look up draft release ID                    │
-  │        │                                                                      │
-  │        ▼                                                                      │
-  │  [job: publish-tauri]  matrix build (3 runners in parallel)                   │
-  │    ├─ macOS arm64    ─► macOS_Apple_Silicon .dmg + .app.tar.gz + .sig  (3)    │
-  │    ├─ macOS x86_64   ─► macOS_Intel .dmg + .app.tar.gz + .sig  (3)           │
-  │    └─ Windows x86_64 ─► .msi + .nsis.zip + .sig  (3)                         │
-  │        │                                                                      │
-  │        ▼                                                                      │
-  │  [job: cli]  cross-compile CLI binary (3 targets)                             │
-  │    ├─ aarch64-apple-darwin     ─► .tar.gz                                     │
-  │    ├─ x86_64-apple-darwin      ─► .tar.gz                                     │
-  │    └─ x86_64-pc-windows-msvc   ─► .zip                                       │
-  │        │                                                                      │
-  │        ▼                                                                      │
-  │  [job: publish-release]                                                       │
-  │    verify-release-assets.sh: 18 assets, 6 .sig companions, latest.json       │
-  │    draft ─► live ─► verify-release-assets.sh (post-publish safety net)       │
-  │                                                                               │
-  └──────────────────────────┬────────────────────────────────────────────────────┘
-                             │
-                             ▼
-  ┌──────────────── backmerge.yml ───────────────────────────────┐
-  │                                                              │
-  │  Triggered by: release published event                       │
-  │  Resets dev to main (force-push) to prevent ghost commits     │
-  │  Falls back to regular merge PR if dev has new commits       │
-  │                                                              │
-  └──────────────────────────────────────────────────────────────┘
-```
-
-```
-                        CI PIPELINE (every PR/push)
- ═══════════════════════════════════════════════════════════════
-
-  push / PR to dev or main
-        │
-        ├──► test.yml
-        │      ├─ lint (clippy, rustfmt, eslint, prettier, typecheck)
-        │      ├─ test (rust tests, mcp tests, bats tests)
-        │      ├─ desktop (desktop clippy, angular eslint, angular tests)
-        │      └─ audit (cargo-audit, npm audit)
-        │
-        └──► desktop-build.yml  (push/PR to main or dev, when desktop/** crates/** Cargo.toml Cargo.lock change)
-               ├─ PR:   macOS only
-               └─ push: macOS + Windows (unsigned)
-```
-
-## How to Create a Release
-
-1. Merge all changes from `dev` to `main` via PR — **use squash merge** (see below)
-2. Wait for CI to pass on `main`
-3. Release-please automatically opens (or updates) a release PR
-4. Review the release PR — it shows the changelog and version bump
-5. **Merge the release PR** — use **squash merge** (same as all PRs to main)
-6. Release-please creates a draft GitHub Release and tag
-7. Builds run automatically on all platforms
-8. After all builds succeed, the release is published
-
-That's it — no manual version bumping, no workflow dispatch, no release type selection.
-
-### Why squash merge matters
-
-**All PRs to `main` must use squash merge** — this includes `dev` → `main` PRs and release-please PRs. Release-please is compatible with squash merge thanks to `force-tag-creation: true` and manifest-based version tracking. This is because:
-
-- Release-please uses `--first-parent` commit traversal and parses each commit's message as a conventional commit
-- Regular merge commits have messages like `Merge pull request #N from speednet-software/dev` — this is **not** a conventional commit and release-please ignores it
-- Release-please also backfills file lists per commit — empty commits (`--allow-empty`) return 0 files and are excluded from path-based detection
-- Squash merge produces a single commit with the PR title as the message — if the PR title follows conventional commits (e.g. `feat(runtime): add logging`), release-please picks it up correctly
-
-#### Non-release types are NOT allowed as PR titles to `main`
-
-The desktop updater installs only when `latest.json.version` is greater than the installed version. A `dev` → `main` squash merge must therefore use a release-triggering title: `feat(...)` or `fix(...)`.
-
-Release-please may not create a version bump for non-release types such as `build`, `chore`, `ci`, `docs`, `perf`, `refactor`, `revert`, `style`, or `test`. If one of those titles is used for the squash merge, code can land on `main` without a newer updater version. Result: no release PR, no desktop build, and users who check for updates remain on the previous app code.
-
-`merge-strategy-check.yml` enforces this by rejecting non-release titles on PRs to `main`. If a `dev` → `main` PR contains only housekeeping, wait for the next `feat`/`fix` batch before merging, or retitle the PR to the dominant user-visible release reason. Non-release types remain valid for PRs targeting `dev`.
-
-#### What happens if you accidentally use a regular merge
-
-A regular merge brings the entire `dev` commit history onto `main` as a merge commit with two parents. Release-please walks both parents and sees all historical commits from `dev` — including ones already released in previous versions — as "new" commits. This causes **phantom release PRs**: release-please opens a new release PR containing duplicate changelog entries for already-released features.
-
-This is a known issue: [release-please#2476](https://github.com/googleapis/release-please/issues/2476).
-
-#### Recovery procedure after an accidental regular merge
-
-1. **Close the phantom release PR** that release-please opened (it contains duplicate commits).
-2. **Create the missing tag** for the last actual release, if it doesn't exist (draft releases don't create tags unless `force-tag-creation` is enabled):
-
-   ```bash
-   # Find the merge commit SHA of the last release PR
-   git log --oneline main | head -20
-
-   # Create and push the tag
-   git tag v<VERSION> <COMMIT_SHA>
-   git push origin v<VERSION>
-   ```
-
-3. **Verify** that release-please does not reopen the phantom PR on the next push to `main`. If it does, check that the tag exists on the remote: `git ls-remote --tags origin | grep v<VERSION>`.
-4. **Prevent future accidents** by disabling "Allow merge commits" in GitHub repo settings for the `main` branch (Settings → General → Pull Requests), leaving only "Allow squash merging" enabled.
-
-### Version examples
-
-| Commits since last release           | Version bump      |
-| ------------------------------------ | ----------------- |
-| `fix(cli): handle missing config`    | `0.3.0` → `0.3.1` |
-| `feat(runtime): add nerdctl support` | `0.3.0` → `0.4.0` |
-| `feat!: redesign config format`      | `0.3.0` → `0.4.0` |
-| Multiple `fix` + one `feat`          | `0.3.0` → `0.4.0` |
-
-**Note:** While at `0.x`, `BREAKING CHANGE` bumps minor (not major). After `1.0.0`, breaking changes will bump major.
-
-## Update Channel
-
-Users receive updates through a single stable channel served from GitHub Releases:
-
-```
-  GitHub Releases
-  ├─ v0.3.0  (published)
-  ├─ v0.3.1  (published)  ◄── latest stable
-  └─ ...
-
-  Speedwave.app ──► /releases/latest/download/latest.json
-                    (GitHub auto-resolves to latest non-draft, non-prerelease)
-                        │
-                        ▼
-                    remote.version > current? ──► download + install
-```
-
-The updater (`desktop/src-tauri/src/updater.rs`) uses strict semver comparison (`remote.version > current`) — downgrades are blocked.
-
-## What to Do When a Build Fails
-
-```
-                        FAILURE DECISION TREE
- ═══════════════════════════════════════════════════════════════
-
-  Build failed
-    │
-    ├─ Single platform failed?
-    │    └─ YES ──► "Re-run failed jobs" in Actions UI
-    │               (release stays draft, re-run is safe)
-    │
-    ├─ publish-release failed?
-    │    └─ YES ──► Re-run job, or publish manually:
-    │               gh api --method PATCH .../releases/<ID> -f draft=false
-    │
-    ├─ All builds OK but release stuck as draft?
-    │    └─ YES ──► publish-release was skipped ──► publish manually
-    │
-    └─ Fundamental problem (wrong version, bad code)?
-         └─ YES ──► Abort: delete release + tag + revert commit
-```
-
-### Single platform fails in `publish-tauri`
+Speedwave ships a beta on every merge to `dev` and promotes a tested beta to stable by creating a `release/0.M` branch. There is no `main`, no release-please, and no manual version bump.
 
-The matrix uses `fail-fast: false` — other platforms continue building. After the run completes:
+## Channels and versions
 
-1. Check which platform failed in the Actions log
-2. Fix the issue (usually a missing dependency or signing problem)
-3. **Re-run the failed job** from the Actions UI (click "Re-run failed jobs")
+- **`dev`** is the default and only long-lived integration branch. Every merge produces a beta `GitHub Release` within the hour: `v0.<M+1>.0+N`, flagged `prerelease`, with macOS (Apple Silicon) and Windows installers, CLI archives and `latest.json`. `N` is the number of commits reachable from the tip of `dev` (`git rev-list --count HEAD`); it never resets.
+- **`release/0.M`** is the line for stable minor `M`. It is created once, by pushing it at a commit on `dev` that already has a beta release — this is the one manual step in the whole process, open to anyone with write access. The push flips that exact beta's `prerelease` flag to `false` and sets `make_latest`: same build, same tag, same bytes, no rebuild.
+- A **hotfix** is a PR to the highest `release/0.M` line. Its merge publishes `0.M.Z` immediately, with no beta stage, and opens a PR that backports it into `dev`.
+- The version always comes from git (`crates/speedwave-version`, the `speedwave-version` binary's `version`/`notes-range`/`validate-promotion` subcommands). Every tracked file in the repo stays pinned to `0.0.0` (enforced by `scripts/check-version-pinned.py`, `make test-desktop-config`); nothing about a release is ever written back to a tracked file.
 
-The release stays as draft until `publish-release` runs. Tauri-action uploads to the existing release via `releaseId`, so re-runs are safe.
+## Files involved
 
-### CLI cross-compilation fails
+| File                                  | Role                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/beta.yml`          | `push: dev` → computes the version and tag from git, tags the commit, generates notes with git-cliff, calls `build-publish.yml` with `prerelease: true`                                                                                                                                                                                         |
+| `.github/workflows/release.yml`       | `push: release/**` → job `promote` on branch creation (audit, flip `prerelease`/`make_latest`, rewrite notes, open the `changelog/0.M` PR); job `hotfix` on every later push (audit, version `0.M.Z`, tag, notes, calls `build-publish.yml` with `prerelease: false`); job `backport` opens the `merge/release-0.M-into-dev` PR with auto-merge |
+| `.github/workflows/build-publish.yml` | Reusable (`workflow_call`): creates the draft release, builds macOS (Apple Silicon) + Windows + CLI, verifies assets, publishes, deletes its own draft on failure                                                                                                                                                                               |
+| `cliff.toml`                          | git-cliff configuration: section order (Breaking changes, Security, Features, Bug Fixes, Performance), hidden types (`refactor`, `docs`, `ci`, `test`, `chore`, `style`, `build`, `revert`), `security`-labeled PRs routed to the Security section                                                                                              |
+| `scripts/verify-release-assets.sh`    | Enumerates every expected asset and `.sig`, validates `latest.json`'s platform keys                                                                                                                                                                                                                                                             |
+| `scripts/check-version-pinned.py`     | Asserts every tracked version source stays `0.0.0`; the single list of tracked files (no more `release-please-config.json`)                                                                                                                                                                                                                     |
+| `crates/speedwave-version`            | Computes the version, the stable notes range, and rejects an out-of-order promotion                                                                                                                                                                                                                                                             |
+| `desktop/src-tauri/src/updater.rs`    | Stable endpoint, channel-aware endpoint selection (SPEED-741/742), version comparator, auto-check loop                                                                                                                                                                                                                                          |
 
-Same approach — re-run the failed job. CLI builds run after `publish-tauri` and upload to the same release.
+## Secrets, environments and the automation token
 
-### `publish-release` fails
+- **Environment `release`**: one environment for both channels (beta and stable builds, promote, hotfix, backport PR, changelog PR all run in it). Deployment branch policy: `dev` and `release/*`. No reviewers, no bypass. The existing Azure federated credential (`repo:speednet-software/speedwave:environment:release`) and its 6 `AZURE_*` variables are unchanged — one signing identity serves both channels, because a stable release is the exact same build as its beta, never a rebuild.
+- **Environment `e2e`** (SPEED-738/739): policy `dev`, rig secrets. A pull request branch never gets these secrets — only a run from `dev` (the merge queue or a maintainer's `workflow_dispatch`) qualifies. **This is why a PR from a fork never runs the `e2e` lane with real credentials**: a maintainer who wants a fork's PR through the full gate pushes that branch into the main repository and opens the PR from there instead, so it runs as a same-repo branch.
+- **`GH_AUTOMATION_PAT`**: one fine-grained personal access token (owner: Mikołaj Kąkol), scoped to this repository only, with Contents: write, Pull requests: write, Workflows: write, Metadata: read — no admin role. It is the credential behind every release write (tag push, draft creation, asset upload, publish, flipping `prerelease`/`make_latest`) and every automated PR (changelog, backport), because a PR opened with the default `GITHUB_TOKEN` does not trigger CI on itself. Issued 2026-10-07; renew before 2027-10-08 (tracked as [SPEED-745](https://speedwave.atlassian.net/browse/SPEED-745)). Replacing it with a GitHub App is [SPEED-746](https://speedwave.atlassian.net/browse/SPEED-746), no deadline.
+- **`GITHUB_TOKEN`** stays at its default read scope everywhere in the release workflows; jobs that need to write use `GH_AUTOMATION_PAT` explicitly, and jobs that log into Azure add `id-token: write`. `RELEASE_TOKEN` no longer exists as a repository secret.
+- Signing secrets (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the six `APPLE_*` secrets) stay at the repository level, unchanged, available to same-repo branch builds as before (never to forks or Dependabot).
+- Immutable releases are enabled: once a release is published, its assets and tag are frozen (title, notes and flags stay editable, which is how `promote` rewrites the beta's notes). Tags matching `v*` cannot be moved or deleted.
 
-The release remains as draft. Check the log — it usually means the `gh api PATCH` call failed (network issue). Re-run the job.
+## Creating a stable release
 
-### All builds succeed but release stays draft
+1. Pick a commit on `dev` that already has a beta release (check the Releases page or `gh release list`) — it does not have to be the latest beta; testers may have validated an earlier one.
+2. Push a branch at that commit: `git push origin <sha>:refs/heads/release/0.<M>`, where `M` is one more than the current highest `release/0.*` line.
+3. The `promote` job runs `make audit` on that commit first. A red advisory without a valid exception fails the job; the beta stays a beta and the branch stays in place — fix with a bump PR to `dev`, let a new beta build, then either move the branch (delete and recreate on the new commit) or push the bump through as a new beta and re-target.
+4. On success, the beta's `GitHub Release` loses `prerelease`, gains `make_latest`, and its notes are rewritten to the list of changes since the previous line (hotfixes of that line excluded). A `changelog/0.M` PR to `dev` is opened with the `CHANGELOG.md` section — merge it like any other PR.
+5. File a Jira task for the landing "What's new" entry (EN and PL); update `install.mdx` on the landing to drop the macOS Intel row once this is the first stable of the cutover.
 
-This means `publish-release` was skipped or failed silently. You can publish manually:
+**If the job fails because there is no beta release on that commit yet** (the beta build is still running), do nothing to the branch — use "Re-run jobs" once the beta publishes.
 
-```bash
-# Find the release ID
-gh release list --repo speednet-software/speedwave
+**If the job fails because the commit is older than the previous release line's tip**, the new stable would be lower-versioned than the one it is replacing. Delete the branch and recreate it on a commit at or after the previous line's tip.
 
-# Publish the draft
-gh api --method PATCH repos/speednet-software/speedwave/releases/<RELEASE_ID> -f draft=false
-```
+## Hotfixing a stable release
 
-### Need to abort a release entirely
+1. Branch from the tip of the highest `release/0.M`, fix the bug, open a PR against `release/0.M`. It goes through the same gate as a PR to `dev`.
+2. On merge, the `hotfix` job runs `make audit` on the squashed commit — a red advisory blocks the publish exactly as it does for a promotion.
+3. The audit passing, it tags `v0.M.Z`, builds, and publishes `0.M.Z` immediately — no prerelease stage, because the PR gate is already the bar for stable.
+4. A `merge/release-0.M-into-dev` PR opens automatically, with the `CHANGELOG.md` section for `0.M.Z`, auto-merge on, assigned to whoever authored the hotfix. If it shows conflicts, resolve them by pushing to that PR's branch — never push directly to `release/0.M` (that is the next hotfix) and never resolve on the release branch.
+5. A second hotfix to the same line may show the same conflict the first one already resolved, in its own backport PR; that is expected.
 
-If something is fundamentally wrong and you need to delete the release:
+Only the highest `release/0.*` line takes hotfixes. `release/0.20` (the cutover base marker) never does.
 
-```bash
-# Delete the GitHub Release (also deletes uploaded assets)
-gh release delete v0.3.1 --repo speednet-software/speedwave --yes
+## Beta
 
-# Delete the remote tag
-git push origin --delete v0.3.1
+Nothing to operate: every merge to `dev` builds and publishes a beta automatically, in commit order (`concurrency: beta`, no cancellation — a run that gets cancelled because three merges landed in close succession gets its beta back via "Re-run jobs"). A beta never blocks on an audit (an environmental advisory already blocked merges once before this process existed, SPEED-674 ticket 20); a stable promotion or hotfix does.
 
-# Revert the release commit on main
-git revert <commit-sha>
-git push origin main
-```
+## What's not here yet
 
-## Hotfix Procedure
+The `e2e` environment, the 13-lane merge gate (`ci-gate`), the merge queue and the `dev`/`release/**` ruleset land with [SPEED-739](https://speedwave.atlassian.net/browse/SPEED-739) and [SPEED-740](https://speedwave.atlassian.net/browse/SPEED-740). Until then, `dev` and `release/0.M` PRs go through today's `ci-gate` (`test.yml`) and `validate` (`pr-title.yml`) checks, without a queue. The channel switch, the beta update endpoint and `speedwave self-update`'s channel awareness are [SPEED-741](https://speedwave.atlassian.net/browse/SPEED-741)/[SPEED-742](https://speedwave.atlassian.net/browse/SPEED-742)/[SPEED-743](https://speedwave.atlassian.net/browse/SPEED-743).
 
-When a critical bug is in the latest stable release but `dev` has unreleased work:
+## Cutover steps (one-time, phase 2b)
 
-```
-main (v1.2.0 — buggy)         dev (has unreleased work)
-  │                              │
-  ├── hotfix/fix-critical ───┐   │
-  │   (branch from main)     │   │
-  │   fix the bug             │   │
-  │   PR → main               │   │
-  │◄──────────────────────────┘   │
-  │                               │
-  ├── release-please PR opens     │
-  │   (merge to create v1.2.1)    │
-  │                               │
-  └── cherry-pick fix ──────────► │
-```
+These ran once, when this file replaced the release-please process (SPEED-674 ticket 17):
 
-1. `git checkout main && git checkout -b hotfix/fix-critical`
-2. Apply the minimal fix (use `fix(scope): description` commit message)
-3. Open PR targeting `main` — CI must pass
-4. Merge — release-please will open a release PR with a patch bump
-5. Merge the release PR to trigger the release
-6. Cherry-pick the fix into `dev`: `git cherry-pick <commit-sha>` or open a PR
+1. Phase 0 (admin, done 2026-10-07): the `release` environment's deployment branch policy extended to `dev` and `release/*` (`main` stayed until phase 5); `GH_AUTOMATION_PAT` issued; immutable releases turned on; `release/0.20` pushed at the `v0.20.0` commit as a base marker — before this workflow or any ruleset change touched `release/**`, so nothing built from it.
+2. Phase 2a ([SPEED-734](https://speedwave.atlassian.net/browse/SPEED-734)): version-from-git landed on `dev`.
+3. Phase 2b (this change, [SPEED-735](https://speedwave.atlassian.net/browse/SPEED-735)): `beta.yml`, `release.yml`, `build-publish.yml` and `cliff.toml` added; `desktop-release.yml`, the three `release-please*.yml` workflows, `backmerge.yml`, `merge-strategy-check.yml`, `dependabot-auto-rebase.yml` and their configs and scripts removed. Merging this PR is the cutover: the next merge to `dev` is the first beta of the new process, `0.21.0+N`.
+4. Phase 5 (admin, right after 2b): classic `main` branch protection removed, `main` deleted (its tip, `v0.20.0`, is identical to the `release/0.20` marker), `RELEASE_TOKEN` deleted.
+5. In parallel: phase 3 (the channel PRs above) and phase 1 (the `e2e` environment and merge-gate PRs above).
+6. Phase 4, first stable of the new process: `release/0.21`, after phases 1 and 3 land, so the first stable already carries the channel switch and went through the full gate including rig e2e.
 
-## Backmerge (main → dev)
+0.20.0 was the last release of the old process. A hotfix needed before the cutover went out as an emergency `0.20.1` through the old `main`-based process; `release/0.20` never receives a hotfix through this process.
 
-After every release, `main` has commits that `dev` doesn't (version bumps, CHANGELOG updates, hotfixes). The `backmerge.yml` workflow automatically keeps `dev` in sync:
+## macOS Intel
 
-1. **Trigger:** fires on `release: [published]` event
-2. **Guard:** skips if `dev` already contains all `main` commits
-3. **Reset (default):** force-pushes `main` to `dev` so they are identical — this prevents ghost commits from accumulating due to SHA divergence from squash merges
-4. **Fallback:** if `dev` has new commits not yet on `main` (someone merged between release and backmerge), falls back to a regular merge via PR with auto-merge enabled
-
-**Why force-push instead of regular merge?** Squash merge from `dev` → `main` creates new commit SHAs. A regular backmerge preserves the original SHAs on `dev`, so Git sees them as "unmerged" — these ghost commits accumulate over time and pollute future PR diffs. Force-pushing `dev = main` eliminates this divergence entirely.
-
-**Branch protection:** The `dev` branch uses a GitHub Repository Ruleset (not legacy branch protection) that grants admin role bypass for force-push. The `RELEASE_TOKEN` (admin PAT) used by `backmerge.yml` can force-push; regular users cannot.
-
-**Prerequisite:** the repository must have **"Allow auto-merge"** enabled in GitHub Settings > General > Pull Requests. Without this, `gh pr merge --auto` silently does nothing and fallback backmerge PRs will require manual merge.
-
-## Known Pitfalls
-
-### Version mismatch between code and release
-
-**Symptom:** Desktop app shows wrong version (e.g., release is v0.3.0 but app says 0.2.0).
-
-**Cause:** `workflow_dispatch` on `desktop-release.yml` checked out branch HEAD instead of the release tag. The branch had old version files.
-
-**Fix:** The `resolve` job now checks if the tag exists and conditionally sets the checkout `ref`. When a tag exists, builds always use tagged code. Falls back to branch HEAD only when no tag exists (testing scenarios).
-
-### Release-please labeling race condition
-
-**Symptom:** Release-please creates a PR but the `autorelease: pending` label is missing. When the PR is merged, `release_created` is never set to `true` because `findMergedReleasePullRequests()` filters by label.
-
-**Cause:** GitHub's API returns the PR before the node ID is fully propagated. The labeling API call inside release-please fails silently.
-
-**Fix:** `release-please.yml` has an idempotent label-ensure step that retries label application with backoff after every release-please run that produces a PR.
-
-### Manual dispatch requires existing tag for correct builds
-
-When using `workflow_dispatch` on `desktop-release.yml` to re-build an existing release, the tag must exist on the remote. The `resolve` job checks for the tag and warns if it doesn't exist. Without a tag, the build uses branch HEAD which may have different code than expected.
-
-### `workflow_dispatch` uses workflow YAML from the default branch, not `main`
-
-**Symptom:** Manual re-trigger of `desktop-release.yml` via `gh workflow run` or Actions UI fails on steps that were recently hotfixed on `main`, even though `actions/checkout` checks out the correct tag.
-
-**Cause:** GitHub Actions `workflow_dispatch` reads the **workflow YAML file** (steps, `run:` blocks, `if:` guards) from the **default branch** — which is `dev` in this repo, not `main`[^wd-ref]. The `actions/checkout` step inside the workflow checks out the correct tag/ref for **source code**, but `run:` blocks are baked into the YAML at dispatch time. If `dev` has an older version of the workflow YAML than `main`, the build executes stale step logic.
-
-This is a two-path problem: **workflow definition** comes from the default branch, **repo source** comes from the checkout ref. They can diverge when hotfixes land on `main` but haven't been cherry-picked to `dev` yet.
-
-**Fix:** When manually dispatching, always pass `--ref main` to source the workflow YAML from `main`:
-
-```bash
-gh workflow run desktop-release.yml --ref main -f version=0.7.2
-```
-
-In the Actions UI, select `main` from the branch dropdown before clicking "Run workflow".
-
-**Prevention:** When hotfixing any workflow YAML file (`.github/workflows/`) on `main`, always cherry-pick the same change to `dev` in the same session. This keeps both branches' workflow definitions in sync and avoids the `--ref` footgun entirely.
-
-[^wd-ref]: GitHub docs: "This event will only trigger a workflow run if the workflow file exists on the default branch." `gh workflow run --ref` overrides which branch's YAML is used. See `gh workflow run --help`.
-
-## Manual Desktop Build (without release)
-
-To trigger a desktop build without creating a release (e.g. for testing):
-
-```bash
-# Re-build an existing release (YAML from main, not dev):
-gh workflow run desktop-release.yml --ref main -f version=0.3.0
-
-# From Actions UI: select "main" branch, run "Desktop Release" with version "0.3.0"
-```
-
-**Note:** `workflow_dispatch` now checks whether the tag exists. If `v0.3.0` tag exists, the build checks out that tag (builds from tagged code with correct version). If no tag exists, falls back to branch HEAD (for testing only — version in artifacts will match whatever the branch has).
-
-Or use `desktop-build.yml` which runs automatically on PRs to `main` or `dev` (macOS only) and on push to `main` or `dev` (macOS + Windows). These builds are unsigned.
-
-## Files Involved
-
-| File                                                | Role                                                           |
-| --------------------------------------------------- | -------------------------------------------------------------- |
-| `release-please-config.json`                        | release-please configuration — extra-files, changelog sections |
-| `.release-please-manifest.json`                     | Current version tracker for release-please                     |
-| `.github/workflows/release-please.yml`              | Runs release-please on push to main, triggers builds           |
-| `.github/workflows/release-please-lockfile.yml`     | Regenerates Cargo.lock on release-please PRs                   |
-| `.github/workflows/release-please-npm-lockfile.yml` | Regenerates npm package-lock.json files on release-please PRs  |
-| `.github/workflows/desktop-release.yml`             | Matrix build, code signing, CLI cross-compile, publish         |
-| `.github/actions/azure-signing-login/action.yml`    | OIDC login to Azure + `AZURE_ARTIFACT_SIGNING_*` env export    |
-| `scripts/sign-windows-binaries.ps1`                 | Windows signing script (Tauri `signCommand` + `-Bundled` pass) |
-| `desktop/src-tauri/tauri.windows.conf.json`         | Windows hooks: `beforeBundleCommand`, `signCommand`, resources |
-| `.github/workflows/desktop-build.yml`               | PR/push CI build (unsigned)                                    |
-| `.github/workflows/backmerge.yml`                   | Automated main → dev backmerge after release publish           |
-| `.github/workflows/merge-strategy-check.yml`        | Enforces conventional commit PR titles on PRs to main          |
-| `desktop/src-tauri/src/updater.rs`                  | Stable endpoint, version comparator, auto-check loop           |
-| `desktop/src-tauri/tauri.conf.json`                 | Tauri config — updater pubkey, default stable endpoint         |
-
-## Verifying a Release
-
-After a release is published:
-
-```bash
-# Check the release exists and has all assets
-gh release view v0.3.1 --repo speednet-software/speedwave
-
-# Verify the updater endpoint works
-curl -sL https://github.com/speednet-software/speedwave/releases/latest/download/latest.json | jq .version
-```
-
-Expected assets per release (18 assets, of which 6 require companion .sig files):
-
-| Asset                                          | Needs .sig? |
-| ---------------------------------------------- | ----------- |
-| `latest.json`                                  | no          |
-| `Speedwave_<V>_macOS_Apple_Silicon.app.tar.gz` | **yes**     |
-| `Speedwave_<V>_macOS_Apple_Silicon.dmg`        | no          |
-| `Speedwave_<V>_macOS_Intel.app.tar.gz`         | **yes**     |
-| `Speedwave_<V>_macOS_Intel.dmg`                | no          |
-| `Speedwave_<V>_x64-setup.exe`                  | **yes**     |
-| `Speedwave_<V>_x64-setup.nsis.zip`             | **yes**     |
-| `Speedwave_<V>_x64_en-US.msi`                  | **yes**     |
-| `Speedwave_<V>_x64_en-US.msi.zip`              | **yes**     |
-| `speedwave-v<V>-aarch64-apple-darwin.tar.gz`   | no          |
-| `speedwave-v<V>-x86_64-apple-darwin.tar.gz`    | no          |
-| `speedwave-v<V>-x86_64-pc-windows-msvc.zip`    | no          |
-
-Breakdown by platform:
-
-- macOS (per arch): `.dmg` (no sig) + `.app.tar.gz` + `.app.tar.gz.sig` × 2 archs = 6 assets
-- Windows: `.exe` + `.exe.sig` + `.nsis.zip` + `.nsis.zip.sig` + `.msi` + `.msi.sig` + `.msi.zip` + `.msi.zip.sig` = 8 assets
-- CLI archives: 3 (`.tar.gz` / `.zip` per target, no sig)
-- `latest.json`: 1
-
-**Total: 18 assets, 6 `.sig` companions.**
-
-Asset names use `releaseAssetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
-
-The `publish-release` job runs three steps:
-
-1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://api.github.com/repos/<repo>/releases/assets/` prefix (the URL shape tauri-action >= 1.0.0 writes).
-2. **Publish:** flips the draft release to live via `gh api --method PATCH … -f draft=false`.
-3. **Post-publish safety net:** re-runs `scripts/verify-release-assets.sh` against the live release; if it fails, the workflow reverts back to draft so the broken release is not user-visible.
-
-At PR time, `_tests/desktop/updater-config.bats` enforces `tauri.conf.json` updater-plugin shape (`createUpdaterArtifacts`, `endpoints`, `pubkey`) and `_tests/desktop/version-pinned.bats` enforces that every release-please-managed version source stays pinned to `0.0.0`.
-
-### Changing release artifact naming or target set
-
-When changing `bundle.targets` in `tauri.conf.json`, bumping `tauri-action`, or modifying `releaseAssetNamePattern` in `desktop-release.yml`:
-
-1. Update the expected-asset list in `scripts/verify-release-assets.sh`.
-2. Regenerate the happy-case fixture `_tests/desktop/fixtures/verify-release-assets/assets-happy.json`.
-3. Update the three BATS "missing-asset" fixtures to stay valid deletions of the happy set.
-4. If `latest.json.version` format changes (e.g., gains a `v` prefix), update both the Python assertion in `verify-release-assets.sh` and the `latest-v-prefix.json` fixture case.
+The new process builds and publishes no `x86_64` artifact for macOS, on any channel — application or CLI. 0.20.0 remains the last release with an Intel build. Installed 0.19.0/0.20.0 on Intel keep running; auto-check logs an error and stays quiet, a manual check shows the raw `TargetsNotFound` error from the updater. This is accepted: no in-app messaging, no changelog entry, no farewell release. The installation page drops the Intel row without a note, starting with the first stable of the new process (until then `releases/latest` still points at 0.20.0, which has it).
