@@ -55,14 +55,7 @@ jobs:
       - name: Tag the release commit
         env:
           TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "::error::tag $TAG already exists — refusing to move it"
-            exit 1
-          fi
-          git tag "$TAG"
-          git push origin "$TAG"
+        run: bash scripts/tag-release-commit.sh --allow-reuse-same-commit "$TAG"
 
       - name: Generate beta release notes
         id: cliff
