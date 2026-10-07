@@ -574,7 +574,7 @@ test-native-cli-plist:
 
 test-desktop-config:
 	@$(REQUIRE_BATS)
-	bats _tests/desktop/updater-config.bats _tests/desktop/version-pinned.bats \
+	bats _tests/desktop/updater-config.bats \
 	  _tests/desktop/e2e-rig-deps.bats \
 	  _tests/desktop/e2e-invoke-helper.bats \
 	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \

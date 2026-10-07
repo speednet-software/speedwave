@@ -59,7 +59,7 @@ staged_fixture_repo() {
     local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
     plist_fixture "$src"
     stage_info_plist "$src" "$dest"
-    diff <(grep -v 'x-release-please-version' "$src") <(grep -v 'x-release-please-version' "$dest")
+    diff "$src" "$dest"
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$dest")" = "pl.speedwave.desktop.calendar" ]
 }
 
@@ -124,26 +124,3 @@ PY
     done
 }
 
-@test "every committed CLI plist carries both markers" {
-    assert_package_list
-    local pkg plist markers
-    for pkg in $SPW_PACKAGES; do
-        plist="$SPW_ROOT/native/macos/$pkg/Resources/Info.plist"
-        markers="$(grep -c 'x-release-please-version' "$plist" | tr -d ' ')"
-        if [ "$markers" != "2" ]; then
-            echo "$pkg/Resources/Info.plist has $markers x-release-please-version markers, expected 2" >&2
-            return 1
-        fi
-    done
-}
-
-@test "every committed CLI plist is listed in check-version-pinned.py's PINNED_GENERIC_FILES" {
-    assert_package_list
-    local pkg
-    for pkg in $SPW_PACKAGES; do
-        grep -qF "native/macos/$pkg/Resources/Info.plist" "$SPW_ROOT/scripts/check-version-pinned.py" || {
-            echo "native/macos/$pkg/Resources/Info.plist missing from check-version-pinned.py's PINNED_GENERIC_FILES" >&2
-            return 1
-        }
-    done
-}
