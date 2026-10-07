@@ -68,6 +68,7 @@ rustix = { version = "1", features = ["fs"] }
 [features]
 audio-transcription = ["dep:hound", "dep:num_cpus", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
 windows-capture = ["dep:ash", "dep:cpal", "dep:wasapi"]
+update-check = ["dep:reqwest"]
 test-support = []
 mcp-os-bundle-e2e = []
 

@@ -1,6 +1,6 @@
-//! Shared update-channel model for `update-settings.json`: the channel enum
-//! and the pure GitHub release URL/tag helpers both the desktop updater and
-//! the CLI self-updater build on.
+//! Shared update-channel model for `update-settings.json`: the channel enum,
+//! the pure GitHub release URL/tag helpers, and (behind `update-check`) the
+//! one hardened HTTP fetch both the desktop updater and the CLI build on.
 
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +82,78 @@ pub fn parse_release_tag(body: &[u8]) -> Result<String, String> {
 /// in the tag is a valid path segment and stays unescaped.
 pub fn release_manifest_url(tag: &str) -> String {
     format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}/latest.json")
+}
+
+/// Request timeout for a release-list fetch, matching the desktop updater's
+/// `http_util::DEFAULT_REQUEST_TIMEOUT` (ADR-041).
+#[cfg(feature = "update-check")]
+const RELEASE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Maximum release-list response body, matching the desktop updater's
+/// `http_util::MAX_RESPONSE_BODY_BYTES`.
+#[cfg(feature = "update-check")]
+const MAX_RELEASE_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Builds a blocking client hardened per ADR-041: no redirects, bounded
+/// timeout, Speedwave UA.
+#[cfg(feature = "update-check")]
+fn build_release_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(RELEASE_FETCH_TIMEOUT)
+        .user_agent(format!("Speedwave/{}", env!("SPEEDWAVE_VERSION")))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+/// Reads `resp`'s body, aborting past [`MAX_RELEASE_RESPONSE_BYTES`].
+#[cfg(feature = "update-check")]
+fn read_release_body_limited(resp: reqwest::blocking::Response) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RELEASE_RESPONSE_BYTES {
+            return Err(format!(
+                "GitHub releases list response too large ({len} bytes, limit {MAX_RELEASE_RESPONSE_BYTES})"
+            ));
+        }
+    }
+
+    let mut limited = resp.take(MAX_RELEASE_RESPONSE_BYTES + 1);
+    let mut buf = Vec::new();
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Failed to read GitHub releases list response: {e}"))?;
+    if buf.len() as u64 > MAX_RELEASE_RESPONSE_BYTES {
+        return Err(format!(
+            "GitHub releases list response too large (exceeded {MAX_RELEASE_RESPONSE_BYTES} byte limit)"
+        ));
+    }
+    Ok(buf)
+}
+
+/// Fetches and parses the release tag at `list_url`: no redirects followed,
+/// a non-success status or an oversized body errors before parsing.
+#[cfg(feature = "update-check")]
+fn fetch_release_tag_from(list_url: &str) -> Result<String, String> {
+    let client = build_release_client()?;
+    let resp = client
+        .get(list_url)
+        .send()
+        .map_err(|e| format!("Failed to list GitHub releases: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("GitHub releases list returned HTTP {status}"));
+    }
+    let body = read_release_body_limited(resp)?;
+    parse_release_tag(&body)
+}
+
+/// Fetches the GitHub release tag for `channel`: the single HTTP implementation
+/// the desktop updater and the CLI self-updater both call (ADR-041 hardening).
+#[cfg(feature = "update-check")]
+pub fn fetch_release_tag(channel: UpdateChannel) -> Result<String, String> {
+    fetch_release_tag_from(&release_list_url(channel))
 }
 
 #[derive(Deserialize)]
@@ -260,5 +332,97 @@ mod tests {
         let url = release_manifest_url("v0.21.0+110");
         assert!(url.contains("v0.21.0+110"));
         assert!(!url.contains("%2B"));
+    }
+}
+
+#[cfg(all(test, feature = "update-check"))]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only assertions"
+)]
+mod fetch_tests {
+    use super::*;
+
+    #[test]
+    fn fetch_release_tag_from_parses_first_entry_from_mocked_api() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/releases")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"tag_name":"v0.22.0+41"}]"#)
+            .create();
+
+        let url = format!("{}/releases", server.url());
+        let tag = fetch_release_tag_from(&url).expect("fetch tag");
+
+        assert_eq!(tag, "v0.22.0+41");
+        mock.assert();
+    }
+
+    #[test]
+    fn fetch_release_tag_from_empty_list_errors() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/releases")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create();
+
+        let url = format!("{}/releases", server.url());
+        let err = fetch_release_tag_from(&url).unwrap_err();
+
+        assert!(err.contains("tag_name"), "{err}");
+    }
+
+    #[test]
+    fn fetch_release_tag_from_http_error_status_errors() {
+        let mut server = mockito::Server::new();
+        let _mock = server.mock("GET", "/releases").with_status(500).create();
+
+        let url = format!("{}/releases", server.url());
+        let err = fetch_release_tag_from(&url).unwrap_err();
+
+        assert!(err.contains("500"), "{err}");
+    }
+
+    #[test]
+    fn fetch_release_tag_from_does_not_follow_redirects() {
+        let mut server = mockito::Server::new();
+        let target = server
+            .mock("GET", "/moved-target")
+            .with_status(200)
+            .with_body(r#"{"tag_name":"v9.9.9"}"#)
+            .expect(0)
+            .create();
+        let _redirect = server
+            .mock("GET", "/releases")
+            .with_status(301)
+            .with_header("Location", "/moved-target")
+            .create();
+
+        let url = format!("{}/releases", server.url());
+        let err = fetch_release_tag_from(&url).unwrap_err();
+
+        assert!(err.contains("301"), "{err}");
+        target.assert();
+    }
+
+    #[test]
+    fn fetch_release_tag_from_oversized_body_errors() {
+        let mut server = mockito::Server::new();
+        let oversized = vec![b' '; (MAX_RELEASE_RESPONSE_BYTES + 1) as usize];
+        let _mock = server
+            .mock("GET", "/releases")
+            .with_status(200)
+            .with_body(oversized)
+            .create();
+
+        let url = format!("{}/releases", server.url());
+        let err = fetch_release_tag_from(&url).unwrap_err();
+
+        assert!(err.contains("too large"), "{err}");
     }
 }
