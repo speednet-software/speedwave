@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::consts;
+use speedwave_runtime::update_channel::{deserialize_channel, UpdateChannel};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::AppHandle;
@@ -35,6 +36,8 @@ pub enum UpdateCheckOutcome {
 pub struct UpdateSettings {
     pub auto_check: bool,
     pub check_interval_hours: u32,
+    #[serde(default, deserialize_with = "deserialize_channel")]
+    pub channel: UpdateChannel,
 }
 
 impl Default for UpdateSettings {
@@ -42,6 +45,7 @@ impl Default for UpdateSettings {
         Self {
             auto_check: true,
             check_interval_hours: consts::UPDATE_CHECK_INTERVAL_HOURS,
+            channel: UpdateChannel::default(),
         }
     }
 }
@@ -54,7 +58,7 @@ impl UpdateSettings {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    Some(consts::data_dir().join("update-settings.json"))
+    Some(speedwave_runtime::update_channel::settings_path())
 }
 
 pub fn load_update_settings() -> UpdateSettings {
@@ -202,6 +206,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn update_settings_missing_channel_field_defaults_to_stable() {
+        let json = r#"{"auto_check":true,"check_interval_hours":24}"#;
+        let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(settings.channel, UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn update_settings_channel_stable_value() {
+        let json = r#"{"auto_check":true,"check_interval_hours":24,"channel":"stable"}"#;
+        let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(settings.channel, UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn update_settings_channel_beta_value() {
+        let json = r#"{"auto_check":true,"check_interval_hours":24,"channel":"beta"}"#;
+        let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(settings.channel, UpdateChannel::Beta);
+    }
+
+    #[test]
+    fn update_settings_unknown_channel_value_falls_back_to_stable_without_resetting_other_fields() {
+        let json = r#"{"auto_check":false,"check_interval_hours":6,"channel":"nightly"}"#;
+        let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(settings.channel, UpdateChannel::Stable);
+        assert!(!settings.auto_check);
+        assert_eq!(settings.check_interval_hours, 6);
+    }
+
+    #[test]
+    fn update_settings_default_channel_is_stable() {
+        assert_eq!(UpdateSettings::default().channel, UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn update_settings_unparsable_file_defaults_to_stable_channel() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("update-settings.json");
+        std::fs::write(&path, "not json").expect("write garbage");
+        let contents = std::fs::read_to_string(&path).expect("read");
+        let settings: UpdateSettings = serde_json::from_str(&contents).unwrap_or_default();
+        assert_eq!(settings.channel, UpdateChannel::Stable);
+    }
+
+    #[test]
     fn detect_critical_default_false() {
         assert!(!detect_critical(&None));
         assert!(!detect_critical(&Some("Normal release notes".to_string())));
@@ -233,6 +282,7 @@ mod tests {
         let mut s = UpdateSettings {
             auto_check: true,
             check_interval_hours: 0,
+            channel: UpdateChannel::Stable,
         };
         s.normalize();
         assert_eq!(s.check_interval_hours, 1);
@@ -243,6 +293,7 @@ mod tests {
         let mut s = UpdateSettings {
             auto_check: true,
             check_interval_hours: 999,
+            channel: UpdateChannel::Stable,
         };
         s.normalize();
         assert_eq!(s.check_interval_hours, 168);
@@ -254,6 +305,11 @@ mod tests {
         let settings: UpdateSettings = serde_json::from_str(json).expect("deserialize");
         assert!(settings.auto_check);
         assert_eq!(settings.check_interval_hours, 24);
+        assert_eq!(
+            settings.channel,
+            UpdateChannel::Stable,
+            "the dead update_channel key must never be read as channel"
+        );
     }
 
     #[test]
@@ -264,6 +320,7 @@ mod tests {
         let original = UpdateSettings {
             auto_check: false,
             check_interval_hours: 12,
+            channel: UpdateChannel::Beta,
         };
 
         let json = serde_json::to_string_pretty(&original).expect("serialize");
@@ -285,6 +342,7 @@ mod tests {
         let settings = UpdateSettings {
             auto_check: true,
             check_interval_hours: 6,
+            channel: UpdateChannel::Stable,
         };
 
         let json = serde_json::to_string_pretty(&settings).expect("serialize");
@@ -311,6 +369,7 @@ mod tests {
         let updated = UpdateSettings {
             auto_check: false,
             check_interval_hours: 48,
+            channel: UpdateChannel::Beta,
         };
         let json2 = serde_json::to_string_pretty(&updated).expect("serialize");
         std::fs::write(&tmp_path, &json2).expect("write tmp");
@@ -330,11 +389,13 @@ mod tests {
         let settings = UpdateSettings {
             auto_check: true,
             check_interval_hours: 0,
+            channel: UpdateChannel::Stable,
         };
 
         let mut clamped = UpdateSettings {
             check_interval_hours: settings.check_interval_hours,
             auto_check: settings.auto_check,
+            channel: settings.channel,
         };
         clamped.normalize();
         let json = serde_json::to_string_pretty(&clamped).expect("serialize");
@@ -389,6 +450,7 @@ mod tests {
         let initial = UpdateSettings {
             auto_check: true,
             check_interval_hours: 24,
+            channel: UpdateChannel::Stable,
         };
         let json = serde_json::to_string_pretty(&initial).expect("serialize");
         std::fs::write(&path, &json).expect("write");

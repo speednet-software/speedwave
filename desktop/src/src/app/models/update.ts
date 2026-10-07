@@ -14,6 +14,7 @@ export type UpdateCheckOutcome =
 export interface UpdateSettings {
   auto_check: boolean;
   check_interval_hours: number;
+  channel?: 'stable' | 'beta';
 }
 
 /** A configured project entry from ~/.speedwave/config.json. */

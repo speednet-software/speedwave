@@ -25,6 +25,9 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
           <div>
             <div class="mono text-[12px] text-[var(--ink)]">
               speedwave {{ currentVersion ? 'v' + currentVersion : '' }}
+              @if (currentVersion) {
+                · {{ channelLabel() }}
+              }
             </div>
             <div class="mono mt-0.5 text-[11px]" [class]="updateStatusClass()">
               {{ updateStatusText() }}
@@ -53,6 +56,38 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
             }
           </div>
         </div>
+        <div class="flex flex-wrap items-center gap-2 border-t border-[var(--line)] px-4 py-3">
+          <span class="mono text-[11px] text-[var(--ink-mute)]">Update channel:</span>
+          <button
+            type="button"
+            class="mono rounded border px-3 py-1 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+            [class]="channelButtonClass('stable')"
+            data-testid="settings-channel-stable"
+            (click)="setChannel('stable')"
+            [disabled]="updateInstalling"
+          >
+            stable
+          </button>
+          <button
+            type="button"
+            class="mono rounded border px-3 py-1 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+            [class]="channelButtonClass('beta')"
+            data-testid="settings-channel-beta"
+            (click)="setChannel('beta')"
+            [disabled]="updateInstalling"
+          >
+            beta
+          </button>
+        </div>
+        @if (channelLabel() === 'beta') {
+          <p
+            class="mono border-t border-[var(--line)] px-4 py-3 text-[11px] text-[var(--ink-mute)]"
+            data-testid="settings-channel-beta-warning"
+          >
+            Beta installs every build merged to dev. It may break and comes with no support.
+            Switching back to stable keeps the current version until a newer stable release ships.
+          </p>
+        }
       </div>
 
       @if (updateInstallError) {
@@ -77,6 +112,8 @@ export class UpdateSectionComponent implements OnInit {
   /** Always true; auto-check is non-negotiable. */
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
+  /** `undefined` until settings load; a save omits `channel` while it stays `undefined`, so opening Settings never writes a `channel` the file never had. */
+  updateChannel?: 'stable' | 'beta';
   updateChecking = false;
   updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
@@ -110,6 +147,21 @@ export class UpdateSectionComponent implements OnInit {
     return 'text-[var(--ink-mute)]';
   }
 
+  /** Current channel for display; missing settings read as `stable`. */
+  channelLabel(): 'stable' | 'beta' {
+    return this.updateChannel ?? 'stable';
+  }
+
+  /**
+   * Tailwind class for a channel button: highlighted when it is the active channel.
+   * @param channel - The channel this button represents.
+   */
+  channelButtonClass(channel: 'stable' | 'beta'): string {
+    return channel === this.channelLabel()
+      ? 'border-[var(--accent)] text-[var(--ink)]'
+      : 'border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink)] hover:bg-[var(--bg-3)]';
+  }
+
   private async loadCurrentVersion(): Promise<void> {
     try {
       this.currentVersion = await this.tauri.getVersion();
@@ -120,6 +172,7 @@ export class UpdateSectionComponent implements OnInit {
   private async loadUpdateSettings(): Promise<void> {
     try {
       const settings = await this.tauri.invoke<UpdateSettings>('get_update_settings');
+      this.updateChannel = settings.channel;
       const needsRewrite =
         !settings.auto_check ||
         settings.check_interval_hours !== UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
@@ -132,17 +185,31 @@ export class UpdateSectionComponent implements OnInit {
 
   private async saveUpdateSettings(): Promise<void> {
     try {
-      await this.tauri.invoke('set_update_settings', {
-        settings: {
-          auto_check: this.updateAutoCheck,
-          check_interval_hours: this.updateIntervalHours,
-        },
-      });
+      const settings: UpdateSettings = {
+        auto_check: this.updateAutoCheck,
+        check_interval_hours: this.updateIntervalHours,
+      };
+      if (this.updateChannel !== undefined) {
+        settings.channel = this.updateChannel;
+      }
+      await this.tauri.invoke('set_update_settings', { settings });
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       this.errorOccurred.emit(this.error);
       this.cdr.markForCheck();
     }
+  }
+
+  /**
+   * Switches the update channel, persists it and immediately checks for updates on the new channel.
+   * @param channel - The channel to switch to.
+   */
+  async setChannel(channel: 'stable' | 'beta'): Promise<void> {
+    if (this.updateInstalling || channel === this.channelLabel()) return;
+    this.updateChannel = channel;
+    this.cdr.markForCheck();
+    await this.saveUpdateSettings();
+    await this.checkForUpdate();
   }
 
   /** Manually checks for available updates. */
