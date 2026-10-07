@@ -137,12 +137,12 @@ PY
     done
 }
 
-@test "every committed CLI plist is listed in release-please extra-files" {
+@test "every committed CLI plist is listed in check-version-pinned.py's PINNED_GENERIC_FILES" {
     assert_package_list
     local pkg
     for pkg in $SPW_PACKAGES; do
-        grep -qF "native/macos/$pkg/Resources/Info.plist" "$SPW_ROOT/release-please-config.json" || {
-            echo "native/macos/$pkg/Resources/Info.plist missing from release-please extra-files" >&2
+        grep -qF "native/macos/$pkg/Resources/Info.plist" "$SPW_ROOT/scripts/check-version-pinned.py" || {
+            echo "native/macos/$pkg/Resources/Info.plist missing from check-version-pinned.py's PINNED_GENERIC_FILES" >&2
             return 1
         }
     done
