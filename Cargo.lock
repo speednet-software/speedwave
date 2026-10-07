@@ -2775,6 +2775,7 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "reqwest",
  "self_update",
  "semver",
  "serde",
