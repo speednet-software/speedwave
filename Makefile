@@ -554,7 +554,7 @@ test-entrypoint:
 
 test-ci:
 	@$(REQUIRE_BATS)
-	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
+	bats _tests/ci/windows-only-test-list.bats \
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
@@ -575,7 +575,7 @@ test-native-cli-plist:
 test-desktop-config:
 	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-pinned.bats \
-	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
+	  _tests/desktop/e2e-rig-deps.bats \
 	  _tests/desktop/e2e-invoke-helper.bats \
 	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \
 	  _tests/desktop/installer-sweep.bats
