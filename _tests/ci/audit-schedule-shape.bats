@@ -11,8 +11,10 @@ SCHEDULE_WORKFLOW="$REPO_ROOT/.github/workflows/audit-schedule.yml"
 }
 
 @test "the time-dependent absolute audit never runs inside test.yml (PR lane stays a diff)" {
-  ! grep -q 'audit-schedule' "$TEST_WORKFLOW"
-  ! grep -q 'audit-issue.sh' "$TEST_WORKFLOW"
+  run grep -c 'audit-schedule' "$TEST_WORKFLOW"
+  [ "$output" = "0" ]
+  run grep -c 'audit-issue.sh' "$TEST_WORKFLOW"
+  [ "$output" = "0" ]
   grep -q 'audit-diff.sh' "$TEST_WORKFLOW"
 }
 

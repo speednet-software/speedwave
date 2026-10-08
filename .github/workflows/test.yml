@@ -327,7 +327,12 @@ jobs:
         run: make test-ci
 
       - name: Install actionlint
-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.12
+        run: |
+          curl -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSL -o checksums.txt https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          grep 'actionlint_1.7.12_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
 
       - name: actionlint (invalid workflow, e.g. typo'd needs, bad expressions, unknown events/inputs, shellcheck of run steps)
         run: ./actionlint -color
@@ -340,23 +345,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
         with:
-          node-version-file: .node-version
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-audit-
+          rust-cache-workspaces: |
+            . -> target
+            ./desktop/src-tauri -> target
+          node-cache-dependency-path: |
+            mcp-servers/package-lock.json
+            desktop/src/package-lock.json
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -585,13 +582,19 @@ jobs:
 
       - name: Resolve the PR's commit range
         id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo "base=${{ github.event.merge_group.base_sha }}" >> "$GITHUB_OUTPUT"
-            echo "head=${{ github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            echo "base=$MERGE_GROUP_BASE_SHA" >> "$GITHUB_OUTPUT"
+            echo "head=$MERGE_GROUP_HEAD_SHA" >> "$GITHUB_OUTPUT"
           else
-            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            echo "base=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
+            echo "head=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install gitleaks

@@ -146,3 +146,39 @@ _on_block() {
         [[ "$block" != *"rig-lane"* ]]
     done
 }
+
+@test "test.yml never interpolates github.event.* straight into a run: step (named failure: untrusted payload reaches the shell unescaped, route it through env: instead)" {
+    run python3 - "$TEST_WORKFLOW" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+lines = open(path).read().split("\n")
+pattern = re.compile(r"\$\{\{\s*github\.event\.")
+in_run = False
+run_indent = None
+hits = []
+for i, line in enumerate(lines, 1):
+    block_start = re.match(r"^(\s*)run:\s*[|>]?\s*$", line)
+    inline = re.match(r"^(\s*)run:\s*(.+)$", line)
+    if in_run:
+        if line.strip() == "":
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= run_indent:
+            in_run = False
+        elif pattern.search(line):
+            hits.append((i, line))
+            continue
+    if block_start:
+        in_run = True
+        run_indent = len(block_start.group(1))
+    elif inline and pattern.search(inline.group(2)):
+        hits.append((i, line))
+
+for lineno, text in hits:
+    print(f"{lineno}: {text}")
+sys.exit(1 if hits else 0)
+PY
+    [ "$status" -eq 0 ]
+}

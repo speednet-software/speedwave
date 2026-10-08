@@ -22,23 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
         with:
-          node-version-file: .node-version
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-audit-schedule-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-audit-schedule-
+          rust-cache-workspaces: |
+            . -> target
+            ./desktop/src-tauri -> target
+          node-cache-dependency-path: |
+            mcp-servers/package-lock.json
+            desktop/src/package-lock.json
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
