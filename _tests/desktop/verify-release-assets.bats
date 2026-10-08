@@ -148,6 +148,45 @@ setup() {
 }
 
 
+@test "beta version with build number passes with assets named as uploaded" {
+  export VERSION=0.21.0+115
+  export TAG_NAME=v0.21.0+115
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-beta.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-beta.json"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+
+@test "beta version passes when GitHub stores '+' in asset names as '.'" {
+  export VERSION=0.21.0+115
+  export TAG_NAME=v0.21.0+115
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-beta-dotted.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-beta.json"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+
+@test "beta version missing a signature fails with the expected name" {
+  export VERSION=0.21.0+115
+  export TAG_NAME=v0.21.0+115
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-beta-missing-macos-sig.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-beta.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing signature: Speedwave_0.21.0+115_macOS_Apple_Silicon.app.tar.gz.sig" ]]
+}
+
+
+@test "non-numeric build metadata in VERSION fails" {
+  export VERSION=0.21.0+abc
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Invalid VERSION format" ]]
+}
+
+
 @test "missing latest.json asset fails with expected message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-latest.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
