@@ -92,8 +92,8 @@ EOF
   run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
   [ "$status" -eq 0 ]
   grep -q "issue edit 42" "$GH_LOG"
-  ! grep -q "issue create" "$GH_LOG"
-  ! grep -q "issue close" "$GH_LOG"
+  run grep -cE 'issue (create|close)' "$GH_LOG"
+  [ "$output" = "0" ]
 }
 
 @test "a red audit with duplicate open issues updates the oldest and closes the rest" {
