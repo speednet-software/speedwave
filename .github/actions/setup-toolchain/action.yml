@@ -1,5 +1,5 @@
 name: 'Setup Toolchain'
-description: 'Sets up Node.js (version from .node-version) + Rust stable + swatinem/rust-cache. Shared by desktop-build.yml and build-publish.yml so the pinned action SHAs live in one place.'
+description: 'Sets up Node.js (version from .node-version) + Rust stable + swatinem/rust-cache. Shared by the build lane in test.yml and by build-publish.yml so the pinned action SHAs live in one place.'
 inputs:
   rust-targets:
     description: 'Comma-separated rustup targets to install with the toolchain (empty for none)'

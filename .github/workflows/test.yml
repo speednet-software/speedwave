@@ -1,10 +1,8 @@
 name: Tests
 
 on:
-  push:
-    branches: [main, dev]
   pull_request:
-    branches: [main, dev]
+  merge_group:
 
 permissions:
   contents: read
@@ -90,9 +88,9 @@ jobs:
         working-directory: mcp-servers
         run: npx eslint .
 
-  test:
+  test-rust:
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -111,56 +109,100 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock', 'containers/proxy/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
 
+      - name: Install cmake
+        run: brew install cmake
+
+      - name: Fetch cargo dependencies
+        run: cargo fetch
+
+      - name: Rust coverage (>=70% lines, catches an untested regression before merge)
+        run: make coverage-rust
+
+      - name: Audio transcription tests
+        run: make test-transcription
+
+      - name: Proxy tests
+        run: make test-proxy
+
+  test-rust-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-runtime-
+
+      - name: cargo test (full suite incl. test-support)
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
+
+      - name: Verify .gitattributes survives core.autocrlf=true checkout
+        shell: bash
+        env:
+          REPO_PATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/recheck"
+          rm -rf "$tmp"
+          git -c core.autocrlf=true clone "$REPO_PATH" "$tmp"
+          cd "$tmp"
+          fail=0
+          while IFS= read -r -d '' f; do
+            if ! cmp -s <(tr -d "$(printf '\r')" < "$f") "$f"; then
+              echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
+              fail=1
+            fi
+          done < <(find containers -type f -name '*.sh' -print0)
+          exit "$fail"
+
+  test-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: .node-version
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            mcp-servers/package-lock.json
-
-      - name: Install dependencies
-        run: |
-          cargo fetch
-          npm ci --ignore-scripts
-          cd mcp-servers && npm ci
-
-      - name: Install cmake
-        run: brew install cmake
+          cache-dependency-path: mcp-servers/package-lock.json
 
       - name: Install wasm toolchain (PII engine)
         run: |
           rustup target add wasm32-unknown-unknown
           npm install -g wasm-pack
 
-      - name: Rust tests (incl. transcription)
-        run: make test-rust
-
-      - name: Proxy tests
-        run: make test-proxy
+      - name: Install dependencies
+        working-directory: mcp-servers
+        run: npm ci
 
       - name: MCP tests + coverage
         run: make coverage-mcp
 
-      - name: mcp-os bundle upgrade-path test
-        run: make test-mcp-os-bundle
-
       - name: Office Python script tests
         run: make test-mcp-office-py
 
-      - name: Install bats
-        run: brew install bats-core
-
-      - name: Entrypoint tests
-        run: make test-entrypoint
-
-      - name: CI workflow tests
-        run: make test-ci
-
-  desktop:
+  test-desktop:
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -218,6 +260,9 @@ jobs:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: make test-desktop-run
 
+      - name: mcp-os bundle upgrade-path test
+        run: make test-mcp-os-bundle
+
       - name: Angular ESLint
         working-directory: desktop/src
         run: npx eslint 'src/**/*.ts'
@@ -237,6 +282,55 @@ jobs:
 
       - name: Desktop bats tests
         run: make test-desktop-build
+
+  test-cli:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cli-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-cli-
+
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: CLI e2e trio (no VM)
+        run: make test-e2e
+
+      - name: Entrypoint tests
+        run: make test-entrypoint
+
+  ci-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: CI workflow shape tests
+        run: make test-ci
+
+      - name: Install actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.12
+
+      - name: actionlint (invalid workflow, e.g. typo'd needs, bad expressions, unknown events/inputs, shellcheck of run steps)
+        run: ./actionlint -color
 
   audit:
     runs-on: ubuntu-latest
@@ -287,8 +381,10 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
       - name: Compute app version
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch '${{ github.head_ref || github.ref_name }}')" >> "$GITHUB_ENV"
+          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")" >> "$GITHUB_ENV"
 
       - name: Build native macOS CLI binaries (universal)
         run: scripts/build-native-macos.sh
@@ -304,51 +400,6 @@ jobs:
 
       - name: Check the build did not modify a tracked file
         run: git diff --exit-code
-
-  runtime-windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-runtime-
-
-      - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
-
-      - name: Verify .gitattributes survives core.autocrlf=true checkout
-        shell: bash
-        env:
-          REPO_PATH: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          tmp="$RUNNER_TEMP/recheck"
-          rm -rf "$tmp"
-          git -c core.autocrlf=true clone "$REPO_PATH" "$tmp"
-          cd "$tmp"
-          fail=0
-          while IFS= read -r -d '' f; do
-            if ! tr -d "$(printf '\r')" < "$f" | cmp -s - "$f"; then
-              echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
-              fail=1
-            fi
-          done < <(find containers -type f -name '*.sh' -print0)
-          exit "$fail"
 
   desktop-windows-check:
     runs-on: windows-latest
@@ -434,10 +485,142 @@ jobs:
           wipe_data_dir_names_failing_path_on_error
           wipe_data_dir_partial_failure_still_removes_deletable_sibling
 
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        shell: bash
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Use a short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          echo 'CARGO_TARGET_DIR=D:\st' >> "$GITHUB_ENV"
+          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
+      - name: Cache the short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: D:\st
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-targets: ${{ matrix.rust-targets }}
+          rust-cache-workspaces: |
+            . -> target
+            ./desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: desktop/src
+
+      - name: Compute app version
+        id: version
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")"
+          echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+      - name: Prepare desktop bundle
+        uses: ./.github/actions/prepare-desktop-bundle
+        with:
+          platform: ${{ matrix.platform }}
+          args: ${{ matrix.args }}
+
+      - name: Build Tauri app
+        working-directory: desktop/src-tauri
+        shell: bash
+        env:
+          CI: true
+          MATRIX_ARGS: ${{ matrix.args }}
+        run: |
+          read -ra ARGS <<< "$MATRIX_ARGS"
+          CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
+          npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
+
+      - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/check-nsis-update-reset.ps1 -BundleDir "$env:CARGO_TARGET_DIR\release\bundle\nsis"
+
+      - name: Check the build did not modify a tracked file
+        shell: bash
+        run: git diff --exit-code
+
+  architecture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "No architecture checks defined yet, content is SPEED-750."
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the PR's commit range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            echo "base=${{ github.event.merge_group.base_sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install gitleaks
+        run: |
+          curl -fsSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          curl -fsSL -o checksums.txt https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
+          grep 'gitleaks_8.30.1_linux_x64.tar.gz$' checksums.txt | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+
+      - name: Secret scan of the PR's commits (a leaked token/key enters a tracked file)
+        run: ./gitleaks git --log-opts="${{ steps.range.outputs.base }}..${{ steps.range.outputs.head }}" --no-banner
 
   ci-gate:
     if: always()
-    needs: [lint, test, desktop, audit, swift, runtime-windows, desktop-windows-check]
+    needs:
+      - lint
+      - test-rust
+      - test-rust-windows
+      - test-mcp
+      - test-desktop
+      - test-cli
+      - ci-config
+      - audit
+      - swift
+      - desktop-windows-check
+      - build
+      - architecture
+      - security
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

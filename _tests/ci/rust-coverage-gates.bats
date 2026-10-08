@@ -16,9 +16,9 @@ _makefile_test_rust_cargo_line() {
     ' "$MAKEFILE"
 }
 
-_workflow_runtime_windows_cargo_lines() {
+_workflow_test_rust_windows_cargo_lines() {
     awk '
-        /^  runtime-windows:/ { in_job=1; next }
+        /^  test-rust-windows:/ { in_job=1; next }
         in_job && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ { exit }
         in_job && /^[[:space:]]*run: cargo test/ {
             sub(/^[[:space:]]*run:[[:space:]]*/, "")
@@ -35,16 +35,16 @@ _makefile_check_clippy_cargo_lines() {
     ' "$MAKEFILE"
 }
 
-@test "runtime-windows runs exactly the cargo test invocation of make test-rust" {
+@test "test-rust-windows runs exactly the cargo test invocation of make test-rust" {
     makefile_line="$(_makefile_test_rust_cargo_line)"
     [ -n "$makefile_line" ]
 
-    workflow_lines="$(_workflow_runtime_windows_cargo_lines)"
+    workflow_lines="$(_workflow_test_rust_windows_cargo_lines)"
     [ -n "$workflow_lines" ]
 
     if [ "$workflow_lines" != "$makefile_line" ]; then
-        echo "Makefile test-rust runs: $makefile_line"
-        echo "runtime-windows runs:    $workflow_lines"
+        echo "Makefile test-rust runs:     $makefile_line"
+        echo "test-rust-windows runs:      $workflow_lines"
         echo "Keep the workflow's cargo test line identical to make test-rust's."
         return 1
     fi
