@@ -23,6 +23,19 @@ impl std::fmt::Display for UpdateChannel {
     }
 }
 
+#[derive(Deserialize)]
+struct ChannelOnly {
+    #[serde(default, deserialize_with = "deserialize_channel")]
+    channel: Option<UpdateChannel>,
+}
+
+const SETTINGS_FILE_NAME: &str = "update-settings.json";
+
+const REPO_OWNER: &str = "speednet-software";
+const REPO_NAME: &str = "speedwave";
+
+const MAX_RELEASE_RESPONSE_BYTES: u64 = crate::consts::HTTP_MAX_RESPONSE_BODY_BYTES as u64;
+
 /// `serde(deserialize_with)` for an optional `channel` field: anything other
 /// than the strings `"beta"`/`"stable"` deserializes as `None`.
 pub fn deserialize_channel<'de, D>(deserializer: D) -> Result<Option<UpdateChannel>, D::Error>
@@ -37,20 +50,32 @@ where
     })
 }
 
-/// File name of the shared update-settings file under [`crate::consts::data_dir`].
-pub const SETTINGS_FILE_NAME: &str = "update-settings.json";
-
 /// Path to the shared update-settings file read by both the desktop app and the CLI.
 pub fn settings_path() -> std::path::PathBuf {
     crate::consts::data_dir().join(SETTINGS_FILE_NAME)
 }
 
-const REPO_OWNER: &str = "speednet-software";
-const REPO_NAME: &str = "speedwave";
+/// Builds the GitHub release-download manifest URL for a tag; a literal `+`
+/// in the tag is a valid path segment and stays unescaped.
+pub fn release_manifest_url(tag: &str) -> String {
+    format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}/latest.json")
+}
+
+/// Fetches the GitHub release tag for `channel`: the single HTTP implementation
+/// the desktop updater and the CLI self-updater both call (ADR-041 hardening).
+pub fn fetch_release_tag(channel: UpdateChannel) -> Result<String, String> {
+    fetch_release_tag_from(&release_list_url(channel))
+}
+
+/// Reads the effective `channel` from the shared settings file; missing,
+/// unparsable, or unrecognized content all read as `stable`.
+pub fn read_update_channel() -> UpdateChannel {
+    read_update_channel_at(&settings_path())
+}
 
 /// GitHub API URL for the release to check on `channel`: `/releases/latest`
 /// for stable, the newest-first releases page for beta.
-pub fn release_list_url(channel: UpdateChannel) -> String {
+fn release_list_url(channel: UpdateChannel) -> String {
     match channel {
         UpdateChannel::Stable => {
             format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest")
@@ -61,29 +86,21 @@ pub fn release_list_url(channel: UpdateChannel) -> String {
     }
 }
 
-/// Extracts `tag_name` from a GitHub releases API response: a single release
-/// object (`/releases/latest`) or a list (`/releases?per_page=1`, newest first).
-pub fn parse_release_tag(body: &[u8]) -> Result<String, String> {
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|e| format!("GitHub API response is not valid JSON: {e}"))?;
-    let entry = value
-        .as_array()
-        .and_then(|list| list.first())
-        .unwrap_or(&value);
-    entry
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| "GitHub API response has no tag_name".to_string())
+/// Fetches and parses the release tag at `list_url`: no redirects followed,
+/// a non-success status or an oversized body errors before parsing.
+fn fetch_release_tag_from(list_url: &str) -> Result<String, String> {
+    let client = build_release_client()?;
+    let resp = client
+        .get(list_url)
+        .send()
+        .map_err(|e| format!("Failed to list GitHub releases: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("GitHub releases list returned HTTP {status}"));
+    }
+    let body = read_release_body_limited(resp)?;
+    parse_release_tag(&body)
 }
-
-/// Builds the GitHub release-download manifest URL for a tag; a literal `+`
-/// in the tag is a valid path segment and stays unescaped.
-pub fn release_manifest_url(tag: &str) -> String {
-    format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}/latest.json")
-}
-
-const MAX_RELEASE_RESPONSE_BYTES: u64 = crate::consts::HTTP_MAX_RESPONSE_BODY_BYTES as u64;
 
 /// Builds a blocking client hardened per ADR-041: no redirects, bounded
 /// timeout, Speedwave UA.
@@ -121,32 +138,20 @@ fn read_release_body_limited(resp: reqwest::blocking::Response) -> Result<Vec<u8
     Ok(buf)
 }
 
-/// Fetches and parses the release tag at `list_url`: no redirects followed,
-/// a non-success status or an oversized body errors before parsing.
-fn fetch_release_tag_from(list_url: &str) -> Result<String, String> {
-    let client = build_release_client()?;
-    let resp = client
-        .get(list_url)
-        .send()
-        .map_err(|e| format!("Failed to list GitHub releases: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("GitHub releases list returned HTTP {status}"));
-    }
-    let body = read_release_body_limited(resp)?;
-    parse_release_tag(&body)
-}
-
-/// Fetches the GitHub release tag for `channel`: the single HTTP implementation
-/// the desktop updater and the CLI self-updater both call (ADR-041 hardening).
-pub fn fetch_release_tag(channel: UpdateChannel) -> Result<String, String> {
-    fetch_release_tag_from(&release_list_url(channel))
-}
-
-#[derive(Deserialize)]
-struct ChannelOnly {
-    #[serde(default, deserialize_with = "deserialize_channel")]
-    channel: Option<UpdateChannel>,
+/// Extracts `tag_name` from a GitHub releases API response: a single release
+/// object (`/releases/latest`) or a list (`/releases?per_page=1`, newest first).
+fn parse_release_tag(body: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("GitHub API response is not valid JSON: {e}"))?;
+    let entry = value
+        .as_array()
+        .and_then(|list| list.first())
+        .unwrap_or(&value);
+    entry
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "GitHub API response has no tag_name".to_string())
 }
 
 fn read_update_channel_at(path: &std::path::Path) -> UpdateChannel {
@@ -159,14 +164,12 @@ fn read_update_channel_at(path: &std::path::Path) -> UpdateChannel {
         .unwrap_or_default()
 }
 
-/// Reads the effective `channel` from the shared settings file; missing,
-/// unparsable, or unrecognized content all read as `stable`.
-pub fn read_update_channel() -> UpdateChannel {
-    read_update_channel_at(&settings_path())
-}
-
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test-only assertions")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only assertions"
+)]
 mod tests {
     use super::*;
 
@@ -320,16 +323,6 @@ mod tests {
         assert!(url.contains("v0.21.0+110"));
         assert!(!url.contains("%2B"));
     }
-}
-
-#[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test-only assertions"
-)]
-mod fetch_tests {
-    use super::*;
 
     #[test]
     fn fetch_release_tag_from_parses_first_entry_from_mocked_api() {
