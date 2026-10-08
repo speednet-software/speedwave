@@ -35,7 +35,7 @@ Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain
 
 ### Running Tests
 
-The required CI checks on every PR to `dev` (macOS + Windows) are the test and quality gate; the commands below are optional for a local pass. The pre-push hook runs only `make check-fmt` (fast format check, no builds/tests).
+The required CI checks on every PR to `dev` (macOS + Windows) are the test and quality gate; the commands below are optional for a local pass. There are no git hooks: run `make check-fmt` (fast format check, no builds/tests) and the test targets you touched before committing.
 
 ```bash
 # Run all tests (Rust + MCP) — optional locally; CI runs it
@@ -59,7 +59,7 @@ make check-all
 
 ## Commit Conventions
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/). Commit messages are validated by commitlint via a git hook.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/). The PR title is validated by commitlint in the required `validate` check (`.github/workflows/pr-title.yml`), since a squash merge turns it into the commit message on `dev`.
 
 Format: `type(scope): description`
 
