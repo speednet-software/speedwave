@@ -13,6 +13,14 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     ! grep -qE "^  (push|pull_request|workflow_dispatch):" "$WORKFLOW"
 }
 
+@test "the draft release is titled with the bare tag, not a product-name prefix" {
+    grep -qF -- '--title "$TAG" \' "$WORKFLOW"
+    if grep -qF -- '--title "Speedwave $TAG"' "$WORKFLOW"; then
+        echo "ERROR: release titles are the bare tag (e.g. v0.20.0), matching earlier releases" >&2
+        return 1
+    fi
+}
+
 @test "workflow imports Apple certificate into keychain before tauri-action" {
     import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
     tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
@@ -148,7 +156,7 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     job_line=$(grep -n "^  delete-draft-on-failure:$" "$WORKFLOW" | head -1 | cut -d: -f1)
     [ -n "$job_line" ]
     block=$(awk -v start="$job_line" 'NR>=start && NR<=start+2' "$WORKFLOW")
-    for j in draft publish-tauri cli publish; do
+    for j in draft publish-tauri publish; do
         echo "$block" | grep -qF "$j" || { echo "ERROR: delete-draft-on-failure does not need '$j'" >&2; return 1; }
     done
 }
@@ -204,13 +212,13 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
     sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'windows-latest'"
 }
 
-@test "both Windows-building jobs use the shared azure-signing-login action" {
-    [ "$(grep -c "uses: ./.github/actions/azure-signing-login" "$WORKFLOW")" -eq 2 ]
+@test "publish-tauri is the one job with a Windows signing login (the standalone cli job is gone)" {
+    [ "$(grep -c "uses: ./.github/actions/azure-signing-login" "$WORKFLOW")" -eq 1 ]
 }
 
-@test "jobs that sign grant id-token: write and run in the caller's environment" {
-    [ "$(grep -c "^      id-token: write$" "$WORKFLOW")" -eq 2 ]
-    [ "$(grep -cF '    environment: ${{ inputs.environment }}' "$WORKFLOW")" -eq 4 ]
+@test "the job that signs grants id-token: write and every job runs in the caller's environment" {
+    [ "$(grep -c "^      id-token: write$" "$WORKFLOW")" -eq 1 ]
+    [ "$(grep -cF '    environment: ${{ inputs.environment }}' "$WORKFLOW")" -eq 3 ]
 }
 
 @test "every caller of build-publish.yml grants it contents: read and id-token: write" {
@@ -228,7 +236,7 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
 
 @test "every signing login is followed at once by the Artifact Signing token fetch" {
     token_run="run: az account get-access-token --resource https://codesigning.azure.net --output none"
-    [ "$(grep -cF "$token_run" "$WORKFLOW")" -eq 2 ]
+    [ "$(grep -cF "$token_run" "$WORKFLOW")" -eq 1 ]
     logins=$(grep -n "uses: ./.github/actions/azure-signing-login" "$WORKFLOW" | cut -d: -f1)
     [ -n "$logins" ]
     for login_line in $logins; do
@@ -242,24 +250,27 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
 
 @test "the Artifact Signing token fetch is skipped when signing is not configured" {
     grep -A1 "name: Cache the Artifact Signing token (Windows)" "$WORKFLOW" | grep "if:" > "$BATS_TEST_TMPDIR/guards"
-    [ "$(wc -l < "$BATS_TEST_TMPDIR/guards")" -eq 2 ]
-    [ "$(grep -cF "&& vars.AZURE_CLIENT_ID != ''" "$BATS_TEST_TMPDIR/guards")" -eq 2 ]
+    [ "$(wc -l < "$BATS_TEST_TMPDIR/guards")" -eq 1 ]
+    [ "$(grep -cF "&& vars.AZURE_CLIENT_ID != ''" "$BATS_TEST_TMPDIR/guards")" -eq 1 ]
 }
 
-@test "cli job signs the Windows CLI before packaging it" {
-    sign_line=$(grep -n "name: Sign CLI binary (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
+@test "the standalone Windows CLI archive packages the same copy tauri's beforeBundleCommand already signed" {
+    tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
     pack_line=$(grep -n "name: Package CLI (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
-    [ -n "$sign_line" ]
+    [ -n "$tauri_line" ]
     [ -n "$pack_line" ]
-    [ "$sign_line" -lt "$pack_line" ]
-    grep -qF 'sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\target\$env:TARGET\release\speedwave.exe"' "$WORKFLOW"
+    [ "$tauri_line" -lt "$pack_line" ]
+    grep -qF 'Compress-Archive -Path "desktop/src-tauri/cli/speedwave.exe"' "$WORKFLOW"
+
+    local tauri_windows_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.conf.json"
+    grep -qF "sign-windows-binaries.ps1 -Bundled" "$tauri_windows_conf"
+    local sign_script="$BATS_TEST_DIRNAME/../../scripts/sign-windows-binaries.ps1"
+    grep -qF "'cli\\speedwave.exe'" "$sign_script"
 }
 
-@test "every file the workflow hands to the signing script is a rooted path" {
-    grep -F 'sign-windows-binaries.ps1 "' "$WORKFLOW" > "$BATS_TEST_TMPDIR/calls"
-    [ -s "$BATS_TEST_TMPDIR/calls" ]
-    if grep -vF 'sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\' "$BATS_TEST_TMPDIR/calls"; then
-        echo "ERROR: Invoke-ArtifactSigning rejects a relative path ('is not rooted'); pass \$env:GITHUB_WORKSPACE\\..." >&2
+@test "no job calls sign-windows-binaries.ps1 with an explicit file path (there is no longer a separately-built CLI to sign)" {
+    if grep -qF 'sign-windows-binaries.ps1 "' "$WORKFLOW"; then
+        echo "ERROR: build-publish.yml must not pass an explicit path to sign-windows-binaries.ps1; the shipped CLI is the bundle copy tauri's beforeBundleCommand (-Bundled) already signs" >&2
         return 1
     fi
 }
@@ -287,18 +298,29 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
     grep -qF "allow-no-subscriptions: true" "$SIGNING_LOGIN_ACTION"
 }
 
-@test "the cli job builds with SPEEDWAVE_VERSION from the caller's computed version, so the released CLI version matches the release tag" {
-    build_line=$(grep -n "name: Build CLI" "$WORKFLOW" | head -1 | cut -d: -f1)
-    [ -n "$build_line" ]
-    block=$(awk -v start="$build_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
-    echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ inputs.version }}'
-    echo "$block" | grep -qF 'cargo build --release'
+@test "the CLI archives are named from the caller's computed version, so the released CLI matches the release tag" {
+    for step in "Package CLI (unix)" "Package CLI (windows)"; do
+        line=$(grep -n "name: $step" "$WORKFLOW" | head -1 | cut -d: -f1)
+        [ -n "$line" ] || { echo "ERROR: step '$step' not found" >&2; return 1; }
+        block=$(awk -v start="$line" 'NR>=start && NR<=start+6' "$WORKFLOW")
+        echo "$block" | grep -qF 'VERSION: ${{ inputs.version }}' || { echo "ERROR: '$step' does not use inputs.version" >&2; return 1; }
+    done
 }
 
-@test "the publish-tauri job builds with SPEEDWAVE_VERSION from the caller's computed version, so the released CLI/crates version matches the Tauri app version" {
-    tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
-    [ -n "$tauri_line" ]
-    block=$(awk -v start="$tauri_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
+@test "no cli job remains; the CLI is built once, by prepare-desktop-bundle, and shipped from publish-tauri" {
+    if grep -qE "^  cli:$" "$WORKFLOW"; then
+        echo "ERROR: a 'cli' job still exists; SPEED-767 merges it into publish-tauri" >&2
+        return 1
+    fi
+    grep -qF "uses: ./.github/actions/prepare-desktop-bundle" "$WORKFLOW"
+}
+
+@test "publish-tauri sets SPEEDWAVE_VERSION to inputs.version at job level, so every step (the tauri build and the CLI it bundles and ships standalone) sees the same version" {
+    job_line=$(grep -n "^  publish-tauri:$" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$job_line" ]
+    steps_line=$(awk -v start="$job_line" 'NR>start && /^    steps:$/ { print NR; exit }' "$WORKFLOW")
+    [ -n "$steps_line" ]
+    block=$(awk -v start="$job_line" -v stop="$steps_line" 'NR>=start && NR<=stop' "$WORKFLOW")
     echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ inputs.version }}'
 }
 
