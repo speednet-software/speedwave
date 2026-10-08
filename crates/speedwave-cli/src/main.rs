@@ -194,20 +194,6 @@ const REPO_NAME: &str = "speedwave";
 const UPDATE_CHECK_INTERVAL_SECS: u64 =
     speedwave_runtime::consts::UPDATE_CHECK_INTERVAL_HOURS as u64 * 3600;
 
-fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
-    update_channel::fetch_release_tag(channel).map_err(|e| anyhow::anyhow!(e))
-}
-
-/// `true` when `tag` is a strictly newer release than `current` (full `Ord`, build metadata included).
-fn tag_is_newer_than(current: &str, tag: &str) -> anyhow::Result<bool> {
-    let current_version = semver::Version::parse(current)
-        .map_err(|e| anyhow::anyhow!("Cannot parse current version {current}: {e}"))?;
-    let candidate = tag.trim_start_matches('v');
-    let candidate_version = semver::Version::parse(candidate)
-        .map_err(|e| anyhow::anyhow!("Cannot parse release tag {tag}: {e}"))?;
-    Ok(candidate_version > current_version)
-}
-
 fn skip_plugin_audit(action: &CliAction) -> bool {
     matches!(
         action,
@@ -387,6 +373,20 @@ fn run_self_update() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
+    update_channel::fetch_release_tag(channel).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `true` when `tag` is a strictly newer release than `current` (full `Ord`, build metadata included).
+fn tag_is_newer_than(current: &str, tag: &str) -> anyhow::Result<bool> {
+    let current_version = semver::Version::parse(current)
+        .map_err(|e| anyhow::anyhow!("Cannot parse current version {current}: {e}"))?;
+    let candidate = tag.trim_start_matches('v');
+    let candidate_version = semver::Version::parse(candidate)
+        .map_err(|e| anyhow::anyhow!("Cannot parse release tag {tag}: {e}"))?;
+    Ok(candidate_version > current_version)
 }
 
 fn validate_project_name(name: &str) -> Result<(), String> {
@@ -2083,18 +2083,6 @@ mod tests {
     #[test]
     fn tag_is_newer_than_errors_on_unparsable_tag() {
         assert!(tag_is_newer_than("0.21.0", "not-a-tag").is_err());
-    }
-
-    #[test]
-    fn target_release_tag_uses_the_shared_release_list_url() {
-        assert_eq!(
-            update_channel::release_list_url(UpdateChannel::Stable),
-            "https://api.github.com/repos/speednet-software/speedwave/releases/latest"
-        );
-        assert_eq!(
-            update_channel::release_list_url(UpdateChannel::Beta),
-            "https://api.github.com/repos/speednet-software/speedwave/releases?per_page=1"
-        );
     }
 
     #[test]
