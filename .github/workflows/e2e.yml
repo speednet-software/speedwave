@@ -2,29 +2,20 @@ name: E2E
 
 on:
   merge_group:
-  workflow_dispatch:
-    inputs:
-      pr-number:
-        description: "Pull request number to run against for an early signal (before merge_group)"
-        required: false
-        type: string
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
-  # Stub required checks: the real rig lanes (VPN to the Speednet server room,
-  # environment `e2e`, the `rig-lane` composite action) are blocked without a
-  # deadline behind SPEED-738. This job stays an always-green placeholder,
-  # required by the `dev`/`release/**` ruleset from day one, until SPEED-738
-  # swaps it for the real macOS rig lane.
+  # Stub required check, SPEED-738 replaces this with the real macOS rig lane.
   e2e-macos:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - run: echo "Stub required check, SPEED-738 replaces this with the real macOS rig lane."
 
-  # Same stub as e2e-macos, for the Windows rig leg. See SPEED-738.
+  # Stub required check, SPEED-738 replaces this with the real Windows rig lane.
   e2e-windows:
     runs-on: ubuntu-latest
     timeout-minutes: 5
