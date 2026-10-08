@@ -329,7 +329,7 @@ jobs:
       - name: Install actionlint
         run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.12
 
-      - name: actionlint (invalid workflow — typo'd needs, bad expressions, unknown events/inputs, shellcheck of run steps)
+      - name: actionlint (invalid workflow, e.g. typo'd needs, bad expressions, unknown events/inputs, shellcheck of run steps)
         run: ./actionlint -color
 
   audit:
@@ -572,7 +572,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "No architecture checks defined yet — content is SPEED-750."
+      - run: echo "No architecture checks defined yet, content is SPEED-750."
 
   security:
     runs-on: ubuntu-latest

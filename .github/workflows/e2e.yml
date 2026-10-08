@@ -22,11 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "Stub required check — SPEED-738 replaces this with the real macOS rig lane."
+      - run: echo "Stub required check, SPEED-738 replaces this with the real macOS rig lane."
 
   # Same stub as e2e-macos, for the Windows rig leg. See SPEED-738.
   e2e-windows:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "Stub required check — SPEED-738 replaces this with the real Windows rig lane."
+      - run: echo "Stub required check, SPEED-738 replaces this with the real Windows rig lane."
