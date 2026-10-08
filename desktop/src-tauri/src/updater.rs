@@ -13,20 +13,6 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 const UPDATE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
 
-/// Resolves the update manifest URL for `channel`: the fixed stable endpoint,
-/// or the manifest built from the latest beta release's tag.
-async fn resolve_update_endpoint(channel: UpdateChannel) -> Result<String, String> {
-    match channel {
-        UpdateChannel::Stable => Ok(UPDATE_ENDPOINT.to_string()),
-        UpdateChannel::Beta => tokio::task::spawn_blocking(move || {
-            update_channel::fetch_release_tag(UpdateChannel::Beta)
-        })
-        .await
-        .map_err(|e| format!("Release tag fetch task failed: {e}"))?
-        .map(|tag| update_channel::release_manifest_url(&tag)),
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
     pub version: String,
@@ -131,6 +117,20 @@ fn detect_critical(body: &Option<String>) -> bool {
         let upper = b.to_uppercase();
         upper.contains("[CRITICAL]") || upper.contains("[SECURITY]")
     })
+}
+
+/// Resolves the update manifest URL for `channel`: the fixed stable endpoint,
+/// or the manifest built from the latest beta release's tag.
+async fn resolve_update_endpoint(channel: UpdateChannel) -> Result<String, String> {
+    match channel {
+        UpdateChannel::Stable => Ok(UPDATE_ENDPOINT.to_string()),
+        UpdateChannel::Beta => tokio::task::spawn_blocking(move || {
+            update_channel::fetch_release_tag(UpdateChannel::Beta)
+        })
+        .await
+        .map_err(|e| format!("Release tag fetch task failed: {e}"))?
+        .map(|tag| update_channel::release_manifest_url(&tag)),
+    }
 }
 
 /// Builds a Tauri Updater for `channel`. `version_comparator` allows upgrades only (remote > current), on either channel.

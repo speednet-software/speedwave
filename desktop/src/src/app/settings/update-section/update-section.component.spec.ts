@@ -5,6 +5,12 @@ import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred } from '../../testing/deferred';
 
+type ChannelTestAccess = { channelLabel(): string; setChannel(channel: string): Promise<void> };
+
+function channelAccess(component: UpdateSectionComponent): ChannelTestAccess {
+  return component as unknown as ChannelTestAccess;
+}
+
 describe('UpdateSectionComponent', () => {
   let component: UpdateSectionComponent;
   let fixture: ComponentFixture<UpdateSectionComponent>;
@@ -212,7 +218,7 @@ describe('UpdateSectionComponent', () => {
       };
       await component.ngOnInit();
       await new Promise<void>((r) => setTimeout(r, 0));
-      expect(component.channelLabel()).toBe('stable');
+      expect(channelAccess(component).channelLabel()).toBe('stable');
     });
 
     it('loads the persisted channel', async () => {
@@ -224,7 +230,7 @@ describe('UpdateSectionComponent', () => {
       };
       await component.ngOnInit();
       await new Promise<void>((r) => setTimeout(r, 0));
-      expect(component.channelLabel()).toBe('beta');
+      expect(channelAccess(component).channelLabel()).toBe('beta');
     });
 
     it('opening the section does not add a channel key when the file never had one', async () => {
@@ -271,9 +277,9 @@ describe('UpdateSectionComponent', () => {
       await new Promise<void>((r) => setTimeout(r, 0));
       calls.length = 0;
 
-      await component.setChannel('beta');
+      await channelAccess(component).setChannel('beta');
 
-      expect(component.channelLabel()).toBe('beta');
+      expect(channelAccess(component).channelLabel()).toBe('beta');
       const setCall = calls.find((c) => c.cmd === 'set_update_settings');
       expect(setCall?.args).toEqual({
         settings: { auto_check: true, check_interval_hours: 12, channel: 'beta' },
@@ -292,7 +298,7 @@ describe('UpdateSectionComponent', () => {
       await new Promise<void>((r) => setTimeout(r, 0));
       calls.length = 0;
 
-      await component.setChannel('stable');
+      await channelAccess(component).setChannel('stable');
 
       expect(calls.some((c) => c.cmd === 'set_update_settings')).toBe(false);
       expect(calls.some((c) => c.cmd === 'check_for_update')).toBe(false);
@@ -312,9 +318,9 @@ describe('UpdateSectionComponent', () => {
         calls.push(cmd);
         return undefined;
       };
-      await component.setChannel('beta');
+      await channelAccess(component).setChannel('beta');
 
-      expect(component.channelLabel()).toBe('stable');
+      expect(channelAccess(component).channelLabel()).toBe('stable');
       expect(calls).toEqual([]);
     });
   });

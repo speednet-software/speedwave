@@ -113,7 +113,7 @@ export class UpdateSectionComponent implements OnInit {
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
   /** Loaded channel; `undefined` until settings load. */
-  updateChannel?: UpdateChannel;
+  private updateChannel?: UpdateChannel;
   updateChecking = false;
   updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
@@ -148,7 +148,7 @@ export class UpdateSectionComponent implements OnInit {
   }
 
   /** Current channel for display; missing settings read as `stable`. */
-  channelLabel(): UpdateChannel {
+  protected channelLabel(): UpdateChannel {
     return this.updateChannel ?? 'stable';
   }
 
@@ -156,7 +156,7 @@ export class UpdateSectionComponent implements OnInit {
    * Tailwind class for a channel button: highlighted when it is the active channel.
    * @param channel - The channel this button represents.
    */
-  channelButtonClass(channel: UpdateChannel): string {
+  protected channelButtonClass(channel: UpdateChannel): string {
     return channel === this.channelLabel()
       ? 'border-[var(--accent)] text-[var(--ink)]'
       : 'border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink)] hover:bg-[var(--bg-3)]';
@@ -204,7 +204,7 @@ export class UpdateSectionComponent implements OnInit {
    * Switches the update channel, persists it and immediately checks for updates on the new channel.
    * @param channel - The channel to switch to.
    */
-  async setChannel(channel: UpdateChannel): Promise<void> {
+  protected async setChannel(channel: UpdateChannel): Promise<void> {
     if (this.updateInstalling || channel === this.channelLabel()) return;
     this.updateChannel = channel;
     this.cdr.markForCheck();
