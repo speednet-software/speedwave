@@ -162,7 +162,7 @@ jobs:
           cd "$tmp"
           fail=0
           while IFS= read -r -d '' f; do
-            if ! tr -d "$(printf '\r')" < "$f" | cmp -s - "$f"; then
+            if ! cmp -s <(tr -d "$(printf '\r')" < "$f") "$f"; then
               echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
               fail=1
             fi
@@ -380,8 +380,10 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
       - name: Compute app version
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch '${{ github.head_ref || github.ref_name }}')" >> "$GITHUB_ENV"
+          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")" >> "$GITHUB_ENV"
 
       - name: Build native macOS CLI binaries (universal)
         run: scripts/build-native-macos.sh
@@ -534,8 +536,9 @@ jobs:
       - name: Compute app version
         id: version
         shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          BRANCH="${{ github.head_ref || github.ref_name }}"
           APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")"
           echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
