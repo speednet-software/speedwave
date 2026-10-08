@@ -43,6 +43,7 @@ export default {
         'native',
         'security',
         'version',
+        'release',
       ],
     ],
     'scope-empty': [1, 'never'],

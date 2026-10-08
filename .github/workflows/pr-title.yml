@@ -3,34 +3,45 @@ name: PR Title
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
-    branches: [main, dev]
+  merge_group:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Validate conventional commit title
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install commitlint
+        run: npm ci
+
+      - name: Resolve the message to validate
+        id: message
         env:
+          EVENT_NAME: ${{ github.event_name }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          MERGE_GROUP_MESSAGE: ${{ github.event.merge_group.head_commit.message }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          TITLE="$PR_TITLE"
-          PATTERN='^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\(.+\))?(!)?: .+'
-          if [[ ! "$TITLE" =~ $PATTERN ]]; then
-            echo "::error::PR title must be a conventional commit: type(scope): description"
-            echo ""
-            echo "Examples:"
-            echo "  feat(runtime): add logging support"
-            echo "  fix(desktop): resolve crash on startup"
-            echo "  chore(deps): bump dependencies"
-            echo "  docs: update ADR index"
-            echo ""
-            echo "Allowed types: feat, fix, chore, docs, style, refactor, perf, test, build, ci, revert"
-            echo ""
-            echo "Your title: $TITLE"
-            exit 1
-          fi
-          echo "✅ PR title is valid: $TITLE"
+          message="$(bash scripts/resolve-pr-title-message.sh)"
+          echo "message<<EOF_MESSAGE" >>"$GITHUB_OUTPUT"
+          echo "$message" >>"$GITHUB_OUTPUT"
+          echo "EOF_MESSAGE" >>"$GITHUB_OUTPUT"
+
+      - name: Validate conventional commit message
+        env:
+          MESSAGE: ${{ steps.message.outputs.message }}
+        run: echo "$MESSAGE" | npx --no -- commitlint
