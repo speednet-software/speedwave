@@ -1,6 +1,5 @@
-//! Shared update-channel model for `update-settings.json`: the channel enum,
-//! the pure GitHub release URL/tag helpers, and (behind `update-check`) the
-//! one hardened HTTP fetch both the desktop updater and the CLI build on.
+//! Update channel for `update-settings.json` and the release-tag lookup
+//! shared by the desktop updater and the CLI.
 
 use serde::{Deserialize, Serialize};
 
@@ -84,12 +83,10 @@ pub fn release_manifest_url(tag: &str) -> String {
     format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}/latest.json")
 }
 
-#[cfg(feature = "update-check")]
 const MAX_RELEASE_RESPONSE_BYTES: u64 = crate::consts::HTTP_MAX_RESPONSE_BODY_BYTES as u64;
 
 /// Builds a blocking client hardened per ADR-041: no redirects, bounded
 /// timeout, Speedwave UA.
-#[cfg(feature = "update-check")]
 fn build_release_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -100,7 +97,6 @@ fn build_release_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 /// Reads `resp`'s body, aborting past [`MAX_RELEASE_RESPONSE_BYTES`].
-#[cfg(feature = "update-check")]
 fn read_release_body_limited(resp: reqwest::blocking::Response) -> Result<Vec<u8>, String> {
     use std::io::Read;
 
@@ -127,7 +123,6 @@ fn read_release_body_limited(resp: reqwest::blocking::Response) -> Result<Vec<u8
 
 /// Fetches and parses the release tag at `list_url`: no redirects followed,
 /// a non-success status or an oversized body errors before parsing.
-#[cfg(feature = "update-check")]
 fn fetch_release_tag_from(list_url: &str) -> Result<String, String> {
     let client = build_release_client()?;
     let resp = client
@@ -144,7 +139,6 @@ fn fetch_release_tag_from(list_url: &str) -> Result<String, String> {
 
 /// Fetches the GitHub release tag for `channel`: the single HTTP implementation
 /// the desktop updater and the CLI self-updater both call (ADR-041 hardening).
-#[cfg(feature = "update-check")]
 pub fn fetch_release_tag(channel: UpdateChannel) -> Result<String, String> {
     fetch_release_tag_from(&release_list_url(channel))
 }
@@ -328,7 +322,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "update-check"))]
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,

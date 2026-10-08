@@ -14,7 +14,7 @@ name = "speedwave"
 path = "src/main.rs"
 
 [dependencies]
-speedwave-runtime = { path = "../speedwave-runtime", features = ["update-check"] }
+speedwave-runtime = { path = "../speedwave-runtime" }
 anyhow = { workspace = true }
 strum = { version = "0.28", features = ["derive"] }
 serde = { workspace = true }
@@ -31,7 +31,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 anstyle-query = "1.1"
 
 [dev-dependencies]
-speedwave-runtime = { path = "../speedwave-runtime", features = ["test-support", "update-check"] }
+speedwave-runtime = { path = "../speedwave-runtime", features = ["test-support"] }
 tempfile = "3"
 
 [build-dependencies]
