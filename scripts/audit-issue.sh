@@ -6,20 +6,20 @@ set -euo pipefail
 TITLE="audit-schedule: known vulnerabilities on dev"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATE="$REPO_ROOT/scripts/audit-gate.py"
+AUDIT_RUN="$REPO_ROOT/scripts/audit-run.sh"
 EXCEPTIONS="${AUDIT_EXCEPTIONS:-$REPO_ROOT/scripts/audit-exceptions.json}"
-NPM_AUDIT_LEVEL="${NPM_AUDIT_LEVEL:-high}"
+NPM_AUDIT_LEVEL="${NPM_AUDIT_LEVEL:-$(python3 "$GATE" print-npm-default-severity)}"
+export NPM_AUDIT_LEVEL
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 cd "$REPO_ROOT"
 
-cargo audit --json >"$WORKDIR/cargo-root.json" || true
-cargo audit --json --file desktop/src-tauri/Cargo.lock >"$WORKDIR/cargo-desktop.json" || true
-(cd mcp-servers && npm audit --omit=dev --audit-level="$NPM_AUDIT_LEVEL" --package-lock-only --json) \
-    >"$WORKDIR/npm-mcp.json" || true
-(cd desktop/src && npm audit --omit=dev --audit-level="$NPM_AUDIT_LEVEL" --package-lock-only --json) \
-    >"$WORKDIR/npm-desktop.json" || true
+"$AUDIT_RUN" cargo-root "$WORKDIR/cargo-root.json"
+"$AUDIT_RUN" cargo-desktop "$WORKDIR/cargo-desktop.json"
+"$AUDIT_RUN" npm-mcp "$WORKDIR/npm-mcp.json"
+"$AUDIT_RUN" npm-desktop "$WORKDIR/npm-desktop.json"
 
 set +e
 python3 "$GATE" absolute \

@@ -545,7 +545,8 @@ test-ci:
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
 	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
-	  _tests/ci/merge-gate-lanes.bats \
+	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats \
+	  _tests/ci/merge-gate-lanes.bats _tests/ci/audit-schedule-shape.bats \
 	  _tests/ci/git-hooks-removed.bats _tests/ci/pr-title-validate.bats \
 	  _tests/ci/resolve-pr-title-message.bats
 	@echo "✅ CI workflow tests passed"
@@ -720,28 +721,32 @@ audit: audit-rust audit-mcp audit-desktop
 AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
 AUDIT_TMP := .audit-tmp
 
+# scripts/audit-run.sh is the single source of the audited lockfile paths and
+# the cargo-audit/npm-audit invocations; scripts/audit-diff.sh (PR lane) and
+# scripts/audit-issue.sh (audit-schedule.yml) call the same script. The npm
+# severity threshold has one source too: audit-gate.py's own default, read by
+# audit-run.sh when NPM_AUDIT_LEVEL is not set and left unset here so
+# audit-gate.py's matching default applies on both sides.
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
 	@mkdir -p $(AUDIT_TMP)
-	cargo audit --json >$(AUDIT_TMP)/cargo-root.json || true
-	cargo audit --json --file desktop/src-tauri/Cargo.lock >$(AUDIT_TMP)/cargo-desktop.json || true
+	scripts/audit-run.sh cargo-root $(AUDIT_TMP)/cargo-root.json
+	scripts/audit-run.sh cargo-desktop $(AUDIT_TMP)/cargo-desktop.json
 	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report cargo:$(AUDIT_TMP)/cargo-root.json --report cargo:$(AUDIT_TMP)/cargo-desktop.json
 	@echo "✅ Rust dependencies: no vulnerabilities without a valid exception"
 
-NPM_AUDIT_LEVEL := high
-
 audit-mcp:
 	@mkdir -p $(AUDIT_TMP)
-	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev --package-lock-only --json >../$(AUDIT_TMP)/npm-mcp.json || true
-	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) --npm-min-severity $(NPM_AUDIT_LEVEL) \
+	scripts/audit-run.sh npm-mcp $(AUDIT_TMP)/npm-mcp.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report npm:$(AUDIT_TMP)/npm-mcp.json
 	@echo "✅ MCP dependencies: no vulnerabilities without a valid exception"
 
 audit-desktop:
 	@mkdir -p $(AUDIT_TMP)
-	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev --package-lock-only --json >../../$(AUDIT_TMP)/npm-desktop.json || true
-	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) --npm-min-severity $(NPM_AUDIT_LEVEL) \
+	scripts/audit-run.sh npm-desktop $(AUDIT_TMP)/npm-desktop.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report npm:$(AUDIT_TMP)/npm-desktop.json
 	@echo "✅ Desktop dependencies: no vulnerabilities without a valid exception"
 

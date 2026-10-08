@@ -6,9 +6,11 @@ cd "$REPO_ROOT"
 
 : "${AUDIT_BASE_SHA:?AUDIT_BASE_SHA required (target branch commit)}"
 
-NPM_AUDIT_LEVEL="${NPM_AUDIT_LEVEL:-high}"
 EXCEPTIONS="${AUDIT_EXCEPTIONS:-$REPO_ROOT/scripts/audit-exceptions.json}"
 GATE="$REPO_ROOT/scripts/audit-gate.py"
+AUDIT_RUN="$REPO_ROOT/scripts/audit-run.sh"
+NPM_AUDIT_LEVEL="${NPM_AUDIT_LEVEL:-$(python3 "$GATE" print-npm-default-severity)}"
+export NPM_AUDIT_LEVEL
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -22,30 +24,27 @@ fi
 
 fetch_base_file() {
     local ref_path="$1" out="$2"
+    mkdir -p "$(dirname "$out")"
     git show "${AUDIT_BASE_SHA}:${ref_path}" >"$out"
 }
 
-mkdir -p "$WORKDIR/base-mcp" "$WORKDIR/base-desktop"
-fetch_base_file "Cargo.lock" "$WORKDIR/base-cargo-root.lock"
-fetch_base_file "desktop/src-tauri/Cargo.lock" "$WORKDIR/base-cargo-desktop.lock"
-fetch_base_file "mcp-servers/package.json" "$WORKDIR/base-mcp/package.json"
-fetch_base_file "mcp-servers/package-lock.json" "$WORKDIR/base-mcp/package-lock.json"
-fetch_base_file "desktop/src/package.json" "$WORKDIR/base-desktop/package.json"
-fetch_base_file "desktop/src/package-lock.json" "$WORKDIR/base-desktop/package-lock.json"
+BASE_ROOT="$WORKDIR/base"
+fetch_base_file "Cargo.lock" "$BASE_ROOT/Cargo.lock"
+fetch_base_file "desktop/src-tauri/Cargo.lock" "$BASE_ROOT/desktop/src-tauri/Cargo.lock"
+fetch_base_file "mcp-servers/package.json" "$BASE_ROOT/mcp-servers/package.json"
+fetch_base_file "mcp-servers/package-lock.json" "$BASE_ROOT/mcp-servers/package-lock.json"
+fetch_base_file "desktop/src/package.json" "$BASE_ROOT/desktop/src/package.json"
+fetch_base_file "desktop/src/package-lock.json" "$BASE_ROOT/desktop/src/package-lock.json"
 
-cargo audit --json --file "$WORKDIR/base-cargo-root.lock" >"$WORKDIR/base-cargo-root.json" || true
-cargo audit --json --file "$WORKDIR/base-cargo-desktop.lock" >"$WORKDIR/base-cargo-desktop.json" || true
-cargo audit --json >"$WORKDIR/head-cargo-root.json" || true
-cargo audit --json --file desktop/src-tauri/Cargo.lock >"$WORKDIR/head-cargo-desktop.json" || true
+"$AUDIT_RUN" cargo-root "$WORKDIR/base-cargo-root.json" "$BASE_ROOT"
+"$AUDIT_RUN" cargo-desktop "$WORKDIR/base-cargo-desktop.json" "$BASE_ROOT"
+"$AUDIT_RUN" npm-mcp "$WORKDIR/base-npm-mcp.json" "$BASE_ROOT"
+"$AUDIT_RUN" npm-desktop "$WORKDIR/base-npm-desktop.json" "$BASE_ROOT"
 
-(cd "$WORKDIR/base-mcp" && npm audit --omit=dev --audit-level="$NPM_AUDIT_LEVEL" --package-lock-only --json) \
-    >"$WORKDIR/base-npm-mcp.json" || true
-(cd "$WORKDIR/base-desktop" && npm audit --omit=dev --audit-level="$NPM_AUDIT_LEVEL" --package-lock-only --json) \
-    >"$WORKDIR/base-npm-desktop.json" || true
-(cd mcp-servers && npm audit --omit=dev --audit-level="$NPM_AUDIT_LEVEL" --package-lock-only --json) \
-    >"$WORKDIR/head-npm-mcp.json" || true
-(cd desktop/src && npm audit --omit=dev --audit-level="$NPM_AUDIT_LEVEL" --package-lock-only --json) \
-    >"$WORKDIR/head-npm-desktop.json" || true
+"$AUDIT_RUN" cargo-root "$WORKDIR/head-cargo-root.json"
+"$AUDIT_RUN" cargo-desktop "$WORKDIR/head-cargo-desktop.json"
+"$AUDIT_RUN" npm-mcp "$WORKDIR/head-npm-mcp.json"
+"$AUDIT_RUN" npm-desktop "$WORKDIR/head-npm-desktop.json"
 
 python3 "$GATE" diff \
     --exceptions "$EXCEPTIONS" \

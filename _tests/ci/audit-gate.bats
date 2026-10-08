@@ -185,3 +185,57 @@ setup() {
   [ "$status" -eq 0 ]
   [ "$output" = '{"action": "update", "number": 10}' ]
 }
+
+@test "print-npm-default-severity: prints the one severity threshold" {
+  run "$PYTHON" "$SCRIPT" print-npm-default-severity
+  [ "$status" -eq 0 ]
+  [ "$output" = "high" ]
+}
+
+@test "extract: an empty cargo audit report fails with a named error, not a traceback" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem cargo --in "$FIXTURES/cargo-empty.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "audit-gate: empty cargo audit report" ]]
+  [[ "$output" != *"Traceback"* ]]
+}
+
+@test "extract: an empty npm audit report fails with a named error, not a traceback" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem npm --in "$FIXTURES/npm-empty.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "audit-gate: empty npm audit report" ]]
+  [[ "$output" != *"Traceback"* ]]
+}
+
+@test "extract: npm audit error object fails loudly instead of being read as a clean report" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem npm --in "$FIXTURES/npm-error.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "audit-gate: npm audit reported an error instead of a report" ]]
+  [[ "$output" =~ "ENOTFOUND" ]]
+}
+
+@test "extract: cargo audit output missing vulnerabilities fails with a named error" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem cargo --in "$FIXTURES/cargo-malformed.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing 'vulnerabilities'" ]]
+}
+
+@test "extract: invalid JSON fails with a named error, not a traceback" {
+  run "$PYTHON" "$SCRIPT" extract --ecosystem npm --in "$FIXTURES/npm-not-json.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "is not valid JSON" ]]
+  [[ "$output" != *"Traceback"* ]]
+}
+
+@test "diff: a base side that is an empty report fails loudly instead of silently passing" {
+  run "$PYTHON" "$SCRIPT" diff --exceptions "$FIXTURES/exceptions-empty.json" \
+    --base "cargo:$FIXTURES/cargo-empty.json" --head "cargo:$FIXTURES/cargo-clean.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "audit-gate: empty cargo audit report" ]]
+}
+
+@test "absolute: an npm error object fails loudly instead of green" {
+  run "$PYTHON" "$SCRIPT" absolute --exceptions "$FIXTURES/exceptions-empty.json" \
+    --report "npm:$FIXTURES/npm-error.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "audit-gate: npm audit reported an error instead of a report" ]]
+}
