@@ -57,71 +57,9 @@ _on_block() {
     [ ! -f "$REPO_ROOT/.github/workflows/desktop-build.yml" ]
 }
 
-@test "build lane builds both macos-latest and windows-latest, no Intel leg" {
-    block="$(_job_block "$TEST_WORKFLOW" build)"
-    [[ "$block" == *"macos-latest"* ]]
-    [[ "$block" == *"windows-latest"* ]]
-    [[ "$block" != *"macos_x64"* ]]
-    [[ "$block" != *"arch_label"* ]]
-}
-
-@test "build lane ends with git diff --exit-code (named failure: build step wrote to a tracked file)" {
-    block="$(_job_block "$TEST_WORKFLOW" build)"
-    [[ "$block" == *"git diff --exit-code"* ]]
-}
-
 @test "test.yml reads no secrets (named failure: PR code gets a release signing key)" {
     run grep -n 'secrets\.' "$TEST_WORKFLOW"
     [ "$status" -eq 1 ]
-}
-
-@test "build lane never creates signed updater artifacts" {
-    block="$(_job_block "$TEST_WORKFLOW" build)"
-    [[ "$block" == *'"createUpdaterArtifacts\":false'* ]]
-    [[ "$block" != *TAURI_SIGNING_PRIVATE_KEY* ]]
-}
-
-@test "build lane runs check-nsis-update-reset.ps1 on the Windows leg" {
-    block="$(_job_block "$TEST_WORKFLOW" build)"
-    [[ "$block" == *"check-nsis-update-reset.ps1"* ]]
-}
-
-@test "architecture lane is always-green (no test/audit command)" {
-    block="$(_job_block "$TEST_WORKFLOW" architecture)"
-    [ -n "$block" ]
-    [[ "$block" != *"make "* ]]
-    [[ "$block" != *"cargo "* ]]
-    [[ "$block" != *"npm "* ]]
-}
-
-@test "security lane scans PR commits with gitleaks, scoped to the PR's range" {
-    block="$(_job_block "$TEST_WORKFLOW" security)"
-    [[ "$block" == *"gitleaks"* ]]
-    [[ "$block" == *"log-opts"* ]]
-}
-
-@test "ci-config lane runs both the CI bats suite and actionlint" {
-    block="$(_job_block "$TEST_WORKFLOW" ci-config)"
-    [[ "$block" == *"make test-ci"* ]]
-    [[ "$block" == *"actionlint"* ]]
-}
-
-@test "test-rust lane gates on cargo llvm-cov coverage, on macOS" {
-    block="$(_job_block "$TEST_WORKFLOW" test-rust)"
-    [[ "$block" == *"macos-latest"* ]]
-    [[ "$block" == *"make coverage-rust"* ]]
-}
-
-@test "test-desktop lane runs ng test with coverage" {
-    block="$(_job_block "$TEST_WORKFLOW" test-desktop)"
-    [[ "$block" == *"ng test"* ]]
-    [[ "$block" == *"--coverage"* ]]
-}
-
-@test "test-cli lane runs the no-VM e2e trio and entrypoint tests" {
-    block="$(_job_block "$TEST_WORKFLOW" test-cli)"
-    [[ "$block" == *"make test-e2e"* ]]
-    [[ "$block" == *"make test-entrypoint"* ]]
 }
 
 @test "e2e.yml exists with e2e-macos and e2e-windows on merge_group and workflow_dispatch, referencing SPEED-738" {

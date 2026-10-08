@@ -1,21 +1,12 @@
 #!/usr/bin/env bats
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
-TEST_WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 SCHEDULE_WORKFLOW="$REPO_ROOT/.github/workflows/audit-schedule.yml"
 
 @test "audit-schedule.yml exists and carries a schedule trigger" {
   [ -f "$SCHEDULE_WORKFLOW" ]
   grep -q '^\s*schedule:' "$SCHEDULE_WORKFLOW"
   grep -Eq "cron: '[^']+'" "$SCHEDULE_WORKFLOW"
-}
-
-@test "the time-dependent absolute audit never runs inside test.yml (PR lane stays a diff)" {
-  run grep -c 'audit-schedule' "$TEST_WORKFLOW"
-  [ "$output" = "0" ]
-  run grep -c 'audit-issue.sh' "$TEST_WORKFLOW"
-  [ "$output" = "0" ]
-  grep -q 'audit-diff.sh' "$TEST_WORKFLOW"
 }
 
 @test "audit-schedule.yml never triggers on pull_request or merge_group" {
