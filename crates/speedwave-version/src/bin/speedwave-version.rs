@@ -1,8 +1,10 @@
 //! CLI wrapper over `speedwave_version`: prints plain values for workflows.
-//! Subcommands: `version`, `notes-range`, `validate-promotion`.
+//! Subcommands: `version`, `notes-range`, `validate-promotion`, `stable-tag`.
 
 use clap::{Args, Parser, Subcommand};
-use speedwave_version::{compute_version, notes_range, reject_if_ancestor_of_previous_line};
+use speedwave_version::{
+    compute_version, notes_range, reject_if_ancestor_of_previous_line, stable_tag_for_line,
+};
 use std::path::PathBuf;
 
 fn main() {
@@ -12,6 +14,7 @@ fn main() {
         Command::Version(args) => run_version(&args),
         Command::NotesRange(args) => run_notes_range(&args),
         Command::ValidatePromotion(args) => run_validate_promotion(&args),
+        Command::StableTag(args) => run_stable_tag(&args),
     };
 
     if let Err(e) = result {
@@ -32,6 +35,7 @@ enum Command {
     Version(RepoBranchArgs),
     NotesRange(RepoBranchArgs),
     ValidatePromotion(ValidatePromotionArgs),
+    StableTag(StableTagArgs),
 }
 
 #[derive(Debug, Args)]
@@ -50,6 +54,14 @@ struct ValidatePromotionArgs {
     candidate: String,
     #[arg(long)]
     new_minor: u64,
+}
+
+#[derive(Debug, Args)]
+struct StableTagArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    minor: u64,
 }
 
 #[expect(
@@ -83,6 +95,12 @@ fn run_notes_range(args: &RepoBranchArgs) -> Result<(), String> {
 fn run_validate_promotion(args: &ValidatePromotionArgs) -> Result<(), String> {
     reject_if_ancestor_of_previous_line(&args.repo, &args.candidate, args.new_minor)
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn run_stable_tag(args: &StableTagArgs) -> Result<(), String> {
+    let tag = stable_tag_for_line(&args.repo, args.minor).map_err(|e| e.to_string())?;
+    emit(false, &tag);
     Ok(())
 }
 
@@ -157,6 +175,24 @@ mod tests {
             }
             other => panic!("expected ValidatePromotion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stable_tag_subcommand_parses_its_required_flags() {
+        let cli = Cli::try_parse_from(["speedwave-version", "stable-tag", "--minor", "21"])
+            .expect("parse");
+        match cli.command {
+            Command::StableTag(args) => {
+                assert_eq!(args.repo, PathBuf::from("."));
+                assert_eq!(args.minor, 21);
+            }
+            other => panic!("expected StableTag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stable_tag_without_minor_is_rejected() {
+        assert!(Cli::try_parse_from(["speedwave-version", "stable-tag"]).is_err());
     }
 
     #[test]

@@ -21,6 +21,10 @@ assert_package_list() {
     }
 }
 
+without_version_values() {
+    awk 'skip { skip = 0; next } /<key>(CFBundleShortVersionString|CFBundleVersion)<\/key>/ { skip = 1 } { print }' "$1"
+}
+
 plist_fixture() {
     cp "$SPW_ROOT/native/macos/calendar/Resources/Info.plist" "$1"
 }
@@ -59,7 +63,7 @@ staged_fixture_repo() {
     local src="$BATS_TEST_TMPDIR/Info.plist" dest="$BATS_TEST_TMPDIR/.build/Info.plist"
     plist_fixture "$src"
     stage_info_plist "$src" "$dest"
-    diff <(grep -v 'x-release-please-version' "$src") <(grep -v 'x-release-please-version' "$dest")
+    diff <(without_version_values "$src") <(without_version_values "$dest")
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$dest")" = "pl.speedwave.desktop.calendar" ]
 }
 
@@ -124,26 +128,3 @@ PY
     done
 }
 
-@test "every committed CLI plist carries both markers" {
-    assert_package_list
-    local pkg plist markers
-    for pkg in $SPW_PACKAGES; do
-        plist="$SPW_ROOT/native/macos/$pkg/Resources/Info.plist"
-        markers="$(grep -c 'x-release-please-version' "$plist" | tr -d ' ')"
-        if [ "$markers" != "2" ]; then
-            echo "$pkg/Resources/Info.plist has $markers x-release-please-version markers, expected 2" >&2
-            return 1
-        fi
-    done
-}
-
-@test "every committed CLI plist is listed in release-please extra-files" {
-    assert_package_list
-    local pkg
-    for pkg in $SPW_PACKAGES; do
-        grep -qF "native/macos/$pkg/Resources/Info.plist" "$SPW_ROOT/release-please-config.json" || {
-            echo "native/macos/$pkg/Resources/Info.plist missing from release-please extra-files" >&2
-            return 1
-        }
-    done
-}

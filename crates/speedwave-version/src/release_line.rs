@@ -1,5 +1,5 @@
 use crate::error::VersionError;
-use crate::git::run_git;
+use crate::git::{ensure_git_repo, run_git, run_git_is_ancestor};
 use std::path::Path;
 
 pub(crate) fn parse_release_minor_from_branch_name(branch: &str) -> Option<u64> {
@@ -34,7 +34,10 @@ pub(crate) fn find_release_ref(repo: &Path, minor: u64) -> Result<String, Versio
         .ok_or(VersionError::NoReleaseLineMinor(minor))
 }
 
-pub(crate) fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, VersionError> {
+/// The stable tag for release line `0.minor` (`v0.minor.0[+N]`): the lone
+/// match, or the highest build number among those on the line's ancestry.
+pub fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, VersionError> {
+    ensure_git_repo(repo)?;
     let pattern = format!("v0.{minor}.0*");
     let out = run_git(repo, &["tag", "--list", &pattern])?;
     let prefix = format!("v0.{minor}.0");
@@ -61,8 +64,36 @@ pub(crate) fn stable_tag_for_line(repo: &Path, minor: u64) -> Result<String, Ver
             .first()
             .cloned()
             .ok_or(VersionError::NoStableTag(minor)),
-        _ => Err(VersionError::AmbiguousStableTag(minor, matches)),
+        _ => {
+            let Ok(line_ref) = find_release_ref(repo, minor) else {
+                return Err(VersionError::AmbiguousStableTag(minor, matches));
+            };
+            let mut ancestors: Vec<String> = Vec::new();
+            for candidate in &matches {
+                if run_git_is_ancestor(repo, candidate, &line_ref)? {
+                    ancestors.push(candidate.clone());
+                }
+            }
+            match ancestors.len() {
+                0 => Err(VersionError::AmbiguousStableTag(minor, matches)),
+                1 => Ok(ancestors[0].clone()),
+                _ => {
+                    ancestors.sort_by_key(|t| build_number_suffix(t, &prefix));
+                    match ancestors.into_iter().last() {
+                        Some(tag) => Ok(tag),
+                        None => Err(VersionError::AmbiguousStableTag(minor, matches)),
+                    }
+                }
+            }
+        }
     }
+}
+
+fn build_number_suffix(tag: &str, prefix: &str) -> u64 {
+    tag.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('+'))
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 fn parse_release_minor_from_ref(refname: &str) -> Option<u64> {
@@ -115,6 +146,35 @@ mod tests {
 
         let err = stable_tag_for_line(tmp.path(), 21).unwrap_err();
         assert!(matches!(err, VersionError::AmbiguousStableTag(21, _)));
+    }
+
+    #[test]
+    fn stable_tag_for_line_picks_the_highest_build_number_among_ancestors_of_the_line_head() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+        commit(tmp.path(), "feat: a");
+        git(tmp.path(), &["tag", "v0.21.0+109"]);
+        git(tmp.path(), &["branch", "release/0.21"]);
+        commit(tmp.path(), "feat: b");
+        git(tmp.path(), &["tag", "v0.21.0+110"]);
+        git(tmp.path(), &["branch", "-f", "release/0.21", "v0.21.0+110"]);
+
+        let tag = stable_tag_for_line(tmp.path(), 21).expect("stable tag");
+        assert_eq!(tag, "v0.21.0+110");
+    }
+
+    #[test]
+    fn stable_tag_for_line_ignores_a_matching_tag_that_is_not_an_ancestor_of_the_line_head() {
+        let tmp = init_repo();
+        commit(tmp.path(), "init");
+        commit(tmp.path(), "feat: a");
+        git(tmp.path(), &["tag", "v0.21.0+109"]);
+        git(tmp.path(), &["branch", "release/0.21"]);
+        commit(tmp.path(), "feat: stray");
+        git(tmp.path(), &["tag", "v0.21.0+200"]);
+
+        let tag = stable_tag_for_line(tmp.path(), 21).expect("stable tag");
+        assert_eq!(tag, "v0.21.0+109");
     }
 
     #[test]

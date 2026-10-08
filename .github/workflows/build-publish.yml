@@ -1,102 +1,83 @@
-
-name: Desktop Release
+name: Build & Publish
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. 0.1.0)"
-        required: true
   workflow_call:
     inputs:
+      environment:
+        type: string
+        required: true
       version:
         type: string
         required: true
-      tag_name:
+      tag:
         type: string
-        required: false
+        required: true
+      prerelease:
+        type: boolean
+        required: true
+      notes:
+        type: string
+        required: true
 
 permissions: {}
 
-concurrency:
-  group: release-build
-  cancel-in-progress: false
-
 jobs:
-  resolve:
+  draft:
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.resolve.outputs.version }}
-      tag_name: ${{ steps.resolve.outputs.tag_name }}
-      release_id: ${{ steps.resolve.outputs.release_id }}
-      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
+      release_id: ${{ steps.draft.outputs.release_id }}
     steps:
-      - name: Resolve version and release parameters
-        id: resolve
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Create or reuse the draft release
+        id: draft
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_TAG_NAME: ${{ inputs.tag_name }}
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          NOTES: ${{ inputs.notes }}
         run: |
-          set -e
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::RELEASE_TOKEN secret is not set — required for gh CLI authentication" >&2
-            exit 1
-          fi
-          VERSION="$INPUT_VERSION"
+          set -euo pipefail
 
-          # tag_name from workflow_call (release-please.yml) or derive from version
-          if [ -n "$INPUT_TAG_NAME" ]; then
-            TAG="$INPUT_TAG_NAME"
-          else
-            TAG="v${VERSION}"
-          fi
-
-          # Stable-only regex; kept in sync with verify-release-assets.sh.
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: Version '$VERSION' has invalid format. Expected: X.Y.Z"
-            exit 1
-          fi
-
-          # Look up draft release ID from tag
           RELEASE_ID=$(gh release view "$TAG" --repo "$REPO" --json databaseId --jq '.databaseId' 2>/dev/null || true)
-
-          if [ -z "$RELEASE_ID" ]; then
-            echo "No existing release found for tag $TAG — tauri-action will create one"
-          else
-            echo "Found existing release ID: $RELEASE_ID for tag $TAG"
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Reusing existing release $RELEASE_ID for tag $TAG"
+            echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          # Check if tag exists on remote (needed for deterministic checkout)
-          TAG_EXISTS=$(gh api "repos/$REPO/git/refs/tags/$TAG" --jq '.ref' 2>/dev/null || true)
-          if [ -n "$TAG_EXISTS" ]; then
-            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
-          elif [ -z "$INPUT_TAG_NAME" ]; then
-            # workflow_dispatch (no tag_name input) — tag must exist to ensure correct code
-            echo "::error::Tag $TAG does not exist. Manual dispatch requires an existing tag to build the correct code."
-            echo "::error::Either create the tag first, or use workflow_call from release-please."
-            exit 1
-          else
-            # workflow_call — tag may not exist yet (race condition), fall back to branch HEAD
-            echo "::warning::Tag $TAG does not exist — build will use branch HEAD"
-            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          NOTES_FILE="$(mktemp)"
+          printf '%s' "$NOTES" > "$NOTES_FILE"
+
+          LATEST_FLAG="--latest"
+          if [ "$PRERELEASE" = "true" ]; then
+            LATEST_FLAG="--prerelease"
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "Speedwave $TAG" \
+            --notes-file "$NOTES_FILE" \
+            --draft \
+            $LATEST_FLAG
+
+          RELEASE_ID=$(gh release view "$TAG" --repo "$REPO" --json databaseId --jq '.databaseId')
+          echo "Created draft release $RELEASE_ID for tag $TAG"
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
-          echo "Resolved: version=$VERSION tag=$TAG release_id=$RELEASE_ID tag_exists=$TAG_EXISTS"
-
   publish-tauri:
-    needs: resolve
-    environment: release
+    needs: draft
+    environment: ${{ inputs.environment }}
     permissions:
-      contents: write
+      contents: read
       id-token: write
     strategy:
       fail-fast: false
@@ -105,9 +86,6 @@ jobs:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             arch_label: "macOS_Apple_Silicon"
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            arch_label: "macOS_Intel"
           - platform: windows-latest
             args: ""
             arch_label: ""
@@ -116,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
+          ref: ${{ inputs.tag }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -139,7 +117,7 @@ jobs:
       - name: Setup toolchain (Node + Rust + cache)
         uses: ./.github/actions/setup-toolchain
         with:
-          rust-targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          rust-targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
           rust-cache-workspaces: "./desktop/src-tauri -> target"
 
       - name: Install frontend dependencies
@@ -157,19 +135,20 @@ jobs:
           APPLE_TEAM_ID_VAL: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -n "$CERT" ]; then
-            # Mask all secrets before writing to GITHUB_ENV
             echo "::add-mask::$CERT"
             echo "::add-mask::$CERT_PASSWORD"
             echo "::add-mask::$SIGNING_IDENTITY"
             echo "::add-mask::$APPLE_ID_VAL"
             echo "::add-mask::$APPLE_PASSWORD_VAL"
             echo "::add-mask::$APPLE_TEAM_ID_VAL"
-            echo "APPLE_CERTIFICATE=$CERT" >> "$GITHUB_ENV"
-            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
-            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
-            echo "APPLE_ID=$APPLE_ID_VAL" >> "$GITHUB_ENV"
-            echo "APPLE_PASSWORD=$APPLE_PASSWORD_VAL" >> "$GITHUB_ENV"
-            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_VAL" >> "$GITHUB_ENV"
+            {
+              echo "APPLE_CERTIFICATE=$CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY"
+              echo "APPLE_ID=$APPLE_ID_VAL"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD_VAL"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID_VAL"
+            } >> "$GITHUB_ENV"
             echo "::notice::macOS code signing configured"
           else
             echo "::notice::macOS code signing skipped (no APPLE_CERTIFICATE secret)"
@@ -253,24 +232,20 @@ jobs:
         id: version_config
         shell: bash
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ inputs.version }}
         run: |
           echo "config={\"version\":\"$VERSION\"}" >> "$GITHUB_OUTPUT"
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}
+          SPEEDWAVE_VERSION: ${{ inputs.version }}
         with:
           projectPath: desktop/src-tauri
-          releaseId: ${{ needs.resolve.outputs.release_id }}
-          tagName: ${{ needs.resolve.outputs.release_id == '' && needs.resolve.outputs.tag_name || '' }}
-          releaseName: ${{ needs.resolve.outputs.release_id == '' && format('Speedwave {0}', needs.resolve.outputs.tag_name) || '' }}
-          releaseBody: ${{ needs.resolve.outputs.release_id == '' && 'See the assets to download and install this version.' || '' }}
-          releaseDraft: ${{ needs.resolve.outputs.release_id == '' && 'true' || 'false' }}
-          prerelease: false
+          releaseId: ${{ needs.draft.outputs.release_id }}
+          prerelease: ${{ inputs.prerelease }}
           args: ${{ format('{0} --config {1}', matrix.args, steps.version_config.outputs.config) }}
           releaseAssetNamePattern: ${{ matrix.arch_label != '' && format('[name]_[version]_{0}[setup][ext]', matrix.arch_label) || '' }}
 
@@ -279,8 +254,8 @@ jobs:
         run: git diff --exit-code
 
   cli:
-    needs: [resolve, publish-tauri]
-    environment: release
+    needs: [draft, publish-tauri]
+    environment: ${{ inputs.environment }}
     strategy:
       fail-fast: false
       matrix:
@@ -288,33 +263,24 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
+          ref: ${{ inputs.tag }}
           persist-credentials: false
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           targets: ${{ matrix.target }}
-
-      - name: Ensure cross-compile target is installed
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: rustup target add "$TARGET"
 
       - name: Rust cache
         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -325,7 +291,7 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          SPEEDWAVE_VERSION: ${{ needs.resolve.outputs.version }}
+          SPEEDWAVE_VERSION: ${{ inputs.version }}
         run: cargo build --release --target "$TARGET" -p speedwave-cli
 
       - name: Configure Windows code signing
@@ -354,7 +320,7 @@ jobs:
       - name: Package CLI (unix)
         if: matrix.archive == 'tar.gz'
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ inputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
           ARCHIVE_NAME="speedwave-v${VERSION}-${TARGET}.tar.gz"
@@ -366,7 +332,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ inputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
           $archiveName = "speedwave-v${env:VERSION}-${env:TARGET}.zip"
@@ -376,68 +342,61 @@ jobs:
       - name: Upload CLI to release
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          TAG_NAME: ${{ inputs.tag }}
           REPO: ${{ github.repository }}
         run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" --repo "$REPO" --clobber
 
-  publish-release:
-    needs: [resolve, publish-tauri, cli]
+  publish:
+    needs: [draft, publish-tauri, cli]
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
 
-      - name: Verify release assets (pre-publish)
+      - name: Verify release assets
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          VERSION: ${{ inputs.version }}
+          TAG_NAME: ${{ inputs.tag }}
           REPO: ${{ github.repository }}
-          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
-        run: |
-          set -euo pipefail
-
-          # Resolve release ID — use the one from resolve job, or look it up by tag
-          RID="$RELEASE_ID"
-          if [ -z "$RID" ]; then
-            RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
-          fi
-          RID="$RID" bash scripts/verify-release-assets.sh
+          RID: ${{ needs.draft.outputs.release_id }}
+        run: bash scripts/verify-release-assets.sh
 
       - name: Publish release (draft → live)
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
-          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
+          RID: ${{ needs.draft.outputs.release_id }}
         run: |
           set -euo pipefail
-          RID="$RELEASE_ID"
-          if [ -z "$RID" ]; then
-            RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
-          fi
-          # Asset/latest.json checks ran in the pre-publish gate; post-publish re-runs it.
           gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=false
           echo "Release published successfully"
 
-      - name: Verify release assets (post-publish safety net)
+  delete-draft-on-failure:
+    needs: [draft, publish-tauri, cli, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Delete the draft release left behind by this failed run
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
           REPO: ${{ github.repository }}
-          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          TAG_NAME: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          RID="$RELEASE_ID"
-          if [ -z "$RID" ]; then
-            RID=$(gh release view "$TAG_NAME" --repo "$REPO" --json databaseId --jq '.databaseId')
-          fi
-          if ! RID="$RID" bash scripts/verify-release-assets.sh; then
-            echo "::error::Post-publish validation failed — reverting to draft"
-            gh api --method PATCH "repos/$REPO/releases/$RID" -f draft=true
-            exit 1
+          STATE=$(gh release view "$TAG_NAME" --repo "$REPO" --json isDraft --jq '.isDraft' 2>/dev/null || true)
+          if [ "$STATE" = "true" ]; then
+            gh release delete "$TAG_NAME" --repo "$REPO" --yes
+            echo "Deleted draft release for $TAG_NAME"
+          else
+            echo "No draft release to delete for $TAG_NAME (state: ${STATE:-not found})"
           fi

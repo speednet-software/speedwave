@@ -1,0 +1,91 @@
+name: Beta
+
+on:
+  push:
+    branches: [dev]
+
+concurrency:
+  group: beta
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      notes: ${{ steps.notes.outputs.body }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch release lines and tags
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*' --no-tags
+          git fetch origin --tags --force
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: speedwave-version
+
+      - name: Compute version and tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo "$PWD" --branch dev)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the release commit
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GH_AUTOMATION_PAT: ${{ secrets.GH_AUTOMATION_PAT }}
+        run: bash scripts/tag-release-commit.sh --allow-reuse-same-commit "$TAG"
+
+      - name: Generate beta release notes
+        id: cliff
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff
+        with:
+          config: cliff.toml
+          args: --no-exec HEAD~1..HEAD
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture release notes as a job output
+        id: notes
+        env:
+          BODY: ${{ steps.cliff.outputs.content }}
+        run: |
+          {
+            echo "body<<SPEEDWAVE_NOTES_EOF"
+            printf '%s\n' "$BODY"
+            echo "SPEEDWAVE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: compute
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/build-publish.yml
+    with:
+      environment: release
+      version: ${{ needs.compute.outputs.version }}
+      tag: ${{ needs.compute.outputs.tag }}
+      prerelease: true
+      notes: ${{ needs.compute.outputs.notes }}
+    secrets: inherit
