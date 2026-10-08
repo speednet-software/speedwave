@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 mod addressing;
 mod llm;
+mod networks;
 mod plugins;
 mod proxy;
 mod quoting;
@@ -52,6 +53,9 @@ pub use llm::{
     read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
+pub(crate) use networks::{
+    compose_egress_less_networks_in, egress_less_network_name, egress_less_network_names,
+};
 use plugins::apply_plugins_from_verified;
 pub(crate) use plugins::ApplyPluginsCtx;
 
@@ -242,7 +246,7 @@ pub fn render_compose_in(
     let tokens_dir = resolve_tokens_dir_in(data_dir, project_name);
     let claude_home = crate::claude_home::claude_home_dir(data_dir, project_name);
     let resources_dir = data_dir.join("claude-resources");
-    let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
+    let network_name = networks::project_network_name(project_name);
 
     let verified_plugins = plugin::list_verified_from_dir(&plugin::plugins_base_dir_in(data_dir))?;
     let plugin_manifests: Vec<PluginManifest> = verified_plugins
@@ -1143,7 +1147,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 52;
+    const SECURITY_RULE_COUNT: usize = 53;
 
     fn test_bundle_manifest() -> bundle::BundleManifest {
         bundle::BundleManifest {
@@ -1997,8 +2001,8 @@ networks:
   speedwave_test_network:
     driver: bridge
   speedwave_test_network_office:
-    driver: bridge
-    internal: true
+    name: speedwave_test_network_office
+    external: true
 "#;
 
     #[test]
@@ -2020,6 +2024,123 @@ networks:
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
         );
+    }
+
+    const OFFICE_NET_EXTERNAL: &str = "  speedwave_test_network_office:
+    name: speedwave_test_network_office
+    external: true
+";
+
+    fn egress_less_violations(yaml: &str) -> Vec<SecurityViolation> {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = with_hub_policy_and_audit_mounts(yaml, tmp.path(), "test");
+        SecurityCheck::run_with_data_dir(&yaml, "test", &[], &test_expected_paths(), tmp.path())
+            .into_iter()
+            .filter(|v| v.rule == SecurityRule::EgressLessNetworkExternal)
+            .collect()
+    }
+
+    #[test]
+    fn test_egress_less_network_external_passes_the_rendered_shape() {
+        assert!(valid_compose_yaml().contains(OFFICE_NET_EXTERNAL));
+        let violations = egress_less_violations(&valid_compose_yaml());
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn test_egress_less_network_external_flags_a_compose_created_network() {
+        let yaml = valid_compose_yaml().replace(
+            OFFICE_NET_EXTERNAL,
+            "  speedwave_test_network_office:\n    driver: bridge\n    internal: true\n",
+        );
+        let violations = egress_less_violations(&yaml);
+        assert_eq!(violations.len(), 2, "{violations:?}");
+        assert!(violations
+            .iter()
+            .any(|v| v.container == "speedwave_test_network_office"
+                && v.message.contains("not declared `external: true`")));
+        assert!(violations.iter().any(|v| v.container == "mcp-office"));
+    }
+
+    #[test]
+    fn test_egress_less_network_external_flags_a_false_or_string_external() {
+        for external in ["external: false", "external: \"true\"", "external: {}"] {
+            let yaml =
+                valid_compose_yaml().replace("    external: true\n", &format!("    {external}\n"));
+            let violations = egress_less_violations(&yaml);
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.container == "speedwave_test_network_office"),
+                "{external}: {violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_egress_less_network_external_flags_a_repointed_name() {
+        let yaml = valid_compose_yaml().replace(
+            "    name: speedwave_test_network_office\n",
+            "    name: speedwave_test_network\n",
+        );
+        let violations = egress_less_violations(&yaml);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].message.contains("points at another network"));
+    }
+
+    #[test]
+    fn test_egress_less_network_external_flags_an_office_worker_with_a_way_out() {
+        let on_main = valid_compose_yaml().replace(
+            "    networks:\n      - speedwave_test_network_office\n\n  mcp-playwright:",
+            "    networks:\n      - speedwave_test_network_office\n      - speedwave_test_network\n\n  mcp-playwright:",
+        );
+        assert_ne!(on_main, valid_compose_yaml());
+        let violations = egress_less_violations(&on_main);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].container, "mcp-office");
+
+        let default_network = valid_compose_yaml().replace(
+            "    networks:\n      - speedwave_test_network_office\n\n  mcp-playwright:",
+            "\n  mcp-playwright:",
+        );
+        assert_ne!(default_network, valid_compose_yaml());
+        let violations = egress_less_violations(&default_network);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].container, "mcp-office");
+
+        let undeclared = valid_compose_yaml().replace(OFFICE_NET_EXTERNAL, "");
+        let violations = egress_less_violations(&undeclared);
+        assert!(
+            violations.iter().any(|v| v.container == "mcp-office"),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_egress_less_network_external_accepts_the_mapping_network_form() {
+        let yaml = valid_compose_yaml().replace(
+            "    networks:\n      - speedwave_test_network_office\n\n  mcp-playwright:",
+            "    networks:\n      speedwave_test_network_office: {}\n\n  mcp-playwright:",
+        );
+        assert_ne!(yaml, valid_compose_yaml());
+        let violations = egress_less_violations(&yaml);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn test_egress_less_network_external_passes_without_office() {
+        let mut integrations = all_enabled_integrations();
+        integrations.office = false;
+        let yaml = apply_integrations_filter(
+            &valid_compose_yaml(),
+            &integrations,
+            "speedwave_test_network",
+            &[],
+        )
+        .unwrap();
+        assert!(!yaml.contains("network_office"));
+        let violations = egress_less_violations(&yaml);
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]
@@ -2928,6 +3049,20 @@ services:
         assert!(
             nets[0].ends_with("_office"),
             "mcp-office's only network must be the egress-less *_office network; got: {nets:?}"
+        );
+        assert_eq!(nets[0], egress_less_network_names("test-project")[0]);
+        let decl = doc
+            .get("networks")
+            .and_then(|n| n.get(nets[0]))
+            .and_then(|d| d.as_mapping())
+            .expect("the office network must be declared");
+        let keys: Vec<&str> = decl.keys().filter_map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec!["name", "external"], "{decl:?}");
+        assert_eq!(decl.get("name").and_then(|v| v.as_str()), Some(nets[0]));
+        assert_eq!(decl.get("external").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            networks::external_egress_less_networks(&yaml).unwrap(),
+            vec![nets[0].to_string()]
         );
     }
 
@@ -9928,8 +10063,8 @@ networks:
   speedwave_test_network:
     driver: bridge
   speedwave_test_network_office:
-    driver: bridge
-    internal: true
+    name: speedwave_test_network_office
+    external: true
 "#;
 
     fn all_enabled_integrations() -> ResolvedIntegrationsConfig {
@@ -12904,8 +13039,8 @@ networks:
   speedwave_net:
     driver: bridge
   speedwave_net_office:
-    driver: bridge
-    internal: true
+    name: speedwave_net_office
+    external: true
 "#;
         validate_compose_network_refs(yaml).unwrap();
     }

@@ -127,6 +127,15 @@ impl LimaRuntime {
         }
     }
 
+    fn network_command(&self, args: &[&str]) -> anyhow::Result<String> {
+        let mut argv = vec!["shell", consts::lima_vm_name(), "--", "sudo", "nerdctl"];
+        argv.extend_from_slice(args);
+        retry_on_eof("nerdctl network", || {
+            self.runner
+                .run_bounded("limactl", &argv, consts::CONTAINER_EXEC_PROBE_TIMEOUT)
+        })
+    }
+
     fn require_running(&self) -> anyhow::Result<()> {
         if self.is_available() {
             Ok(())
@@ -675,6 +684,18 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
         self.up_with_heal(project, &compose_file, super::UpMode::Service(service))
+    }
+
+    fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()> {
+        self.require_running()?;
+        super::networks::ensure_internal_network_with(name, project, &|args| {
+            self.network_command(args)
+        })
+    }
+
+    fn remove_network(&self, name: &str) -> anyhow::Result<()> {
+        self.require_running()?;
+        super::networks::remove_network_with(name, &|args| self.network_command(args))
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -3725,6 +3746,108 @@ mod tests {
         assert!(
             msg.contains("limactl stop --force"),
             "error message must include the recovery hint, got: {msg}"
+        );
+    }
+
+    type NetworkCalls = Arc<Mutex<Vec<(String, std::time::Duration)>>>;
+
+    struct NetworkScript {
+        answers: Mutex<std::collections::VecDeque<Result<String, String>>>,
+        calls: NetworkCalls,
+    }
+
+    impl CommandRunner for NetworkScript {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            if args.first() == Some(&"--version") {
+                return Ok("limactl version 2.1.2".to_string());
+            }
+            anyhow::bail!(
+                "network commands must be bounded, got run: {cmd} {}",
+                args.join(" ")
+            )
+        }
+
+        fn run_bounded(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<String> {
+            let key = format!("{cmd} {}", args.join(" "));
+            if key.contains("list --format") {
+                return Ok("Running".to_string());
+            }
+            self.calls.lock().unwrap().push((key.clone(), timeout));
+            match self.answers.lock().unwrap().pop_front() {
+                Some(Ok(out)) => Ok(out),
+                Some(Err(e)) => Err(anyhow::anyhow!(e)),
+                None => anyhow::bail!("unexpected network command: {key}"),
+            }
+        }
+    }
+
+    fn network_script(answers: &[Result<&str, &str>]) -> (LimaRuntime, NetworkCalls) {
+        let calls = NetworkCalls::default();
+        let runner = NetworkScript {
+            answers: Mutex::new(
+                answers
+                    .iter()
+                    .map(|a| a.map(str::to_string).map_err(str::to_string))
+                    .collect(),
+            ),
+            calls: Arc::clone(&calls),
+        };
+        (LimaRuntime::with_runner(Box::new(runner)), calls)
+    }
+
+    #[test]
+    fn ensure_internal_network_creates_it_through_sudo_nerdctl_bounded() {
+        use crate::runtime::networks::tests::{INTERNAL_INSPECT, NOT_FOUND};
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Ok(name), Ok(INTERNAL_INSPECT)]);
+        rt.ensure_internal_network(name, "acme").unwrap();
+        let vm = consts::lima_vm_name();
+        let calls = calls.lock().unwrap();
+        let keys: Vec<&str> = calls.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                format!("limactl shell {vm} -- sudo nerdctl network inspect --mode=native {name}"),
+                format!(
+                    "limactl shell {vm} -- sudo nerdctl network create --internal \
+                     --label com.docker.compose.project=acme \
+                     --label com.docker.compose.network={name} {name}"
+                ),
+                format!("limactl shell {vm} -- sudo nerdctl network inspect --mode=native {name}"),
+            ]
+        );
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn ensure_internal_network_fails_when_the_vm_is_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt
+            .ensure_internal_network("speedwave_acme_network_office", "acme")
+            .is_err());
+    }
+
+    #[test]
+    fn remove_network_runs_sudo_nerdctl_network_rm() {
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(name)]);
+        rt.remove_network(name).unwrap();
+        assert_eq!(
+            calls.lock().unwrap()[0].0,
+            format!(
+                "limactl shell {} -- sudo nerdctl network rm {name}",
+                consts::lima_vm_name()
+            )
         );
     }
 }

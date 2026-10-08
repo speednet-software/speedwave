@@ -66,6 +66,8 @@ where
 pub struct LockedRuntime {
     inner: Box<dyn ContainerRuntime>,
     engine_teardown_started: fn() -> bool,
+    #[cfg(any(test, feature = "test-support"))]
+    data_dir_override: Option<std::path::PathBuf>,
 }
 
 impl LockedRuntime {
@@ -76,7 +78,23 @@ impl LockedRuntime {
         Self {
             inner,
             engine_teardown_started,
+            #[cfg(any(test, feature = "test-support"))]
+            data_dir_override: None,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_data_dir_override(mut self, data_dir: Option<std::path::PathBuf>) -> Self {
+        self.data_dir_override = data_dir;
+        self
+    }
+
+    fn data_dir(&self) -> &std::path::Path {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(dir) = &self.data_dir_override {
+            return dir;
+        }
+        crate::consts::data_dir()
     }
 
     fn refuse_during_engine_teardown(&self) -> anyhow::Result<()> {
@@ -86,11 +104,23 @@ impl LockedRuntime {
         Ok(())
     }
 
-    /// Starts the project's compose stack (under the per-project lock); refused once
-    /// [`super::begin_engine_teardown`] ran.
+    fn ensure_egress_less_networks(&self, project: &str) -> anyhow::Result<()> {
+        for name in crate::compose::compose_egress_less_networks_in(self.data_dir(), project)? {
+            self.inner.ensure_internal_network(&name, project)?;
+        }
+        Ok(())
+    }
+
+    fn start_checks(&self, project: &str) -> anyhow::Result<()> {
+        self.refuse_during_engine_teardown()?;
+        self.ensure_egress_less_networks(project)
+    }
+
+    /// Starts the project's compose stack (under the per-project lock) once its egress-less
+    /// networks exist isolated; refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.refuse_during_engine_teardown()?;
+            self.start_checks(project)?;
             let result = self.inner.compose_up(project);
             crate::slash::invalidate_cache(project);
             result
@@ -102,11 +132,11 @@ impl LockedRuntime {
         with_acquired(project, || self.inner.compose_down(project))
     }
 
-    /// Recreates the project's compose stack (under the per-project lock); refused once
-    /// [`super::begin_engine_teardown`] ran.
+    /// Recreates the project's compose stack (under the per-project lock) once its egress-less
+    /// networks exist isolated; refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.refuse_during_engine_teardown()?;
+            self.start_checks(project)?;
             let result = self.inner.compose_up_recreate(project);
             crate::slash::invalidate_cache(project);
             result
@@ -117,12 +147,23 @@ impl LockedRuntime {
     /// the per-project lock, refused once the engine teardown began) — ADR-073 proxy hot-reload.
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.refuse_during_engine_teardown()?;
+            self.start_checks(project)?;
             let result = self.inner.compose_up_service(project, service);
             if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
                 crate::slash::invalidate_cache(project);
             }
             result
+        })
+    }
+
+    /// Removes every egress-less network the project can have (under the per-project lock);
+    /// a missing network is skipped, any other failure is returned.
+    pub fn remove_egress_less_networks(&self, project: &str) -> anyhow::Result<()> {
+        with_acquired(project, || {
+            for name in crate::compose::egress_less_network_names(project) {
+                self.inner.remove_network(&name)?;
+            }
+            Ok(())
         })
     }
 
@@ -539,6 +580,147 @@ mod tests {
             !final_snap.contains("inner_diff_project"),
             "inner lock must be released before snapshot is taken (snapshot runs after inner returns)"
         );
+    }
+
+    fn rendered(project: &str, yaml: &str) -> tempfile::TempDir {
+        let data_dir = tempfile::tempdir().unwrap();
+        let path = crate::compose::compose_output_path_in(data_dir.path(), project).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, yaml).unwrap();
+        data_dir
+    }
+
+    fn compose_with_office(project: &str) -> String {
+        let office = crate::compose::egress_less_network_names(project).remove(0);
+        format!(
+            "services: {{}}\nnetworks:\n  main:\n    driver: bridge\n  {office}:\n    name: {office}\n    external: true\n"
+        )
+    }
+
+    fn start_every_way(rt: &LockedRuntime, project: &str) -> Vec<anyhow::Result<()>> {
+        vec![
+            rt.compose_up(project),
+            rt.compose_up_recreate(project),
+            rt.compose_up_service(project, crate::consts::CLAUDE_COMPOSE_SERVICE),
+        ]
+    }
+
+    #[test]
+    fn every_start_creates_the_egress_less_networks_first() {
+        let project = "locked-net-ensure";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        for started in start_every_way(&rt, project) {
+            started.unwrap();
+        }
+        let office = crate::compose::egress_less_network_names(project).remove(0);
+        assert_eq!(
+            handles.ensured_networks(),
+            vec![office.clone(), office.clone(), office]
+        );
+        assert!(handles
+            .ensure_network_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, p)| p == project));
+        assert_eq!(handles.up_projects(), vec![project.to_string()]);
+        assert!(handles.was_recreated());
+        assert_eq!(handles.up_service_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn no_stack_starts_when_its_egress_less_network_cannot_be_isolated() {
+        let project = "locked-net-fail";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_ensure_network_error("network has egress")
+            .build();
+        for started in start_every_way(&rt, project) {
+            let err = started.unwrap_err();
+            assert!(err.to_string().contains("network has egress"), "{err}");
+        }
+        assert_eq!(handles.ensured_networks().len(), 3);
+        assert!(handles.up_projects().is_empty());
+        assert!(!handles.was_recreated());
+        assert!(handles.up_service_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stack_without_egress_less_networks_creates_none() {
+        let project = "locked-net-none";
+        let data_dir = rendered(
+            project,
+            "services: {}\nnetworks:\n  main:\n    driver: bridge\n",
+        );
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        for started in start_every_way(&rt, project) {
+            started.unwrap();
+        }
+        assert!(handles.ensured_networks().is_empty());
+        assert_eq!(handles.up_projects(), vec![project.to_string()]);
+    }
+
+    #[test]
+    fn a_project_without_a_rendered_compose_creates_no_network() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.compose_up("locked-net-unrendered").unwrap();
+        assert!(handles.ensured_networks().is_empty());
+        assert_eq!(
+            handles.up_projects(),
+            vec!["locked-net-unrendered".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unparsable_compose_stops_the_start() {
+        let project = "locked-net-garbage";
+        let data_dir = rendered(project, "networks: [unclosed");
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        assert!(rt.compose_up(project).is_err());
+        assert!(handles.up_projects().is_empty());
+    }
+
+    #[test]
+    fn the_teardown_refusal_comes_before_any_network_is_created() {
+        let project = "locked-net-teardown";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_engine_teardown_check(|| true)
+            .build();
+        assert!(rt.compose_up(project).is_err());
+        assert!(handles.ensured_networks().is_empty());
+    }
+
+    #[test]
+    fn removing_egress_less_networks_removes_every_one_of_the_project() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        rt.remove_egress_less_networks("gone").unwrap();
+        assert_eq!(
+            handles.removed_networks(),
+            crate::compose::egress_less_network_names("gone")
+        );
+    }
+
+    #[test]
+    fn removing_egress_less_networks_returns_the_engine_error() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_remove_network_error("network is in use")
+            .build();
+        let err = rt.remove_egress_less_networks("busy").unwrap_err();
+        assert!(err.to_string().contains("in use"), "{err}");
+        assert_eq!(handles.removed_networks().len(), 1);
     }
 
     #[test]

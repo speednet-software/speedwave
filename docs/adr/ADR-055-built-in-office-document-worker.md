@@ -37,7 +37,7 @@ Three layers select tools across the large tool set: `_meta.keywords` + `_meta.d
 ## Where it lives in code
 
 - **Worker** — `mcp-servers/office/` (`src/index.ts` fails fast without `MCP_OFFICE_AUTH_TOKEN`; Python helpers under `scripts/`)
-- **Compose service + egress-less network** — `containers/compose.template.yml` (`mcp-office`, `${NETWORK_NAME}_office` declared `internal: true`)
+- **Compose service + egress-less network** — `containers/compose.template.yml` (`mcp-office`, `${NETWORK_NAME}_office` declared `external: true` and pre-created isolated by the runtime, see the 2026-10-08 amendment)
 - **Service registry SSOT** — `crates/speedwave-runtime/src/consts.rs::TOGGLEABLE_MCP_SERVICES` (the `office` entry, `egress_less: true`, `auth_fields: &[]`)
 - **Filtering & auth tokens** — `crates/speedwave-runtime/src/compose.rs` (`apply_integrations_filter`, `apply_worker_auth_tokens_in`)
 - **Decision-map skill** — `containers/claude-resources/skills/integrations/office/SKILL.md`, gated per-integration by `containers/entrypoint.sh` via `ENABLED_SERVICES` + the `~/.claude/.speedwave-managed-links` state file
@@ -52,6 +52,20 @@ Three layers select tools across the large tool set: `_meta.keywords` + `_meta.d
 - **SheetJS on the write path** — the SheetJS Community Edition writes no cell styles or charts, so writes stay on `openpyxl`[^4].
 - **`mcp-office` on the shared network with only application-level fetch restrictions** — a network-level egress block is stronger and cheaper than auditing every tool for remote-fetch paths; the application restrictions remain as defense in depth.
 
+## Amendment (2026-10-08): the runtime pre-creates the office network with `--internal`
+
+**Context.** The `internal: true` key never reached the engine. Speedwave starts every stack with the bundled nerdctl 2.2.2 (`consts.rs::NERDCTL_FULL_VERSION`), whose `compose up` creates a non-external network with `nerdctl network create`, passing only the name, the driver, the driver options and the IPAM settings; every other non-empty key, `internal` included, is logged as `Ignoring: network …` and dropped[^5]. A plain `network create` builds a bridge with `isGateway` and `ipMasq` set, a `portmap` plugin and a `0.0.0.0/0` route in its IPAM config; only `--internal` leaves all of them out[^6]. So `${NETWORK_NAME}_office` had a gateway and masquerade, and `mcp-office` could reach the internet, contrary to the security contract above. The compose tests only pinned the YAML text.
+
+**Decision.** Egress-less networks are created by the runtime, not by compose.
+
+- The template declares `${NETWORK_NAME}_office` with `name:` equal to its key and `external: true`. nerdctl compose does nothing for an external network on `up` or `down`[^7].
+- Before every `compose up` (`LockedRuntime::compose_up`, `compose_up_recreate` and `compose_up_service`, under the project lock, so the CLI, Desktop, update and rollback paths all get it), the runtime reads the compose file it is about to start. For each external network whose key is the egress-less network of an `egress_less` service (`compose/networks.rs`), it calls `ContainerRuntime::ensure_internal_network` (`runtime/networks.rs`). That runs `nerdctl network inspect --mode=native`, which prints the network's raw CNI config list[^8]. A missing network is created with `network create --internal` and the two labels nerdctl compose puts on a project network, then inspected again. The start fails unless the first CNI plugin is a bridge, no plugin sets `isGateway`, `isDefaultGateway` or `ipMasq` (all three are omitted when false[^9]), no plugin is `portmap`, and no IPAM route is a default route. An existing network that fails the same check is removed and created again; if containers still use it, the removal fails and so does the start.
+- When `office` is disabled, the network is absent from the compose file and nothing is created.
+- The `com.docker.compose.project=<project>` label lets the post-`down` sweep that already removes a project's compose networks (`runtime/mod.rs::force_remove_project_networks_with_run_fn`) remove this network too, so a stop removes it and the next start creates it again. Unregistering a project also removes every egress-less network of the project after `compose down`, and keeps the project registered if that fails (`LockedRuntime::remove_egress_less_networks`, called from `containers_cmd.rs::remove_project_core`). Factory reset deletes the Lima VM or the WSL distro, which holds the network configs.
+- A new `SecurityCheck` rule, `EGRESS_LESS_NETWORK_EXTERNAL`, fails a compose in which an egress-less network is not `external: true` or names another network, or in which `mcp-office` is attached to anything else. A rollback snapshot rendered before this amendment declares the office network `internal: true`, fails the rule, and gives way to a fresh render (`update.rs::choose_rollback_compose`).
+
+**Consequences.** compose-go names a non-external network without `name:` `<project>_<key>` and an external one by its key[^10], so the network that earlier releases created (`<project>_<prefix>_<project>_network_office`) is not the one started now. Containers move to the isolated network only when they are recreated: a plain `compose up` starts an existing container again when its service config hash is unchanged[^11], and that hash keys a service's networks by their short name, which this change keeps. A new release changes the Desktop bundle id, so the Desktop reconcile and the update path both run `compose down` and then `compose_up_recreate`; the old network carries the compose project label and goes in that `down`. A stack from an earlier release that the CLI starts before any of those runs keeps its `mcp-office` container on the old network until the next stop or recreate. The same mechanism serves any later network that must have no egress. Isolation is checked against the CNI config on every start, not by probing traffic from inside a container.
+
 [^1]: [markitdown-mcp package README](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp): exposes a single `convert_to_markdown(uri)` tool, no write/edit tool.
 
 [^2]: [jenstangen1/pptx-xlsx-mcp](https://github.com/jenstangen1/pptx-xlsx-mcp): uses `pywin32` COM automation against locally running PowerPoint/Excel, Windows-only.
@@ -59,3 +73,17 @@ Three layers select tools across the large tool set: `_meta.keywords` + `_meta.d
 [^3]: [WeasyPrint API reference, `url_fetcher`](https://doc.courtbouillon.org/weasyprint/stable/api_reference.html): `HTML`/`CSS` accept a custom `url_fetcher` callable that can restrict or reject fetched URL schemes.
 
 [^4]: [SheetJS issue #3214](https://git.sheetjs.com/sheetjs/sheetjs/issues/3214): reading and re-writing a file with the Community Edition does not preserve cell styles; styling and chart-writing support is reserved for the Pro edition.
+
+[^5]: [nerdctl v2.2.2 `pkg/composer/up_network.go` L39-L92](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/composer/up_network.go#L39-L92): `UnknownNonEmptyFields(&net, "Name", "Ipam", "Driver", "DriverOpts")` logs `Ignoring: network …`, and the `network create` argv carries only the compose labels, `--driver`, `--opt` and the IPAM flags.
+
+[^6]: [nerdctl v2.2.2 `pkg/netutil/netutil_unix.go` L132-L161](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/netutil/netutil_unix.go#L132-L161) and [L223-L226](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/netutil/netutil_unix.go#L223-L226): `bridge.IsGW = !internal`, `IPMasq = false` when internal, the `portmap` plugin only when not internal, and the `0.0.0.0/0` IPAM route only when not internal.
+
+[^7]: [nerdctl v2.2.2 `pkg/composer/up_network.go` L34-L37](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/composer/up_network.go#L34-L37) and [`pkg/composer/down.go` L94](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/composer/down.go#L94): an external network is skipped on `up` and on `down`.
+
+[^8]: [nerdctl v2.2.2 `pkg/cmd/network/inspect.go` L82-L106](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/cmd/network/inspect.go#L82-L106): `--mode=native` prints the network with `CNI` set to its raw config list; a name that matches no network ends in `unable to find any network matching the provided request`.
+
+[^9]: [nerdctl v2.2.2 `pkg/netutil/cni_plugin_unix.go` L27-L30](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/netutil/cni_plugin_unix.go#L27-L30): the bridge plugin's `isGateway`, `isDefaultGateway` and `ipMasq` fields are `omitempty`.
+
+[^10]: [compose-go v2.10.0 `loader/normalize.go` L251-L256](https://github.com/compose-spec/compose-go/blob/v2.10.0/loader/normalize.go#L251-L256), the compose-go version [nerdctl v2.2.2 requires](https://github.com/containerd/nerdctl/blob/v2.2.2/go.mod#L10): a network without `name:` is named by its key when it is external and `<project>_<key>` otherwise.
+
+[^11]: [nerdctl v2.2.2 `pkg/composer/up_service.go` L156-L177](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/composer/up_service.go#L156-L177) and [`pkg/composer/config.go` L80-L91](https://github.com/containerd/nerdctl/blob/v2.2.2/pkg/composer/config.go#L80-L91): without `--force-recreate`, an existing container whose `ComposeConfigHash` label equals the hash of the JSON-encoded service config is started instead of recreated.

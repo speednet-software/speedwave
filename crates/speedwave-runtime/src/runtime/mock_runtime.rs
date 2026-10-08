@@ -51,6 +51,10 @@ pub struct MockHandles {
     pub reset_vm_calls: Arc<AtomicUsize>,
     /// Whether `prepare_build_context` was called.
     pub prepare_build_context_calls: Arc<AtomicBool>,
+    /// Recorded `ensure_internal_network` (name, project) args.
+    pub ensure_network_calls: Arc<Mutex<Vec<(String, String)>>>,
+    /// Recorded `remove_network` name args.
+    pub remove_network_calls: Arc<Mutex<Vec<String>>>,
 }
 
 /// Recorded arguments of a `build_image` call.
@@ -130,6 +134,19 @@ impl MockHandles {
     pub fn reset_vm_count(&self) -> usize {
         self.reset_vm_calls.load(Ordering::SeqCst)
     }
+    /// Network names passed to `ensure_internal_network`, in call order.
+    pub fn ensured_networks(&self) -> Vec<String> {
+        self.ensure_network_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+    /// Network names passed to `remove_network`, in call order.
+    pub fn removed_networks(&self) -> Vec<String> {
+        self.remove_network_calls.lock().unwrap().clone()
+    }
 }
 
 /// Builder for a fully-configurable mock runtime.
@@ -173,6 +190,9 @@ pub struct MockRuntimeBuilder {
     remove_images_result: Result<(), String>,
     prepare_build_context_root: Option<std::path::PathBuf>,
     engine_teardown_check: fn() -> bool,
+    ensure_network_error: Option<String>,
+    remove_network_error: Option<String>,
+    data_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -246,6 +266,9 @@ impl MockRuntimeBuilder {
             remove_images_result: Ok(()),
             prepare_build_context_root: None,
             engine_teardown_check: || false,
+            ensure_network_error: None,
+            remove_network_error: None,
+            data_dir: None,
         }
     }
 
@@ -439,6 +462,21 @@ impl MockRuntimeBuilder {
         self.stop_vm_result = Err(msg.to_string());
         self
     }
+    /// Makes the runtime read project compose files under `data_dir` instead of the data dir.
+    pub fn with_data_dir(mut self, data_dir: &std::path::Path) -> Self {
+        self.data_dir = Some(data_dir.to_path_buf());
+        self
+    }
+    /// Makes every `ensure_internal_network` fail with `msg` (the call is still recorded).
+    pub fn with_ensure_network_error(mut self, msg: &str) -> Self {
+        self.ensure_network_error = Some(msg.to_string());
+        self
+    }
+    /// Makes every `remove_network` fail with `msg` (the call is still recorded).
+    pub fn with_remove_network_error(mut self, msg: &str) -> Self {
+        self.remove_network_error = Some(msg.to_string());
+        self
+    }
     /// Sets the path `prepare_build_context` returns.
     pub fn with_prepare_build_context_root(mut self, root: std::path::PathBuf) -> Self {
         self.prepare_build_context_root = Some(root);
@@ -488,9 +526,12 @@ impl MockRuntimeBuilder {
             buildkit_prune_result: self.buildkit_prune_result,
             remove_images_result: self.remove_images_result,
             prepare_build_context_root: self.prepare_build_context_root,
+            ensure_network_error: self.ensure_network_error,
+            remove_network_error: self.remove_network_error,
         };
         (
-            LockedRuntime::new(Box::new(mock), self.engine_teardown_check),
+            LockedRuntime::new(Box::new(mock), self.engine_teardown_check)
+                .with_data_dir_override(self.data_dir),
             handles,
         )
     }
@@ -535,6 +576,8 @@ struct MockRuntime {
     buildkit_prune_result: Result<(), String>,
     remove_images_result: Result<(), String>,
     prepare_build_context_root: Option<std::path::PathBuf>,
+    ensure_network_error: Option<String>,
+    remove_network_error: Option<String>,
 }
 
 impl ContainerRuntime for MockRuntime {
@@ -792,6 +835,30 @@ impl ContainerRuntime for MockRuntime {
             .unwrap()
             .push((project.to_string(), service.to_string()));
         Ok(())
+    }
+
+    fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()> {
+        self.handles
+            .ensure_network_calls
+            .lock()
+            .unwrap()
+            .push((name.to_string(), project.to_string()));
+        match &self.ensure_network_error {
+            Some(msg) => anyhow::bail!("{msg}"),
+            None => Ok(()),
+        }
+    }
+
+    fn remove_network(&self, name: &str) -> anyhow::Result<()> {
+        self.handles
+            .remove_network_calls
+            .lock()
+            .unwrap()
+            .push(name.to_string());
+        match &self.remove_network_error {
+            Some(msg) => anyhow::bail!("{msg}"),
+            None => Ok(()),
+        }
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {

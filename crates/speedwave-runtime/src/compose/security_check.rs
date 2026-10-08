@@ -419,6 +419,14 @@ pub enum SecurityRule {
     ))]
     ClaudeWorkspaceMount,
 
+    /// Every egress-less network is `external: true` under its own name (pre-created with
+    /// `--internal`; nerdctl compose ignores `internal:`), and egress-less workers join only those.
+    #[strum(to_string = "EGRESS_LESS_NETWORK_EXTERNAL")]
+    #[strum(props(
+        description = "Egress-less networks are external (pre-created --internal) and egress-less workers join only them"
+    ))]
+    EgressLessNetworkExternal,
+
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
     /// Host file/dir has wrong mode bits or UID (Unix-only, skipped on Windows).
@@ -586,6 +594,7 @@ impl SecurityCheck {
             Self::check_audit_mount(&doc, data_dir, project, "mcp-hub"),
             Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
             Self::check_claude_workspace_mount(&doc, expected_paths, data_dir, project),
+            Self::check_egress_less_networks(&doc),
             Self::check_file_security(data_dir, project),
         ]
         .into_iter()
@@ -975,6 +984,73 @@ impl SecurityCheck {
                     remediation:
                         "Remove the 'ports:' section. Hub and workers communicate over the internal Docker network.",
                 });
+            }
+        }
+        violations
+    }
+
+    /// Egress-less networks must be pre-created `external` networks (a compose-created one
+    /// keeps its gateway), and an egress-less worker must sit on nothing but such a network.
+    fn check_egress_less_networks(doc: &serde_yaml_ng::Value) -> Vec<SecurityViolation> {
+        const REMEDIATION: &str = "Run render_compose() again: egress-less networks are declared \
+             `external: true` and pre-created by the runtime with `nerdctl network create --internal`.";
+        let mut violations = Vec::new();
+        let declared = doc.get("networks").and_then(|n| n.as_mapping());
+
+        for (key, decl) in declared.into_iter().flatten() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            if !super::networks::is_egress_less_network(key) {
+                continue;
+            }
+            if !super::networks::declares_external(decl) {
+                violations.push(SecurityViolation::new(
+                    key,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!(
+                        "egress-less network '{key}' is not declared `external: true`; nerdctl \
+                         compose ignores `internal:` and would create it with a gateway"
+                    ),
+                    REMEDIATION,
+                ));
+            }
+            if let Some(name) = decl.get("name").filter(|n| n.as_str() != Some(key)) {
+                violations.push(SecurityViolation::new(
+                    key,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!("egress-less network '{key}' points at another network: {name:?}"),
+                    REMEDIATION,
+                ));
+            }
+        }
+
+        let services = get_services(doc).unwrap_or_default();
+        for svc in consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .filter(|s| s.egress_less)
+        {
+            let Some((_, service)) = services.iter().find(|(n, _)| n == svc.compose_name) else {
+                continue;
+            };
+            let attached = service_network_refs(service);
+            let escapes = attached.iter().any(|net| {
+                !super::networks::is_egress_less_network(net)
+                    || !declared
+                        .and_then(|m| m.get(net.as_str()))
+                        .is_some_and(super::networks::declares_external)
+            });
+            if attached.is_empty() || escapes {
+                violations.push(SecurityViolation::new(
+                    svc.compose_name,
+                    SecurityRule::EgressLessNetworkExternal,
+                    format!(
+                        "{} must be attached only to its external egress-less network; \
+                         attached: {attached:?}",
+                        svc.compose_name
+                    ),
+                    REMEDIATION,
+                ));
             }
         }
         violations
@@ -2210,6 +2286,21 @@ fn is_plugin_service(service: &serde_yaml_ng::Value) -> bool {
 }
 
 /// Helper: extract services as Vec<(name, &Value)> from a compose YAML doc
+/// Network names a service attaches to, from the sequence or the mapping form.
+fn service_network_refs(service: &serde_yaml_ng::Value) -> Vec<String> {
+    match service.get("networks") {
+        Some(serde_yaml_ng::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        Some(serde_yaml_ng::Value::Mapping(map)) => map
+            .keys()
+            .filter_map(|k| k.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn get_services(
     doc: &serde_yaml_ng::Value,
 ) -> Option<Vec<(String, &serde_yaml_ng::Value)>> {

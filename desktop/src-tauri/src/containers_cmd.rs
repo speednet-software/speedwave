@@ -594,6 +594,13 @@ pub(crate) fn remove_project_core(
             speedwave_runtime::build::user_facing_engine_error(&e)
         )
     })?;
+    rt.remove_egress_less_networks(name).map_err(|e| {
+        log::error!("removing the egress-less networks of '{name}' failed: {e:#}");
+        format!(
+            "Failed to remove the networks of '{name}': {}",
+            speedwave_runtime::build::user_facing_engine_error(&e)
+        )
+    })?;
     log::info!("removing project name={name}");
     remove_fn(name)
 }
@@ -5309,7 +5316,36 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(handles.ensure_ready_count(), 1);
         assert_eq!(handles.down_projects(), vec!["alpha"]);
+        let networks = handles.removed_networks();
+        assert_eq!(networks.len(), 1, "{networks:?}");
+        assert!(
+            networks[0].ends_with("_alpha_network_office"),
+            "{networks:?}"
+        );
         assert_eq!(*removed.borrow(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn remove_project_core_network_removal_failure_keeps_the_project() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_remove_network_error("network is in use by container \"abc\"")
+            .build();
+        let remove_calls = RefCell::new(0u32);
+        let result = remove_project_core("alpha", &rt, &ok_check, &|_| {
+            *remove_calls.borrow_mut() += 1;
+            Ok(())
+        });
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to remove the networks of 'alpha'") && err.contains("in use"),
+            "{err}"
+        );
+        assert_eq!(handles.down_projects(), vec!["alpha"]);
+        assert_eq!(
+            *remove_calls.borrow(),
+            0,
+            "a project whose network is left behind must stay registered"
+        );
     }
 
     #[test]
@@ -5382,7 +5418,7 @@ mod tests {
 
     #[test]
     fn remove_project_core_compose_down_failure_aborts_remove() {
-        let (rt, _handles) = MockRuntimeBuilder::new()
+        let (rt, handles) = MockRuntimeBuilder::new()
             .with_fail_on_down(&["alpha"])
             .build();
         let remove_calls = RefCell::new(0u32);
@@ -5401,6 +5437,7 @@ mod tests {
             0,
             "runtime project removal must not run after compose_down failure"
         );
+        assert!(handles.removed_networks().is_empty());
     }
 
     #[test]
