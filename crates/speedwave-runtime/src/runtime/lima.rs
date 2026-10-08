@@ -698,6 +698,11 @@ impl ContainerRuntime for LimaRuntime {
         super::networks::remove_network_with(name, &|args| self.network_command(args))
     }
 
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool> {
+        self.require_running()?;
+        super::networks::network_exists_with(name, &|args| self.network_command(args))
+    }
+
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
@@ -3834,6 +3839,38 @@ mod tests {
         let rt = LimaRuntime::with_runner(Box::new(runner));
         assert!(rt
             .ensure_internal_network("speedwave_acme_network_office", "acme")
+            .is_err());
+    }
+
+    #[test]
+    fn network_exists_inspects_through_sudo_nerdctl_bounded() {
+        use crate::runtime::networks::tests::{BRIDGED_INSPECT, NOT_FOUND};
+        let name = "acme_speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(BRIDGED_INSPECT), Err(NOT_FOUND)]);
+        assert!(rt.network_exists(name).unwrap());
+        assert!(!rt.network_exists(name).unwrap());
+        let calls = calls.lock().unwrap();
+        let inspect = format!(
+            "limactl shell {} -- sudo nerdctl network inspect --mode=native {name}",
+            consts::lima_vm_name()
+        );
+        assert_eq!(
+            calls.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            vec![inspect.clone(), inspect]
+        );
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn network_exists_fails_when_the_vm_is_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt
+            .network_exists("acme_speedwave_acme_network_office")
             .is_err());
     }
 

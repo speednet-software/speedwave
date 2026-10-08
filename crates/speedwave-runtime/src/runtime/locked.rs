@@ -104,26 +104,56 @@ impl LockedRuntime {
         Ok(())
     }
 
-    fn ensure_egress_less_networks(&self, project: &str) -> anyhow::Result<()> {
+    fn isolate_egress_less_networks(&self, project: &str) -> anyhow::Result<Vec<String>> {
+        let mut legacy = Vec::new();
         for name in crate::compose::compose_egress_less_networks_in(self.data_dir(), project)? {
             self.inner.ensure_internal_network(&name, project)?;
+            let compose_created = crate::compose::legacy_compose_network_name(project, &name);
+            if self.inner.network_exists(&compose_created)? {
+                legacy.push(compose_created);
+            }
+        }
+        Ok(legacy)
+    }
+
+    fn start_isolated(
+        &self,
+        project: &str,
+        up: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.refuse_during_engine_teardown()?;
+        let legacy = self.isolate_egress_less_networks(project)?;
+        if legacy.is_empty() {
+            return up();
+        }
+        log::warn!(
+            "project {project} still has the compose-created networks {legacy:?} of a release \
+             before the isolated pre-create; recreating every container so none stays on them"
+        );
+        let result = self.inner.compose_up_recreate(project);
+        crate::slash::invalidate_cache(project);
+        result?;
+        for name in &legacy {
+            self.inner.remove_network(name).map_err(|e| {
+                e.context(format!(
+                    "the containers of {project} were recreated, but the network {name} could \
+                     not be removed; stop the project and start it again"
+                ))
+            })?;
         }
         Ok(())
     }
 
-    fn start_checks(&self, project: &str) -> anyhow::Result<()> {
-        self.refuse_during_engine_teardown()?;
-        self.ensure_egress_less_networks(project)
-    }
-
     /// Starts the project's compose stack (under the per-project lock) once its egress-less
-    /// networks exist isolated; refused once [`super::begin_engine_teardown`] ran.
+    /// networks exist isolated, recreating every container while a compose-created one remains;
+    /// refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.start_checks(project)?;
-            let result = self.inner.compose_up(project);
-            crate::slash::invalidate_cache(project);
-            result
+            self.start_isolated(project, || {
+                let result = self.inner.compose_up(project);
+                crate::slash::invalidate_cache(project);
+                result
+            })
         })
     }
 
@@ -136,10 +166,11 @@ impl LockedRuntime {
     /// networks exist isolated; refused once [`super::begin_engine_teardown`] ran.
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.start_checks(project)?;
-            let result = self.inner.compose_up_recreate(project);
-            crate::slash::invalidate_cache(project);
-            result
+            self.start_isolated(project, || {
+                let result = self.inner.compose_up_recreate(project);
+                crate::slash::invalidate_cache(project);
+                result
+            })
         })
     }
 
@@ -147,12 +178,13 @@ impl LockedRuntime {
     /// the per-project lock, refused once the engine teardown began) — ADR-073 proxy hot-reload.
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.start_checks(project)?;
-            let result = self.inner.compose_up_service(project, service);
-            if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
-                crate::slash::invalidate_cache(project);
-            }
-            result
+            self.start_isolated(project, || {
+                let result = self.inner.compose_up_service(project, service);
+                if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
+                    crate::slash::invalidate_cache(project);
+                }
+                result
+            })
         })
     }
 
@@ -701,6 +733,131 @@ mod tests {
             .build();
         assert!(rt.compose_up(project).is_err());
         assert!(handles.ensured_networks().is_empty());
+    }
+
+    fn legacy_office(project: &str) -> String {
+        let office = crate::compose::egress_less_network_names(project).remove(0);
+        crate::compose::legacy_compose_network_name(project, &office)
+    }
+
+    #[test]
+    fn a_plain_start_over_the_compose_created_network_recreates_and_removes_it() {
+        let project = "locked-net-legacy";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let legacy = legacy_office(project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy)
+            .build();
+        rt.compose_up(project).unwrap();
+        assert!(handles.up_projects().is_empty(), "never a plain up");
+        assert_eq!(
+            *handles.recreate_calls.lock().unwrap(),
+            vec![project.to_string()]
+        );
+        assert_eq!(handles.removed_networks(), vec![legacy.clone()]);
+        assert_eq!(handles.probed_networks(), vec![legacy]);
+        assert_eq!(handles.ensured_networks().len(), 1);
+    }
+
+    #[test]
+    fn every_start_over_the_compose_created_network_recreates_the_whole_stack() {
+        let project = "locked-net-legacy-all";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let legacy = legacy_office(project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy)
+            .build();
+        for started in start_every_way(&rt, project) {
+            started.unwrap();
+        }
+        assert!(handles.up_projects().is_empty());
+        assert!(handles.up_service_calls.lock().unwrap().is_empty());
+        assert_eq!(handles.recreate_calls.lock().unwrap().len(), 3);
+        assert_eq!(handles.removed_networks(), vec![legacy; 3]);
+    }
+
+    #[test]
+    fn a_start_without_the_compose_created_network_keeps_its_own_up() {
+        let project = "locked-net-no-legacy";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        rt.compose_up(project).unwrap();
+        assert_eq!(handles.up_projects(), vec![project.to_string()]);
+        assert!(!handles.was_recreated());
+        assert!(handles.removed_networks().is_empty());
+        assert_eq!(handles.probed_networks(), vec![legacy_office(project)]);
+    }
+
+    #[test]
+    fn a_stack_without_egress_less_networks_probes_no_compose_created_one() {
+        let project = "locked-net-no-office";
+        let data_dir = rendered(
+            project,
+            "services: {}\nnetworks:\n  main:\n    driver: bridge\n",
+        );
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy_office(project))
+            .build();
+        rt.compose_up(project).unwrap();
+        assert!(handles.probed_networks().is_empty());
+        assert_eq!(handles.up_projects(), vec![project.to_string()]);
+        assert!(!handles.was_recreated());
+    }
+
+    #[test]
+    fn an_unreadable_compose_created_network_stops_the_start() {
+        let project = "locked-net-legacy-unreadable";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_network_exists_error("command 'limactl' timed out after 60s")
+            .build();
+        for started in start_every_way(&rt, project) {
+            let err = started.unwrap_err();
+            assert!(err.to_string().contains("timed out"), "{err}");
+        }
+        assert!(handles.up_projects().is_empty());
+        assert!(!handles.was_recreated());
+        assert!(handles.up_service_calls.lock().unwrap().is_empty());
+        assert!(handles.removed_networks().is_empty());
+    }
+
+    #[test]
+    fn a_compose_created_network_still_in_use_fails_the_start_after_the_recreate() {
+        let project = "locked-net-legacy-busy";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let legacy = legacy_office(project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy)
+            .with_remove_network_error("network is in use by container \"abc\"")
+            .build();
+        let err = rt.compose_up(project).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("is in use"), "{msg}");
+        assert!(msg.contains(&legacy), "{msg}");
+        assert!(msg.contains("stop the project and start it again"), "{msg}");
+        assert!(handles.was_recreated());
+        assert_eq!(handles.removed_networks(), vec![legacy]);
+    }
+
+    #[test]
+    fn a_failed_recreate_leaves_the_compose_created_network_in_place() {
+        let project = "locked-net-legacy-recreate-fails";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy_office(project))
+            .with_fail_on_recreate(&[project])
+            .build();
+        assert!(rt.compose_up(project).is_err());
+        assert!(handles.up_projects().is_empty());
+        assert!(handles.removed_networks().is_empty());
     }
 
     #[test]

@@ -55,6 +55,7 @@ pub use llm::{
 
 pub(crate) use networks::{
     compose_egress_less_networks_in, egress_less_network_name, egress_less_network_names,
+    legacy_compose_network_name,
 };
 use plugins::apply_plugins_from_verified;
 pub(crate) use plugins::ApplyPluginsCtx;

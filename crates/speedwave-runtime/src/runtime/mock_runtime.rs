@@ -55,6 +55,8 @@ pub struct MockHandles {
     pub ensure_network_calls: Arc<Mutex<Vec<(String, String)>>>,
     /// Recorded `remove_network` name args.
     pub remove_network_calls: Arc<Mutex<Vec<String>>>,
+    /// Recorded `network_exists` name args.
+    pub network_exists_calls: Arc<Mutex<Vec<String>>>,
 }
 
 /// Recorded arguments of a `build_image` call.
@@ -147,6 +149,10 @@ impl MockHandles {
     pub fn removed_networks(&self) -> Vec<String> {
         self.remove_network_calls.lock().unwrap().clone()
     }
+    /// Network names passed to `network_exists`, in call order.
+    pub fn probed_networks(&self) -> Vec<String> {
+        self.network_exists_calls.lock().unwrap().clone()
+    }
 }
 
 /// Builder for a fully-configurable mock runtime.
@@ -192,6 +198,8 @@ pub struct MockRuntimeBuilder {
     engine_teardown_check: fn() -> bool,
     ensure_network_error: Option<String>,
     remove_network_error: Option<String>,
+    existing_networks: HashSet<String>,
+    network_exists_error: Option<String>,
     data_dir: Option<std::path::PathBuf>,
 }
 
@@ -268,6 +276,8 @@ impl MockRuntimeBuilder {
             engine_teardown_check: || false,
             ensure_network_error: None,
             remove_network_error: None,
+            existing_networks: HashSet::new(),
+            network_exists_error: None,
             data_dir: None,
         }
     }
@@ -477,6 +487,16 @@ impl MockRuntimeBuilder {
         self.remove_network_error = Some(msg.to_string());
         self
     }
+    /// Makes `network_exists` report `name` present (every other network is absent).
+    pub fn with_existing_network(mut self, name: &str) -> Self {
+        self.existing_networks.insert(name.to_string());
+        self
+    }
+    /// Makes every `network_exists` fail with `msg` (the call is still recorded).
+    pub fn with_network_exists_error(mut self, msg: &str) -> Self {
+        self.network_exists_error = Some(msg.to_string());
+        self
+    }
     /// Sets the path `prepare_build_context` returns.
     pub fn with_prepare_build_context_root(mut self, root: std::path::PathBuf) -> Self {
         self.prepare_build_context_root = Some(root);
@@ -528,6 +548,8 @@ impl MockRuntimeBuilder {
             prepare_build_context_root: self.prepare_build_context_root,
             ensure_network_error: self.ensure_network_error,
             remove_network_error: self.remove_network_error,
+            existing_networks: self.existing_networks,
+            network_exists_error: self.network_exists_error,
         };
         (
             LockedRuntime::new(Box::new(mock), self.engine_teardown_check)
@@ -578,6 +600,8 @@ struct MockRuntime {
     prepare_build_context_root: Option<std::path::PathBuf>,
     ensure_network_error: Option<String>,
     remove_network_error: Option<String>,
+    existing_networks: HashSet<String>,
+    network_exists_error: Option<String>,
 }
 
 impl ContainerRuntime for MockRuntime {
@@ -858,6 +882,18 @@ impl ContainerRuntime for MockRuntime {
         match &self.remove_network_error {
             Some(msg) => anyhow::bail!("{msg}"),
             None => Ok(()),
+        }
+    }
+
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool> {
+        self.handles
+            .network_exists_calls
+            .lock()
+            .unwrap()
+            .push(name.to_string());
+        match &self.network_exists_error {
+            Some(msg) => anyhow::bail!("{msg}"),
+            None => Ok(self.existing_networks.contains(name)),
         }
     }
 

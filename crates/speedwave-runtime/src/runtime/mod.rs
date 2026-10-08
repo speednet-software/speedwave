@@ -107,6 +107,10 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Removes the network `name`; a network that does not exist is not an error.
     fn remove_network(&self, name: &str) -> anyhow::Result<()>;
 
+    /// `Ok(true)` if the network `name` exists; `Ok(false)` only when the engine answers that it
+    /// does not, while an engine that cannot answer is `Err`.
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool>;
+
     /// Validates compose.yml as the engine sees it. Every impl MUST run the engine's
     /// `compose config` so a silent no-op cannot mask a torn/invalid file.
     fn compose_validate(&self, project: &str) -> anyhow::Result<()>;
@@ -5003,6 +5007,9 @@ impl ContainerRuntime for NoopRuntime {
     }
     fn remove_network(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn network_exists(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(false)
     }
     fn compose_validate(&self, _: &str) -> anyhow::Result<()> {
         Ok(())

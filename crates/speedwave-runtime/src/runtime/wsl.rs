@@ -676,6 +676,10 @@ impl ContainerRuntime for WslRuntime {
         super::networks::remove_network_with(name, &|args| self.network_command(args))
     }
 
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool> {
+        super::networks::network_exists_with(name, &|args| self.network_command(args))
+    }
+
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
@@ -3377,6 +3381,33 @@ mod tests {
         let (rt, _) = network_script(&[Err("wsl.exe failed: Wsl/Service/E_UNEXPECTED")]);
         let err = rt
             .ensure_internal_network("speedwave_acme_network_office", "acme")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("E_UNEXPECTED"), "{err:#}");
+    }
+
+    #[test]
+    fn network_exists_inspects_in_the_distro_bounded() {
+        use crate::runtime::networks::tests::{BRIDGED_INSPECT, NOT_FOUND};
+        let name = "acme_speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(BRIDGED_INSPECT), Err(NOT_FOUND)]);
+        assert!(rt.network_exists(name).unwrap());
+        assert!(!rt.network_exists(name).unwrap());
+        let calls = calls.lock().unwrap();
+        let inspect = distro_network_key(&["network", "inspect", "--mode=native", name]);
+        assert_eq!(
+            calls.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            vec![inspect.clone(), inspect]
+        );
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn network_exists_surfaces_a_wsl_transport_failure() {
+        let (rt, _) = network_script(&[Err("wsl.exe failed: Wsl/Service/E_UNEXPECTED")]);
+        let err = rt
+            .network_exists("acme_speedwave_acme_network_office")
             .unwrap_err();
         assert!(format!("{err:#}").contains("E_UNEXPECTED"), "{err:#}");
     }

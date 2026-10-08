@@ -107,6 +107,15 @@ fn inspect_network(
     }
 }
 
+/// `Ok(true)` if the network `name` exists; `Ok(false)` only when the engine answers that it does
+/// not, while an engine that cannot answer is `Err`.
+pub(crate) fn network_exists_with(
+    name: &str,
+    nerdctl: &dyn Fn(&[&str]) -> anyhow::Result<String>,
+) -> anyhow::Result<bool> {
+    Ok(inspect_network(name, nerdctl)?.is_some())
+}
+
 /// Makes `name` exist as an isolated (`--internal`) network of `project`: a missing network is
 /// created, one with egress is removed and created again, and the result is inspected live.
 pub(crate) fn ensure_internal_network_with(
@@ -415,6 +424,26 @@ pub(crate) mod tests {
         let net =
             inspected(r#"[{"type": "bridge", "ipam": {"routes": [{"dst": "10.4.0.0/16"}]}}]"#);
         assert_eq!(isolation_problem(&net), None);
+    }
+
+    #[test]
+    fn an_existing_network_is_reported_present() {
+        let script = Script::new(&[Ok(BRIDGED_INSPECT)]);
+        assert!(network_exists_with(NAME, &|a| script.run(a)).unwrap());
+        assert_eq!(script.calls(), vec![INSPECT]);
+    }
+
+    #[test]
+    fn a_missing_network_is_reported_absent() {
+        let script = Script::new(&[Err(NOT_FOUND)]);
+        assert!(!network_exists_with(NAME, &|a| script.run(a)).unwrap());
+    }
+
+    #[test]
+    fn an_unreadable_engine_never_reports_a_network_absent() {
+        let script = Script::new(&[Err("command 'limactl' timed out after 60s")]);
+        let err = network_exists_with(NAME, &|a| script.run(a)).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
     }
 
     #[test]

@@ -19,6 +19,12 @@ pub(crate) fn egress_less_network_name(network_name: &str, config_key: &str) -> 
     format!("{network_name}_{config_key}")
 }
 
+/// The engine name compose gives a non-external network `key` of `project` declared without
+/// `name:` (`<project>_<key>`): where releases before the `--internal` pre-create put office.
+pub(crate) fn legacy_compose_network_name(project: &str, key: &str) -> String {
+    format!("{project}_{key}")
+}
+
 fn egress_less_config_keys() -> impl Iterator<Item = &'static str> {
     consts::TOGGLEABLE_MCP_SERVICES
         .iter()
@@ -94,6 +100,16 @@ mod tests {
             project_network_name("acme"),
             format!("{}_acme_network", consts::compose_prefix())
         );
+    }
+
+    #[test]
+    fn legacy_compose_network_name_prefixes_the_key_with_the_compose_project() {
+        let office = egress_less_network_names("acme").remove(0);
+        assert_eq!(
+            legacy_compose_network_name("acme", &office),
+            format!("acme_{}_acme_network_office", consts::compose_prefix())
+        );
+        assert_ne!(legacy_compose_network_name("acme", &office), office);
     }
 
     #[test]
