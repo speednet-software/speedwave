@@ -10,14 +10,9 @@
     "url": "https://github.com/speednet-software/speedwave.git"
   },
   "type": "module",
-  "scripts": {
-    "prepare": "husky"
-  },
   "devDependencies": {
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21",
-    "husky": "^9",
-    "lint-staged": "^17",
     "prettier": "^3.9.6"
   }
 }
