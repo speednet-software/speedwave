@@ -545,7 +545,7 @@ test-ci:
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
 	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
-	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats \
+	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
 	  _tests/ci/merge-gate-lanes.bats _tests/ci/audit-schedule-shape.bats \
 	  _tests/ci/git-hooks-removed.bats _tests/ci/pr-title-validate.bats \
 	  _tests/ci/resolve-pr-title-message.bats

@@ -38,15 +38,26 @@ if [ "$GATE_STATUS" -eq 0 ]; then
     exit 0
 fi
 
-gh issue list --repo "$GH_REPO" --state open --limit 100 \
+# --search scopes the query to this exact title (GitHub's `in:title` search
+# qualifier) instead of listing every open issue in the repo: a repo with
+# more than 100 open issues no longer risks missing an older duplicate past
+# a plain `gh issue list --limit 100`.
+gh issue list --repo "$GH_REPO" --state open --search "\"$TITLE\" in:title" --limit 100 \
     --json number,title,state >"$WORKDIR/existing.json"
 
 PLAN="$(python3 "$GATE" issue-plan --existing "$WORKDIR/existing.json" --title "$TITLE")"
 ACTION="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["action"])' "$PLAN")"
 
 if [ "$ACTION" = "create" ]; then
-    gh issue create --repo "$GH_REPO" --title "$TITLE" --body-file "$WORKDIR/report.md"
+    NUMBER="$(gh issue create --repo "$GH_REPO" --title "$TITLE" --body-file "$WORKDIR/report.md" | grep -oE '[0-9]+$')"
 else
     NUMBER="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["number"])' "$PLAN")"
     gh issue edit "$NUMBER" --repo "$GH_REPO" --body-file "$WORKDIR/report.md"
 fi
+
+python3 -c 'import json,sys; print("\n".join(str(n) for n in json.loads(sys.argv[1])["close"]))' "$PLAN" |
+    while IFS= read -r dup; do
+        [ -n "$dup" ] || continue
+        gh issue close "$dup" --repo "$GH_REPO" \
+            --comment "Duplicate of the single audit-schedule issue, superseded by #$NUMBER."
+    done

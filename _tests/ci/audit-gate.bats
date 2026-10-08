@@ -168,28 +168,35 @@ setup() {
   run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-none.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
-  [ "$output" = '{"action": "create"}' ]
+  [ "$output" = '{"action": "create", "close": []}' ]
 }
 
 @test "issue-plan: updates the existing open issue instead of creating a second one" {
   run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-one-open.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
-  [ "$output" = '{"action": "update", "number": 42}' ]
+  [ "$output" = '{"action": "update", "number": 42, "close": []}' ]
 }
 
 @test "issue-plan: a closed issue with a matching title does not block a new one" {
   run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-one-closed.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
-  [ "$output" = '{"action": "create"}' ]
+  [ "$output" = '{"action": "create", "close": []}' ]
 }
 
-@test "issue-plan: two open duplicates still resolve to exactly one issue, the oldest" {
+@test "issue-plan: two open duplicates still resolve to exactly one issue, the oldest, and plans to close the other" {
   run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-two-open-duplicates.json" \
     --title "audit-schedule: known vulnerabilities on dev"
   [ "$status" -eq 0 ]
-  [ "$output" = '{"action": "update", "number": 10}' ]
+  [ "$output" = '{"action": "update", "number": 10, "close": [55]}' ]
+}
+
+@test "issue-plan: three open duplicates keep the oldest and plan to close all the others" {
+  run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-three-open-duplicates.json" \
+    --title "audit-schedule: known vulnerabilities on dev"
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"action": "update", "number": 7, "close": [20, 33]}' ]
 }
 
 @test "print-npm-default-severity: prints the one severity threshold" {

@@ -164,9 +164,10 @@ def cmd_issue_plan(args):
     matches = [i for i in issues if i.get("title") == args.title and i.get("state") == "open"]
     if matches:
         chosen = min(matches, key=lambda i: i["number"])
-        print(json.dumps({"action": "update", "number": chosen["number"]}))
+        duplicates = sorted(i["number"] for i in matches if i["number"] != chosen["number"])
+        print(json.dumps({"action": "update", "number": chosen["number"], "close": duplicates}))
     else:
-        print(json.dumps({"action": "create"}))
+        print(json.dumps({"action": "create", "close": []}))
     return 0
 
 
