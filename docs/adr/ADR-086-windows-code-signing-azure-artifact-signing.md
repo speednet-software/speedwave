@@ -16,7 +16,7 @@ The script signs through Microsoft's `ArtifactSigning` PowerShell module (pinned
 
 CI authenticates with **OpenID Connect and no stored secret**. The `publish-tauri` and `cli` jobs run in the `release` GitHub environment with `id-token: write`; `azure/login` exchanges the job's OIDC token for an Azure session; an Entra app registration carries a federated credential whose subject is exactly `repo:speednet-software/speedwave:environment:release`.[^5][^6] That app holds only the `Artifact Signing Certificate Profile Signer` role, scoped to the signing account. The endpoint, account and profile names plus the client, tenant and subscription ids are GitHub variables on the `release` environment (none of them is a secret); `.github/actions/azure-signing-login` validates them and exports the `AZURE_ARTIFACT_SIGNING_*` env the script reads.
 
-Without that env the script exits 0 with a notice, so PR builds, `desktop-build.yml` and a local `make build-desktop` stay unsigned without any Azure access, the same contract `APPLE_SIGNING_IDENTITY` gives macOS in ADR-037. A client id with an incomplete signing target fails the job instead: a half-configured release must never ship unsigned by accident.
+Without that env the script exits 0 with a notice, so PR builds, `test.yml`'s `build` lane and a local `make build-desktop` stay unsigned without any Azure access, the same contract `APPLE_SIGNING_IDENTITY` gives macOS in ADR-037. A client id with an incomplete signing target fails the job instead: a half-configured release must never ship unsigned by accident.
 
 ## Why
 
