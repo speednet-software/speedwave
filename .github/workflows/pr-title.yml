@@ -37,9 +37,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           message="$(bash scripts/resolve-pr-title-message.sh)"
-          echo "message<<EOF_MESSAGE" >>"$GITHUB_OUTPUT"
-          echo "$message" >>"$GITHUB_OUTPUT"
-          echo "EOF_MESSAGE" >>"$GITHUB_OUTPUT"
+          echo "message=$message" >>"$GITHUB_OUTPUT"
 
       - name: Validate conventional commit message
         env:

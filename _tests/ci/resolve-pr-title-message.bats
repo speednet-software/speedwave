@@ -47,7 +47,8 @@ EOF
         REPO='speednet-software/speedwave' run_script
 
     [ "$status" -eq 0 ]
-    [ "$output" = "chore(release): changelog 0.21.0" ]
+    [[ "$output" == *"::warning::resolve-pr-title-message: merge_group.head_commit.message is empty"* ]]
+    [ "${lines[${#lines[@]}-1]}" = "chore(release): changelog 0.21.0" ]
     grep -q -- '--repo speednet-software/speedwave' "$GH_CALL_LOG"
     grep -q 'pr view 1234' "$GH_CALL_LOG"
 }
