@@ -1,9 +1,8 @@
-/// Maximum response body size (5 MiB) to prevent OOM from rogue servers.
-pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize =
+    speedwave_runtime::consts::HTTP_MAX_RESPONSE_BODY_BYTES;
 
-/// Default request timeout (ADR-041). A stalled upstream must not hang the
-/// command; discovery probes override this per-request with their own value.
-pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration =
+    speedwave_runtime::consts::HTTP_REQUEST_TIMEOUT;
 
 /// Reads a body chunk-by-chunk, aborting past `MAX_RESPONSE_BODY_BYTES`.
 /// `label` identifies the failed HTTP operation in error messages.

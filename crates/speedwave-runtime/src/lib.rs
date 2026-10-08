@@ -49,6 +49,7 @@ pub mod telemetry_env;
 pub mod transcription;
 pub mod tz;
 pub mod update;
+pub mod update_channel;
 pub mod url_validation;
 pub mod usage;
 pub mod usage_cost;

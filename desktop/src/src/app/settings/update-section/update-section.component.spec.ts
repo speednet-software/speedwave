@@ -5,6 +5,12 @@ import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred } from '../../testing/deferred';
 
+type ChannelTestAccess = { channelLabel(): string; setChannel(channel: string): Promise<void> };
+
+function channelAccess(component: UpdateSectionComponent): ChannelTestAccess {
+  return component as unknown as ChannelTestAccess;
+}
+
 describe('UpdateSectionComponent', () => {
   let component: UpdateSectionComponent;
   let fixture: ComponentFixture<UpdateSectionComponent>;
@@ -201,6 +207,121 @@ describe('UpdateSectionComponent', () => {
       pendingCheck.resolve();
       await promise;
       expect(component.updateChecking).toBe(false);
+    });
+  });
+
+  describe('update channel', () => {
+    it('shows stable when the settings carry no channel field', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 12 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      expect(channelAccess(component).channelLabel()).toBe('stable');
+    });
+
+    it('loads the persisted channel', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_update_settings') {
+          return { auto_check: true, check_interval_hours: 12, channel: 'beta' };
+        }
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      expect(channelAccess(component).channelLabel()).toBe('beta');
+    });
+
+    it('opening the section does not add a channel key when the file never had one', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') return { auto_check: false, check_interval_hours: 24 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      const setCall = calls.find((c) => c.cmd === 'set_update_settings');
+      expect(setCall?.args).toEqual({
+        settings: { auto_check: true, check_interval_hours: 12 },
+      });
+    });
+
+    it('opening the section does not reset a persisted beta channel', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') {
+          return { auto_check: false, check_interval_hours: 24, channel: 'beta' };
+        }
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      const setCall = calls.find((c) => c.cmd === 'set_update_settings');
+      expect(setCall?.args).toEqual({
+        settings: { auto_check: true, check_interval_hours: 12, channel: 'beta' },
+      });
+    });
+
+    it('switching channel saves it and triggers a check', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 12 };
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      calls.length = 0;
+
+      await channelAccess(component).setChannel('beta');
+
+      expect(channelAccess(component).channelLabel()).toBe('beta');
+      const setCall = calls.find((c) => c.cmd === 'set_update_settings');
+      expect(setCall?.args).toEqual({
+        settings: { auto_check: true, check_interval_hours: 12, channel: 'beta' },
+      });
+      expect(calls.some((c) => c.cmd === 'check_for_update')).toBe(true);
+    });
+
+    it('does nothing when switching to the already-active channel', async () => {
+      const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 12 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      calls.length = 0;
+
+      await channelAccess(component).setChannel('stable');
+
+      expect(calls.some((c) => c.cmd === 'set_update_settings')).toBe(false);
+      expect(calls.some((c) => c.cmd === 'check_for_update')).toBe(false);
+    });
+
+    it('is disabled while an update is installing', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_update_settings') return { auto_check: true, check_interval_hours: 12 };
+        return undefined;
+      };
+      await component.ngOnInit();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      component.updateInstalling = true;
+
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await channelAccess(component).setChannel('beta');
+
+      expect(channelAccess(component).channelLabel()).toBe('stable');
+      expect(calls).toEqual([]);
     });
   });
 });
