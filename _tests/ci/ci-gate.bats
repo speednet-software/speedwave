@@ -53,7 +53,7 @@ _job_ifs() {
     awk -v hdr="$JOB_HEADER" '
         /^jobs:/ { in_jobs=1; next }
         in_jobs && $0 ~ hdr { job=$0; sub(/^  /, "", job); sub(/:.*/, "", job) }
-        in_jobs && /^[[:space:]]+if:/ { sub(/^[[:space:]]+if:[[:space:]]*/, ""); print job " " $0 }
+        in_jobs && /^    if:/ { sub(/^    if:[[:space:]]*/, ""); print job " " $0 }
     ' "$WORKFLOW"
 }
 
@@ -159,7 +159,7 @@ _job_ifs() {
     [ "$output" = "0" ]
 }
 
-@test "ci-gate carries the only if: in test.yml (the gate counts skipped as failure)" {
+@test "ci-gate carries the only job-level if: in test.yml (the gate counts a skipped job as failure)" {
     run _job_ifs
     [ "$output" = "ci-gate always()" ]
 }

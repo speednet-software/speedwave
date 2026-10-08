@@ -9,7 +9,7 @@ command -v jq >/dev/null 2>&1 || {
 
 NEEDS_JSON="${NEEDS_JSON:-}"
 
-if ! jq -e 'type == "object"' <<<"$NEEDS_JSON" >/dev/null 2>&1; then
+if [[ -z "$NEEDS_JSON" ]] || ! jq -e 'type == "object"' <<<"$NEEDS_JSON" >/dev/null 2>&1; then
     echo "::error::ci-gate: NEEDS_JSON must be the workflow's toJSON(needs) object (got: ${NEEDS_JSON:-<empty>})"
     exit 1
 fi

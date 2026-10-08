@@ -1,0 +1,45 @@
+name: lane-swift
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  swift:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          node: 'false'
+
+      - name: Compute app version
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")" >> "$GITHUB_ENV"
+
+      - name: Build native macOS CLI binaries (universal)
+        run: scripts/build-native-macos.sh
+
+      - name: Run Swift tests
+        run: make test-swift
+
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: Native CLI embedded-plist guards
+        run: make test-native-cli-plist
+
+      - name: Check the build did not modify a tracked file
+        run: git diff --exit-code

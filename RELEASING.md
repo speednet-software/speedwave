@@ -59,7 +59,7 @@ Nothing to operate: every merge to `dev` builds and publishes a beta automatical
 
 ## What's not here yet
 
-The `e2e` environment, the 13-lane merge gate (`ci-gate`), the merge queue and the `dev`/`release/**` ruleset land with [SPEED-739](https://speedwave.atlassian.net/browse/SPEED-739) and [SPEED-740](https://speedwave.atlassian.net/browse/SPEED-740). Until then, `dev` and `release/0.M` PRs go through today's `ci-gate` (`test.yml`) and `validate` (`pr-title.yml`) checks, without a queue. The channel switch, the beta update endpoint and `speedwave self-update`'s channel awareness are [SPEED-741](https://speedwave.atlassian.net/browse/SPEED-741)/[SPEED-742](https://speedwave.atlassian.net/browse/SPEED-742)/[SPEED-743](https://speedwave.atlassian.net/browse/SPEED-743).
+The 13-lane merge gate (`ci-gate` in `test.yml`) and the `e2e.yml` stub (`e2e-macos`/`e2e-windows`, always green until [SPEED-738](https://speedwave.atlassian.net/browse/SPEED-738) swaps in the real rig lane) land with [SPEED-739](https://speedwave.atlassian.net/browse/SPEED-739). The merge queue and the `dev`/`release/**` ruleset extension are [SPEED-740](https://speedwave.atlassian.net/browse/SPEED-740); a commitlint-based `validate` (replacing `pr-title.yml`'s regex check) is the rest of SPEED-739. Until both land, `dev` and `release/0.M` PRs go through the required checks of `test.yml` and `validate` (`pr-title.yml`), without a queue. The channel switch, the beta update endpoint and `speedwave self-update`'s channel awareness are [SPEED-741](https://speedwave.atlassian.net/browse/SPEED-741)/[SPEED-742](https://speedwave.atlassian.net/browse/SPEED-742)/[SPEED-743](https://speedwave.atlassian.net/browse/SPEED-743).
 
 ## Cutover steps (one-time, phase 2b)
 

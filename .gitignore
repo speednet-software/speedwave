@@ -53,6 +53,7 @@ coverage/
 
 .build/
 .swiftpm/
+.audit-tmp/
 
 *.dmg
 *.exe

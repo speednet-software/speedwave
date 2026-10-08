@@ -1,10 +1,8 @@
 name: Tests
 
 on:
-  push:
-    branches: [main, dev]
   pull_request:
-    branches: [main, dev]
+  merge_group:
 
 permissions:
   contents: read
@@ -13,430 +11,62 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   lint:
-    runs-on: macos-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    uses: ./.github/workflows/lane-lint.yml
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-        with:
-          components: clippy, rustfmt
+  test-rust:
+    uses: ./.github/workflows/lane-test-rust.yml
 
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-            containers/proxy/target/
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock', 'containers/proxy/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lint-
+  test-rust-windows:
+    uses: ./.github/workflows/lane-test-rust-windows.yml
 
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            mcp-servers/package-lock.json
+  test-mcp:
+    uses: ./.github/workflows/lane-test-mcp.yml
 
-      - name: Install dependencies
-        run: |
-          cargo fetch
-          npm ci --ignore-scripts
-          cd mcp-servers && npm ci
+  test-desktop:
+    uses: ./.github/workflows/lane-test-desktop.yml
 
-      - name: Install wasm toolchain (PII engine)
-        run: |
-          rustup target add wasm32-unknown-unknown
-          npm install -g wasm-pack
+  test-cli:
+    uses: ./.github/workflows/lane-test-cli.yml
 
-      - name: Install cmake
-        run: brew install cmake
-
-      - name: Rust clippy
-        run: make check-clippy
-
-      - name: Proxy clippy
-        run: make check-proxy-clippy
-
-      - name: Format check
-        run: make check-fmt
-
-      - name: MCP type-check (build shared first)
-        working-directory: mcp-servers
-        run: |
-          (cd shared && npx tsc)
-          # hub resolves @speedwave/policy-engine types from policies/dist, so build (not noEmit).
-          (cd policies && npm run build:wasm)
-          (cd policies && npx tsc)
-          # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
-          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
-            echo "tsc --noEmit $ws"
-            (cd "$ws" && npx tsc --noEmit)
-          done
-
-      - name: MCP ESLint
-        working-directory: mcp-servers
-        run: npx eslint .
-
-  test:
-    runs-on: macos-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-            containers/proxy/target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock', 'containers/proxy/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            mcp-servers/package-lock.json
-
-      - name: Install dependencies
-        run: |
-          cargo fetch
-          npm ci --ignore-scripts
-          cd mcp-servers && npm ci
-
-      - name: Install cmake
-        run: brew install cmake
-
-      - name: Install wasm toolchain (PII engine)
-        run: |
-          rustup target add wasm32-unknown-unknown
-          npm install -g wasm-pack
-
-      - name: Rust tests (incl. transcription)
-        run: make test-rust
-
-      - name: Proxy tests
-        run: make test-proxy
-
-      - name: MCP tests + coverage
-        run: make coverage-mcp
-
-      - name: mcp-os bundle upgrade-path test
-        run: make test-mcp-os-bundle
-
-      - name: Office Python script tests
-        run: make test-mcp-office-py
-
-      - name: Install bats
-        run: brew install bats-core
-
-      - name: Entrypoint tests
-        run: make test-entrypoint
-
-      - name: CI workflow tests
-        run: make test-ci
-
-  desktop:
-    runs-on: macos-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-        with:
-          components: clippy
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            desktop/src-tauri/target/
-          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-desktop-
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: desktop/src/package-lock.json
-
-      - name: Install wasm toolchain (PII engine)
-        run: |
-          rustup target add wasm32-unknown-unknown
-          npm install -g wasm-pack
-
-      - name: Install dependencies
-        working-directory: desktop/src-tauri
-        run: cargo fetch
-
-      - name: Install Angular dependencies
-        working-directory: desktop/src
-        run: npm ci
-
-      - name: Install mcp-servers dependencies
-        working-directory: mcp-servers
-        run: npm ci
-
-      - name: Create resource stubs for Tauri build script
-        run: scripts/create-desktop-stubs.sh
-
-      - name: Desktop clippy
-        working-directory: desktop/src-tauri
-        env:
-          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: cargo clippy -- -D warnings
-
-      - name: Desktop tests
-        env:
-          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: make test-desktop-run
-
-      - name: Angular ESLint
-        working-directory: desktop/src
-        run: npx eslint 'src/**/*.ts'
-
-      - name: Angular tests + coverage
-        working-directory: desktop/src
-        run: npx ng test --no-watch --coverage
-
-      - name: Install bats
-        run: brew install bats-core
-
-      - name: Desktop config tests (fast)
-        run: make test-desktop-config
-
-      - name: Release-gate tests (gh shim)
-        run: make test-release-gate
-
-      - name: Desktop bats tests
-        run: make test-desktop-build
+  ci-config:
+    uses: ./.github/workflows/lane-ci-config.yml
 
   audit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version-file: .node-version
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-audit-
-
-      - name: npm audit (both workspaces)
-        run: make audit-mcp audit-desktop
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Rust audit (both lockfiles)
-        run: make audit-rust
+    uses: ./.github/workflows/lane-audit.yml
 
   swift:
-    runs-on: macos-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-
-      - name: Fetch release/* branches
-        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Compute app version
-        run: |
-          echo "SPEEDWAVE_VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch '${{ github.head_ref || github.ref_name }}')" >> "$GITHUB_ENV"
-
-      - name: Build native macOS CLI binaries (universal)
-        run: scripts/build-native-macos.sh
-
-      - name: Run Swift tests
-        run: make test-swift
-
-      - name: Install bats
-        run: brew install bats-core
-
-      - name: Native CLI embedded-plist guards
-        run: make test-native-cli-plist
-
-      - name: Check the build did not modify a tracked file
-        run: git diff --exit-code
-
-  runtime-windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-runtime-
-
-      - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
-
-      - name: Verify .gitattributes survives core.autocrlf=true checkout
-        shell: bash
-        env:
-          REPO_PATH: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          tmp="$RUNNER_TEMP/recheck"
-          rm -rf "$tmp"
-          git -c core.autocrlf=true clone "$REPO_PATH" "$tmp"
-          cd "$tmp"
-          fail=0
-          while IFS= read -r -d '' f; do
-            if ! tr -d "$(printf '\r')" < "$f" | cmp -s - "$f"; then
-              echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
-              fail=1
-            fi
-          done < <(find containers -type f -name '*.sh' -print0)
-          exit "$fail"
+    uses: ./.github/workflows/lane-swift.yml
 
   desktop-windows-check:
-    runs-on: windows-latest
-    timeout-minutes: 45
-    env:
-      CARGO_TARGET_DIR: D:\st
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    uses: ./.github/workflows/lane-desktop-windows-check.yml
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+  build:
+    uses: ./.github/workflows/lane-build.yml
 
-      - name: Capture runner image version
-        run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+  architecture:
+    uses: ./.github/workflows/lane-architecture.yml
 
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            D:\st
-          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
-
-      - name: Install Vulkan SDK
-        shell: pwsh
-        run: |
-          $out = scripts/install-vulkan-sdk.ps1
-          $out | Write-Output
-          $root = (($out | Select-String -Pattern '^VULKAN_SDK=').Line) -replace '^VULKAN_SDK=', ''
-          "VULKAN_SDK=$root" | Add-Content $env:GITHUB_ENV
-          Join-Path $root 'runtime\x64' | Add-Content $env:GITHUB_PATH
-
-      - name: Create resource stubs for Tauri build script
-        run: scripts/create-desktop-stubs.sh
-
-      - name: cargo check speedwave-desktop
-        working-directory: desktop/src-tauri
-        env:
-          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: cargo check --all-targets
-
-      - name: cargo test speedwave-runtime transcription (windows)
-        run: |
-          LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
-          grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
-          cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::"
-          # Integration targets (transcription_pipeline_e2e) must still compile with the
-          # feature — check-only, so nothing links libwhisper for zero runnable tests.
-          cargo check --tests -p speedwave-runtime --features audio-transcription
-
-      - name: cargo test speedwave-desktop (windows-only)
-        working-directory: desktop/src-tauri
-        env:
-          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: >
-          cargo test --bins --
-          desktop_log_dir_windows_path_under_local_appdata_logs
-          set_os_integration_enabled_rejects_on_windows
-          validate_os_integrations_returns_empty_on_windows
-          resolve_cli_source_finds_resources_path
-          full_cleanup_calls_in_order_on_windows
-          calls_compose_down_for_each_project
-          empty_projects_is_noop
-          failure_does_not_abort_remaining_projects
-          cli_session_appearing_during_compose_down_loop_skips_stop_vm
-          cli_session_appearing_mid_batch_aborts_remaining_teardown
-          windows_nsis_resolves_exe_parent_when_resources_alongside
-          windows_fallback_to_resources_subdir
-          windows_exe_parent_takes_priority_over_resources_subdir
-          windows_returns_none_when_no_markers
-          windows_dev_mode_returns_none
-          windows_detects_mcp_os_marker
-          windows_detects_build_context_marker
-          options_derive_metadata_and_container_uid_from_ssot
-          watched_dir_cannot_be_removed_until_watcher_drops
-          wipe_data_dir_names_deep_undeletable_path_on_final_failure
-          wipe_data_dir_names_failing_path_on_error
-          wipe_data_dir_partial_failure_still_removes_deletable_sibling
-
+  security:
+    uses: ./.github/workflows/lane-security.yml
 
   ci-gate:
     if: always()
-    needs: [lint, test, desktop, audit, swift, runtime-windows, desktop-windows-check]
+    needs:
+      - lint
+      - test-rust
+      - test-rust-windows
+      - test-mcp
+      - test-desktop
+      - test-cli
+      - ci-config
+      - audit
+      - swift
+      - desktop-windows-check
+      - build
+      - architecture
+      - security
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

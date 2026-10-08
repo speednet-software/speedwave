@@ -1,0 +1,92 @@
+name: lane-build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        shell: bash
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Use a short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          echo 'CARGO_TARGET_DIR=D:\st' >> "$GITHUB_ENV"
+          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
+      - name: Cache the short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: D:\st
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-targets: ${{ matrix.rust-targets }}
+          rust-cache-workspaces: |
+            . -> target
+            ./desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: desktop/src
+
+      - name: Compute app version
+        id: version
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")"
+          echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+      - name: Prepare desktop bundle
+        uses: ./.github/actions/prepare-desktop-bundle
+        with:
+          platform: ${{ matrix.platform }}
+          args: ${{ matrix.args }}
+
+      - name: Build Tauri app
+        working-directory: desktop/src-tauri
+        shell: bash
+        env:
+          CI: true
+          MATRIX_ARGS: ${{ matrix.args }}
+        run: |
+          read -ra ARGS <<< "$MATRIX_ARGS"
+          CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
+          npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
+
+      - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/check-nsis-update-reset.ps1 -BundleDir "$env:CARGO_TARGET_DIR\release\bundle\nsis"
+
+      - name: Check the build did not modify a tracked file
+        shell: bash
+        run: git diff --exit-code

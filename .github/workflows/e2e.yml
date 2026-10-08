@@ -1,0 +1,23 @@
+name: E2E
+
+on:
+  merge_group:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # Stub required check, SPEED-738 replaces this with the real macOS rig lane.
+  e2e-macos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "Stub required check, SPEED-738 replaces this with the real macOS rig lane."
+
+  # Stub required check, SPEED-738 replaces this with the real Windows rig lane.
+  e2e-windows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "Stub required check, SPEED-738 replaces this with the real Windows rig lane."

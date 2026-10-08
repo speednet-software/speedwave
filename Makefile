@@ -93,7 +93,7 @@ dev-config: guard-dev-instance
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
 	printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
 
-.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir guard-dev-instance guard-dev-port \
+.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
@@ -155,16 +155,6 @@ setup-dev:
 	else \
 		echo "  📦 cargo-tauri not found — installing..."; \
 		cargo install tauri-cli && echo "  ✅ cargo-tauri installed" || { echo "  ❌ cargo-tauri install failed"; FAIL=1; }; \
-	fi; \
-	\
-	echo ""; \
-	echo "── Git hooks ──"; \
-	if command -v gitleaks >/dev/null 2>&1; then \
-		echo "  ✅ gitleaks $$(gitleaks version 2>/dev/null || echo installed)"; \
-	else \
-		echo "  ❌ gitleaks not found — the pre-commit hook rejects every commit without it"; \
-		echo "     Install: brew install gitleaks (macOS) / make setup-dev-windows (Windows)"; \
-		FAIL=1; \
 	fi; \
 	\
 	echo ""; \
@@ -232,9 +222,8 @@ setup-dev:
 	cd desktop/src && $(NPM) ci
 	@echo "── E2E test dependencies ──"
 	cd desktop/e2e && $(NPM) ci
-	@echo "── Git hooks (husky, commitlint) ──"
+	@echo "── Root npm dependencies (commitlint, prettier) ──"
 	$(NPM) ci
-	$(NPX) husky
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
@@ -270,11 +259,6 @@ clean:
 	@echo "✅ Clean"
 
 install-deps: setup-dev
-
-install-hooks:
-	$(NPM) install
-	$(NPX) husky
-	@echo "✅ Git hooks installed"
 
 build-runtime:
 	cargo build -p speedwave-runtime
@@ -554,12 +538,16 @@ test-entrypoint:
 
 test-ci:
 	@$(REQUIRE_BATS)
-	bats _tests/ci/windows-only-test-list.bats \
-	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
+	bats _tests/ci/dependabot-cargo-workspaces.bats \
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
-	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats
+	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
+	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
+	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
+	  _tests/ci/merge-gate-lanes.bats _tests/ci/audit-schedule-shape.bats \
+	  _tests/ci/git-hooks-removed.bats _tests/ci/pr-title-validate.bats \
+	  _tests/ci/resolve-pr-title-message.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -727,25 +715,39 @@ check-angular-lint:
 	@echo "✅ Angular ESLint passed"
 
 audit: audit-rust audit-mcp audit-desktop
-	@echo "\n✅ No known vulnerabilities"
+	@echo "\n✅ No known vulnerabilities without a valid exception"
 
-AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
+AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
+AUDIT_TMP := .audit-tmp
 
+# scripts/audit-run.sh is the single source of the audited lockfile paths and
+# the cargo-audit/npm-audit invocations; scripts/audit-diff.sh (PR lane) and
+# scripts/audit-issue.sh (audit-schedule.yml) call the same script. The npm
+# severity threshold has one source too: audit-gate.py's own default, read by
+# audit-run.sh when NPM_AUDIT_LEVEL is not set and left unset here so
+# audit-gate.py's matching default applies on both sides.
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
-	cargo audit $(AUDIT_IGNORE)
-	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
-	@echo "✅ Rust dependencies: no vulnerabilities"
-
-NPM_AUDIT_LEVEL := high
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh cargo-root $(AUDIT_TMP)/cargo-root.json
+	scripts/audit-run.sh cargo-desktop $(AUDIT_TMP)/cargo-desktop.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report cargo:$(AUDIT_TMP)/cargo-root.json --report cargo:$(AUDIT_TMP)/cargo-desktop.json
+	@echo "✅ Rust dependencies: no vulnerabilities without a valid exception"
 
 audit-mcp:
-	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
-	@echo "✅ MCP dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-mcp $(AUDIT_TMP)/npm-mcp.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-mcp.json
+	@echo "✅ MCP dependencies: no vulnerabilities without a valid exception"
 
 audit-desktop:
-	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
-	@echo "✅ Desktop dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-desktop $(AUDIT_TMP)/npm-desktop.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-desktop.json
+	@echo "✅ Desktop dependencies: no vulnerabilities without a valid exception"
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"

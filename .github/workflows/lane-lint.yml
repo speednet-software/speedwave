@@ -1,0 +1,70 @@
+name: lane-lint
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-components: clippy, rustfmt
+          cargo-cache-paths: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            containers/proxy/target/
+          cargo-cache-key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock', 'containers/proxy/Cargo.lock') }}
+          cargo-cache-restore-keys: ${{ runner.os }}-cargo-lint-
+          node-cache-dependency-path: |
+            package-lock.json
+            mcp-servers/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cargo fetch
+          npm ci --ignore-scripts
+          cd mcp-servers && npm ci
+
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
+      - name: Install cmake
+        run: brew install cmake
+
+      - name: Rust clippy
+        run: make check-clippy
+
+      - name: Proxy clippy
+        run: make check-proxy-clippy
+
+      - name: Format check
+        run: make check-fmt
+
+      - name: MCP type-check (build shared first)
+        working-directory: mcp-servers
+        run: |
+          (cd shared && npx tsc)
+          # hub resolves @speedwave/policy-engine types from policies/dist, so build (not noEmit).
+          (cd policies && npm run build:wasm)
+          (cd policies && npx tsc)
+          # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
+          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
+            echo "tsc --noEmit $ws"
+            (cd "$ws" && npx tsc --noEmit)
+          done
+
+      - name: MCP ESLint
+        working-directory: mcp-servers
+        run: npx eslint .
