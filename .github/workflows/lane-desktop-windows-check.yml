@@ -1,0 +1,90 @@
+name: lane-desktop-windows-check
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-windows-check:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: D:\st
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Capture runner image version
+        run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          node: 'false'
+          cargo-cache-paths: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            D:\st
+          cargo-cache-key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
+          cargo-cache-restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $out = scripts/install-vulkan-sdk.ps1
+          $out | Write-Output
+          $root = (($out | Select-String -Pattern '^VULKAN_SDK=').Line) -replace '^VULKAN_SDK=', ''
+          "VULKAN_SDK=$root" | Add-Content $env:GITHUB_ENV
+          Join-Path $root 'runtime\x64' | Add-Content $env:GITHUB_PATH
+
+      - name: Create resource stubs for Tauri build script
+        run: scripts/create-desktop-stubs.sh
+
+      - name: cargo check speedwave-desktop
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo check --all-targets
+
+      - name: cargo test speedwave-runtime transcription (windows)
+        run: |
+          LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
+          grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
+          cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::"
+          # Integration targets (transcription_pipeline_e2e) must still compile with the
+          # feature — check-only, so nothing links libwhisper for zero runnable tests.
+          cargo check --tests -p speedwave-runtime --features audio-transcription
+
+      - name: cargo test speedwave-desktop (windows-only)
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: >
+          cargo test --bins --
+          desktop_log_dir_windows_path_under_local_appdata_logs
+          set_os_integration_enabled_rejects_on_windows
+          validate_os_integrations_returns_empty_on_windows
+          resolve_cli_source_finds_resources_path
+          full_cleanup_calls_in_order_on_windows
+          calls_compose_down_for_each_project
+          empty_projects_is_noop
+          failure_does_not_abort_remaining_projects
+          cli_session_appearing_during_compose_down_loop_skips_stop_vm
+          cli_session_appearing_mid_batch_aborts_remaining_teardown
+          windows_nsis_resolves_exe_parent_when_resources_alongside
+          windows_fallback_to_resources_subdir
+          windows_exe_parent_takes_priority_over_resources_subdir
+          windows_returns_none_when_no_markers
+          windows_dev_mode_returns_none
+          windows_detects_mcp_os_marker
+          windows_detects_build_context_marker
+          options_derive_metadata_and_container_uid_from_ssot
+          watched_dir_cannot_be_removed_until_watcher_drops
+          wipe_data_dir_names_deep_undeletable_path_on_final_failure
+          wipe_data_dir_names_failing_path_on_error
+          wipe_data_dir_partial_failure_still_removes_deletable_sibling

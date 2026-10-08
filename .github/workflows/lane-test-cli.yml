@@ -1,0 +1,35 @@
+name: lane-test-cli
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-cli:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          node-cache: 'false'
+          cargo-cache-paths: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          cargo-cache-key: ${{ runner.os }}-cargo-cli-${{ hashFiles('Cargo.lock') }}
+          cargo-cache-restore-keys: ${{ runner.os }}-cargo-cli-
+
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: CLI e2e trio (no VM)
+        run: make test-e2e
+
+      - name: Entrypoint tests
+        run: make test-entrypoint

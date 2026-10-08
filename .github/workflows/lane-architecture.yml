@@ -1,0 +1,14 @@
+name: lane-architecture
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  architecture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "No architecture checks defined yet, content is SPEED-750."
