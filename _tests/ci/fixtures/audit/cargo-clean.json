@@ -1,0 +1,11 @@
+{
+  "database": { "advisory-count": 800 },
+  "lockfile": { "dependency-count": 400 },
+  "settings": { "target_arch": null, "target_os": null, "severity": null, "ignore": [], "informational_warnings": [] },
+  "vulnerabilities": {
+    "found": false,
+    "count": 0,
+    "list": []
+  },
+  "warnings": {}
+}
