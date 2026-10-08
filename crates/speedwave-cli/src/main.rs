@@ -336,7 +336,7 @@ fn run_self_update() -> anyhow::Result<()> {
         .bin_name(consts::CLI_BINARY)
         .show_download_progress(true)
         .current_version(current)
-        .target_version_tag(&target_tag)
+        .release_tag(&target_tag)
         .build()?
         .update()?;
 
@@ -345,7 +345,7 @@ fn run_self_update() -> anyhow::Result<()> {
         latest_version: status.version().to_string(),
     });
 
-    if status.updated() {
+    if status.is_updated() {
         out!("Updated to version {}.", status.version());
         let resources_version = speedwave_runtime::build::resolve_build_root()
             .ok()
@@ -2018,9 +2018,9 @@ mod tests {
         let tag_resolution = fn_body
             .find("target_release_tag(")
             .expect("run_self_update must resolve a target release tag");
-        let target_version_tag_call = fn_body
-            .find(".target_version_tag(")
-            .expect("run_self_update must pass target_version_tag to self_update");
+        let release_tag_call = fn_body
+            .find(".release_tag(")
+            .expect("run_self_update must pass release_tag to self_update");
         let build_call = fn_body
             .find(".build()?")
             .expect("run_self_update must call .build()");
@@ -2029,12 +2029,12 @@ mod tests {
             "the channel must be read before resolving a tag"
         );
         assert!(
-            tag_resolution < target_version_tag_call,
-            "the resolved tag must be passed to target_version_tag"
+            tag_resolution < release_tag_call,
+            "the resolved tag must be passed to release_tag"
         );
         assert!(
-            target_version_tag_call < build_call,
-            "target_version_tag must be set before build()"
+            release_tag_call < build_call,
+            "release_tag must be set before build()"
         );
     }
 
@@ -2800,8 +2800,8 @@ mod tests {
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
         let updated_check = fn_body
-            .find("status.updated()")
-            .expect("must check status.updated()");
+            .find("status.is_updated()")
+            .expect("must check status.is_updated()");
         let rebuild_call = fn_body.find("run_rebuild(").expect("must call run_rebuild");
         let already_up_to_date = fn_body
             .rfind("Already up to date")
