@@ -23,14 +23,6 @@
 
 Full process, the promotion/hotfix state machine and the runbook steps are in `RELEASING.md`. In short: every merge to `dev` becomes a beta GitHub Release within the hour (`beta.yml`); promoting one commit's beta to stable is pushing a `release/0.M` branch at it (`release.yml`'s `promote` job flips the `prerelease` flag, no rebuild); a hotfix is a PR to the highest `release/0.M` that publishes `0.M.Z` immediately on merge. `GH_AUTOMATION_PAT` is the one token for every release/PR write; `RELEASE_TOKEN` no longer exists.
 
-## Git hooks — NEVER bypass
-
-All of these are equally forbidden: `--no-verify`, `HUSKY=0` or any hook-disabling env var, repointing/renaming/deleting `.husky/` or `.git/hooks/`, `core.hooksPath` tricks. If a hook fails, fix the underlying issue; if you cannot, stop and ask the user. Zero exceptions.
-
-Editing a committed hook body (`.husky/*`) in a reviewed PR is NOT a bypass — it passes the same PR + CI + branch-protection gates. But removed coverage must move to a `test.yml` job behind the required `ci-gate` check, never be dropped: this is why pre-push runs only `make check-fmt` while the full suite is the required CI gate.
-
-Caution: the pre-commit stash/pop (lint-staged) can drop uncommitted work when committing repeatedly — commit generated/edited files promptly rather than accumulating a dirty tree across multiple commits.
-
 ## Branch protection & CI — NEVER bypass
 
 Forbidden: `gh pr merge --admin`, disabling or weakening protection rules, marking failing checks as expected. If CI fails — fix it, even when the failure is pre-existing or unrelated to your PR. If you cannot, stop and ask the user. Zero exceptions.

@@ -93,7 +93,7 @@ dev-config: guard-dev-instance
 	DEV_TAURI_CONFIG="$$(printf '%s' "$$DEV_TAURI_CONFIG" | sed "s/^{/{\"version\":\"$$app_version\",/")"; \
 	printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
 
-.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir guard-dev-instance guard-dev-port \
+.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
@@ -155,16 +155,6 @@ setup-dev:
 	else \
 		echo "  📦 cargo-tauri not found — installing..."; \
 		cargo install tauri-cli && echo "  ✅ cargo-tauri installed" || { echo "  ❌ cargo-tauri install failed"; FAIL=1; }; \
-	fi; \
-	\
-	echo ""; \
-	echo "── Git hooks ──"; \
-	if command -v gitleaks >/dev/null 2>&1; then \
-		echo "  ✅ gitleaks $$(gitleaks version 2>/dev/null || echo installed)"; \
-	else \
-		echo "  ❌ gitleaks not found — the pre-commit hook rejects every commit without it"; \
-		echo "     Install: brew install gitleaks (macOS) / make setup-dev-windows (Windows)"; \
-		FAIL=1; \
 	fi; \
 	\
 	echo ""; \
@@ -232,9 +222,8 @@ setup-dev:
 	cd desktop/src && $(NPM) ci
 	@echo "── E2E test dependencies ──"
 	cd desktop/e2e && $(NPM) ci
-	@echo "── Git hooks (husky, commitlint) ──"
+	@echo "── Root npm dependencies (commitlint, prettier) ──"
 	$(NPM) ci
-	$(NPX) husky
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
@@ -270,11 +259,6 @@ clean:
 	@echo "✅ Clean"
 
 install-deps: setup-dev
-
-install-hooks:
-	$(NPM) install
-	$(NPX) husky
-	@echo "✅ Git hooks installed"
 
 build-runtime:
 	cargo build -p speedwave-runtime
@@ -560,7 +544,9 @@ test-ci:
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
 	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
-	  _tests/ci/merge-gate-lanes.bats
+	  _tests/ci/merge-gate-lanes.bats \
+	  _tests/ci/git-hooks-removed.bats _tests/ci/pr-title-validate.bats \
+	  _tests/ci/resolve-pr-title-message.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
