@@ -62,9 +62,14 @@ EOF
 }
 
 @test "merge_group fallback fails loud when gh is not available" {
+    local no_gh_bin="$BATS_TEST_TMPDIR/no-gh-bin"
+    mkdir -p "$no_gh_bin"
+    for tool in bash grep head; do
+        ln -s "$(command -v "$tool")" "$no_gh_bin/$tool"
+    done
     EVENT_NAME=merge_group MERGE_GROUP_MESSAGE='' \
         HEAD_REF='refs/heads/gh-readonly-queue/dev/pr-5-deadbee' \
-        REPO='speednet-software/speedwave' PATH="/usr/bin:/bin" run bash "$SCRIPT"
+        REPO='speednet-software/speedwave' PATH="$no_gh_bin" run bash "$SCRIPT"
     [ "$status" -ne 0 ]
     [[ "$output" == *"gh is required"* ]]
 }

@@ -115,6 +115,13 @@ jobs:
       - name: Fetch cargo dependencies
         run: cargo fetch
 
+      - name: Install cargo-llvm-cov
+        run: |
+          rustup component add llvm-tools-preview
+          curl -fsSLO https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-aarch64-apple-darwin.tar.gz
+          echo "7e821a6c90c0884f79f759f5d9be50799ade67bb82515186d922f26032ef43b8  cargo-llvm-cov-aarch64-apple-darwin.tar.gz" | shasum -a 256 -c -
+          tar -xzf cargo-llvm-cov-aarch64-apple-darwin.tar.gz -C "$HOME/.cargo/bin" cargo-llvm-cov
+
       - name: Rust coverage (>=70% lines, catches an untested regression before merge)
         run: make coverage-rust
 
@@ -303,6 +310,11 @@ jobs:
           key: ${{ runner.os }}-cargo-cli-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-cli-
 
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: .node-version
+
       - name: Install bats
         run: brew install bats-core
 
@@ -328,10 +340,10 @@ jobs:
 
       - name: Install actionlint
         run: |
-          curl -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSLO https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           curl -fsSL -o checksums.txt https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
           grep 'actionlint_1.7.12_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
-          tar -xzf actionlint.tar.gz actionlint
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
           chmod +x actionlint
 
       - name: actionlint (invalid workflow, e.g. typo'd needs, bad expressions, unknown events/inputs, shellcheck of run steps)
@@ -599,10 +611,10 @@ jobs:
 
       - name: Install gitleaks
         run: |
-          curl -fsSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
           curl -fsSL -o checksums.txt https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
           grep 'gitleaks_8.30.1_linux_x64.tar.gz$' checksums.txt | sha256sum -c -
-          tar -xzf gitleaks.tar.gz gitleaks
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
           chmod +x gitleaks
 
       - name: Secret scan of the PR's commits (a leaked token/key enters a tracked file)
