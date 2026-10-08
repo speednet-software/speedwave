@@ -13,6 +13,14 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     ! grep -qE "^  (push|pull_request|workflow_dispatch):" "$WORKFLOW"
 }
 
+@test "the draft release is titled with the bare tag, not a product-name prefix" {
+    grep -qF -- '--title "$TAG" \' "$WORKFLOW"
+    if grep -qF -- '--title "Speedwave $TAG"' "$WORKFLOW"; then
+        echo "ERROR: release titles are the bare tag (e.g. v0.20.0), matching earlier releases" >&2
+        return 1
+    fi
+}
+
 @test "workflow imports Apple certificate into keychain before tauri-action" {
     import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
     tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)

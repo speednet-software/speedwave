@@ -64,7 +64,7 @@ jobs:
 
           gh release create "$TAG" \
             --repo "$REPO" \
-            --title "Speedwave $TAG" \
+            --title "$TAG" \
             --notes-file "$NOTES_FILE" \
             --draft \
             $LATEST_FLAG
