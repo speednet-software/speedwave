@@ -315,10 +315,12 @@ RELEASE_WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/release.yml"
     grep -qF "uses: ./.github/actions/prepare-desktop-bundle" "$WORKFLOW"
 }
 
-@test "the publish-tauri job builds with SPEEDWAVE_VERSION from the caller's computed version, so the released CLI/crates version matches the Tauri app version" {
-    tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
-    [ -n "$tauri_line" ]
-    block=$(awk -v start="$tauri_line" 'NR>=start && NR<=start+6' "$WORKFLOW")
+@test "publish-tauri sets SPEEDWAVE_VERSION to inputs.version at job level, so every step (the tauri build and the CLI it bundles and ships standalone) sees the same version" {
+    job_line=$(grep -n "^  publish-tauri:$" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$job_line" ]
+    steps_line=$(awk -v start="$job_line" 'NR>start && /^    steps:$/ { print NR; exit }' "$WORKFLOW")
+    [ -n "$steps_line" ]
+    block=$(awk -v start="$job_line" -v stop="$steps_line" 'NR>=start && NR<=stop' "$WORKFLOW")
     echo "$block" | grep -qF 'SPEEDWAVE_VERSION: ${{ inputs.version }}'
 }
 
