@@ -158,6 +158,12 @@ setup() {
   [ "$output" = "false" ]
 }
 
+@test "lockfiles-touched: false for a package-lock.json/Cargo.lock outside the four audited lockfiles" {
+  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-unaudited-lockfile.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "false" ]
+}
+
 @test "issue-plan: creates when no matching open issue exists" {
   run "$PYTHON" "$SCRIPT" issue-plan --existing "$FIXTURES/issues-none.json" \
     --title "audit-schedule: known vulnerabilities on dev"
