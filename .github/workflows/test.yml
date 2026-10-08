@@ -243,6 +243,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -262,14 +264,13 @@ jobs:
           key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-audit-
 
-      - name: npm audit (both workspaces)
-        run: make audit-mcp audit-desktop
-
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      - name: Rust audit (both lockfiles)
-        run: make audit-rust
+      - name: Diff known advisories between the target branch and the PR head
+        env:
+          AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: scripts/audit-diff.sh
 
   swift:
     runs-on: macos-latest

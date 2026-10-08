@@ -87,22 +87,32 @@ _makefile_check_clippy_cargo_lines() {
     }
 }
 
-@test "audit job delegates cargo audit to make audit-rust" {
-    grep -q 'run: make audit-rust' "$WORKFLOW"
+@test "audit job delegates the base-vs-head advisory diff to scripts/audit-diff.sh" {
+    grep -q 'run: scripts/audit-diff.sh' "$WORKFLOW"
 
-    if grep -n 'run:.*cargo audit' "$WORKFLOW"; then
-        echo "Run make audit-rust instead of a hand-rolled cargo audit."
+    if grep -n 'run:.*cargo audit\|run:.*npm audit' "$WORKFLOW"; then
+        echo "The audit job must call scripts/audit-diff.sh, not a hand-rolled cargo/npm audit."
         return 1
     fi
 }
 
-@test "audit job delegates npm audit to the Makefile targets" {
-    grep -q 'run: make audit-mcp audit-desktop' "$WORKFLOW"
+@test "audit-rust and the npm audit targets stay available and filter through the one shared exceptions file" {
+    grep -q '^audit-rust:' "$MAKEFILE"
+    grep -q '^audit-mcp:' "$MAKEFILE"
+    grep -q '^audit-desktop:' "$MAKEFILE"
+    grep -q 'AUDIT_EXCEPTIONS := scripts/audit-exceptions.json' "$MAKEFILE"
 
-    if grep -n 'run:.*npm audit' "$WORKFLOW"; then
-        echo "Run make audit-mcp audit-desktop instead of a hand-rolled npm audit."
-        return 1
-    fi
+    for target in audit-rust audit-mcp audit-desktop; do
+        block="$(awk -v t="^${target}:" '$0 ~ t {f=1; next} /^[A-Za-z]/ {f=0} f' "$MAKEFILE")"
+        [[ "$block" == *"audit-gate.py absolute"* ]] || {
+            echo "$target does not filter through scripts/audit-gate.py absolute"
+            return 1
+        }
+        [[ "$block" == *'$(AUDIT_EXCEPTIONS)'* ]] || {
+            echo "$target does not pass the shared AUDIT_EXCEPTIONS list"
+            return 1
+        }
+    done
 }
 
 _workspace_rust_members() {

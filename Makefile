@@ -559,7 +559,8 @@ test-ci:
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
-	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats
+	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
+	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -727,25 +728,35 @@ check-angular-lint:
 	@echo "✅ Angular ESLint passed"
 
 audit: audit-rust audit-mcp audit-desktop
-	@echo "\n✅ No known vulnerabilities"
+	@echo "\n✅ No known vulnerabilities without a valid exception"
 
-AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
+AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
+AUDIT_TMP := .audit-tmp
 
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
-	cargo audit $(AUDIT_IGNORE)
-	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
-	@echo "✅ Rust dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	cargo audit --json >$(AUDIT_TMP)/cargo-root.json || true
+	cargo audit --json --file desktop/src-tauri/Cargo.lock >$(AUDIT_TMP)/cargo-desktop.json || true
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report cargo:$(AUDIT_TMP)/cargo-root.json --report cargo:$(AUDIT_TMP)/cargo-desktop.json
+	@echo "✅ Rust dependencies: no vulnerabilities without a valid exception"
 
 NPM_AUDIT_LEVEL := high
 
 audit-mcp:
-	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
-	@echo "✅ MCP dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev --package-lock-only --json >../$(AUDIT_TMP)/npm-mcp.json || true
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) --npm-min-severity $(NPM_AUDIT_LEVEL) \
+	  --report npm:$(AUDIT_TMP)/npm-mcp.json
+	@echo "✅ MCP dependencies: no vulnerabilities without a valid exception"
 
 audit-desktop:
-	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
-	@echo "✅ Desktop dependencies: no vulnerabilities"
+	@mkdir -p $(AUDIT_TMP)
+	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev --package-lock-only --json >../../$(AUDIT_TMP)/npm-desktop.json || true
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) --npm-min-severity $(NPM_AUDIT_LEVEL) \
+	  --report npm:$(AUDIT_TMP)/npm-desktop.json
+	@echo "✅ Desktop dependencies: no vulnerabilities without a valid exception"
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"
