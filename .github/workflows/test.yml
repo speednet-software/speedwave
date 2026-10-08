@@ -553,16 +553,10 @@ jobs:
         shell: bash
         env:
           CI: true
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           MATRIX_ARGS: ${{ matrix.args }}
         run: |
           read -ra ARGS <<< "$MATRIX_ARGS"
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
-          else
-            CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\"}"
-          fi
+          CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
           npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
 
       - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)

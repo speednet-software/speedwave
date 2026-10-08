@@ -70,6 +70,17 @@ _on_block() {
     [[ "$block" == *"git diff --exit-code"* ]]
 }
 
+@test "test.yml reads no secrets (named failure: PR code gets a release signing key)" {
+    run grep -n 'secrets\.' "$TEST_WORKFLOW"
+    [ "$status" -eq 1 ]
+}
+
+@test "build lane never creates signed updater artifacts" {
+    block="$(_job_block "$TEST_WORKFLOW" build)"
+    [[ "$block" == *'"createUpdaterArtifacts\":false'* ]]
+    [[ "$block" != *TAURI_SIGNING_PRIVATE_KEY* ]]
+}
+
 @test "build lane runs check-nsis-update-reset.ps1 on the Windows leg" {
     block="$(_job_block "$TEST_WORKFLOW" build)"
     [[ "$block" == *"check-nsis-update-reset.ps1"* ]]
