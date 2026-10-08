@@ -86,9 +86,13 @@ jobs:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             arch_label: "macOS_Apple_Silicon"
+            target: aarch64-apple-darwin
+            archive: tar.gz
           - platform: windows-latest
             args: ""
             arch_label: ""
+            target: x86_64-pc-windows-msvc
+            archive: zip
     timeout-minutes: 75
     runs-on: ${{ matrix.platform }}
     steps:
@@ -253,70 +257,6 @@ jobs:
         shell: bash
         run: git diff --exit-code
 
-  cli:
-    needs: [draft, publish-tauri]
-    environment: ${{ inputs.environment }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ inputs.tag }}
-          persist-credentials: false
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        with:
-          shared-key: cli-${{ matrix.target }}
-
-      - name: Build CLI
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          SPEEDWAVE_VERSION: ${{ inputs.version }}
-        run: cargo build --release --target "$TARGET" -p speedwave-cli
-
-      - name: Configure Windows code signing
-        if: matrix.os == 'windows-latest'
-        uses: ./.github/actions/azure-signing-login
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
-
-      - name: Cache the Artifact Signing token (Windows)
-        if: matrix.os == 'windows-latest' && vars.AZURE_CLIENT_ID != ''
-        shell: pwsh
-        run: az account get-access-token --resource https://codesigning.azure.net --output none
-
-      - name: Sign CLI binary (windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        env:
-          TARGET: ${{ matrix.target }}
-        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\sign-windows-binaries.ps1 "$env:GITHUB_WORKSPACE\target\$env:TARGET\release\speedwave.exe"
-
       - name: Package CLI (unix)
         if: matrix.archive == 'tar.gz'
         env:
@@ -324,8 +264,8 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           ARCHIVE_NAME="speedwave-v${VERSION}-${TARGET}.tar.gz"
-          chmod +x "target/${TARGET}/release/speedwave"
-          tar -czf "$ARCHIVE_NAME" -C "target/${TARGET}/release" speedwave
+          chmod +x desktop/src-tauri/cli/speedwave
+          tar -czf "$ARCHIVE_NAME" -C desktop/src-tauri/cli speedwave
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
 
       - name: Package CLI (windows)
@@ -336,7 +276,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           $archiveName = "speedwave-v${env:VERSION}-${env:TARGET}.zip"
-          Compress-Archive -Path "target/${env:TARGET}/release/speedwave.exe" -DestinationPath $archiveName
+          Compress-Archive -Path "desktop/src-tauri/cli/speedwave.exe" -DestinationPath $archiveName
           "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload CLI to release
@@ -348,7 +288,7 @@ jobs:
         run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME" --repo "$REPO" --clobber
 
   publish:
-    needs: [draft, publish-tauri, cli]
+    needs: [draft, publish-tauri]
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -380,7 +320,7 @@ jobs:
           echo "Release published successfully"
 
   delete-draft-on-failure:
-    needs: [draft, publish-tauri, cli, publish]
+    needs: [draft, publish-tauri, publish]
     if: failure()
     runs-on: ubuntu-latest
     timeout-minutes: 5
