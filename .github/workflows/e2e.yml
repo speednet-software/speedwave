@@ -9,22 +9,18 @@ permissions:
   contents: read
 
 jobs:
-  # Stub required check, SPEED-738 replaces the merge-queue step with the real macOS rig lane; a pull request stays a no-op.
+  # Stub required check, SPEED-738 replaces the steps with the real macOS rig lane; skipped on pull requests, run in the merge queue.
   e2e-macos:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - if: github.event_name == 'pull_request'
-        run: echo "Rig e2e runs in the merge queue, a pull request reports green."
-      - if: github.event_name != 'pull_request'
-        run: echo "Stub required check, SPEED-738 replaces this step with the real macOS rig lane."
+      - run: echo "Stub required check, SPEED-738 replaces this step with the real macOS rig lane."
 
-  # Stub required check, SPEED-738 replaces the merge-queue step with the real Windows rig lane; a pull request stays a no-op.
+  # Stub required check, SPEED-738 replaces the steps with the real Windows rig lane; skipped on pull requests, run in the merge queue.
   e2e-windows:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - if: github.event_name == 'pull_request'
-        run: echo "Rig e2e runs in the merge queue, a pull request reports green."
-      - if: github.event_name != 'pull_request'
-        run: echo "Stub required check, SPEED-738 replaces this step with the real Windows rig lane."
+      - run: echo "Stub required check, SPEED-738 replaces this step with the real Windows rig lane."

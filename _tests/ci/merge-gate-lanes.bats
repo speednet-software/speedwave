@@ -78,6 +78,13 @@ _on_block() {
     [ "$output" -ge 1 ]
 }
 
+@test "e2e.yml jobs are skipped on pull requests, never green there (named failure: a pull request looks e2e-tested before the merge queue ran the rig)" {
+    for job in e2e-macos e2e-windows; do
+        block="$(_job_block "$E2E_WORKFLOW" "$job")"
+        [[ "$block" == *"if: github.event_name != 'pull_request'"* ]]
+    done
+}
+
 @test "e2e.yml stub jobs carry no real work (always green)" {
     for job in e2e-macos e2e-windows; do
         block="$(_job_block "$E2E_WORKFLOW" "$job")"
