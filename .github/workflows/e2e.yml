@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "Stub required check, SPEED-738 replaces this step with the real macOS rig lane."
+      - name: Stub until SPEED-738 brings the macOS rig lane
+        run: echo "Stub required check, SPEED-738 replaces this step with the real macOS rig lane."
 
   # Stub required check, SPEED-738 replaces the steps with the real Windows rig lane; skipped on pull requests, run in the merge queue.
   e2e-windows:
@@ -23,4 +24,5 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "Stub required check, SPEED-738 replaces this step with the real Windows rig lane."
+      - name: Stub until SPEED-738 brings the Windows rig lane
+        run: echo "Stub required check, SPEED-738 replaces this step with the real Windows rig lane."
