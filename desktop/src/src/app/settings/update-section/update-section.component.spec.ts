@@ -157,6 +157,108 @@ describe('UpdateSectionComponent', () => {
       await component.installUpdate();
       expect(component.updateInstallError).toBe('');
     });
+
+    it('switches to the newer version when the server changed it mid-install', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') {
+          throw new Error('Version mismatch: expected 2.0.0 but server returned 2.0.1');
+        }
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '2.0.1',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+
+      await component.installUpdate();
+
+      expect(component.updateAvailableVersion).toBe('2.0.1');
+      expect(component.updateInstallError).toBe('');
+      expect(component.updateInstallNotice).toBe('A newer version v2.0.1 is available');
+    });
+
+    it('passes the newer version to a subsequent install call', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('version mismatch');
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '2.0.1',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+      await component.installUpdate();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async () => undefined;
+      await component.installUpdate();
+
+      expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
+        expectedVersion: '2.0.1',
+      });
+    });
+
+    it('keeps the original error when the re-check reports the same version', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('download failed');
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '2.0.0',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+
+      await component.installUpdate();
+
+      expect(component.updateAvailableVersion).toBe('2.0.0');
+      expect(component.updateInstallError).toBe('download failed');
+      expect(component.updateInstallNotice).toBe('');
+    });
+
+    it('keeps the original error when the re-check reports up to date', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('download failed');
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
+        return undefined;
+      };
+
+      await component.installUpdate();
+
+      expect(component.updateInstallError).toBe('download failed');
+      expect(component.updateInstallNotice).toBe('');
+    });
+
+    it('keeps the original error when the re-check itself fails', async () => {
+      component.updateAvailableVersion = '2.0.0';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('download failed');
+        if (cmd === 'check_for_update') throw new Error('network failed');
+        return undefined;
+      };
+
+      await component.installUpdate();
+
+      expect(component.updateInstallError).toBe('download failed');
+      expect(component.updateInstallNotice).toBe('');
+    });
   });
 
   describe('checkForUpdate()', () => {
@@ -207,6 +309,18 @@ describe('UpdateSectionComponent', () => {
       pendingCheck.resolve();
       await promise;
       expect(component.updateChecking).toBe(false);
+    });
+
+    it('clears a previous install notice', async () => {
+      component.updateInstallNotice = 'A newer version v2.0.1 is available';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
+        return undefined;
+      };
+
+      await component.checkForUpdate();
+
+      expect(component.updateInstallNotice).toBe('');
     });
   });
 

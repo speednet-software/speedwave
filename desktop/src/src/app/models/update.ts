@@ -1,3 +1,5 @@
+import { TauriService } from '../services/tauri.service';
+
 /** Metadata for an available application update from GitHub Releases. */
 export interface UpdateInfo {
   version: string;
@@ -21,6 +23,35 @@ export interface UpdateSettings {
   auto_check: boolean;
   check_interval_hours: number;
   channel?: UpdateChannel;
+}
+
+/**
+ * Re-checks for an update after a failed install, used by both the banner and the Settings
+ * update section to recover from a version that changed mid-install.
+ * @param tauri - Service used to invoke `check_for_update`.
+ * @param triedVersion - The version the failed install attempted.
+ * @returns The newer version string, or null when the re-check reports the same version,
+ *   up to date, or fails outright.
+ */
+export async function recheckNewerVersion(
+  tauri: TauriService,
+  triedVersion: string
+): Promise<string | null> {
+  try {
+    const outcome = await tauri.invoke<UpdateCheckOutcome>('check_for_update');
+    if (outcome.kind === 'update_available' && outcome.version !== triedVersion) {
+      return outcome.version;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Builds the UI copy for the version `recheckNewerVersion` found.
+ * @param version - The newer version string.
+ */
+export function newerVersionNoticeText(version: string): string {
+  return `A newer version v${version} is available`;
 }
 
 /** A configured project entry from ~/.speedwave/config.json. */

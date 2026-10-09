@@ -14,6 +14,8 @@ import {
   UpdateChannel,
   UpdateCheckOutcome,
   UpdateSettings,
+  newerVersionNoticeText,
+  recheckNewerVersion,
 } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
@@ -100,6 +102,14 @@ import {
           {{ updateInstallError }}
         </p>
       }
+      @if (updateInstallNotice) {
+        <p
+          class="mono mt-3 rounded border border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+          data-testid="settings-update-notice"
+        >
+          {{ updateInstallNotice }}
+        </p>
+      }
     </section>
   `,
 })
@@ -124,6 +134,7 @@ export class UpdateSectionComponent implements OnInit {
   updateAvailableVersion = '';
   updateInstalling = false;
   updateInstallError = '';
+  updateInstallNotice = '';
   error = '';
 
   private cdr = inject(ChangeDetectorRef);
@@ -212,6 +223,7 @@ export class UpdateSectionComponent implements OnInit {
     this.updateChecking = true;
     this.updateResult = 'none';
     this.error = '';
+    this.updateInstallNotice = '';
     this.cdr.markForCheck();
     try {
       const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
@@ -241,15 +253,27 @@ export class UpdateSectionComponent implements OnInit {
     if (!this.updateAvailableVersion) return;
     this.updateInstalling = true;
     this.updateInstallError = '';
+    this.updateInstallNotice = '';
     this.cdr.markForCheck();
+    const triedVersion = this.updateAvailableVersion;
     try {
       await this.tauri.invoke('install_update_and_reconcile', {
-        expectedVersion: this.updateAvailableVersion,
+        expectedVersion: triedVersion,
       });
     } catch (e: unknown) {
-      this.updateInstallError = e instanceof Error ? e.message : String(e);
+      await this.handleInstallFailure(e, triedVersion);
     }
     this.updateInstalling = false;
     this.cdr.markForCheck();
+  }
+
+  private async handleInstallFailure(e: unknown, triedVersion: string): Promise<void> {
+    const newerVersion = await recheckNewerVersion(this.tauri, triedVersion);
+    if (newerVersion) {
+      this.updateAvailableVersion = newerVersion;
+      this.updateInstallNotice = newerVersionNoticeText(newerVersion);
+      return;
+    }
+    this.updateInstallError = e instanceof Error ? e.message : String(e);
   }
 }
