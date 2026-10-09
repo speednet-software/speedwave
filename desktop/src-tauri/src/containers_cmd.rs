@@ -2347,7 +2347,7 @@ mod tests {
             .find(|v| v["id"] == "claude-fable-5")
             .expect("claude-fable-5 must be present in the JSON payload");
         assert_eq!(fable_json["family"], "Fable 5");
-        assert_eq!(fable_json["one_million_context"], "every_plan");
+        assert_eq!(fable_json["one_million_context"], "native");
         assert!(fable_json.get("has_1m").is_none());
         assert!(fable_json.get("selectable").is_none());
     }
