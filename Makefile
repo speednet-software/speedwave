@@ -538,8 +538,7 @@ test-entrypoint:
 
 test-ci:
 	@$(REQUIRE_BATS)
-	bats _tests/ci/dependabot-cargo-workspaces.bats \
-	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
+	bats _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
 	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
 	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
@@ -547,7 +546,7 @@ test-ci:
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
 	  _tests/ci/merge-gate-lanes.bats _tests/ci/audit-schedule-shape.bats \
 	  _tests/ci/git-hooks-removed.bats _tests/ci/pr-title-validate.bats \
-	  _tests/ci/resolve-pr-title-message.bats
+	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
