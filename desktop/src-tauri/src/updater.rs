@@ -155,12 +155,19 @@ pub async fn check_for_update(app: &AppHandle) -> Result<UpdateCheckOutcome, Str
     let updater = build_updater(app, settings.effective_channel()).await?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     match update {
-        Some(u) => Ok(UpdateCheckOutcome::UpdateAvailable(UpdateInfo {
-            version: u.version.clone(),
-            is_critical: detect_critical(&u.body),
-            body: u.body.clone(),
-            date: u.date.map(|d| d.to_string()),
-        })),
+        Some(u) => {
+            let info = UpdateInfo {
+                version: u.version.clone(),
+                is_critical: detect_critical(&u.body),
+                body: u.body.clone(),
+                date: u.date.map(|d| d.to_string()),
+            };
+            use tauri::Emitter;
+            if let Err(e) = app.emit("update_available", &info) {
+                log::warn!("failed to emit update_available event: {e}");
+            }
+            Ok(UpdateCheckOutcome::UpdateAvailable(info))
+        }
         None => Ok(UpdateCheckOutcome::UpToDate),
     }
 }
@@ -618,8 +625,6 @@ pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHand
 
             let state = match check_for_update(&app_handle).await {
                 Ok(UpdateCheckOutcome::UpdateAvailable(info)) => {
-                    use tauri::Emitter;
-                    let _ = app_handle.emit("update_available", &info);
                     AutoCheckState::UpdateAvailable(info.version)
                 }
                 Ok(UpdateCheckOutcome::UpToDate) => AutoCheckState::UpToDate,
