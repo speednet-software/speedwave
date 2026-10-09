@@ -9,7 +9,12 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
-import { UpdateChannel, UpdateCheckOutcome, UpdateSettings } from '../../models/update';
+import {
+  UPDATE_CHANNELS,
+  UpdateChannel,
+  UpdateCheckOutcome,
+  UpdateSettings,
+} from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
@@ -56,28 +61,26 @@ import { UpdateChannel, UpdateCheckOutcome, UpdateSettings } from '../../models/
             }
           </div>
         </div>
-        <div class="flex flex-wrap items-center gap-2 border-t border-[var(--line)] px-4 py-3">
-          <span class="mono text-[11px] text-[var(--ink-mute)]">Update channel:</span>
-          <button
-            type="button"
-            class="mono rounded border px-3 py-1 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
-            [class]="channelButtonClass('stable')"
-            data-testid="settings-channel-stable"
-            (click)="setChannel('stable')"
-            [disabled]="updateInstalling"
-          >
-            stable
-          </button>
-          <button
-            type="button"
-            class="mono rounded border px-3 py-1 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
-            [class]="channelButtonClass('beta')"
-            data-testid="settings-channel-beta"
-            (click)="setChannel('beta')"
-            [disabled]="updateInstalling"
-          >
-            beta
-          </button>
+        <div class="border-t border-[var(--line)] px-4 py-3">
+          <div class="mono mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            update channel
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            @for (channel of channels; track channel) {
+              <button
+                type="button"
+                [attr.data-testid]="'settings-channel-' + channel"
+                [class.active]="channel === channelLabel()"
+                [attr.aria-pressed]="channel === channelLabel()"
+                class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)] disabled:cursor-not-allowed disabled:opacity-40"
+                (click)="setChannel(channel)"
+                [disabled]="updateInstalling"
+              >
+                <span class="mono text-[12px] text-[var(--ink)]">{{ channel }}</span>
+                <span class="check ml-auto text-[var(--accent)]">&#9679;</span>
+              </button>
+            }
+          </div>
         </div>
         @if (channelLabel() === 'beta') {
           <p
@@ -104,6 +107,8 @@ export class UpdateSectionComponent implements OnInit {
   readonly activeProject = input<string | null>(null);
 
   readonly errorOccurred = output<string>();
+
+  protected readonly channels = UPDATE_CHANNELS;
 
   /** Hard-coded auto-check interval in hours; the UI exposes no toggle or frequency control. */
   private static readonly DEFAULT_INTERVAL_HOURS = 12;
@@ -150,16 +155,6 @@ export class UpdateSectionComponent implements OnInit {
   /** Current channel for display; missing settings read as `stable`. */
   protected channelLabel(): UpdateChannel {
     return this.updateChannel ?? 'stable';
-  }
-
-  /**
-   * Tailwind class for a channel button: highlighted when it is the active channel.
-   * @param channel - The channel this button represents.
-   */
-  protected channelButtonClass(channel: UpdateChannel): string {
-    return channel === this.channelLabel()
-      ? 'border-[var(--accent)] text-[var(--ink)]'
-      : 'border-[var(--line-strong)] bg-[var(--bg-2)] text-[var(--ink)] hover:bg-[var(--bg-3)]';
   }
 
   private async loadCurrentVersion(): Promise<void> {

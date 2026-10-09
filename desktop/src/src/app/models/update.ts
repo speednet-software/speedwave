@@ -13,6 +13,9 @@ export type UpdateCheckOutcome =
 /** Mirrors Rust `speedwave_runtime::update_channel::UpdateChannel`. */
 export type UpdateChannel = 'stable' | 'beta';
 
+/** Channels in the order the Updates section lists them. */
+export const UPDATE_CHANNELS: readonly UpdateChannel[] = ['stable', 'beta'] as const;
+
 /** User-configurable auto-update check preferences. */
 export interface UpdateSettings {
   auto_check: boolean;

@@ -324,4 +324,56 @@ describe('UpdateSectionComponent', () => {
       expect(calls).toEqual([]);
     });
   });
+
+  describe('channel indicator', () => {
+    async function renderWith(settings: Record<string, unknown>): Promise<HTMLElement> {
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'get_update_settings' ? settings : undefined;
+      fixture.detectChanges();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      fixture.detectChanges();
+      return fixture.nativeElement as HTMLElement;
+    }
+
+    function channelButton(root: HTMLElement, channel: string): HTMLButtonElement {
+      const button = root.querySelector<HTMLButtonElement>(
+        `[data-testid="settings-channel-${channel}"]`
+      );
+      if (!button) throw new Error(`missing ${channel} button`);
+      return button;
+    }
+
+    it('marks stable as the selected channel when the settings carry no channel field', async () => {
+      const root = await renderWith({ auto_check: true, check_interval_hours: 12 });
+
+      expect(channelButton(root, 'stable').classList).toContain('active');
+      expect(channelButton(root, 'stable').getAttribute('aria-pressed')).toBe('true');
+      expect(channelButton(root, 'beta').classList).not.toContain('active');
+      expect(channelButton(root, 'beta').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('marks beta as the selected channel when it is persisted', async () => {
+      const root = await renderWith({
+        auto_check: true,
+        check_interval_hours: 12,
+        channel: 'beta',
+      });
+
+      expect(channelButton(root, 'beta').classList).toContain('active');
+      expect(channelButton(root, 'beta').getAttribute('aria-pressed')).toBe('true');
+      expect(channelButton(root, 'stable').classList).not.toContain('active');
+      expect(channelButton(root, 'stable').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('moves the indicator to the clicked channel', async () => {
+      const root = await renderWith({ auto_check: true, check_interval_hours: 12 });
+
+      channelButton(root, 'beta').click();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      fixture.detectChanges();
+
+      expect(channelButton(root, 'beta').classList).toContain('active');
+      expect(channelButton(root, 'stable').classList).not.toContain('active');
+    });
+  });
 });
