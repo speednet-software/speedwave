@@ -9,6 +9,12 @@ import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from '../services/tauri.service';
 import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
 
+function toUpdateInfo(outcome: { kind: 'update_available' } & UpdateInfo): UpdateInfo {
+  const { kind: _kind, ...info } = outcome;
+  void _kind;
+  return info;
+}
+
 /** Shows a banner when a new Speedwave version is available for install. */
 @Component({
   selector: 'app-update-notification',
@@ -32,6 +38,11 @@ import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
         <div class="flex items-center gap-2">
           @if (error) {
             <span class="text-sw-accent text-xs" data-testid="update-error">{{ error }}</span>
+          }
+          @if (newerVersionNotice) {
+            <span class="text-sw-text text-xs" data-testid="update-newer-version-notice">{{
+              newerVersionNotice
+            }}</span>
           }
           @if (!confirmUpdate) {
             <button
@@ -81,6 +92,7 @@ export class UpdateNotificationComponent implements OnDestroy {
   dismissed = false;
   installing = false;
   error = '';
+  newerVersionNotice: string | null = null;
   confirmUpdate = false;
   containersRunning = false;
 
@@ -106,9 +118,7 @@ export class UpdateNotificationComponent implements OnDestroy {
 
       const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
       if (outcome.kind === 'update_available') {
-        const { kind: _kind, ...info } = outcome;
-        void _kind;
-        this.updateInfo = info;
+        this.updateInfo = toUpdateInfo(outcome);
         this.checkContainers();
         this.cdr.markForCheck();
       }
@@ -134,18 +144,32 @@ export class UpdateNotificationComponent implements OnDestroy {
   async installAndRestart(): Promise<void> {
     this.installing = true;
     this.error = '';
+    this.newerVersionNotice = null;
     this.cdr.markForCheck();
+    const triedVersion = this.updateInfo!.version;
     try {
       await this.tauri.invoke('install_update_and_reconcile', {
-        expectedVersion: this.updateInfo!.version,
+        expectedVersion: triedVersion,
       });
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : String(e);
-      this.confirmUpdate = false;
+      await this.handleInstallFailure(e, triedVersion);
     } finally {
       this.installing = false;
       this.cdr.markForCheck();
     }
+  }
+
+  private async handleInstallFailure(e: unknown, triedVersion: string): Promise<void> {
+    this.confirmUpdate = false;
+    try {
+      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
+      if (outcome.kind === 'update_available' && outcome.version !== triedVersion) {
+        this.updateInfo = toUpdateInfo(outcome);
+        this.newerVersionNotice = `A newer version v${outcome.version} is available`;
+        return;
+      }
+    } catch {}
+    this.error = e instanceof Error ? e.message : String(e);
   }
 
   /** Hides the notification banner until the next update event. */

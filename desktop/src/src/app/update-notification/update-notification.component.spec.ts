@@ -108,5 +108,108 @@ describe('UpdateNotificationComponent', () => {
         expectedVersion: '1.2.3',
       });
     });
+
+    it('switches to the newer version when the server changed it mid-install', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') {
+          throw new Error('Version mismatch: expected 1.2.3 but server returned 1.2.4');
+        }
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '1.2.4',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.updateInfo?.version).toBe('1.2.4');
+      expect(component.confirmUpdate).toBe(false);
+      expect(component.error).toBe('');
+      expect(component.newerVersionNotice).toBe('A newer version v1.2.4 is available');
+    });
+
+    it('passes the newer version to a subsequent Confirm Update', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('version mismatch');
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '1.2.4',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+      await component.installAndRestart();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async () => undefined;
+      await component.installAndRestart();
+
+      expect(invokeSpy).toHaveBeenCalledWith('install_update_and_reconcile', {
+        expectedVersion: '1.2.4',
+      });
+    });
+
+    it('keeps the original error when the re-check reports the same version', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
+        if (cmd === 'check_for_update') {
+          return {
+            kind: 'update_available',
+            version: '1.2.3',
+            body: null,
+            date: null,
+            is_critical: false,
+          };
+        }
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.updateInfo?.version).toBe('1.2.3');
+      expect(component.error).toBe('install failed');
+      expect(component.newerVersionNotice).toBe(null);
+    });
+
+    it('keeps the original error when the re-check reports up to date', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.error).toBe('install failed');
+      expect(component.newerVersionNotice).toBe(null);
+    });
+
+    it('keeps the original error when the re-check itself fails', async () => {
+      component.updateInfo = { version: '1.2.3', body: null, date: null, is_critical: false };
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'install_update_and_reconcile') throw new Error('install failed');
+        if (cmd === 'check_for_update') throw new Error('network failed');
+        return undefined;
+      };
+
+      await component.installAndRestart();
+
+      expect(component.error).toBe('install failed');
+      expect(component.newerVersionNotice).toBe(null);
+    });
   });
 });

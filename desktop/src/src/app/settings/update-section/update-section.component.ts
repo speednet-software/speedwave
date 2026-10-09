@@ -100,6 +100,14 @@ import {
           {{ updateInstallError }}
         </p>
       }
+      @if (updateInstallNotice) {
+        <p
+          class="mono mt-3 rounded border border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+          data-testid="settings-update-notice"
+        >
+          {{ updateInstallNotice }}
+        </p>
+      }
     </section>
   `,
 })
@@ -124,6 +132,7 @@ export class UpdateSectionComponent implements OnInit {
   updateAvailableVersion = '';
   updateInstalling = false;
   updateInstallError = '';
+  updateInstallNotice: string | null = null;
   error = '';
 
   private cdr = inject(ChangeDetectorRef);
@@ -241,15 +250,29 @@ export class UpdateSectionComponent implements OnInit {
     if (!this.updateAvailableVersion) return;
     this.updateInstalling = true;
     this.updateInstallError = '';
+    this.updateInstallNotice = null;
     this.cdr.markForCheck();
+    const triedVersion = this.updateAvailableVersion;
     try {
       await this.tauri.invoke('install_update_and_reconcile', {
-        expectedVersion: this.updateAvailableVersion,
+        expectedVersion: triedVersion,
       });
     } catch (e: unknown) {
-      this.updateInstallError = e instanceof Error ? e.message : String(e);
+      await this.handleInstallFailure(e, triedVersion);
     }
     this.updateInstalling = false;
     this.cdr.markForCheck();
+  }
+
+  private async handleInstallFailure(e: unknown, triedVersion: string): Promise<void> {
+    try {
+      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
+      if (outcome.kind === 'update_available' && outcome.version !== triedVersion) {
+        this.updateAvailableVersion = outcome.version;
+        this.updateInstallNotice = `A newer version v${outcome.version} is available`;
+        return;
+      }
+    } catch {}
+    this.updateInstallError = e instanceof Error ? e.message : String(e);
   }
 }
