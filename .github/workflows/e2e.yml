@@ -1,6 +1,7 @@
 name: E2E
 
 on:
+  pull_request:
   merge_group:
   workflow_dispatch: {}
 
@@ -8,16 +9,18 @@ permissions:
   contents: read
 
 jobs:
-  # Stub required check, SPEED-738 replaces this with the real macOS rig lane.
+  # Stub required check, SPEED-738 replaces the steps with the real macOS rig lane; skipped on pull requests, run in the merge queue.
   e2e-macos:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "Stub required check, SPEED-738 replaces this with the real macOS rig lane."
+      - run: echo "Stub required check, SPEED-738 replaces this step with the real macOS rig lane."
 
-  # Stub required check, SPEED-738 replaces this with the real Windows rig lane.
+  # Stub required check, SPEED-738 replaces the steps with the real Windows rig lane; skipped on pull requests, run in the merge queue.
   e2e-windows:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "Stub required check, SPEED-738 replaces this with the real Windows rig lane."
+      - run: echo "Stub required check, SPEED-738 replaces this step with the real Windows rig lane."
