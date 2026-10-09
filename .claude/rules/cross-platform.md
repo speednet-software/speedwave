@@ -56,7 +56,7 @@ Every change must work on **both** platforms. `make check` compiles the host tar
      - Neither `cl.exe` front-end nor MSBuild `GetOutOfDateItems` can handle >260-char paths **even with `LongPathsEnabled`** (enabled by `setup-dev-windows` for Ninja).
      - Symptoms: `ninja: GetLastError() = 3` then `C1083`, or `error MSB4018` `GetOutOfDateItems`/`%(FullPath)` in CMake TryCompile.
      - Gate: `scripts/check-vulkan-path-budget.sh` gates bundle paths (`prepare-desktop-bundle` in CI, `stage-vulkan-windows` in `Makefile`).
-     - Bypasses: CI jobs pinning short `CARGO_TARGET_DIR` (`test.yml`'s `desktop-windows-check` `D:\st`, e2e rig `C:\cb`).
+     - Bypasses: CI jobs pinning short `CARGO_TARGET_DIR` (`lane-desktop-windows-check.yml` `D:\st`, e2e rig `C:\cb`).
      - Escapes: short `CARGO_TARGET_DIR`, gitignored crate-local `desktop/src-tauri/.cargo/config.toml` `target-dir` (provisioned by `setup-dev-windows`; mandatory as budget leaves 9 chars and default crate target dir never fits), or shorter clone path.
   2. Generator and environment constraints:
      - Force `CMAKE_GENERATOR=Ninja` (choco-provisioned). VS generator dies on `MSB6003` node-reuse cwd confusion in nested `ExternalProject` TryCompile (and Build Tools-only boxes lack a registered VS instance).
