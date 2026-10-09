@@ -157,10 +157,24 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     } else {
         &info.pricing
     };
-    let cost = (r.prompt_tokens.unwrap_or(0) as f64 * p.input
+    let prompt_tokens = r.prompt_tokens.unwrap_or(0);
+    let cache_read = r.cache_read.unwrap_or(0);
+    let cache_write = r.cache_write.unwrap_or(0);
+    let p = match &info.long_prompt {
+        Some(tiered)
+            if prompt_tokens
+                .saturating_add(cache_read)
+                .saturating_add(cache_write)
+                > tiered.threshold_tokens =>
+        {
+            &tiered.pricing
+        }
+        _ => p,
+    };
+    let cost = (prompt_tokens as f64 * p.input
         + r.completion_tokens.unwrap_or(0) as f64 * p.output
-        + r.cache_read.unwrap_or(0) as f64 * p.cached_input
-        + r.cache_write.unwrap_or(0) as f64 * p.cache_write)
+        + cache_read as f64 * p.cached_input
+        + cache_write as f64 * p.cache_write)
         / 1_000_000.0;
     Some(cost)
 }
@@ -384,6 +398,80 @@ mod tests {
             e.cost_usd
         );
         assert_eq!(e.cost_source, CostSource::Catalog);
+    }
+
+    #[test]
+    fn sonnet_5_5_cost_from_catalog_uses_its_own_cache_read_rate() {
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "claude-sonnet-5-5", 0, 0, 1_000_000, 0),
+            &|_| None,
+        );
+        assert!(
+            (e.cost_usd.unwrap() - 0.10).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+        assert_eq!(e.cost_source, CostSource::Catalog);
+    }
+
+    #[test]
+    fn haiku_5_5_up_to_threshold_uses_the_low_tier_rate() {
+        for prompt in [1u64, 99_999, 100_000] {
+            let e = compute_cost_with(
+                &record("anthropic_apikey", "claude-haiku-5-5", prompt, 0, 0, 0),
+                &|_| None,
+            );
+            let expected = prompt as f64 * 0.10 / 1_000_000.0;
+            assert!(
+                (e.cost_usd.unwrap() - expected).abs() < 1e-9,
+                "prompt={prompt}: got {:?}",
+                e.cost_usd
+            );
+        }
+    }
+
+    #[test]
+    fn haiku_5_5_over_threshold_uses_the_long_prompt_rate() {
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "claude-haiku-5-5", 100_001, 0, 0, 0),
+            &|_| None,
+        );
+        let expected = 100_001.0 * 0.50 / 1_000_000.0;
+        assert!(
+            (e.cost_usd.unwrap() - expected).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+    }
+
+    #[test]
+    fn haiku_5_5_cache_reads_count_toward_the_long_prompt_threshold() {
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "claude-haiku-5-5", 60_000, 0, 40_001, 0),
+            &|_| None,
+        );
+        let expected = (60_000.0 * 0.50 + 40_001.0 * 0.05) / 1_000_000.0;
+        assert!(
+            (e.cost_usd.unwrap() - expected).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+    }
+
+    #[test]
+    fn haiku_5_5_cache_writes_count_toward_the_long_prompt_threshold() {
+        for model in ["claude-haiku-5-5", "claude-haiku-5-5[1m]"] {
+            let e = compute_cost_with(
+                &record("anthropic_apikey", model, 1, 0, 0, 100_000),
+                &|_| None,
+            );
+            let expected = (1.0 * 0.50 + 100_000.0 * 0.625) / 1_000_000.0;
+            assert!(
+                (e.cost_usd.unwrap() - expected).abs() < 1e-9,
+                "{model}: got {:?}",
+                e.cost_usd
+            );
+        }
     }
 
     #[test]

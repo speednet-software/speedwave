@@ -2811,12 +2811,12 @@ mod tests {
     }
 
     const RESUME_TRANSCRIPT: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-resume-transcript.sanitized.jsonl");
+        include_str!("../tests/fixtures/cc-2.1.295-resume-transcript.sanitized.jsonl");
     const RESUME_TRANSCRIPT_AFTER: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-resume-transcript-after.sanitized.jsonl");
+        include_str!("../tests/fixtures/cc-2.1.295-resume-transcript-after.sanitized.jsonl");
     const RESUME_STDOUT: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-resume-stdout.sanitized.ndjson");
-    const RESUMED_SESSION: &str = "7f989b3d-8e7e-4691-ac93-c91c3bf281c2";
+        include_str!("../tests/fixtures/cc-2.1.295-resume-stdout.sanitized.ndjson");
+    const RESUMED_SESSION: &str = "c6b01d20-ddc2-4a36-a737-ce0b231e80d6";
     const SNAPSHOT_SESSION: &str = "abcdef01-2345-6789-abcd-ef0123456789";
 
     fn is_cost_state(line: &str) -> bool {

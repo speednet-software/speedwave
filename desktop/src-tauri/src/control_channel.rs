@@ -565,7 +565,7 @@ pub(crate) const FIXTURE: &str =
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.282-apply-effort.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.295-apply-effort.sanitized.json");
 
 #[cfg(test)]
 #[expect(

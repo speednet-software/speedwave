@@ -102,8 +102,12 @@ fn million_context_variants_bill_at_standard_rates() {
 }
 
 #[test]
-fn cache_hit_is_the_standard_01x_multiplier_except_fable_5_1_and_opus_5_5() {
-    let exceptions = [("claude-fable-5-1", 0.025), ("claude-opus-5-5", 0.05)];
+fn cache_hit_is_the_standard_01x_multiplier_except_documented_exceptions() {
+    let exceptions = [
+        ("claude-fable-5-1", 0.025),
+        ("claude-opus-5-5", 0.05),
+        ("claude-sonnet-5-5", 0.05),
+    ];
     for (id, multiplier) in exceptions {
         let m = ANTHROPIC_MODELS
             .iter()
@@ -142,4 +146,24 @@ fn sonnet_5_is_priced_below_sonnet_46() {
     assert!(s5.pricing.cached_input < s46.pricing.cached_input);
     assert!(s5.pricing.cache_write < s46.pricing.cache_write);
     assert!(s5.pricing.output < s46.pricing.output);
+}
+
+#[test]
+fn long_prompt_tiers_are_priced_with_a_positive_threshold() {
+    let mut saw_one = false;
+    for m in ANTHROPIC_MODELS {
+        if let Some(tiered) = &m.long_prompt {
+            saw_one = true;
+            assert_priced(m.id, "long_prompt", &tiered.pricing);
+            assert!(
+                tiered.threshold_tokens > 0,
+                "{}: long_prompt.threshold_tokens must be positive",
+                m.id
+            );
+        }
+    }
+    assert!(
+        saw_one,
+        "no catalog entry carries a long_prompt tier — this test asserts nothing"
+    );
 }

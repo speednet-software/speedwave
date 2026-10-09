@@ -798,7 +798,12 @@ mod tests {
 
     #[test]
     fn anthropic_model_wire_fields_match_ts_mirror() {
-        const UNMIRRORED: &[&str] = &["pricing", "pricing_1m", "one_million_context"];
+        const UNMIRRORED: &[&str] = &[
+            "pricing",
+            "pricing_1m",
+            "long_prompt",
+            "one_million_context",
+        ];
 
         let sample = speedwave_runtime::defaults::ANTHROPIC_MODELS
             .first()

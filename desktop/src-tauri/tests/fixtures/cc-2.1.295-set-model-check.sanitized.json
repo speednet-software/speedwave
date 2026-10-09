@@ -1,11 +1,11 @@
 {
-  "claude_code_version": "2.1.282",
-  "captured": "2026-09-25",
+  "claude_code_version": "2.1.295",
+  "captured": "2026-10-09",
   "note": "Stream-json sessions of the pinned binary against a stub /v1/messages. The routed runs launch with ANTHROPIC_MODEL=local/model-a and send set_model local/model-b before the first user message: before_first_turn with the stub answering the one-token check, refused_not_found with the stub answering it 404, unanswered with the stub holding it for 30 s. answered_after_s is the time from the request to Claude Code's answer, probes lists the one-token requests, first_turn_models the models of the first turn's requests. The typed runs use the Anthropic env: one turn, then /model claude-haiku-4-5 as an input with the stub answering its check 429 (typed_model_refused) or 200 (typed_model_confirmed), then one more turn; synthetic_text is the text of the <synthetic> assistant line the command answered with, and turn_models the models of every turn request.",
   "before_first_turn": {
     "launched": "local/model-a",
     "set_model": "local/model-b",
-    "answered_after_s": 0.5,
+    "answered_after_s": 0.859,
     "answer": {
       "subtype": "success"
     },
@@ -24,7 +24,7 @@
   "refused_not_found": {
     "launched": "local/model-a",
     "set_model": "local/model-b",
-    "answered_after_s": 0.4,
+    "answered_after_s": 0.87,
     "answer": {
       "subtype": "error",
       "error": "Model 'local/model-b' not found",
@@ -45,7 +45,7 @@
   "unanswered": {
     "launched": "local/model-a",
     "set_model": "local/model-b",
-    "answered_after_s": 5.4,
+    "answered_after_s": 5.296,
     "answer": {
       "subtype": "error",
       "error": "Couldn't confirm model \"local/model-b\" with the API. Try again, or run /model to see available models.",
@@ -62,7 +62,7 @@
   "typed_model_refused": {
     "typed": "/model claude-haiku-4-5",
     "synthetic_text": [
-      "API error: 429 Usage credits are required for long context requests \u00b7 model not changed"
+      "API error: 429 Usage credits are required for long context requests · model not changed"
     ],
     "result": {
       "subtype": "success",
