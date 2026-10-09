@@ -3767,7 +3767,7 @@ mod tests {
             |status| reported = Some(status),
         )
         .expect("a live session reports its status");
-        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 6));
+        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 5));
         assert_eq!(*slot.lock().unwrap(), status);
         assert_eq!(reported, Some(status));
     }

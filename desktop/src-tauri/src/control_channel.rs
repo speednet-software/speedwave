@@ -561,7 +561,7 @@ pub(crate) fn parse_context_usage(value: &serde_json::Value) -> Result<ContextUs
 
 #[cfg(test)]
 pub(crate) const FIXTURE: &str =
-    include_str!("../tests/fixtures/cc-2.1.282-control-responses.sanitized.json");
+    include_str!("../tests/fixtures/cc-2.1.295-control-responses.sanitized.json");
 
 #[cfg(test)]
 const APPLY_EFFORT_FIXTURE: &str =
@@ -1191,14 +1191,7 @@ mod tests {
         let values: Vec<&str> = info.models.iter().map(|m| m.value.as_str()).collect();
         assert_eq!(
             values,
-            vec![
-                "default",
-                "opus[1m]",
-                "claude-fable-5-1[1m]",
-                "sonnet",
-                "sonnet[1m]",
-                "haiku"
-            ]
+            vec!["default", "opus", "claude-fable-5-1[1m]", "sonnet", "haiku"]
         );
         let resolved: Vec<Option<&str>> = info
             .models
@@ -1211,23 +1204,22 @@ mod tests {
                 Some("claude-opus-5-5[1m]"),
                 Some("claude-opus-5-5[1m]"),
                 Some("claude-fable-5-1[1m]"),
-                Some("claude-sonnet-5[1m]"),
-                Some("claude-sonnet-5[1m]"),
-                Some("claude-haiku-4-5"),
+                Some("claude-sonnet-5-5[1m]"),
+                Some("claude-haiku-5-5[1m]"),
             ]
         );
-        let default = &info.models[0];
-        assert!(default.supports_effort);
-        assert_eq!(
-            default.supported_effort_levels,
-            vec!["low", "medium", "high", "xhigh", "max"]
-        );
-        let haiku = info.models.last().unwrap();
-        assert!(!haiku.supports_effort);
-        assert!(haiku.supported_effort_levels.is_empty());
+        for model in &info.models {
+            assert!(model.supports_effort, "{}", model.value);
+            assert_eq!(
+                model.supported_effort_levels,
+                vec!["low", "medium", "high", "xhigh", "max"],
+                "{}",
+                model.value
+            );
+        }
         assert_eq!(
             info.account.subscription_type.as_deref(),
-            Some("Claude Max")
+            Some("Claude Team")
         );
         assert_eq!(info.account.api_provider.as_deref(), Some("firstParty"));
     }
@@ -1241,12 +1233,9 @@ mod tests {
                 .find(|m| m.value == v)
                 .and_then(|m| m.resolved_model.clone())
         };
-        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5-5[1m]"));
-        assert_eq!(by_value("sonnet").as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(
-            by_value("haiku").as_deref(),
-            Some("claude-haiku-4-5-20251001")
-        );
+        assert_eq!(by_value("default").as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(by_value("sonnet").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(by_value("haiku").as_deref(), Some("claude-haiku-5-5"));
     }
 
     #[test]
@@ -1285,7 +1274,7 @@ mod tests {
         let SessionInfoState::Ready { info } = state else {
             panic!("expected ready, got {state:?}");
         };
-        assert_eq!(info.models.len(), 6);
+        assert_eq!(info.models.len(), 5);
     }
 
     #[test]
@@ -1303,20 +1292,20 @@ mod tests {
 
     #[test]
     fn usage_fixture_parses_the_typed_windows() {
-        for (run, five_hour_used) in [("run_A", 1.0), ("run_B", 2.0)] {
+        for run in ["run_A", "run_B"] {
             let usage = parse_plan_usage(&fixture()[run]["get_usage"]).unwrap();
-            assert_eq!(usage.subscription_type.as_deref(), Some("max"));
+            assert_eq!(usage.subscription_type.as_deref(), Some("team"));
             assert!(usage.rate_limits_available);
             let limits = usage.rate_limits.expect("rate limits");
             let five = limits.five_hour.expect("five_hour");
-            assert_eq!(five.utilization, Some(five_hour_used), "{run}");
-            assert!(five.resets_at.unwrap().starts_with("2026-09-25T02:19:59"));
-            assert_eq!(limits.seven_day.unwrap().utilization, Some(71.0));
+            assert_eq!(five.utilization, Some(5.0), "{run}");
+            assert!(five.resets_at.unwrap().starts_with("2026-10-09T20:40:00"));
+            assert_eq!(limits.seven_day.unwrap().utilization, Some(74.0));
             assert_eq!(limits.seven_day_opus, None);
             assert_eq!(limits.seven_day_sonnet, None);
             assert_eq!(limits.model_scoped.len(), 1);
             assert_eq!(limits.model_scoped[0].display_name, "Fable");
-            assert_eq!(limits.model_scoped[0].utilization, Some(3.0));
+            assert_eq!(limits.model_scoped[0].utilization, Some(26.0));
             let extra = limits.extra_usage.expect("extra_usage");
             assert!(!extra.is_enabled);
             assert_eq!(extra.utilization, None);
@@ -1326,7 +1315,7 @@ mod tests {
     #[test]
     fn usage_ignores_undeclared_keys() {
         let raw = &fixture()["run_A"]["get_usage"];
-        for undeclared in ["nimbus_quill", "limits", "spend", "seven_day_breakdown"] {
+        for undeclared in ["limits", "spend", "weekly_scoped_shares"] {
             assert!(
                 !raw["rate_limits"][undeclared].is_null(),
                 "the capture no longer carries the undeclared key {undeclared}"
@@ -1439,7 +1428,10 @@ mod tests {
     }
 
     #[test]
-    fn pinned_binary_gives_bare_ids_200k_and_only_the_1m_suffix_one_million() {
+    fn pinned_binary_gives_every_plan_models_1m_on_the_bare_id_and_the_rest_only_with_the_suffix() {
+        use speedwave_runtime::defaults::{
+            canonical_anthropic_model_id, OneMillionContext, ANTHROPIC_MODELS,
+        };
         let fx = fixture();
         for run in ["run_A", "run_B"] {
             for (key, value) in fx[run].as_object().unwrap() {
@@ -1447,11 +1439,18 @@ mod tests {
                     continue;
                 }
                 let usage = parse_context_usage(value).unwrap();
-                let expected = if usage.model.ends_with("[1m]") {
-                    1_000_000
-                } else {
-                    200_000
-                };
+                let id = canonical_anthropic_model_id(&usage.model);
+                let policy = ANTHROPIC_MODELS
+                    .iter()
+                    .find(|m| m.id == id)
+                    .unwrap_or_else(|| panic!("{run} {key}: {id} is not in the catalog"))
+                    .one_million_context;
+                let expected =
+                    if usage.model.ends_with("[1m]") || policy == OneMillionContext::EveryPlan {
+                        1_000_000
+                    } else {
+                        200_000
+                    };
                 assert_eq!(usage.max_tokens, expected, "{run} {key} -> {}", usage.model);
             }
         }
@@ -1522,7 +1521,7 @@ mod tests {
             .iter()
             .all(|c| c.kind == Some(ContextKind::Used)));
         assert_eq!(shown.total_tokens, total);
-        assert_eq!(shown.max_tokens, 200_000);
+        assert_eq!(shown.max_tokens, 1_000_000);
     }
 
     #[test]
@@ -1676,18 +1675,21 @@ mod tests {
         assert_eq!(usage.max_tokens, 1_000_000);
         let bare =
             parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-5-5"]).unwrap();
-        assert_eq!(bare.max_tokens, 200_000);
+        assert_eq!(bare.max_tokens, 1_000_000);
+        let plan_dependent =
+            parse_context_usage(&fixture()["run_A"]["get_context_usage/claude-opus-4-6"]).unwrap();
+        assert_eq!(plan_dependent.max_tokens, 200_000);
     }
 
     #[test]
     fn context_usage_before_the_first_message_reports_the_baseline() {
         let usage = parse_context_usage(&fixture()["run_A"]["get_context_usage/initial"]).unwrap();
-        assert_eq!(usage.model, "claude-haiku-4-5");
-        assert_eq!(usage.total_tokens, 61_125);
-        assert_eq!(usage.max_tokens, 200_000);
-        assert!((usage.percentage - 31.0).abs() < f64::EPSILON);
+        assert_eq!(usage.model, "claude-opus-5-5[1m]");
+        assert_eq!(usage.total_tokens, 48_311);
+        assert_eq!(usage.max_tokens, 1_000_000);
+        assert!((usage.percentage - 5.0).abs() < f64::EPSILON);
         assert_eq!(usage.categories[0].name, "System prompt");
-        assert_eq!(usage.categories[0].tokens, 6_890);
+        assert_eq!(usage.categories[0].tokens, 1_991);
     }
 
     #[test]
