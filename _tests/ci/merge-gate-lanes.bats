@@ -62,9 +62,10 @@ _on_block() {
     [ "$status" -eq 1 ]
 }
 
-@test "e2e.yml exists with e2e-macos and e2e-windows on merge_group and workflow_dispatch, referencing SPEED-738" {
+@test "e2e.yml exists with e2e-macos and e2e-windows on pull_request, merge_group and workflow_dispatch, referencing SPEED-738 (named failure: a required check that never reports on the pull request keeps it out of the merge queue)" {
     [ -f "$E2E_WORKFLOW" ]
     on="$(_on_block "$E2E_WORKFLOW")"
+    [[ "$on" == *"pull_request"* ]]
     [[ "$on" == *"merge_group"* ]]
     [[ "$on" == *"workflow_dispatch"* ]]
     [[ "$on" != *"push"* ]]
