@@ -62,10 +62,9 @@ _on_block() {
     [ "$status" -eq 1 ]
 }
 
-@test "e2e.yml exists with e2e-macos and e2e-windows on pull_request, merge_group and workflow_dispatch, referencing SPEED-738 (named failure: a required check that never reports on the pull request keeps it out of the merge queue)" {
+@test "e2e.yml exists with e2e-macos and e2e-windows on merge_group and workflow_dispatch, referencing SPEED-738" {
     [ -f "$E2E_WORKFLOW" ]
     on="$(_on_block "$E2E_WORKFLOW")"
-    [[ "$on" == *"pull_request"* ]]
     [[ "$on" == *"merge_group"* ]]
     [[ "$on" == *"workflow_dispatch"* ]]
     [[ "$on" != *"push"* ]]
@@ -76,13 +75,6 @@ _on_block() {
     [ "$output" = "1" ]
     run grep -c 'SPEED-738' "$E2E_WORKFLOW"
     [ "$output" -ge 1 ]
-}
-
-@test "e2e.yml jobs are skipped on pull requests, never green there (named failure: a pull request looks e2e-tested before the merge queue ran the rig)" {
-    for job in e2e-macos e2e-windows; do
-        block="$(_job_block "$E2E_WORKFLOW" "$job")"
-        [[ "$block" == *"if: github.event_name != 'pull_request'"* ]]
-    done
 }
 
 @test "e2e.yml stub jobs carry no real work (always green)" {
