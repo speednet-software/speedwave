@@ -14,6 +14,8 @@ import {
   UpdateChannel,
   UpdateCheckOutcome,
   UpdateSettings,
+  newerVersionNoticeText,
+  recheckNewerVersion,
 } from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
@@ -132,7 +134,7 @@ export class UpdateSectionComponent implements OnInit {
   updateAvailableVersion = '';
   updateInstalling = false;
   updateInstallError = '';
-  updateInstallNotice: string | null = null;
+  updateInstallNotice = '';
   error = '';
 
   private cdr = inject(ChangeDetectorRef);
@@ -221,6 +223,7 @@ export class UpdateSectionComponent implements OnInit {
     this.updateChecking = true;
     this.updateResult = 'none';
     this.error = '';
+    this.updateInstallNotice = '';
     this.cdr.markForCheck();
     try {
       const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
@@ -250,7 +253,7 @@ export class UpdateSectionComponent implements OnInit {
     if (!this.updateAvailableVersion) return;
     this.updateInstalling = true;
     this.updateInstallError = '';
-    this.updateInstallNotice = null;
+    this.updateInstallNotice = '';
     this.cdr.markForCheck();
     const triedVersion = this.updateAvailableVersion;
     try {
@@ -265,14 +268,12 @@ export class UpdateSectionComponent implements OnInit {
   }
 
   private async handleInstallFailure(e: unknown, triedVersion: string): Promise<void> {
-    try {
-      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
-      if (outcome.kind === 'update_available' && outcome.version !== triedVersion) {
-        this.updateAvailableVersion = outcome.version;
-        this.updateInstallNotice = `A newer version v${outcome.version} is available`;
-        return;
-      }
-    } catch {}
+    const newerVersion = await recheckNewerVersion(this.tauri, triedVersion);
+    if (newerVersion) {
+      this.updateAvailableVersion = newerVersion;
+      this.updateInstallNotice = newerVersionNoticeText(newerVersion);
+      return;
+    }
     this.updateInstallError = e instanceof Error ? e.message : String(e);
   }
 }

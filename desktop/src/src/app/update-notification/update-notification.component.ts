@@ -7,13 +7,13 @@ import {
 } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 import { TauriService } from '../services/tauri.service';
-import { ProjectList, UpdateCheckOutcome, UpdateInfo } from '../models/update';
-
-function toUpdateInfo(outcome: { kind: 'update_available' } & UpdateInfo): UpdateInfo {
-  const { kind: _kind, ...info } = outcome;
-  void _kind;
-  return info;
-}
+import {
+  ProjectList,
+  UpdateCheckOutcome,
+  UpdateInfo,
+  newerVersionNoticeText,
+  recheckNewerVersion,
+} from '../models/update';
 
 /** Shows a banner when a new Speedwave version is available for install. */
 @Component({
@@ -92,7 +92,7 @@ export class UpdateNotificationComponent implements OnDestroy {
   dismissed = false;
   installing = false;
   error = '';
-  newerVersionNotice: string | null = null;
+  newerVersionNotice = '';
   confirmUpdate = false;
   containersRunning = false;
 
@@ -108,10 +108,14 @@ export class UpdateNotificationComponent implements OnDestroy {
   private async setupListeners(): Promise<void> {
     try {
       this.unlisten = await this.tauri.listen<UpdateInfo>('update_available', (event) => {
+        const isDifferentVersion = event.payload.version !== this.updateInfo?.version;
         this.updateInfo = event.payload;
-        this.dismissed = false;
-        this.error = '';
-        this.confirmUpdate = false;
+        if (isDifferentVersion && !this.installing) {
+          this.dismissed = false;
+          this.error = '';
+          this.confirmUpdate = false;
+          this.newerVersionNotice = '';
+        }
         this.checkContainers();
         this.cdr.markForCheck();
       });
@@ -144,7 +148,7 @@ export class UpdateNotificationComponent implements OnDestroy {
   async installAndRestart(): Promise<void> {
     this.installing = true;
     this.error = '';
-    this.newerVersionNotice = null;
+    this.newerVersionNotice = '';
     this.cdr.markForCheck();
     const triedVersion = this.updateInfo!.version;
     try {
@@ -161,14 +165,12 @@ export class UpdateNotificationComponent implements OnDestroy {
 
   private async handleInstallFailure(e: unknown, triedVersion: string): Promise<void> {
     this.confirmUpdate = false;
-    try {
-      const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
-      if (outcome.kind === 'update_available' && outcome.version !== triedVersion) {
-        this.updateInfo = toUpdateInfo(outcome);
-        this.newerVersionNotice = `A newer version v${outcome.version} is available`;
-        return;
-      }
-    } catch {}
+    const newerVersion = await recheckNewerVersion(this.tauri, triedVersion);
+    if (newerVersion) {
+      this.updateInfo = { ...this.updateInfo!, version: newerVersion };
+      this.newerVersionNotice = newerVersionNoticeText(newerVersion);
+      return;
+    }
     this.error = e instanceof Error ? e.message : String(e);
   }
 
@@ -188,4 +190,10 @@ export class UpdateNotificationComponent implements OnDestroy {
   ngOnDestroy(): void {
     void this.unlisten?.();
   }
+}
+
+function toUpdateInfo(outcome: { kind: 'update_available' } & UpdateInfo): UpdateInfo {
+  const { kind: _kind, ...info } = outcome;
+  void _kind;
+  return info;
 }

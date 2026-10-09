@@ -229,7 +229,7 @@ describe('UpdateSectionComponent', () => {
 
       expect(component.updateAvailableVersion).toBe('2.0.0');
       expect(component.updateInstallError).toBe('download failed');
-      expect(component.updateInstallNotice).toBe(null);
+      expect(component.updateInstallNotice).toBe('');
     });
 
     it('keeps the original error when the re-check reports up to date', async () => {
@@ -243,7 +243,7 @@ describe('UpdateSectionComponent', () => {
       await component.installUpdate();
 
       expect(component.updateInstallError).toBe('download failed');
-      expect(component.updateInstallNotice).toBe(null);
+      expect(component.updateInstallNotice).toBe('');
     });
 
     it('keeps the original error when the re-check itself fails', async () => {
@@ -257,7 +257,7 @@ describe('UpdateSectionComponent', () => {
       await component.installUpdate();
 
       expect(component.updateInstallError).toBe('download failed');
-      expect(component.updateInstallNotice).toBe(null);
+      expect(component.updateInstallNotice).toBe('');
     });
   });
 
@@ -309,6 +309,18 @@ describe('UpdateSectionComponent', () => {
       pendingCheck.resolve();
       await promise;
       expect(component.updateChecking).toBe(false);
+    });
+
+    it('clears a previous install notice', async () => {
+      component.updateInstallNotice = 'A newer version v2.0.1 is available';
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'check_for_update') return { kind: 'up_to_date' };
+        return undefined;
+      };
+
+      await component.checkForUpdate();
+
+      expect(component.updateInstallNotice).toBe('');
     });
   });
 
