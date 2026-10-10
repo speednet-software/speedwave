@@ -37,6 +37,7 @@ export default {
         'docs',
         'e2e',
         'deps',
+        'deps-dev',
         'ide-bridge',
         'lint',
         'config',
