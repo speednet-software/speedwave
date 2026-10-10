@@ -200,7 +200,14 @@ fn pin_needs_rewrite(id: &str, pin: &str, wire_id: &str) -> bool {
     }
     let native =
         catalog_entry(id).is_some_and(|m| m.one_million_context == OneMillionContext::Native);
-    !(native && pin.strip_suffix("[1m]") == Some(wire_id))
+    if native {
+        let pin_base = pin.strip_suffix("[1m]").unwrap_or(pin);
+        let wire_base = wire_id.strip_suffix("[1m]").unwrap_or(wire_id);
+        if pin_base == wire_base {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn normalized_pin(pin: &str, plan: AnthropicPlan) -> Option<String> {
