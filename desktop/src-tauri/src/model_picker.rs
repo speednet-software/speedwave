@@ -334,7 +334,11 @@ mod tests {
 
     #[test]
     fn listed_model_without_supports_effort_offers_no_stops() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        let info = info_of(
+            vec![listed("haiku", Some("claude-haiku-4-5"), "Haiku")],
+            Some("Claude Team"),
+        );
+        let picker = picker_of(&info, AnthropicPlan::Team);
         let (levels, default) = effort_of(&picker, "claude-haiku-4-5");
         assert!(levels.is_empty());
         assert_eq!(default, None);
@@ -349,12 +353,13 @@ mod tests {
     }
 
     #[test]
-    fn captured_max_account_reports_all_five_stops_for_every_listed_effort_model() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+    fn captured_team_account_reports_all_five_stops_for_every_listed_model() {
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Team);
         for (id, catalog_default) in [
             ("claude-opus-5-5", "medium"),
             ("claude-fable-5-1", "high"),
-            ("claude-sonnet-5", "high"),
+            ("claude-sonnet-5-5", "medium"),
+            ("claude-haiku-5-5", "medium"),
         ] {
             let (levels, default) = effort_of(&picker, id);
             assert_eq!(levels, EFFORT_LEVELS, "{id}");
@@ -364,8 +369,10 @@ mod tests {
 
     #[test]
     fn successful_initialize_does_not_restore_models_claude_code_omits() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Team);
         for id in [
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
             "claude-opus-5",
             "claude-fable-5",
             "claude-opus-4-8",
@@ -448,15 +455,15 @@ mod tests {
     }
 
     #[test]
-    fn max_account_lists_every_reported_model_once_with_default_on_opus_5_5() {
+    fn team_account_lists_every_reported_model_once_with_default_on_opus_5_5() {
         for run in ["run_A", "run_B"] {
             let info = fixture_info(run);
             let plan = plan_for(LlmProviderKind::AnthropicOauth, Some(&info));
-            assert_eq!(plan, AnthropicPlan::Max);
+            assert_eq!(plan, AnthropicPlan::Team);
             let picker = picker_of(&info, plan);
             assert_eq!(
                 labels(&picker),
-                vec!["Opus 5.5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"],
+                vec!["Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 5.5"],
                 "{run}"
             );
             let defaults: Vec<&str> = picker
@@ -471,17 +478,17 @@ mod tests {
     }
 
     #[test]
-    fn max_account_wire_ids_are_exactly_the_reported_variants() {
+    fn team_account_wire_ids_are_exactly_the_reported_variants() {
         let info = fixture_info("run_A");
-        let picker = picker_of(&info, AnthropicPlan::Max);
+        let picker = picker_of(&info, AnthropicPlan::Team);
         let wire: Vec<&str> = picker.rows.iter().map(|r| r.wire_id.as_str()).collect();
         assert_eq!(
             wire,
             vec![
                 "claude-opus-5-5[1m]",
                 "claude-fable-5-1[1m]",
-                "claude-sonnet-5[1m]",
-                "claude-haiku-4-5"
+                "claude-sonnet-5-5[1m]",
+                "claude-haiku-5-5[1m]"
             ]
         );
     }
@@ -617,16 +624,12 @@ mod tests {
 
     #[test]
     fn a_dated_and_a_plain_listing_of_one_model_make_one_row_on_the_catalog_id() {
-        let info = fixture_info("run_B");
-        let listed: Vec<Option<&str>> = info
-            .models
-            .iter()
-            .filter(|m| m.value.contains("haiku"))
-            .map(|m| m.resolved_model.as_deref())
-            .collect();
-        assert_eq!(
-            listed,
-            vec![Some("claude-haiku-4-5-20251001"), Some("claude-haiku-4-5")]
+        let info = info_of(
+            vec![
+                listed("haiku", Some("claude-haiku-4-5-20251001"), "Haiku"),
+                listed("claude-haiku-4-5", Some("claude-haiku-4-5"), "Haiku 4.5"),
+            ],
+            Some("Claude Max"),
         );
         let picker = picker_of(&info, AnthropicPlan::Max);
         let haiku: Vec<&PickerRow> = picker
@@ -916,7 +919,7 @@ mod tests {
     #[test]
     fn model_picker_matches_ts_mirror() {
         let ts = include_str!("../../src/src/app/models/model-picker.ts");
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Team);
         let fields = |value: serde_json::Value| {
             let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
             keys.sort_unstable();

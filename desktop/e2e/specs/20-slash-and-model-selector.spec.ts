@@ -426,7 +426,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       });
     });
 
-    it('(e) the effort slider matches the active model and hides entirely on Haiku 4.5', async function () {
+    it('(e) the effort slider matches the active model', async function () {
       this.timeout(120_000);
       const catalog = await anthropicCatalog();
       const currentBadge = (
@@ -469,18 +469,6 @@ describe('Slash Popover + Model/Effort Selector', function () {
         'Effort Low'
       );
       await browser.keys('Escape');
-
-      const haiku = catalog.find((m) => m.id === 'claude-haiku-4-5');
-      if (!haiku) throw new Error('claude-haiku-4-5 missing from the catalog');
-      await openModelSelector();
-      await pickModelOption(haiku.id);
-      await browser.waitUntil(
-        async () => !(await $('[data-testid="effort-segment"]').isExisting()),
-        {
-          timeout: 30_000,
-          timeoutMsg: 'effort-segment still rendered after switching to Haiku 4.5',
-        }
-      );
     });
   });
 });
