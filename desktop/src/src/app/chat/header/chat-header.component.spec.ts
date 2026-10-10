@@ -43,7 +43,7 @@ describe('ChatHeaderComponent', () => {
     expect(pill).not.toBeNull();
   });
 
-  it('shows conversation controls in full (default) mode', () => {
+  it('shows conversation controls in full (default) mode, the plus button included without beta', () => {
     fixture.detectChanges();
     expect(
       fixture.nativeElement.querySelector('[data-testid="chat-header-history"]')
@@ -51,7 +51,24 @@ describe('ChatHeaderComponent', () => {
     expect(
       fixture.nativeElement.querySelector('[data-testid="chat-header-memory"]')
     ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-new"]')).not.toBeNull();
+  });
+
+  it('emits newConversation when the plus button is clicked', () => {
+    fixture.detectChanges();
+    let emitted = 0;
+    fixture.componentInstance.newConversation.subscribe(() => emitted++);
+    (
+      fixture.nativeElement.querySelector('[data-testid="chat-header-new"]') as HTMLButtonElement
+    ).click();
+    expect(emitted).toBe(1);
+  });
+
+  it('drops the plus button once beta is enabled (the tab strip carries its own)', () => {
+    betaEnabled.set(true);
+    fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="chat-header-new"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-chat-tabs')).not.toBeNull();
   });
 
   it('hides conversation controls in compact mode but keeps title + pill', () => {

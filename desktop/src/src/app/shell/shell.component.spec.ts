@@ -741,10 +741,35 @@ describe('ShellComponent', () => {
       expect(chatState.openTab).toHaveBeenCalled();
     });
 
-    it('is inert when beta is off, and never prevents the default browser action', () => {
+    it('without beta, requests a conversation restart on the chat route with a ready project (the header plus button path)', async () => {
       betaEnabled.set(false);
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
       const event = pressCmdN();
+
       expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(ui.restartRequested()).toBe(before + 1);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('without beta, is inert off the chat route and never prevents the default browser action', async () => {
+      betaEnabled.set(false);
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdN();
+
+      expect(chatState.openTab).not.toHaveBeenCalled();
+      expect(ui.restartRequested()).toBe(before);
       expect(event.defaultPrevented).toBe(false);
     });
 
@@ -781,6 +806,21 @@ describe('ShellComponent', () => {
 
       expect(ui.restartRequested()).toBe(before + 1);
       expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('is inert without beta, where the header plus button and ⌘N restart instead', async () => {
+      betaEnabled.set(false);
+      const router = TestBed.inject(Router);
+      await router.navigate(['/chat']);
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const ui = TestBed.inject(UiStateService);
+      const before = ui.restartRequested();
+
+      const event = pressCmdR();
+
+      expect(ui.restartRequested()).toBe(before);
+      expect(event.defaultPrevented).toBe(false);
     });
 
     it('is inert off the chat route (the header plus is not rendered there either)', async () => {

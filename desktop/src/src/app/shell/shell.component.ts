@@ -356,16 +356,31 @@ export class ShellComponent implements OnInit, OnDestroy {
         void this.router.navigateByUrl('/logs');
         return;
       case 'r':
-        if (this.activeViewId() === 'chat' && this.projectState.status() === 'ready') {
+        if (
+          this.beta.enabled() &&
+          this.activeViewId() === 'chat' &&
+          this.projectState.status() === 'ready'
+        ) {
           event.preventDefault();
           this.ui.requestRestart();
         }
         return;
       case 't':
       case 'n':
-        if (this.beta.enabled() && this.chat.canOpenTab()) {
+        if (this.beta.enabled()) {
+          if (this.chat.canOpenTab()) {
+            event.preventDefault();
+            void this.chat.openTab();
+          }
+          return;
+        }
+        if (
+          key.toLowerCase() === 'n' &&
+          this.activeViewId() === 'chat' &&
+          this.projectState.status() === 'ready'
+        ) {
           event.preventDefault();
-          void this.chat.openTab();
+          this.ui.requestRestart();
         }
         return;
       case 'w':

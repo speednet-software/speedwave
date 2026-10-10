@@ -6,9 +6,8 @@ import { BetaService } from '../../services/beta.service';
 import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
 
 /**
- * Chat header strip — terminal-minimal layout. Full mode shows conversation controls (history/memory/new), the
- * beta-gated inline tab strip, and the project pill. `compact` hides the conversation controls (and the tab
- * strip) so blocked chat states (no-provider, auth-required) still expose only the title and project switcher.
+ * Chat header strip: conversation controls, the title or the beta-gated tab strip, and the project pill.
+ * `compact` hides the conversation controls and the strip for blocked chat states.
  */
 @Component({
   selector: 'app-chat-header',
@@ -45,6 +44,20 @@ import { ChatTabsComponent } from '../chat-tabs/chat-tabs.component';
         >
           <app-icon name="brain" class="h-4 w-4" />
         </button>
+
+        @if (!beta.enabled()) {
+          <button
+            type="button"
+            data-testid="chat-header-new"
+            class="inline-flex flex-shrink-0 items-center justify-center text-[var(--ink-mute)] hover:text-[var(--ink)]"
+            appTooltip="New conversation"
+            tooltipKbd="⌘N"
+            aria-label="New conversation"
+            (click)="newConversation.emit()"
+          >
+            <app-icon name="plus" class="h-4 w-4" />
+          </button>
+        }
       }
 
       @if (compact() || !beta.enabled()) {
@@ -82,4 +95,6 @@ export class ChatHeaderComponent {
   readonly toggleMemory = output<void>();
   /** Toggle the conversations drawer (hamburger button → ⌘B). */
   readonly toggleHistory = output<void>();
+  /** Start a new conversation (the non-beta plus button; the beta tab strip has its own plus). */
+  readonly newConversation = output<void>();
 }
