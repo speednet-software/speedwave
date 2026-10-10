@@ -212,6 +212,72 @@ describe('ChatMessageListComponent', () => {
     expect(container.scrollTop).toBe(1400);
   });
 
+  it('suppresses the pin on a conversation key change and re-derives from a mid-scroll restored viewport', () => {
+    fixture.componentRef.setInput('conversationKey', 't1');
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
+    ]);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const container = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message-list"]'
+    ) as HTMLDivElement;
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+    container.scrollTop = 600;
+    container.dispatchEvent(new Event('scroll'));
+
+    fixture.componentRef.setInput('conversationKey', 't2');
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'a' }], timestamp: 1 },
+      { role: 'assistant', blocks: [{ type: 'text', content: 'b' }], timestamp: 2 },
+      { role: 'user', blocks: [{ type: 'text', content: 'c' }], timestamp: 3 },
+    ]);
+    fakeOnChanges();
+    container.scrollTop = 100;
+    fixture.detectChanges();
+
+    expect(container.scrollTop).toBe(100);
+
+    fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'delta' }]);
+    fixture.componentRef.setInput('isStreaming', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    expect(container.scrollTop).toBe(100);
+  });
+
+  it('re-derives to pinned when the restored viewport is at the bottom', () => {
+    fixture.componentRef.setInput('conversationKey', 't1');
+    fixture.componentRef.setInput('messages', [
+      { role: 'user', blocks: [{ type: 'text', content: 'first' }], timestamp: 1 },
+    ]);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    const container = fixture.nativeElement.querySelector(
+      '[data-testid="chat-message-list"]'
+    ) as HTMLDivElement;
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+    container.scrollTop = 100;
+    container.dispatchEvent(new Event('scroll'));
+
+    fixture.componentRef.setInput('conversationKey', 't2');
+    fixture.componentRef.setInput('messages', []);
+    fakeOnChanges();
+    container.scrollTop = 590;
+    fixture.detectChanges();
+
+    fixture.componentRef.setInput('currentBlocks', [{ type: 'text', content: 'delta' }]);
+    fixture.componentRef.setInput('isStreaming', true);
+    fakeOnChanges();
+    fixture.detectChanges();
+
+    expect(container.scrollTop).toBe(1000);
+  });
+
   it('isPrecedingUserEdited returns false for index 0', () => {
     fixture.componentRef.setInput('messages', [
       { role: 'user', blocks: [{ type: 'text', content: 'hi' }], timestamp: 1 },

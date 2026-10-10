@@ -129,7 +129,8 @@ impl AnthropicModelInfo {
     }
 }
 
-const ONE_MILLION_SUFFIX: &str = "[1m]";
+/// The `[1m]` wire-id suffix marking a 1M-context model variant (Claude Code syntax).
+pub const ONE_MILLION_SUFFIX: &str = "[1m]";
 
 /// A catalog id, or its `[1m]` form where the model has a 1M window: every id
 /// `anthropic_wire_model_id` can produce. Validation SSOT for the model pin.
@@ -179,10 +180,19 @@ pub fn anthropic_wire_model_id(catalog_id: &str, plan: AnthropicPlan) -> String 
     }
 }
 
+/// Claude Code's `--model` alias for the account default model.
+pub const DEFAULT_MODEL_ALIAS: &str = "default";
+
 /// Claude Code's built-in `--model` aliases, in the order Claude Code's docs list them;
 /// `containers/entrypoint.sh`'s settings.json foreign-model guard mirrors this list.
 pub const CLAUDE_CODE_MODEL_ALIASES: &[&str] = &[
-    "default", "best", "fable", "sonnet", "opus", "haiku", "opusplan",
+    DEFAULT_MODEL_ALIAS,
+    "best",
+    "fable",
+    "sonnet",
+    "opus",
+    "haiku",
+    "opusplan",
 ];
 
 /// A settings.json `model` value `containers/entrypoint.sh`'s foreign-model guard keeps: a

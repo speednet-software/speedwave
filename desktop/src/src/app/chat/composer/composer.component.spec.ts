@@ -609,6 +609,16 @@ describe('ComposerComponent', () => {
       expect(selector.componentInstance.sessionAwaited()).toBe(true);
     });
 
+    it('forwards launchModel() to the model selector', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.launchModel()).toBeNull();
+
+      fixture.componentRef.setInput('launchModel', 'claude-opus-5-5[1m]');
+      fixture.detectChanges();
+
+      expect(selector.componentInstance.launchModel()).toBe('claude-opus-5-5[1m]');
+    });
+
     it('forwards streaming() to the model selector', () => {
       fixture.componentRef.setInput('streaming', true);
       fixture.detectChanges();

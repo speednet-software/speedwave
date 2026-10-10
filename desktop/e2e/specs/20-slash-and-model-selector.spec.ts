@@ -4,7 +4,7 @@ import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
 import { pickComposerEffort } from '../helpers/applied-effort';
-import { clearModelPinFile, clearEffortPinFile } from '../helpers/host-files';
+import { clearModelPinFile, clearEffortPinFile, readModelPin } from '../helpers/host-files';
 import {
   anthropicCatalog,
   latestAnthropicModelIds,
@@ -305,17 +305,15 @@ describe('Slash Popover + Model/Effort Selector', function () {
       for (const opt of await $$('[data-testid^="model-selector-option-"]').getElements()) {
         expect(await opt.getText()).not.toMatch(ONE_MILLION_MARKER);
       }
-      expect(
-        (await $$('[data-testid="model-selector-default-badge"]').getElements()).length
-      ).toBe(1);
-      expect((await $$('[data-testid="model-selector-active-mark"]').getElements()).length).toBe(
+      expect((await $$('[data-testid="model-selector-default-badge"]').getElements()).length).toBe(
         1
       );
+      expect((await $$('[data-testid="model-selector-active-mark"]').getElements()).length).toBe(1);
       expect(ids).toEqual(await modelPickerRowIds(ANTHROPIC_PROJECT));
       await browser.keys('Escape');
     });
 
-    it('(b)+(c) a composer pick of a model and an effort level persists across "+" and a real app restart', async function () {
+    it('(b) a composer pick is tab-scoped: it wires the switch, rides the tab respawn as --model, and never writes the project pin (SPEED-388)', async function () {
       this.timeout(360_000);
       const catalog = await anthropicCatalog();
       const currentBadge = (
@@ -338,6 +336,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect(
         await (await $('[data-testid="control-chip"][data-command="model"]')).getText()
       ).not.toMatch(ONE_MILLION_MARKER);
+      expect(readModelPin(ANTHROPIC_PROJECT)).toBeNull();
 
       await sendMessageAndWait('Say hi in one word.');
       await browser.waitUntil(
@@ -363,7 +362,14 @@ describe('Slash Popover + Model/Effort Selector', function () {
       const newConversationArgs = await waitForFreshSpawnArgs(argsBeforeEffortPick);
       expect(newConversationArgs.filter((a) => a === '--effort').length).toBe(1);
       expect(newConversationArgs[newConversationArgs.indexOf('--effort') + 1]).toBe('max');
+      expect(newConversationArgs.filter((a) => a === '--model').length).toBe(1);
+      const launchedModel = newConversationArgs[newConversationArgs.indexOf('--model') + 1];
+      expect(launchedModel.replace(ONE_MILLION_MARKER, '')).toContain(targetModel.id);
+      expect(readModelPin(ANTHROPIC_PROJECT)).toBeNull();
+    });
 
+    it('(c) a tab pick does not survive an app restart; the effort pin does', async function () {
+      this.timeout(360_000);
       const priorArgs = await lastSpawnArgs();
       await restartAppAndReconnect();
 
@@ -372,15 +378,6 @@ describe('Slash Popover + Model/Effort Selector', function () {
       }
       await openChat();
 
-      await browser.waitUntil(
-        async () =>
-          (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() ===
-          targetModel.family,
-        {
-          timeout: 30_000,
-          timeoutMsg: 'composer-model-badge never showed the pinned model before the first message',
-        }
-      );
       expect((await (await $('[data-testid="effort-segment"]')).getText()).trim()).toBe('Max');
 
       const freshArgs = await waitForFreshSpawnArgs(priorArgs);
@@ -392,6 +389,40 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect(
         (await $$('[data-testid="control-chip"][data-command="model"]').getElements()).length
       ).toBe(0);
+    });
+
+    it('(c2) Set default persists the config model_pin and every new conversation launches on it', async function () {
+      this.timeout(360_000);
+      const catalog = await anthropicCatalog();
+      const currentBadge = (
+        await (await $('[data-testid="composer-model-badge"]')).getText()
+      ).trim();
+      const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
+
+      await openModelSelector();
+      const targetModel = firstListedAlternative(
+        catalog,
+        await listedModelIds(),
+        currentEntry?.id,
+        true
+      );
+      const setDefault = await $(`[data-testid="model-selector-make-default-${targetModel.id}"]`);
+      await setDefault.waitForExist({ timeout: 10_000 });
+      await setDefault.click();
+      await browser.keys('Escape');
+
+      await browser.waitUntil(async () => readModelPin(ANTHROPIC_PROJECT) !== null, {
+        timeout: 10_000,
+        timeoutMsg: 'Set default never wrote the config model_pin',
+      });
+      const pin = readModelPin(ANTHROPIC_PROJECT) as string;
+      expect(pin.replace(ONE_MILLION_MARKER, '')).toContain(targetModel.id);
+
+      const priorArgs = await lastSpawnArgs();
+      await startNewConversation();
+      const freshArgs = await waitForFreshSpawnArgs(priorArgs);
+      expect(freshArgs.filter((a) => a === '--model').length).toBe(1);
+      expect(freshArgs[freshArgs.indexOf('--model') + 1]).toBe(pin);
     });
 
     it('(d) a model pick made mid-stream is queued and applied only after the turn ends', async function () {

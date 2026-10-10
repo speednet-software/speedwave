@@ -364,5 +364,13 @@ export async function resumeNewestConversation(): Promise<void> {
 }
 
 export async function startNewConversation(): Promise<void> {
-  await (await $('[data-testid="chat-header-new"]')).click();
+  const headerPlus = await $('[data-testid="chat-header-new"]');
+  if (await headerPlus.isExisting()) {
+    await headerPlus.click();
+    return;
+  }
+  await browser.keys([process.platform === 'darwin' ? 'Meta' : 'Control', 'r']);
+  const confirm = await $('[data-testid="restart-confirm-restart"]');
+  await confirm.waitForExist({ timeout: 2_000 }).catch(() => undefined);
+  if (await confirm.isExisting()) await confirm.click();
 }

@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::chat::{validate_retry_uuid, ChatSession, SharedChatSession};
+use crate::chat::{validate_retry_uuid, ChatSession};
+use crate::chat_registry::{self, SharedChatSessions, TabEntry};
 use crate::history::validate_session_id;
 
 /// Errors surfaced to the frontend from `retry_last_turn`, serialised as a
@@ -36,6 +37,8 @@ impl std::error::Error for RetryError {}
 pub(crate) fn retry_last_turn_inner(
     session_id: &str,
     user_uuid: &str,
+    model: Option<&str>,
+    start_serialize: &std::sync::Mutex<()>,
     driver: &mut dyn SessionDriver,
 ) -> Result<(), RetryError> {
     if validate_session_id(session_id).is_err() {
@@ -45,10 +48,12 @@ pub(crate) fn retry_last_turn_inner(
         return Err(RetryError::NoAssistantTurn);
     }
 
-    let _serialize = crate::chat_session_cmd::serialize_session_starts();
+    let _serialize = start_serialize
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     driver.stop().map_err(RetryError::ResumeFailed)?;
     driver
-        .start_with_retry(session_id, user_uuid)
+        .start_with_retry(session_id, user_uuid, model)
         .map_err(RetryError::ResumeFailed)?;
     Ok(())
 }
@@ -56,14 +61,20 @@ pub(crate) fn retry_last_turn_inner(
 /// Driver abstraction over the session lifecycle, for tests.
 pub(crate) trait SessionDriver {
     fn stop(&mut self) -> Result<(), String>;
-    fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String>;
+    fn start_with_retry(
+        &mut self,
+        session_id: &str,
+        user_uuid: &str,
+        model: Option<&str>,
+    ) -> Result<(), String>;
 }
 
-/// Real driver backed by [`ChatSession`]. Swaps the session out of its mutex so
+/// Real driver backed by [`ChatSession`]. Swaps the session out of its tab's mutex so
 /// `stop()` (blocks on reader-thread drain) does not starve `send_message` et al.
 struct ChatSessionDriver<'a> {
-    session_arc: SharedChatSession,
-    project_name: Option<String>,
+    entry: TabEntry,
+    tab_id: String,
+    registry: SharedChatSessions,
     app_handle: &'a AppHandle,
 }
 
@@ -71,51 +82,93 @@ impl SessionDriver for ChatSessionDriver<'_> {
     fn stop(&mut self) -> Result<(), String> {
         let mut old = {
             let mut guard = self
-                .session_arc
+                .entry
+                .session
                 .lock()
                 .map_err(|e| format!("session lock poisoned: {e}"))?;
-            let project_name = guard.project_name().to_string();
-            self.project_name = Some(project_name.clone());
-            std::mem::replace(&mut *guard, ChatSession::new(&project_name))
+            std::mem::replace(
+                &mut *guard,
+                ChatSession::new(
+                    &self.entry.project,
+                    &self.tab_id,
+                    self.entry.transcript.clone(),
+                ),
+            )
         };
         old.stop().map_err(|e| e.to_string())?;
         drop(old);
         Ok(())
     }
 
-    fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String> {
+    fn start_with_retry(
+        &mut self,
+        session_id: &str,
+        user_uuid: &str,
+        model: Option<&str>,
+    ) -> Result<(), String> {
         let mut session = self
-            .session_arc
+            .entry
+            .session
             .lock()
             .map_err(|e| format!("session lock poisoned: {e}"))?;
+        let allow_log_truncate = !self
+            .registry
+            .other_entry_for_project(&self.entry.project, &self.tab_id);
         session
-            .start_with_retry(self.app_handle.clone(), Some(session_id), Some(user_uuid))
+            .start_with_retry(
+                self.app_handle.clone(),
+                Some(session_id),
+                Some(user_uuid),
+                allow_log_truncate,
+                model,
+            )
             .map_err(|e| e.to_string())
     }
 }
 
-/// Tauri command — retry the last assistant turn in the active session, rewinding
+fn tab_entry_for_retry(
+    registry: &SharedChatSessions,
+    tab_id: &str,
+) -> Result<TabEntry, RetryError> {
+    if chat_registry::validate_tab_id(tab_id).is_err() {
+        return Err(RetryError::SessionNotFound);
+    }
+    registry.entry(tab_id).ok_or(RetryError::SessionNotFound)
+}
+
+/// Tauri command — retry the last assistant turn in the given tab's session, rewinding
 /// to the frontend-supplied `session_id`/`user_uuid` (ADR-046).
 #[tauri::command]
 pub async fn retry_last_turn(
+    tab_id: String,
     session_id: String,
     user_uuid: String,
+    model: Option<String>,
     app_handle: AppHandle,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<(), RetryError> {
     log::info!(
         "retry_last_turn: session_id_len={} user_uuid_len={}",
         session_id.len(),
         user_uuid.len()
     );
-    let session_arc = state.inner().clone();
+    let registry = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+        let entry = tab_entry_for_retry(&registry, &tab_id)?;
+        let serializer = entry.start_serialize.clone();
         let mut driver = ChatSessionDriver {
-            session_arc,
-            project_name: None,
+            entry,
+            tab_id,
+            registry,
             app_handle: &app_handle,
         };
-        retry_last_turn_inner(&session_id, &user_uuid, &mut driver)
+        retry_last_turn_inner(
+            &session_id,
+            &user_uuid,
+            model.as_deref(),
+            &serializer,
+            &mut driver,
+        )
     })
     .await
     .map_err(|e| RetryError::ResumeFailed(format!("join error: {e}")))?
@@ -130,7 +183,7 @@ mod tests {
     #[derive(Default)]
     struct MockDriver {
         stop_calls: u32,
-        start_calls: Vec<(String, String)>,
+        start_calls: Vec<(String, String, Option<String>)>,
         stop_err: Option<String>,
         start_err: Option<String>,
     }
@@ -143,9 +196,17 @@ mod tests {
                 None => Ok(()),
             }
         }
-        fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String> {
-            self.start_calls
-                .push((session_id.to_string(), user_uuid.to_string()));
+        fn start_with_retry(
+            &mut self,
+            session_id: &str,
+            user_uuid: &str,
+            model: Option<&str>,
+        ) -> Result<(), String> {
+            self.start_calls.push((
+                session_id.to_string(),
+                user_uuid.to_string(),
+                model.map(str::to_string),
+            ));
             match &self.start_err {
                 Some(e) => Err(e.clone()),
                 None => Ok(()),
@@ -159,19 +220,52 @@ mod tests {
     #[test]
     fn retry_happy_path_stops_then_starts_with_retry() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(r.is_ok(), "expected Ok, got {r:?}");
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(
             drv.start_calls,
-            vec![(VALID_SESSION.to_string(), VALID_UUID.to_string())]
+            vec![(VALID_SESSION.to_string(), VALID_UUID.to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn retry_threads_the_tab_model_override_into_the_respawn() {
+        let mut drv = MockDriver::default();
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            Some("claude-opus-4-8"),
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
+        assert!(r.is_ok());
+        assert_eq!(
+            drv.start_calls,
+            vec![(
+                VALID_SESSION.to_string(),
+                VALID_UUID.to_string(),
+                Some("claude-opus-4-8".to_string()),
+            )]
         );
     }
 
     #[test]
     fn retry_with_invalid_session_returns_session_not_found() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner("not-a-uuid", VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(
+            "not-a-uuid",
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert_eq!(r, Err(RetryError::SessionNotFound));
         assert_eq!(
             drv.stop_calls, 0,
@@ -183,7 +277,7 @@ mod tests {
     #[test]
     fn retry_with_empty_session_returns_session_not_found() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner("", VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner("", VALID_UUID, None, &std::sync::Mutex::new(()), &mut drv);
         assert_eq!(r, Err(RetryError::SessionNotFound));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -191,7 +285,13 @@ mod tests {
     #[test]
     fn retry_with_empty_uuid_returns_no_assistant_turn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, "", &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            "",
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -199,7 +299,13 @@ mod tests {
     #[test]
     fn retry_with_malformed_uuid_returns_no_assistant_turn() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, "foo; rm -rf /", &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            "foo; rm -rf /",
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert_eq!(r, Err(RetryError::NoAssistantTurn));
         assert_eq!(drv.stop_calls, 0);
     }
@@ -210,7 +316,13 @@ mod tests {
             stop_err: Some("stop boom".to_string()),
             ..Default::default()
         };
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("stop boom")));
         assert_eq!(drv.stop_calls, 1);
         assert!(
@@ -225,7 +337,13 @@ mod tests {
             start_err: Some("nerdctl exec failed".to_string()),
             ..Default::default()
         };
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(matches!(r, Err(RetryError::ResumeFailed(m)) if m.contains("nerdctl exec failed")));
         assert_eq!(drv.stop_calls, 1);
         assert_eq!(drv.start_calls.len(), 1);
@@ -244,7 +362,12 @@ mod tests {
             }
             Ok(())
         }
-        fn start_with_retry(&mut self, _session_id: &str, _user_uuid: &str) -> Result<(), String> {
+        fn start_with_retry(
+            &mut self,
+            _session_id: &str,
+            _user_uuid: &str,
+            _model: Option<&str>,
+        ) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(50));
             self.log.lock().unwrap().push("retry start");
             Ok(())
@@ -254,13 +377,16 @@ mod tests {
     #[test]
     fn a_retry_waits_for_a_session_start_in_progress() {
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let start_in_progress = crate::chat_session_cmd::serialize_session_starts();
+        let serialize = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let start_in_progress = serialize.lock().unwrap();
         let mut drv = OrderedDriver {
             log: log.clone(),
             stopped: None,
         };
-        let retry =
-            std::thread::spawn(move || retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv));
+        let retry_serialize = serialize.clone();
+        let retry = std::thread::spawn(move || {
+            retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &retry_serialize, &mut drv)
+        });
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         log.lock().unwrap().push("other start done");
@@ -277,15 +403,18 @@ mod tests {
     fn a_session_start_waits_until_a_retry_has_spawned_its_session() {
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (stopped, retry_stopped) = std::sync::mpsc::channel();
+        let serialize = std::sync::Arc::new(std::sync::Mutex::new(()));
         let mut drv = OrderedDriver {
             log: log.clone(),
             stopped: Some(stopped),
         };
-        let retry =
-            std::thread::spawn(move || retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv));
+        let retry_serialize = serialize.clone();
+        let retry = std::thread::spawn(move || {
+            retry_last_turn_inner(VALID_SESSION, VALID_UUID, None, &retry_serialize, &mut drv)
+        });
 
         retry_stopped.recv().unwrap();
-        let other_start = crate::chat_session_cmd::serialize_session_starts();
+        let other_start = serialize.lock().unwrap();
         log.lock().unwrap().push("other start");
         drop(other_start);
 
@@ -322,8 +451,95 @@ mod tests {
     #[test]
     fn retry_does_not_open_session_jsonl_in_mock_driver() {
         let mut drv = MockDriver::default();
-        let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
+        let r = retry_last_turn_inner(
+            VALID_SESSION,
+            VALID_UUID,
+            None,
+            &std::sync::Mutex::new(()),
+            &mut drv,
+        );
         assert!(r.is_ok());
         assert_eq!(drv.stop_calls, 1);
+    }
+
+    const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn an_unknown_or_malformed_tab_is_session_not_found() {
+        let reg: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        assert_eq!(
+            tab_entry_for_retry(&reg, TAB_A).err(),
+            Some(RetryError::SessionNotFound)
+        );
+        assert_eq!(
+            tab_entry_for_retry(&reg, "not-a-uuid").err(),
+            Some(RetryError::SessionNotFound)
+        );
+    }
+
+    #[test]
+    fn a_prepared_tab_resolves_to_its_entry() {
+        let (reg, entry) = crate::chat_registry::test_support::registry_with("acme");
+        let resolved = tab_entry_for_retry(&reg, TAB_A).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&resolved.session, &entry.session));
+        assert_eq!(resolved.project, "acme");
+    }
+
+    #[test]
+    fn the_retry_driver_replaces_the_session_with_the_same_tab_identity() {
+        let source = include_str!("retry_cmd.rs");
+        let stop_impl = source
+            .split("fn stop(&mut self) -> Result<(), String> {")
+            .nth(1)
+            .unwrap();
+        let body = &stop_impl[..stop_impl.find("fn start_with_retry").unwrap()];
+        assert!(
+            body.contains("self.entry.project") && body.contains("self.tab_id"),
+            "the replacement session must carry the tab's own project and tab id"
+        );
+        assert!(
+            body.contains("self.entry.transcript.clone()"),
+            "the replacement session must keep the tab's transcript slot"
+        );
+    }
+
+    #[test]
+    fn the_retry_driver_gates_truncation_on_the_sibling_check() {
+        let source = include_str!("retry_cmd.rs");
+        let impl_block = source
+            .split("impl SessionDriver for ChatSessionDriver<'_> {")
+            .nth(1)
+            .unwrap();
+        let body = &impl_block[..impl_block
+            .find("\nfn tab_entry_for_retry")
+            .unwrap_or(impl_block.len())];
+        let sibling_pos = body.find("other_entry_for_project").expect(
+            "ChatSessionDriver::start_with_retry must compute allow_log_truncate via other_entry_for_project",
+        );
+        let call_pos = body
+            .find(".start_with_retry(")
+            .expect("ChatSessionDriver must call session.start_with_retry");
+        assert!(
+            sibling_pos < call_pos,
+            "the sibling check must run before the session start call"
+        );
+        assert!(body.contains("allow_log_truncate"));
+    }
+
+    #[test]
+    fn retry_holds_the_tab_serializer_for_the_whole_stop_and_start() {
+        let source = include_str!("retry_cmd.rs");
+        let command = source
+            .split("pub async fn retry_last_turn(")
+            .nth(1)
+            .unwrap();
+        let body = &command[..command.find("\nmod tests").unwrap_or(command.len())];
+        let guard_pos = body.find("start_serialize").unwrap();
+        let inner_pos = body.find("retry_last_turn_inner").unwrap();
+        assert!(
+            guard_pos < inner_pos,
+            "the serializer must be held before the stop+start sequence runs"
+        );
     }
 }

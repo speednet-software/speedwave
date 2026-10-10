@@ -53,6 +53,9 @@ export type StreamChunk =
       data: { session_id: string; text: string };
     };
 
+/** `chat_stream` payload: the tagged chunk plus the owning tab. Mirror of Rust chat.rs::TabStreamChunk. */
+export type TabStreamChunk = StreamChunk & { tab_id: string };
+
 /** A single selectable option in an AskUserQuestion prompt. */
 export interface AskUserOption {
   label: string;

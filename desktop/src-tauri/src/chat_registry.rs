@@ -1,0 +1,457 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use speedwave_runtime::resources::MAX_CHAT_TABS;
+
+use crate::chat::ChatSession;
+
+pub(crate) const MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB: &str =
+    "conversation is already open in another tab";
+
+pub(crate) const MSG_TAB_LIMIT_REACHED: &str = "tab limit reached";
+
+pub(crate) fn validate_tab_id(tab_id: &str) -> Result<(), String> {
+    crate::history::validate_session_id(tab_id).map_err(|e| e.to_string())
+}
+
+#[derive(Clone)]
+pub(crate) struct TabEntry {
+    pub(crate) session: Arc<Mutex<ChatSession>>,
+    pub(crate) start_serialize: Arc<Mutex<()>>,
+    pub(crate) project: String,
+    pub(crate) transcript: Arc<Mutex<Option<String>>>,
+    seq: u64,
+}
+
+#[derive(Default)]
+pub struct ChatSessions {
+    tabs: Mutex<HashMap<String, TabEntry>>,
+    next_seq: AtomicU64,
+}
+
+pub type SharedChatSessions = Arc<ChatSessions>;
+
+impl ChatSessions {
+    fn lock_tabs(&self) -> std::sync::MutexGuard<'_, HashMap<String, TabEntry>> {
+        self.tabs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn prepare(&self, tab_id: &str, project: &str) -> Result<TabEntry, String> {
+        let (entry, replaced) = {
+            let mut tabs = self.lock_tabs();
+            if !tabs.contains_key(tab_id) && tabs.len() >= MAX_CHAT_TABS as usize {
+                return Err(MSG_TAB_LIMIT_REACHED.to_string());
+            }
+            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            match tabs.get_mut(tab_id) {
+                Some(entry) if entry.project == project => {
+                    entry.seq = seq;
+                    (entry.clone(), None)
+                }
+                _ => {
+                    let transcript = Arc::new(Mutex::new(None));
+                    let entry = TabEntry {
+                        session: Arc::new(Mutex::new(ChatSession::new(
+                            project,
+                            tab_id,
+                            transcript.clone(),
+                        ))),
+                        start_serialize: Arc::new(Mutex::new(())),
+                        project: project.to_string(),
+                        transcript,
+                        seq,
+                    };
+                    let replaced = tabs.insert(tab_id.to_string(), entry.clone());
+                    (entry, replaced)
+                }
+            }
+        };
+        if let Some(old) = replaced {
+            match old.session.lock() {
+                Ok(mut session) => {
+                    if let Err(e) = session.stop() {
+                        log::warn!("failed to stop the replaced chat session for this tab: {e}");
+                    }
+                }
+                Err(poisoned) => {
+                    if let Err(e) = poisoned.into_inner().stop() {
+                        log::warn!(
+                            "failed to stop a poisoned replaced chat session for this tab: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn entry(&self, tab_id: &str) -> Option<TabEntry> {
+        self.lock_tabs().get(tab_id).cloned()
+    }
+
+    pub(crate) fn remove(&self, tab_id: &str) -> Option<Arc<Mutex<ChatSession>>> {
+        self.lock_tabs().remove(tab_id).map(|e| e.session)
+    }
+
+    pub(crate) fn drain_all(&self) -> Vec<TabEntry> {
+        self.lock_tabs().drain().map(|(_, e)| e).collect()
+    }
+
+    pub(crate) fn entry_for_project(&self, project: &str) -> Option<TabEntry> {
+        self.lock_tabs()
+            .values()
+            .filter(|e| e.project == project)
+            .max_by_key(|e| e.seq)
+            .cloned()
+    }
+
+    pub(crate) fn any_for_project(&self, project: &str) -> Option<Arc<Mutex<ChatSession>>> {
+        self.entry_for_project(project).map(|e| e.session)
+    }
+
+    pub(crate) fn check_transcript_free(
+        &self,
+        tab_id: &str,
+        transcript: Option<&str>,
+    ) -> Result<(), String> {
+        let tabs = self.lock_tabs();
+        Self::ensure_transcript_free(&tabs, tab_id, transcript)
+    }
+
+    pub(crate) fn claim_transcript(
+        &self,
+        tab_id: &str,
+        transcript: Option<&str>,
+    ) -> Result<(), String> {
+        let tabs = self.lock_tabs();
+        Self::ensure_transcript_free(&tabs, tab_id, transcript)?;
+        if let Some(entry) = tabs.get(tab_id) {
+            *entry
+                .transcript
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = transcript.map(str::to_string);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn tab_owning_transcript(&self, transcript: &str) -> Option<String> {
+        self.lock_tabs()
+            .iter()
+            .find(|(_, e)| Self::holds_transcript(e, transcript))
+            .map(|(id, _)| id.clone())
+    }
+
+    fn ensure_transcript_free(
+        tabs: &HashMap<String, TabEntry>,
+        tab_id: &str,
+        transcript: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(sid) = transcript else {
+            return Ok(());
+        };
+        let taken_elsewhere = tabs
+            .iter()
+            .any(|(id, e)| id != tab_id && Self::holds_transcript(e, sid));
+        if taken_elsewhere {
+            return Err(MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB.to_string());
+        }
+        Ok(())
+    }
+
+    fn holds_transcript(entry: &TabEntry, transcript: &str) -> bool {
+        entry
+            .transcript
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_deref()
+            == Some(transcript)
+    }
+
+    pub(crate) fn other_entry_for_project(&self, project: &str, tab_id: &str) -> bool {
+        self.lock_tabs()
+            .iter()
+            .any(|(id, e)| id != tab_id && e.project == project)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{Arc, ChatSessions, SharedChatSessions, TabEntry};
+
+    pub(crate) const TEST_TAB_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[expect(
+        clippy::expect_used,
+        reason = "test support: a full registry here is a broken fixture"
+    )]
+    pub(crate) fn registry_with(project: &str) -> (SharedChatSessions, TabEntry) {
+        let reg: SharedChatSessions = Arc::new(ChatSessions::default());
+        let entry = reg
+            .prepare(TEST_TAB_ID, project)
+            .expect("an empty registry must accept the first tab");
+        (reg, entry)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
+mod tests {
+    use super::*;
+
+    const TAB_A: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const TAB_B: &str = "550e8400-e29b-41d4-a716-446655440001";
+    const TAB_C: &str = "550e8400-e29b-41d4-a716-446655440002";
+    const TAB_D: &str = "550e8400-e29b-41d4-a716-4466554400ff";
+    const SID: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+
+    fn registry_at_cap() -> ChatSessions {
+        let reg = ChatSessions::default();
+        for i in 0..u64::from(MAX_CHAT_TABS) {
+            let tab = format!("550e8400-e29b-41d4-a716-{:012x}", 0x4466_5544_0000 + i);
+            reg.prepare(&tab, "acme").unwrap();
+        }
+        assert!(
+            [TAB_A, TAB_B, TAB_C].iter().all(|t| reg.entry(t).is_some()),
+            "registry_at_cap plants the named tabs"
+        );
+        assert!(reg.entry(TAB_D).is_none(), "TAB_D stays outside the cap");
+        assert_eq!(
+            reg.lock_tabs().len(),
+            MAX_CHAT_TABS as usize,
+            "registry_at_cap plants exactly the cap"
+        );
+        reg
+    }
+
+    #[test]
+    fn a_new_tab_past_the_cap_is_rejected() {
+        let reg = registry_at_cap();
+        let Err(err) = reg.prepare(TAB_D, "acme") else {
+            panic!("a new tab past the cap must be rejected");
+        };
+        assert_eq!(err, MSG_TAB_LIMIT_REACHED);
+        assert!(reg.entry(TAB_D).is_none(), "the rejected tab must not land");
+    }
+
+    #[test]
+    fn existing_tab_ids_keep_working_at_the_cap() {
+        let reg = registry_at_cap();
+        let before = reg.entry(TAB_A).unwrap();
+        let same = reg.prepare(TAB_A, "acme").unwrap();
+        assert!(Arc::ptr_eq(&before.session, &same.session));
+        let switched = reg.prepare(TAB_B, "globex").unwrap();
+        assert_eq!(switched.project, "globex");
+        assert!(reg.prepare(TAB_D, "acme").is_err(), "cap still enforced");
+    }
+
+    #[test]
+    fn close_then_open_succeeds_after_the_cap() {
+        let reg = registry_at_cap();
+        assert!(reg.prepare(TAB_D, "acme").is_err());
+        reg.remove(TAB_C).unwrap();
+        let entry = reg.prepare(TAB_D, "acme").unwrap();
+        assert_eq!(entry.project, "acme");
+        assert!(reg.prepare(TAB_C, "acme").is_err(), "the cap is re-reached");
+    }
+
+    #[test]
+    fn valid_uuid_tab_id_is_accepted_and_junk_is_rejected() {
+        assert!(validate_tab_id(TAB_A).is_ok());
+        assert!(validate_tab_id("").is_err());
+        assert!(validate_tab_id("../../etc/passwd").is_err());
+        assert!(validate_tab_id("550E8400-E29B-41D4-A716-446655440000").is_err());
+    }
+
+    #[test]
+    fn prepare_is_idempotent_per_tab_and_isolated_across_tabs() {
+        let reg = ChatSessions::default();
+        let a1 = reg.prepare(TAB_A, "acme").unwrap();
+        let a2 = reg.prepare(TAB_A, "acme").unwrap();
+        assert!(Arc::ptr_eq(&a1.session, &a2.session));
+        assert!(Arc::ptr_eq(&a1.start_serialize, &a2.start_serialize));
+        let b = reg.prepare(TAB_B, "acme").unwrap();
+        assert!(!Arc::ptr_eq(&a1.session, &b.session));
+    }
+
+    #[test]
+    fn prepare_with_a_different_project_replaces_the_entry() {
+        let reg = ChatSessions::default();
+        let old = reg.prepare(TAB_A, "acme").unwrap();
+        let new = reg.prepare(TAB_A, "globex").unwrap();
+        assert!(!Arc::ptr_eq(&old.session, &new.session));
+        assert_eq!(new.project, "globex");
+    }
+
+    #[test]
+    fn any_for_project_prefers_the_most_recently_prepared_entry() {
+        let reg = ChatSessions::default();
+        let a = reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
+        assert!(Arc::ptr_eq(
+            &reg.any_for_project("acme").unwrap(),
+            &b.session
+        ));
+        let a_again = reg.prepare(TAB_A, "acme").unwrap();
+        assert!(Arc::ptr_eq(
+            &reg.any_for_project("acme").unwrap(),
+            &a_again.session
+        ));
+        assert!(reg.any_for_project("other").is_none());
+        let _ = a;
+    }
+
+    #[test]
+    fn claim_transcript_blocks_a_second_tab_and_frees_on_remove() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "acme").unwrap();
+        reg.claim_transcript(TAB_A, Some(SID)).unwrap();
+        let err = reg.claim_transcript(TAB_B, Some(SID)).unwrap_err();
+        assert_eq!(err, MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB);
+        reg.claim_transcript(TAB_A, Some(SID)).unwrap();
+        reg.remove(TAB_A).unwrap();
+        reg.claim_transcript(TAB_B, Some(SID)).unwrap();
+    }
+
+    #[test]
+    fn check_transcript_free_rejects_a_transcript_held_elsewhere_and_writes_nothing() {
+        let reg = ChatSessions::default();
+        let a = reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
+        reg.claim_transcript(TAB_A, Some(SID)).unwrap();
+
+        let err = reg.check_transcript_free(TAB_B, Some(SID)).unwrap_err();
+
+        assert_eq!(err, MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB);
+        assert_eq!(a.transcript.lock().unwrap().as_deref(), Some(SID));
+        assert_eq!(b.transcript.lock().unwrap().as_deref(), None);
+        reg.check_transcript_free(TAB_A, Some(SID)).unwrap();
+        reg.check_transcript_free(TAB_B, None).unwrap();
+        assert_eq!(b.transcript.lock().unwrap().as_deref(), None);
+    }
+
+    #[test]
+    fn tab_owning_transcript_names_the_holder_until_it_is_removed() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "acme").unwrap();
+        assert_eq!(reg.tab_owning_transcript(SID), None);
+
+        reg.claim_transcript(TAB_B, Some(SID)).unwrap();
+        assert_eq!(reg.tab_owning_transcript(SID).as_deref(), Some(TAB_B));
+
+        reg.remove(TAB_B).unwrap();
+        assert_eq!(reg.tab_owning_transcript(SID), None);
+    }
+
+    #[test]
+    fn claim_transcript_with_none_clears_the_slot() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "acme").unwrap();
+        reg.claim_transcript(TAB_A, Some(SID)).unwrap();
+        reg.claim_transcript(TAB_A, None).unwrap();
+        reg.claim_transcript(TAB_B, Some(SID)).unwrap();
+    }
+
+    #[test]
+    fn drain_all_empties_the_registry() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "globex").unwrap();
+        assert_eq!(reg.drain_all().len(), 2);
+        assert!(reg.entry(TAB_A).is_none());
+        assert!(reg.entry(TAB_B).is_none());
+    }
+
+    #[test]
+    fn other_entry_for_project_sees_only_sibling_tabs_of_the_same_project() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        assert!(!reg.other_entry_for_project("acme", TAB_A));
+        reg.prepare(TAB_B, "globex").unwrap();
+        assert!(!reg.other_entry_for_project("acme", TAB_A));
+        reg.prepare(TAB_B, "acme").unwrap();
+        assert!(reg.other_entry_for_project("acme", TAB_A));
+    }
+
+    #[test]
+    fn entry_for_project_returns_the_most_recent_full_entry() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
+        let entry = reg.entry_for_project("acme").unwrap();
+        assert!(Arc::ptr_eq(&entry.session, &b.session));
+        assert!(Arc::ptr_eq(&entry.start_serialize, &b.start_serialize));
+        assert_eq!(entry.project, "acme");
+        assert!(reg.entry_for_project("other").is_none());
+    }
+
+    #[test]
+    fn prepare_assigns_the_seq_under_the_map_lock() {
+        let source = include_str!("chat_registry.rs");
+        let after_sig = source
+            .split("fn prepare(")
+            .nth(1)
+            .expect("prepare must exist");
+        let body = &after_sig[..after_sig.find("\n    }").expect("prepare must close")];
+        let lock_pos = body.find("lock_tabs").expect("prepare must lock the map");
+        let seq_pos = body.find("fetch_add").expect("prepare must bump the seq");
+        assert!(
+            lock_pos < seq_pos,
+            "the seq must be assigned under the map lock so seq order matches insertion order"
+        );
+    }
+
+    #[test]
+    fn prepare_with_a_different_project_replaces_and_stops_the_old_entry() {
+        let reg = ChatSessions::default();
+        let old = reg.prepare(TAB_A, "acme").unwrap();
+        let new = reg.prepare(TAB_A, "globex").unwrap();
+        assert!(!Arc::ptr_eq(&old.session, &new.session));
+        assert_eq!(new.project, "globex");
+
+        let source = include_str!("chat_registry.rs");
+        let after_sig = source
+            .split("fn prepare(")
+            .nth(1)
+            .expect("prepare must exist");
+        let body = &after_sig[..after_sig.find("\n    }").expect("prepare must close")];
+        let insert_pos = body
+            .find("tabs.insert(tab_id.to_string(), entry.clone())")
+            .expect("prepare must insert the new entry into the map");
+        let lock_scope_end = body[insert_pos..]
+            .find("\n        };")
+            .map(|p| p + insert_pos)
+            .expect("prepare must close the map-lock scope after the insert");
+        let stop_pos = body
+            .find(".stop()")
+            .expect("prepare must stop the replaced session");
+        assert!(
+            lock_scope_end < stop_pos,
+            "the replaced session must be stopped only after the map lock's scope has ended"
+        );
+        let warn_pos = body
+            .find("log::warn!")
+            .expect("prepare must log a warning when the replaced session fails to stop");
+        assert!(
+            stop_pos < warn_pos,
+            "the warning must follow the stop call it reports on"
+        );
+    }
+
+    #[test]
+    fn test_support_registry_with_prepares_one_tab_for_the_project() {
+        let (reg, entry) = test_support::registry_with("acme");
+        assert_eq!(entry.project, "acme");
+        assert!(Arc::ptr_eq(
+            &reg.entry(test_support::TEST_TAB_ID).unwrap().session,
+            &entry.session
+        ));
+    }
+}

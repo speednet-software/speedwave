@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { ModelSelectorComponent, type ModelSelection } from './model-selector.component';
 import { TauriService } from '../../../services/tauri.service';
+import { DEFAULT_ALIAS } from '../../../services/model-picker.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
 import type { ActiveProviderSummary, AnthropicModel } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
@@ -85,6 +86,7 @@ describe('ModelSelectorComponent', () => {
       if (cmd === 'get_active_provider_summary') return summary;
       if (cmd === 'list_anthropic_models') return anthropicCatalog;
       if (cmd === 'get_effort_pin') return 'high';
+      if (cmd === 'get_model_pin') return null;
       if (cmd === 'get_chat_session_info') return { state: 'unavailable' };
       if (cmd === 'list_model_picker') return picker;
       throw new Error(`unexpected invoke: ${cmd}`);
@@ -114,6 +116,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'get_chat_session_info') return Promise.resolve({ state: 'unavailable' });
       if (cmd === 'list_model_picker') return Promise.resolve(rows());
@@ -185,6 +188,7 @@ describe('ModelSelectorComponent', () => {
     fixture.debugElement
       .query(By.css('[data-testid="model-selector-option-meta-llama/llama-3.1-70b-instruct"]'))
       .nativeElement.click();
+    fixture.componentRef.setInput('pickedModel', 'meta-llama/llama-3.1-70b-instruct');
     fixture.detectChanges();
     expect(badge.nativeElement.textContent).toContain('meta-llama/llama-3.1-70b-instruct');
     expect(badge.nativeElement.textContent).not.toContain('openai/o4-mini');
@@ -221,27 +225,17 @@ describe('ModelSelectorComponent', () => {
     return badge.nativeElement as HTMLElement;
   }
 
-  it('gives the badge back to the model the session runs when Claude Code refuses the pick', async () => {
+  it('gives the badge back to the model the session runs when the tab hands a refused pick back', async () => {
     const badge = await pickRoutedRow('proj-or-refused');
+    fixture.componentRef.setInput('pickedModel', 'meta-llama/llama-3.1-70b-instruct');
+    fixture.detectChanges();
     expect(badge.textContent).toContain('meta-llama/llama-3.1-70b-instruct');
 
-    fixture.componentRef.setInput('refusedPick', {
-      catalogId: 'meta-llama/llama-3.1-70b-instruct',
-      running: null,
-    });
+    fixture.componentRef.setInput('pickedModel', '');
     fixture.detectChanges();
 
     expect(badge.textContent).toContain('openai/o4-mini');
     expect(badge.textContent).not.toContain('meta-llama/llama-3.1-70b-instruct');
-  });
-
-  it('keeps a newer pick on the badge when an older pick is refused', async () => {
-    const badge = await pickRoutedRow('proj-or-older-refused');
-
-    fixture.componentRef.setInput('refusedPick', { catalogId: 'openai/gpt-5', running: null });
-    fixture.detectChanges();
-
-    expect(badge.textContent).toContain('meta-llama/llama-3.1-70b-instruct');
   });
 
   it('keeps the active-mark slot at a fixed width so every row label starts at the same edge', async () => {
@@ -267,6 +261,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker')
         return new Promise((r) => {
@@ -307,6 +302,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker')
         return Promise.resolve({
@@ -741,6 +737,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker') return Promise.resolve(paidPicker);
       if (cmd === 'get_chat_session_info') return Promise.resolve({ state: 'unavailable' });
@@ -795,6 +792,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'get_chat_session_info') return Promise.resolve(sessionInfo);
       if (cmd === 'list_model_picker') return Promise.resolve(picker);
@@ -829,6 +827,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker') return Promise.reject(new Error('boom'));
       return Promise.reject(new Error('unexpected'));
@@ -845,6 +844,7 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'get_effort_pin') return Promise.resolve('high');
+      if (cmd === 'get_model_pin') return Promise.resolve(null);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'list_model_picker') return Promise.resolve(picker);
       return Promise.reject(new Error('unexpected'));
@@ -1782,6 +1782,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
       if (cmd === 'get_active_provider_summary') return configlessSummary;
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
+      if (cmd === 'get_model_pin') return null;
       if (cmd === 'get_model_hint') return modelHint;
       if (cmd === 'get_chat_session_info') return { state: 'unavailable' };
       if (cmd === 'list_model_picker') return pickerRows;
@@ -1882,6 +1883,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
         };
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
+      if (cmd === 'get_model_pin') return null;
       if (cmd === 'get_model_hint') return modelHint;
       throw new Error(`unexpected invoke: ${cmd}`);
     });
@@ -1903,30 +1905,140 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(badgeText()).toBe('opus-4.8');
   });
 
-  it('drops a session-scoped pick when a new conversation starts, falling back to the hint', async () => {
+  it('follows the tab pick fed through pickedModel and falls back to the hint when it clears', async () => {
     modelHint = 'claude-opus-4-8';
     fixture.componentRef.setInput('sessionModel', 'claude-opus-4-8');
     await fixture.whenStable();
     fixture.detectChanges();
 
-    fixture.debugElement
-      .query(By.css('[data-testid="composer-model-badge"]'))
-      .nativeElement.click();
-    await fixture.whenStable();
-    await fixture.componentInstance.whenOptionsSettled();
-    fixture.detectChanges();
-    fixture.debugElement
-      .query(By.css('[data-testid="model-selector-option-claude-fable-5"]'))
-      .nativeElement.click();
+    fixture.componentRef.setInput('pickedModel', 'claude-fable-5');
     fixture.detectChanges();
     expect(badgeText()).toBe('Fable 5');
 
+    fixture.componentRef.setInput('pickedModel', '');
     fixture.componentRef.setInput('sessionModel', '');
     fixture.detectChanges();
     await fixture.whenStable();
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
     expect(badgeText()).toBe('opus-4.8');
+  });
+
+  describe('launchModel (the model the tab spawned with)', () => {
+    const twoRows = (): ModelPicker => ({
+      rows: [
+        {
+          id: 'claude-fable-5',
+          wire_id: 'claude-fable-5[1m]',
+          is_default: true,
+          display_name: null,
+          description: null,
+          requires_usage_credits: false,
+          effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          default_effort: 'high',
+        },
+        {
+          id: 'claude-opus-4-8',
+          wire_id: 'claude-opus-4-8',
+          is_default: false,
+          display_name: null,
+          description: null,
+          requires_usage_credits: false,
+          effort_levels: ['low', 'medium', 'high'],
+          default_effort: 'high',
+        },
+      ],
+    });
+
+    async function render(): Promise<void> {
+      fixture.componentRef.setInput('projectId', 'proj-2');
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.detectChanges();
+    }
+
+    async function currentRowId(): Promise<string | null> {
+      fixture.debugElement
+        .query(By.css('[data-testid="composer-model-badge"]'))
+        .nativeElement.click();
+      await fixture.whenStable();
+      await fixture.componentInstance.whenOptionsSettled();
+      fixture.detectChanges();
+      const current = fixture.debugElement.query(By.css('[aria-current="true"]'));
+      return current
+        ? (current.nativeElement.getAttribute('data-testid') as string).replace(
+            'model-selector-option-',
+            ''
+          )
+        : null;
+    }
+
+    it('shows the launch model over a stale project hint before the session reports one', async () => {
+      pickerRows = twoRows();
+      modelHint = 'claude-fable-5[1m]';
+      fixture.componentRef.setInput('launchModel', 'claude-opus-4-8');
+      await render();
+
+      expect(badgeText()).toBe('opus-4.8');
+      expect(await currentRowId()).toBe('claude-opus-4-8');
+    });
+
+    it('shows the plan default row for a tab launched without a pin', async () => {
+      pickerRows = twoRows();
+      modelHint = 'claude-opus-4-8';
+      fixture.componentRef.setInput('launchModel', DEFAULT_ALIAS);
+      await render();
+
+      expect(badgeText()).toBe('Fable 5');
+      expect(await currentRowId()).toBe('claude-fable-5');
+    });
+
+    it('yields to the live session model and to a tab pick', async () => {
+      pickerRows = twoRows();
+      fixture.componentRef.setInput('launchModel', 'claude-opus-4-8');
+      await render();
+
+      fixture.componentRef.setInput('sessionModel', 'claude-fable-5');
+      fixture.detectChanges();
+      expect(badgeText()).toBe('Fable 5');
+
+      fixture.componentRef.setInput('sessionModel', '');
+      fixture.componentRef.setInput('pickedModel', 'claude-fable-5');
+      fixture.detectChanges();
+      expect(badgeText()).toBe('Fable 5');
+    });
+
+    it('ignores the launch model for a routed provider, whose model is container env', async () => {
+      tauriInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'get_active_provider_summary')
+          return {
+            provider_id: 'openrouter',
+            kind: 'open_router',
+            model: 'x-ai/grok-4.3',
+            base_url: null,
+            effort_levels: EFFORT_LEVELS,
+          };
+        if (cmd === 'list_anthropic_models') return catalog;
+        if (cmd === 'get_effort_pin') return null;
+        if (cmd === 'get_model_pin') return null;
+        if (cmd === 'get_model_hint') return modelHint;
+        throw new Error(`unexpected invoke: ${cmd}`);
+      });
+      fixture.componentRef.setInput('launchModel', DEFAULT_ALIAS);
+      await render();
+
+      expect(badgeText()).toBe('x-ai/grok-4.3');
+    });
+
+    it('falls back to the hint when the tab has not spawned yet', async () => {
+      pickerRows = twoRows();
+      modelHint = 'claude-opus-4-8';
+      fixture.componentRef.setInput('launchModel', null);
+      await render();
+
+      expect(badgeText()).toBe('opus-4.8');
+    });
   });
 
   it('shows the picked catalog id, as its family label, optimistically after a live anthropic selection', async () => {
@@ -1943,6 +2055,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     );
     expect(option).toBeTruthy();
     option.nativeElement.click();
+    fixture.componentRef.setInput('pickedModel', 'claude-fable-5');
     fixture.detectChanges();
     expect(badgeText()).toBe('Fable 5');
   });

@@ -96,12 +96,13 @@ export class ClaudeControlService {
   }
 
   /**
-   * Context usage behind Claude Code's `/context`; `null` on any failure.
+   * Context usage behind Claude Code's `/context` for one tab's session; `null` on any failure.
    * @param project - Project the chat session belongs to.
+   * @param tabId - Tab whose session answers.
    */
-  async contextUsage(project: string): Promise<ClaudeContextUsage | null> {
+  async contextUsage(project: string, tabId: string): Promise<ClaudeContextUsage | null> {
     try {
-      return await this.tauri.invoke<ClaudeContextUsage>('get_context_usage', { project });
+      return await this.tauri.invoke<ClaudeContextUsage>('get_context_usage', { project, tabId });
     } catch (e: unknown) {
       this.log.debug(`get_context_usage failed: ${describe(e)}`);
       return null;

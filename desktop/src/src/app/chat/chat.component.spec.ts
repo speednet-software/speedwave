@@ -1,15 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { RouterModule } from '@angular/router';
 import { By } from '@angular/platform-browser';
 import { ChatComponent } from './chat.component';
 import { ComposerComponent } from './composer/composer.component';
+import { ModalOverlayComponent } from '../shell/modal-overlay/modal-overlay.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
@@ -23,6 +26,7 @@ describe('ChatComponent', () => {
   let projectState: ProjectStateService;
   let uiState: UiStateService;
   let mockLogger: ReturnType<typeof makeMockLogger>;
+  let betaEnabled: ReturnType<typeof signal<boolean>>;
 
   beforeEach(async () => {
     mockTauri = new MockTauriService();
@@ -48,16 +52,20 @@ describe('ChatComponent', () => {
           return undefined;
         case 'send_message':
           return undefined;
+        case 'get_active_provider_summary':
+          return { provider_id: 'anthropic', kind: 'anthropic_oauth', model: '', base_url: null };
         default:
           return undefined;
       }
     };
 
+    betaEnabled = signal(false);
     await TestBed.configureTestingModule({
       imports: [ChatComponent, RouterModule.forRoot([])],
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
       ],
     }).compileComponents();
 
@@ -108,7 +116,9 @@ describe('ChatComponent', () => {
     it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
       projectState.activeProject.set('test');
       const dispose = vi.fn();
-      const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
+      const begin = vi
+        .spyOn(chatState.activeStore(), 'beginStartingSession')
+        .mockReturnValue(dispose);
 
       const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -302,6 +312,7 @@ describe('ChatComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'Hello Claude' }],
         displayText: 'Hello Claude',
+        tabId: chatState.tabId,
       });
     });
 
@@ -346,6 +357,7 @@ describe('ChatComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'summarize this\n\n# Meeting transcript' }],
         displayText: 'summarize this',
+        tabId: chatState.tabId,
       });
       expect(transcription.stagedTranscript()).toBe('');
     });
@@ -370,6 +382,7 @@ describe('ChatComponent', () => {
       expect(invokeSpy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'never mind' }],
         displayText: 'never mind',
+        tabId: chatState.tabId,
       });
     });
 
@@ -737,12 +750,9 @@ describe('ChatComponent', () => {
   });
 
   describe('newConversation', () => {
-    it('resets all state and re-initialises', async () => {
-      chatState._setState({
-        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
-        currentBlocks: [{ type: 'text', content: 'stream' }],
-      });
-      chatState.isStreaming = true;
+    it('resets all state and re-initialises without a dialog when the tab is empty', async () => {
+      chatState._setState({ messages: [], currentBlocks: [] });
+      chatState.isStreaming = false;
       uiState.toggleSidebar();
       uiState.toggleMemory();
 
@@ -753,6 +763,208 @@ describe('ChatComponent', () => {
       expect(chatState.currentBlocks).toEqual([]);
       expect(component.showHistory).toBe(false);
       expect(component.showMemory).toBe(false);
+      expect(component.restartConfirmOpen()).toBe(false);
+    });
+
+    it('without beta, resets at once even when the tab holds conversation content (no dialog)', async () => {
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+      });
+      chatState.isStreaming = false;
+
+      await component.newConversation();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toEqual([]);
+    });
+
+    it('shows the confirmation instead of resetting when idle with conversation content', async () => {
+      betaEnabled.set(true);
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+      });
+      chatState.isStreaming = false;
+
+      await component.newConversation();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(component.restartConfirmBody()).toBe('The current conversation will be discarded.');
+      expect(chatState.messages).toHaveLength(1);
+    });
+
+    it('confirming the idle-conversation dialog resets all state', async () => {
+      betaEnabled.set(true);
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+      });
+      chatState.isStreaming = false;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
+
+      await component.newConversation();
+      await component.onRestartConfirm();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toEqual([]);
+      expect(component.showHistory).toBe(false);
+      expect(component.showMemory).toBe(false);
+    });
+  });
+
+  describe('restart request channel (⌘R shares the plus button code path)', () => {
+    it('does not call newConversation on initial render (no spurious restart)', () => {
+      const spy = vi.spyOn(component, 'newConversation');
+      fixture.detectChanges();
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('calls newConversation when UiStateService.requestRestart fires', async () => {
+      fixture.detectChanges();
+      const spy = vi.spyOn(component, 'newConversation');
+
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('calls newConversation again on a second request', async () => {
+      fixture.detectChanges();
+      const spy = vi.spyOn(component, 'newConversation');
+
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it('⌘R on an idle conversation shows the dialog; confirming performs the plus-button reset', async () => {
+      betaEnabled.set(true);
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+      });
+      chatState.isStreaming = false;
+      uiState.toggleSidebar();
+      uiState.toggleMemory();
+
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(chatState.messages).toHaveLength(1);
+
+      await component.onRestartConfirm();
+
+      expect(chatState.messages).toEqual([]);
+      expect(chatState.isStreaming).toBe(false);
+      expect(component.showHistory).toBe(false);
+      expect(component.showMemory).toBe(false);
+    });
+  });
+
+  describe('mid-stream restart confirmation', () => {
+    beforeEach(async () => {
+      betaEnabled.set(true);
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+      chatState._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [{ type: 'text', content: 'stream' }],
+      });
+      chatState.isStreaming = true;
+    });
+
+    it('shows the confirmation modal instead of resetting when the plus button is clicked mid-stream', async () => {
+      await component.newConversation();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
+    });
+
+    it('shows the confirmation modal instead of resetting when ⌘R fires mid-stream', async () => {
+      uiState.requestRestart();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(component.restartConfirmOpen()).toBe(true);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
+    });
+
+    it('renders the confirm dialog with the expected wording', async () => {
+      await component.newConversation();
+      fixture.detectChanges();
+
+      const overlay = document.querySelector('[data-testid="restart-confirm-overlay"]');
+      expect(overlay).toBeTruthy();
+      expect(document.querySelector('[data-testid="modal-title"]')?.textContent?.trim()).toBe(
+        'Restart conversation?'
+      );
+      expect(component.restartConfirmBody()).toBe('The response in progress will be discarded.');
+      expect(document.querySelector('[data-testid="restart-confirm-restart"]')).toBeTruthy();
+      expect(document.querySelector('[data-testid="restart-confirm-cancel"]')).toBeTruthy();
+    });
+
+    it('confirming the modal performs the reset', async () => {
+      await component.newConversation();
+      expect(component.restartConfirmOpen()).toBe(true);
+
+      await component.onRestartConfirm();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toEqual([]);
+      expect(chatState.isStreaming).toBe(false);
+    });
+
+    it('cancelling the modal performs no reset', async () => {
+      await component.newConversation();
+      expect(component.restartConfirmOpen()).toBe(true);
+
+      component.onRestartCancel();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
+    });
+
+    it('without beta, a mid-stream restart resets at once without the dialog', async () => {
+      betaEnabled.set(false);
+
+      await component.newConversation();
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toEqual([]);
+      expect(chatState.isStreaming).toBe(false);
+    });
+
+    it('dismissing the dialog (closed output) performs no reset', async () => {
+      await component.newConversation();
+      fixture.detectChanges();
+
+      const overlay = fixture.debugElement.query(By.directive(ModalOverlayComponent));
+      overlay.triggerEventHandler('closed', undefined);
+
+      expect(component.restartConfirmOpen()).toBe(false);
+      expect(chatState.messages).toHaveLength(1);
+      expect(chatState.isStreaming).toBe(true);
     });
   });
 
@@ -1135,7 +1347,7 @@ describe('ChatComponent', () => {
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
 
       chatState.isStreaming = true;
-      chatState['notifyChange']();
+      chatState.activeStore()['notifyChange']();
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="chat-stop"]')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
@@ -1145,7 +1357,7 @@ describe('ChatComponent', () => {
       projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
-      chatState['notifyChange']();
+      chatState.activeStore()['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
       expect(spy).toHaveBeenCalledTimes(1);
@@ -1182,7 +1394,7 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      chatState['notifyChange']();
+      chatState.activeStore()['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
     });
@@ -1204,7 +1416,7 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      chatState['notifyChange']();
+      chatState.activeStore()['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
       expect(spy).toHaveBeenCalledTimes(1);
@@ -1343,6 +1555,32 @@ describe('ChatComponent', () => {
         kind: 'anthropic_oauth',
       });
     });
+
+    it('forwards the composer defaultModelSelected event to ChatStateService.applyDefaultModelSelection', () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const applySpy = vi
+        .spyOn(fixture.componentInstance.chat, 'applyDefaultModelSelection')
+        .mockResolvedValue(undefined);
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+
+      composer.triggerEventHandler('defaultModelSelected', {
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
+      });
+
+      expect(applySpy).toHaveBeenCalledWith({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+        isDefault: false,
+      });
+    });
   });
 
   describe('deferred effort notice after a pick the live session did not take', () => {
@@ -1403,6 +1641,171 @@ describe('ChatComponent', () => {
       fixture.detectChanges();
 
       expect((restart().nativeElement as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
+
+  describe('per-tab composer draft and scroll restore (SPEED-388 phase 3)', () => {
+    function composerInstance(): ComposerComponent {
+      return fixture.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+    }
+
+    function scrollEl(): HTMLDivElement {
+      return fixture.nativeElement.querySelector(
+        '[data-testid="chat-message-list"]'
+      ) as HTMLDivElement;
+    }
+
+    it('saves the outgoing tab draft/scroll on switch and restores the incoming tab values', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('draft on tab one');
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      el.scrollTop = 250;
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const store1 = chatState.tabs().get(tab1)!;
+      expect(store1.composerDraft()).toBe('draft on tab one');
+      expect(store1.scrollPosition).toBe(250);
+      expect(composer.text.value).toBe('');
+      expect(el.scrollTop).toBe(1000);
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(composer.text.value).toBe('draft on tab one');
+      expect(el.scrollTop).toBe(250);
+    });
+
+    it('does not snap a restored mid-scroll tab to the bottom when new content streams into it', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const el = scrollEl();
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 400, configurable: true });
+      el.scrollTop = 250;
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(el.scrollTop).toBe(250);
+
+      chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'new content' } });
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(el.scrollTop).toBe(250);
+    });
+
+    it('leaves the composer untouched on a no-op re-activation of the already-active tab', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('typing');
+      const tab1 = chatState.activeTabId();
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await Promise.resolve();
+
+      expect(composer.text.value).toBe('typing');
+    });
+  });
+
+  describe('session-ended banner (SPEED-388 phase 3)', () => {
+    const banner = () => fixture.debugElement.query(By.css('[data-testid="session-ended-banner"]'));
+    const resumeBtn = () =>
+      fixture.debugElement.query(By.css('[data-testid="session-ended-resume"]'));
+    const newBtn = () => fixture.debugElement.query(By.css('[data-testid="session-ended-new"]'));
+
+    it('stays hidden for the default single tab', () => {
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      expect(banner()).toBeNull();
+    });
+
+    it('shows a Resume button for a known session and reconnects it on click', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      const tab2 = await chatState.openTab();
+      const store2 = chatState.tabs().get(tab2)!;
+      store2.seedSessionId('ended-session');
+      chatState.activateTab(tab1);
+      store2.markSessionEnded();
+      chatState.activateTab(tab2);
+      fixture.detectChanges();
+
+      expect(banner()).toBeTruthy();
+      expect((banner().nativeElement as HTMLElement).textContent).toContain(
+        'Session ended by a restart'
+      );
+      expect(resumeBtn()).toBeTruthy();
+      expect(newBtn()).toBeNull();
+
+      const invokeCalls: string[] = [];
+      mockTauri.invokeHandler = async (cmd: string) => {
+        invokeCalls.push(cmd);
+        if (cmd === 'get_conversation') return { session_id: 'ended-session', messages: [] };
+        return undefined;
+      };
+
+      (resumeBtn().nativeElement as HTMLButtonElement).click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(invokeCalls).toContain('resume_conversation');
+      expect(store2.sessionEnded()).toBe(false);
+      expect(banner()).toBeNull();
+    });
+
+    it('shows "Start new conversation" instead of Resume when no session id is known', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      const tab2 = await chatState.openTab();
+      const store2 = chatState.tabs().get(tab2)!;
+      chatState.activateTab(tab1);
+      store2.markSessionEnded();
+      chatState.activateTab(tab2);
+      fixture.detectChanges();
+
+      expect(banner()).toBeTruthy();
+      expect(resumeBtn()).toBeNull();
+      expect(newBtn()).toBeTruthy();
+
+      const resetSpy = vi.spyOn(chatState, 'resetForNewConversation');
+      (newBtn().nativeElement as HTMLButtonElement).click();
+      await fixture.whenStable();
+
+      expect(resetSpy).toHaveBeenCalled();
     });
   });
 });

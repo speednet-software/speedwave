@@ -35,6 +35,7 @@ crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:176
 
 desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:605
 desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:961
+dafb3d312f1a88da6caf759eed219f5579da6b20:desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:779
 desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:110
 desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:139
 desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:152

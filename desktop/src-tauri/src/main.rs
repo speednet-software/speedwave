@@ -7,6 +7,7 @@ mod auth;
 mod auth_commands;
 mod bridges;
 mod chat;
+mod chat_registry;
 mod chat_session_cmd;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
@@ -67,7 +68,7 @@ mod window;
 
 use types::check_project;
 
-use chat::{ChatSession, SharedChatSession};
+use chat_registry::SharedChatSessions;
 use speedwave_runtime::config;
 
 use serde::Serialize;
@@ -81,7 +82,7 @@ use reconcile::{
     SharedPluginBridges,
 };
 
-pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
+pub(crate) use project_cmd::{clear_chat_sessions, rollback_and_emit_failed};
 
 pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
     let watchdog = std::thread::spawn(|| {
@@ -686,7 +687,7 @@ fn main() {
         }
     }
 
-    let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
+    let chat_sessions: SharedChatSessions = Arc::new(chat_registry::ChatSessions::default());
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let transcript_store: transcription_cmd::TranscriptStoreHandle =
         Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
@@ -820,7 +821,7 @@ fn main() {
                 }
             }
         }))
-        .manage(initial_session)
+        .manage(chat_sessions)
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
@@ -1154,10 +1155,9 @@ fn main() {
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
+            pin_cmd::get_model_pin,
             pin_cmd::set_model_pin,
             pin_cmd::clear_model_pin,
-            pin_cmd::get_model_pin,
-            pin_cmd::restore_model_pin,
             model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
@@ -1184,11 +1184,14 @@ fn main() {
             paste_cmd::save_pasted_image,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
+            chat_session_cmd::close_chat_tab,
+            chat_session_cmd::reset_chat_tabs,
             chat_session_cmd::get_chat_session_info,
             chat_session_cmd::switch_chat_model,
             chat_session_cmd::apply_chat_effort,
             chat_session_cmd::get_plan_usage,
             chat_session_cmd::get_context_usage,
+            chat_session_cmd::tab_owning_transcript,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
