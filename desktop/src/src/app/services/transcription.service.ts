@@ -321,10 +321,8 @@ export class TranscriptionService {
   }
 
   /**
-   * Re-targets the flow at the tab that was active when `stageForChat` started: if the user
-   * switched away mid-flow, re-activates it (the store itself is untouched) so the transcript
-   * still lands on the right conversation; if it was closed instead, fails loudly rather than
-   * misattaching the transcript to whichever tab is active now.
+   * Re-activates the tab that was active when `stageForChat` started, so the transcript lands on
+   * that conversation; a closed tab fails loudly instead of misattaching it.
    * @param tabId - tab id captured at the start of `stageForChat`.
    */
   private reclaimOriginTab(tabId: string): void {

@@ -50,10 +50,8 @@ export interface ModelSelection {
 }
 
 /**
- * Clickable model badge opening a searchable combobox; sources depend on the
- * active provider kind (anthropic catalog / local discovery / OpenRouter catalog).
- * Emits exactly ONE `modelSelected` event per pick; all session-live/pending/
- * write-through decisions live in `ChatStateService.applyModelSelection`.
+ * Clickable model badge opening a searchable combobox sourced per provider kind. Emits one
+ * `modelSelected` event per pick; `ChatStateService.applyModelSelection` decides what it does.
  */
 @Component({
   selector: 'app-model-selector',
@@ -489,10 +487,8 @@ export class ModelSelectorComponent {
   });
 
   /**
-   * Opens the combobox and starts the option fetch. Awaits the summary if it is
-   * missing or stale for the current project, then kicks off `fetchOptions`
-   * without awaiting it, so the combobox can render its loading state while the
-   * catalog request is in flight.
+   * Opens the combobox: awaits a missing or stale summary, then starts `fetchOptions` without
+   * awaiting it so the loading state renders while the catalog request is in flight.
    */
   async openCombobox(): Promise<void> {
     if (this.streaming()) return;
@@ -546,10 +542,8 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Fetches the option list for the active provider kind (badge combobox source).
-   * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
-   * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
-   * Anthropic rows are the `ModelPickerService` rows; only the latest fetch writes the state.
+   * Fetches the option list for the active provider kind; a local/OpenRouter provider is probed
+   * once per `kind|base_url`, a failed probe keeps the last list marked stale.
    * @param force - Re-issue the discovery probe (or re-read the session info) even when held.
    */
   async fetchOptions(force = false): Promise<void> {

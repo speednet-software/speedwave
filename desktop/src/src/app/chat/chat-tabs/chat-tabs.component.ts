@@ -48,10 +48,8 @@ function tabTitle(store: ChatSessionStore): string {
 }
 
 /**
- * Browser-style tab bar for parallel chat sessions, rendered inline inside the chat header's
- * title row. Tabs past the row's width scroll sideways while the plus button stays pinned after
- * the strip. Reads `ChatStateService.tabs` directly; gating whether the strip is shown at all
- * (beta + not compact) lives in the parent header.
+ * Browser-style tab bar for parallel chat sessions, inline in the chat header; overflowing tabs
+ * scroll sideways past the pinned plus button. The header decides whether the strip is shown.
  */
 @Component({
   selector: 'app-chat-tabs',

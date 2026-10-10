@@ -22,10 +22,8 @@ export class UiStateService {
   readonly projectSwitcherOpen: Signal<boolean> = this.projectSwitcherOpenSignal.asReadonly();
 
   /**
-   * One-shot request channel (shell → chat): a monotonically increasing counter bumped by
-   * {@link requestRestart}. `ChatComponent` reacts via an effect that compares against the
-   * previously seen value, so the shell (⌘R / Ctrl+R) and the chat header's plus button drive
-   * the exact same `newConversation()` path without the shell duplicating its logic.
+   * Shell-to-chat restart channel: a counter bumped by {@link requestRestart}, which `ChatComponent`
+   * turns into the same `newConversation()` path the header's plus button uses.
    */
   readonly restartRequested: Signal<number> = this.restartRequestedSignal.asReadonly();
 
