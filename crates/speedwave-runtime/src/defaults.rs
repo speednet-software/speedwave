@@ -53,13 +53,14 @@ pub struct LongPromptPricing {
     pub pricing: ModelPricing,
 }
 
-/// Plans on which a model's 1M context window is included without usage credits
-/// (Claude Code model-config plan table); decides `<id>[1m]` vs. the bare id.
+/// How a model's 1M window reaches the wire: native on the bare id, `<id>[1m]` by plan,
+/// or not at all. Decides `<id>[1m]` vs. the bare id in `anthropic_wire_model_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OneMillionContext {
-    /// Included on every plan.
-    EveryPlan,
+    /// 1M on every plan on the bare id; Claude Code 2.1.285+ gives it behind the proxy's
+    /// custom `ANTHROPIC_BASE_URL`.
+    Native,
     /// Included on Max, Team, Enterprise and API billing; needs usage credits on Pro.
     PaidPlansAndApi,
     /// Included on API billing only; needs usage credits on every subscription.
@@ -169,14 +170,14 @@ pub fn canonical_anthropic_model_id(id: &str) -> &str {
     }
 }
 
-/// The id Speedwave pins and sends for a catalog model: `<id>[1m]` where the plan
-/// includes the 1M window, the bare id otherwise. A non-catalog id passes through.
+/// The id Speedwave pins and sends for a catalog model: `<id>[1m]` where the plan buys
+/// the 1M window, the bare id otherwise. A non-catalog id passes through.
 pub fn anthropic_wire_model_id(catalog_id: &str, plan: AnthropicPlan) -> String {
     let Some(model) = ANTHROPIC_MODELS.iter().find(|m| m.id == catalog_id) else {
         return catalog_id.to_string();
     };
-    let included = match model.one_million_context {
-        OneMillionContext::EveryPlan => true,
+    let needs_suffix = match model.one_million_context {
+        OneMillionContext::Native | OneMillionContext::Never => false,
         OneMillionContext::PaidPlansAndApi => matches!(
             plan,
             AnthropicPlan::Max
@@ -185,9 +186,8 @@ pub fn anthropic_wire_model_id(catalog_id: &str, plan: AnthropicPlan) -> String 
                 | AnthropicPlan::Api
         ),
         OneMillionContext::ApiOnly => plan == AnthropicPlan::Api,
-        OneMillionContext::Never => false,
     };
-    if included {
+    if needs_suffix {
         format!("{}{ONE_MILLION_SUFFIX}", model.id)
     } else {
         model.id.to_string()
@@ -312,7 +312,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: FABLE_5_1_PRICING,
         pricing_1m: Some(FABLE_5_1_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -325,7 +325,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_5_5_PRICING,
         pricing_1m: Some(OPUS_5_5_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("medium"),
     },
@@ -338,7 +338,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: SONNET_5_5_PRICING,
         pricing_1m: Some(SONNET_5_5_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("medium"),
     },
@@ -354,7 +354,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
             threshold_tokens: HAIKU_5_5_LONG_PROMPT_THRESHOLD_TOKENS,
             pricing: HAIKU_5_5_LONG_PROMPT_PRICING,
         }),
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("medium"),
     },
@@ -367,7 +367,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: SONNET_5_PRICING,
         pricing_1m: Some(SONNET_5_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -393,7 +393,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -406,7 +406,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -419,7 +419,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -432,7 +432,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         long_prompt: None,
-        one_million_context: OneMillionContext::EveryPlan,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("xhigh"),
     },
@@ -503,7 +503,8 @@ pub(crate) const MCP_DESCRIPTION_LENGTH_ENV: &str = "CLAUDE_CODE_MAX_MCP_DESCRIP
 pub(crate) const MCP_DESCRIPTION_MAX_LENGTH: usize = 8192;
 
 /// Alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from `ANTHROPIC_MODELS` (Fable resolves
-/// natively); `[1m]` only where every plan has that window, and a plan-dependent one is not pinned.
+/// natively), always the bare id: a native model runs its 1M window on the bare id already, and a
+/// plan-dependent one is not pinned at all (pinning it would force a window off the account's plan).
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
     default_models_env_from(ANTHROPIC_MODELS)
 }
@@ -517,14 +518,15 @@ fn default_models_env_from(catalog: &[AnthropicModelInfo]) -> HashMap<String, St
         else {
             continue;
         };
-        let suffix = match latest.one_million_context {
-            OneMillionContext::EveryPlan => "[1m]",
-            OneMillionContext::Never => "",
-            OneMillionContext::PaidPlansAndApi | OneMillionContext::ApiOnly => continue,
-        };
+        if matches!(
+            latest.one_million_context,
+            OneMillionContext::PaidPlansAndApi | OneMillionContext::ApiOnly
+        ) {
+            continue;
+        }
         env.insert(
             format!("ANTHROPIC_DEFAULT_{alias}_MODEL"),
-            format!("{}{suffix}", latest.id),
+            latest.id.to_string(),
         );
     }
     env
@@ -805,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_default_models_env_appends_1m_suffix_for_million_token_models() {
+    fn anthropic_default_models_env_pins_bare_ids_for_every_plan_independent_alias() {
         let env = anthropic_default_models_env();
         for (var, value) in &env {
             let alias = var
@@ -818,23 +820,20 @@ mod tests {
                 "HAIKU" => "Haiku",
                 other => panic!("unexpected alias {other}"),
             };
-            let model_id = value.trim_end_matches("[1m]");
             let entry = ANTHROPIC_MODELS
                 .iter()
-                .find(|m| m.id == model_id)
-                .unwrap_or_else(|| panic!("model id {model_id} not in SSOT"));
+                .find(|m| m.id == value.as_str())
+                .unwrap_or_else(|| panic!("model id {value} not in SSOT"));
             assert!(
                 entry.family.starts_with(prefix),
-                "{var}={value}: id {model_id} (family {}) does not match alias {alias}",
+                "{var}={value}: family {} does not match alias {alias}",
                 entry.family
             );
             assert!(entry.latest, "{var} must point at a `latest: true` entry");
-            let has_suffix = value.ends_with("[1m]");
-            let expected_suffix = entry.one_million_context == OneMillionContext::EveryPlan;
-            assert_eq!(
-                has_suffix, expected_suffix,
-                "{var}={value}: [1m] must mirror a 1M window on every plan (was {:?})",
-                entry.one_million_context
+            assert!(
+                !value.ends_with("[1m]"),
+                "{var}={value}: a pin must be the bare id. Claude Code 2.1.285+ runs a \
+                 native model's 1M window on the bare id behind a custom ANTHROPIC_BASE_URL"
             );
         }
     }
@@ -848,7 +847,7 @@ mod tests {
                     && m.latest
                     && matches!(
                         m.one_million_context,
-                        OneMillionContext::EveryPlan | OneMillionContext::Never
+                        OneMillionContext::Native | OneMillionContext::Never
                     )
             });
             let alias = prefix.to_uppercase();
@@ -862,20 +861,20 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_default_models_env_pins_opus_sonnet_and_haiku_to_their_1m_windows() {
+    fn anthropic_default_models_env_pins_opus_sonnet_and_haiku_to_their_latest_bare_ids() {
         let env = anthropic_default_models_env();
         assert_eq!(
             env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").map(String::as_str),
-            Some("claude-opus-5-5[1m]")
+            Some("claude-opus-5-5")
         );
         assert_eq!(
             env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .map(String::as_str),
-            Some("claude-sonnet-5-5[1m]")
+            Some("claude-sonnet-5-5")
         );
         assert_eq!(
             env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").map(String::as_str),
-            Some("claude-haiku-5-5[1m]")
+            Some("claude-haiku-5-5")
         );
     }
 
@@ -930,16 +929,16 @@ mod tests {
     #[test]
     fn one_million_context_table_matches_the_plan_decisions() {
         let expected = [
-            ("claude-fable-5-1", OneMillionContext::EveryPlan),
-            ("claude-opus-5-5", OneMillionContext::EveryPlan),
-            ("claude-sonnet-5-5", OneMillionContext::EveryPlan),
-            ("claude-haiku-5-5", OneMillionContext::EveryPlan),
-            ("claude-sonnet-5", OneMillionContext::EveryPlan),
+            ("claude-fable-5-1", OneMillionContext::Native),
+            ("claude-opus-5-5", OneMillionContext::Native),
+            ("claude-sonnet-5-5", OneMillionContext::Native),
+            ("claude-haiku-5-5", OneMillionContext::Native),
+            ("claude-sonnet-5", OneMillionContext::Native),
             ("claude-haiku-4-5", OneMillionContext::Never),
-            ("claude-opus-5", OneMillionContext::EveryPlan),
-            ("claude-fable-5", OneMillionContext::EveryPlan),
-            ("claude-opus-4-8", OneMillionContext::EveryPlan),
-            ("claude-opus-4-7", OneMillionContext::EveryPlan),
+            ("claude-opus-5", OneMillionContext::Native),
+            ("claude-fable-5", OneMillionContext::Native),
+            ("claude-opus-4-8", OneMillionContext::Native),
+            ("claude-opus-4-7", OneMillionContext::Native),
             ("claude-opus-4-6", OneMillionContext::PaidPlansAndApi),
             ("claude-sonnet-4-6", OneMillionContext::ApiOnly),
         ];
@@ -963,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_model_id_gives_opus_4_7_and_later_1m_on_every_plan() {
+    fn wire_model_id_gives_native_opus_models_their_bare_id_on_every_plan() {
         for opus in [
             "claude-opus-5-5",
             "claude-opus-5",
@@ -978,11 +977,7 @@ mod tests {
                 AnthropicPlan::Api,
                 AnthropicPlan::Unknown,
             ] {
-                assert_eq!(
-                    anthropic_wire_model_id(opus, plan),
-                    format!("{opus}[1m]"),
-                    "{plan:?}"
-                );
+                assert_eq!(anthropic_wire_model_id(opus, plan), opus, "{plan:?}");
             }
         }
     }
@@ -1007,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_model_id_gives_every_plan_models_1m_on_every_plan() {
+    fn wire_model_id_gives_native_models_their_bare_id_on_every_plan() {
         for id in [
             "claude-sonnet-5-5",
             "claude-sonnet-5",
@@ -1023,11 +1018,7 @@ mod tests {
                 AnthropicPlan::Api,
                 AnthropicPlan::Unknown,
             ] {
-                assert_eq!(
-                    anthropic_wire_model_id(id, plan),
-                    format!("{id}[1m]"),
-                    "{plan:?}"
-                );
+                assert_eq!(anthropic_wire_model_id(id, plan), id, "{plan:?}");
             }
         }
     }
@@ -1184,7 +1175,7 @@ mod tests {
         assert_eq!(opus_5.context_tokens, 1_000_000);
         assert_eq!(opus_5.pricing.input, 5.0);
         assert_eq!(opus_5.pricing.output, 25.0);
-        assert_eq!(opus_5.one_million_context, OneMillionContext::EveryPlan);
+        assert_eq!(opus_5.one_million_context, OneMillionContext::Native);
     }
 
     #[test]
@@ -1222,7 +1213,7 @@ mod tests {
         assert_eq!(sonnet_5.context_tokens, 1_000_000);
         assert_eq!(sonnet_5.pricing.input, 2.0);
         assert_eq!(sonnet_5.pricing.cached_input, 0.2);
-        assert_eq!(sonnet_5.one_million_context, OneMillionContext::EveryPlan);
+        assert_eq!(sonnet_5.one_million_context, OneMillionContext::Native);
     }
 
     #[test]
@@ -1245,7 +1236,7 @@ mod tests {
             }
         );
         assert_eq!(haiku_5_5.pricing_1m, Some(haiku_5_5.pricing));
-        assert_eq!(haiku_5_5.one_million_context, OneMillionContext::EveryPlan);
+        assert_eq!(haiku_5_5.one_million_context, OneMillionContext::Native);
         assert_eq!(haiku_5_5.default_effort, Some("medium"));
 
         let long_prompt = haiku_5_5

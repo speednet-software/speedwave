@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_binary_gives_every_plan_models_1m_on_the_bare_id_and_the_rest_only_with_the_suffix() {
+    fn pinned_binary_gives_native_models_1m_on_the_bare_id_and_the_rest_only_with_the_suffix() {
         use speedwave_runtime::defaults::{
             canonical_anthropic_model_id, OneMillionContext, ANTHROPIC_MODELS,
         };
@@ -1446,7 +1446,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{run} {key}: {id} is not in the catalog"))
                     .one_million_context;
                 let expected =
-                    if usage.model.ends_with("[1m]") || policy == OneMillionContext::EveryPlan {
+                    if usage.model.ends_with("[1m]") || policy == OneMillionContext::Native {
                         1_000_000
                     } else {
                         200_000
