@@ -18,6 +18,10 @@ updates:
       - /containers/proxy
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -26,6 +30,10 @@ updates:
     directory: /
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -34,6 +42,10 @@ updates:
     directory: /mcp-servers
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -42,6 +54,10 @@ updates:
     directory: /mcp-servers/playwright
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -50,6 +66,10 @@ updates:
     directory: /desktop/src
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -61,6 +81,10 @@ updates:
     directory: /desktop/e2e
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -74,6 +98,10 @@ updates:
       - '/.github/actions/*'
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -87,6 +115,10 @@ updates:
       - /mcp-servers/gitlab
     patterns: ['*']
     multi-ecosystem-group: dependencies
+    groups:
+      minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
