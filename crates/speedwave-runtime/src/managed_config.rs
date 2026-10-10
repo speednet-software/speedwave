@@ -1,18 +1,47 @@
 //! MDM-deployed managed policy (read-only, fail-closed): a malformed
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
-use crate::config::{ManagedPiiPolicyConfig, ManagedTelemetryConfig};
+use crate::config::{
+    ManagedAccessList, ManagedLlmEgressConfig, ManagedManagementConfig, ManagedPiiPolicyConfig,
+    ManagedServicesConfig, ManagedTelemetryConfig,
+};
 use std::path::{Path, PathBuf};
+
+/// Every top-level key `ManagedConfig` takes, for a management agent to write only what this
+/// Speedwave applies (ADR-091).
+pub const MANAGED_POLICY_KEYS: &[&str] = &[
+    "schema_version",
+    "management",
+    "telemetry",
+    "pii_policy",
+    "llm_egress",
+    "services",
+    "projects",
+    "agents",
+];
 
 /// Root policy object read from the system-level managed-config file. Rejects
 /// unknown keys so an admin typo fails closed instead of silently dropping.
 #[derive(serde::Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedConfig {
+    /// The policy's schema (ADR-091); a newer one than this Speedwave applies is refused at boot.
+    pub schema_version: Option<u32>,
+    /// Who manages the machine and where its status is read (ADR-091).
+    pub management: Option<ManagedManagementConfig>,
     /// MDM-forced OTLP telemetry policy (absent = user fully self-service).
     pub telemetry: Option<ManagedTelemetryConfig>,
     /// MDM-forced PII policy ids (absent = user fully self-service).
     pub pii_policy: Option<ManagedPiiPolicyConfig>,
+    /// MDM-forced LLM egress gateway (ADR-090); absent = Speedwave's default upstream.
+    pub llm_egress: Option<ManagedLlmEgressConfig>,
+    /// MDM-forced access to integrations and plugins (ADR-091); absent = every service allowed.
+    pub services: Option<ManagedServicesConfig>,
+    /// MDM-forced access to projects, by name (ADR-091); absent = every project runs.
+    pub projects: Option<ManagedAccessList>,
+    /// MDM-forced access to the projects' Claude Code agents, by name (ADR-091); absent = every
+    /// agent may be called.
+    pub agents: Option<ManagedAccessList>,
 }
 
 /// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,
@@ -71,6 +100,9 @@ fn program_data_dir() -> anyhow::Result<PathBuf> {
 /// Loads the MDM policy from the system path; `Ok(None)` if absent, `Err` if the
 /// path cannot be resolved or the file is malformed (fail-closed).
 pub fn load_managed_config() -> anyhow::Result<Option<ManagedConfig>> {
+    if cfg!(any(test, feature = "test-support")) {
+        return Ok(None);
+    }
     match managed_config_path()? {
         Some(p) => load_managed_config_from(&p),
         None => Ok(None),

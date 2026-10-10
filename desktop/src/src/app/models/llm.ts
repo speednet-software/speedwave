@@ -73,6 +73,8 @@ export interface LlmConfigResponse {
   providers?: LlmProviderEntry[];
   active?: LlmActive | null;
   proxy_enabled?: boolean | null;
+  /** An `llm_egress` policy fixes the route: nothing in this form can be changed. */
+  locked_by_policy?: boolean;
 }
 
 /**

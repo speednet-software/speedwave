@@ -256,7 +256,9 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         Vec::new()
     });
     let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
-        .with_telemetry_locked(resolved.telemetry.any_locked);
+        .with_telemetry_locked(speedwave_runtime::config::managed_settings_required(
+            &resolved.telemetry,
+        ));
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
@@ -317,7 +319,22 @@ pub(crate) fn project_needs_anthropic_auth(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
 ) -> bool {
+    project_needs_anthropic_auth_in(
+        user_config,
+        project,
+        crate::containers_cmd::llm_locked_by_policy(),
+    )
+}
+
+fn project_needs_anthropic_auth_in(
+    user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
+    project: &str,
+    locked_by_policy: bool,
+) -> bool {
     use speedwave_runtime::config::LlmProviderKind;
+    if locked_by_policy {
+        return false;
+    }
     let llm = user_config
         .find_project(project)
         .and_then(|p| p.claude.as_ref())
@@ -1443,6 +1460,31 @@ mod tests {
             ..Default::default()
         };
         assert!(!project_needs_anthropic_auth(&cfg, "proj"));
+    }
+
+    #[test]
+    fn needs_anthropic_auth_never_under_an_egress_policy() {
+        let mut llm = speedwave_runtime::config::LlmConfig::default();
+        llm.set_active_to_anthropic();
+        let entry = ProjectUserEntry {
+            name: "proj".to_string(),
+            dir: String::new(),
+            claude: Some(speedwave_runtime::config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(llm),
+            }),
+            integrations: None,
+            plugin_settings: None,
+            policy: None,
+            effort_pin: None,
+        };
+        let cfg = SpeedwaveUserConfig {
+            projects: vec![entry],
+            ..Default::default()
+        };
+        assert!(project_needs_anthropic_auth_in(&cfg, "proj", false));
+        assert!(!project_needs_anthropic_auth_in(&cfg, "proj", true));
     }
 
     #[test]

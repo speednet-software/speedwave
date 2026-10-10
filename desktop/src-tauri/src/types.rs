@@ -39,6 +39,8 @@ pub(crate) struct LlmConfigResponse {
     pub(crate) llm: speedwave_runtime::config::LlmConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) default_base_url: Option<String>,
+    /// An `llm_egress` policy fixes the route: nothing in this form can be changed.
+    pub(crate) locked_by_policy: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -279,6 +281,7 @@ pub(crate) struct AuthField {
 pub(crate) struct IntegrationStatusEntry {
     pub(crate) service: String,
     pub(crate) enabled: bool,
+    pub(crate) blocked_by_policy: bool,
     pub(crate) configured: bool,
     pub(crate) display_name: String,
     pub(crate) description: String,
@@ -295,6 +298,7 @@ pub(crate) struct IntegrationStatusEntry {
 pub(crate) struct OsIntegrationStatusEntry {
     pub(crate) service: String,
     pub(crate) enabled: bool,
+    pub(crate) blocked_by_policy: bool,
     pub(crate) display_name: String,
     pub(crate) description: String,
 }
@@ -584,6 +588,7 @@ mod tests {
                 ..Default::default()
             },
             default_base_url: Some("http://host.docker.internal:11434".to_string()),
+            locked_by_policy: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["provider"], "ollama");
@@ -605,6 +610,7 @@ mod tests {
         let resp = LlmConfigResponse {
             llm: speedwave_runtime::config::LlmConfig::default(),
             default_base_url: None,
+            locked_by_policy: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(

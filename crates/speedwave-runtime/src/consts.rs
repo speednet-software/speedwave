@@ -28,6 +28,31 @@ pub const CLAUDE_MANAGED_SUBDIR: &str = "claude-managed";
 /// Native Claude Code managed-settings filename — SSOT for both the host file
 /// and the container mount-target basename (`/etc/claude-code/<this>`).
 pub const MANAGED_SETTINGS_FILE: &str = "managed-settings.json";
+/// The `llm_egress` gateway CA bundle beside the managed settings, at `/etc/claude-code/<this>`.
+pub const GATEWAY_CA_FILE: &str = "gateway-ca.pem";
+/// Container env an `llm_egress` policy may lock: model selection only, never a credential.
+pub const LLM_EGRESS_LOCKABLE_ENV: &[&str] = &[
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+];
+/// Headers an `llm_egress` policy may not set on forwarded requests (lower-case).
+pub const LLM_EGRESS_RESERVED_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "te",
+    "trailer",
+    "upgrade",
+    "anthropic-version",
+];
 /// Vendor dir name under the OS system-config root holding the MDM-deployed
 /// `managed-config.json` — SSOT; don't hard-code "Speedwave" at call sites.
 pub const MANAGED_CONFIG_VENDOR_DIR: &str = "Speedwave";

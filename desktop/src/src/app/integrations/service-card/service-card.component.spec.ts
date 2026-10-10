@@ -226,6 +226,21 @@ describe('ServiceCardComponent', () => {
     expect(toggle.getAttribute('data-disabled')).toBeNull();
   });
 
+  it('lets the user turn on a service the organisation has not allowed yet, and says so', () => {
+    fixture.componentRef.setInput('svc', {
+      ...makeGitlabSvc(),
+      enabled: false,
+      blocked_by_policy: true,
+    });
+    fixture.detectChanges();
+    const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');
+    const badge = fixture.nativeElement.querySelector('[data-testid="badge"]');
+    expect(checkbox.disabled).toBe(false);
+    expect(badge.getAttribute('data-status')).toBe('blocked');
+    expect(badge.textContent.trim()).toBe('Not allowed yet');
+    expect(badge.getAttribute('title')).toBe('Runs once your organisation allows it');
+  });
+
   it('should NOT disable toggle when service is configured', () => {
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector('input[type="checkbox"]');

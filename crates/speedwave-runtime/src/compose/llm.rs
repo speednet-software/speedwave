@@ -3,6 +3,9 @@ use crate::config::{LlmConfig, LlmProviderKind};
 use crate::consts;
 use std::path::Path;
 
+/// Placeholder bearer for a container whose real credential the proxy supplies.
+pub(crate) const NO_KEY_AUTH_TOKEN: &str = "sk-no-key-required";
+
 pub(crate) fn apply_llm_config_in(
     data_dir: &Path,
     yaml: &str,
@@ -79,7 +82,7 @@ fn apply_llm_config_proxy(
             );
             extra_env.insert(
                 "ANTHROPIC_AUTH_TOKEN".to_string(),
-                "sk-no-key-required".to_string(),
+                NO_KEY_AUTH_TOKEN.to_string(),
             );
             for key in [
                 "ANTHROPIC_MODEL",
@@ -158,14 +161,13 @@ fn apply_llm_config_legacy_in(
                 )
             })?;
 
-            const DUMMY_TOKEN: &str = "sk-no-key-required";
             let auth_token = if llm.has_api_key {
                 read_local_llm_token_opt_in(data_dir, project, "api_key").unwrap_or_else(|| {
                     log::warn!("local-llm api_key flagged but unreadable — using dummy");
-                    DUMMY_TOKEN.to_string()
+                    NO_KEY_AUTH_TOKEN.to_string()
                 })
             } else {
-                DUMMY_TOKEN.to_string()
+                NO_KEY_AUTH_TOKEN.to_string()
             };
 
             let mut extra_env = std::collections::HashMap::from([

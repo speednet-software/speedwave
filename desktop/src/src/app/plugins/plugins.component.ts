@@ -7,6 +7,8 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { ManagedMarkComponent } from '../shared/managed-mark.component';
+import { ManagedAccessService } from '../services/managed-access.service';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { TauriService } from '../services/tauri.service';
@@ -87,7 +89,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
 /** Manages installed plugins: list, install, remove, enable/disable, credentials. */
 @Component({
   selector: 'app-plugins',
-  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent],
+  imports: [CommonModule, ProjectPillComponent, ProgressStepsComponent, ManagedMarkComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (installing) {
@@ -205,8 +207,22 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                       <div class="flex items-center gap-2">
                         <span [style.color]="dotColour(idx)" aria-hidden="true">●</span>
                         <div>
-                          <div class="text-[var(--ink)]" data-testid="plugins-row-name">
+                          <div
+                            class="flex items-center gap-1.5 text-[var(--ink)]"
+                            data-testid="plugins-row-name"
+                          >
                             {{ plugin.name }}
+                            @if (
+                              plugin.service_id && access.service('plugin:' + plugin.service_id);
+                              as lamp
+                            ) {
+                              <app-managed-mark
+                                [attr.data-testid]="'plugins-managed-' + plugin.slug"
+                                class="h-3 w-3 text-[var(--ink)]"
+                                [lamp]="lamp"
+                                [provider]="access.provider()"
+                              />
+                            }
                           </div>
                           <div
                             class="mono text-[10px] text-[var(--ink-mute)]"
@@ -260,10 +276,12 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
                         [attr.data-testid]="'plugins-row-toggle-' + plugin.slug"
                         [disabled]="!isVerified(plugin)"
                         [attr.title]="
-                          isVerified(plugin)
-                            ? null
-                            : 'Plugin cannot be enabled: ' +
-                              (plugin.verification_error || verificationStatusLabel(plugin))
+                          plugin.blocked_by_policy
+                            ? blockedByPolicy
+                            : isVerified(plugin)
+                              ? null
+                              : 'Plugin cannot be enabled: ' +
+                                (plugin.verification_error || verificationStatusLabel(plugin))
                         "
                         (click)="onRowToggle(plugin, $event)"
                       ></button>
@@ -282,6 +300,7 @@ const RESOURCE_ONLY_INSTALL_STEPS: readonly SetupStep[] = [
   },
 })
 export class PluginsComponent implements OnInit, OnDestroy {
+  readonly blockedByPolicy = 'Runs once your organisation allows it';
   plugins: PluginStatusEntry[] = [];
   expandedPlugin: string | null = null;
   installing = false;
@@ -297,10 +316,13 @@ export class PluginsComponent implements OnInit, OnDestroy {
   private currentZipPath: string | null = null;
   /** Tauri event listener cleanup; null when no install is in flight. */
   private unlistenInstall: (() => void) | null = null;
+  private unlistenPolicy: (() => void) | null = null;
 
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private tauri = inject(TauriService);
+  /** Whether the organisation's policy lets each plugin's service run — the lamp beside it. */
+  protected readonly access = inject(ManagedAccessService);
   private projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
 
@@ -312,6 +334,9 @@ export class PluginsComponent implements OnInit, OnDestroy {
       await this.loadActiveProject();
       await this.loadPlugins();
     });
+    this.unlistenPolicy = await this.tauri.listen<string | null>('managed_policy_changed', () => {
+      void this.loadPlugins();
+    });
   }
 
   /** Cleans up project ready listener and install event listener. */
@@ -322,6 +347,8 @@ export class PluginsComponent implements OnInit, OnDestroy {
     }
     this.unlistenInstall?.();
     this.unlistenInstall = null;
+    this.unlistenPolicy?.();
+    this.unlistenPolicy = null;
   }
 
   /** Syncs the active project from ProjectStateService. */

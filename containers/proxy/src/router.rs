@@ -17,6 +17,7 @@ pub enum Auth {
 pub enum BareAuth {
     Passthrough,
     None,
+    Gateway,
 }
 
 fn de_bare_auth<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BareAuth, D::Error> {
@@ -24,8 +25,9 @@ fn de_bare_auth<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BareAuth, D::E
     match String::deserialize(d)?.as_str() {
         "passthrough" => Ok(BareAuth::Passthrough),
         "none" => Ok(BareAuth::None),
+        "gateway" => Ok(BareAuth::Gateway),
         other => Err(D::Error::custom(format!(
-            "expected \"passthrough\" or \"none\", got {other:?}"
+            "expected \"passthrough\", \"none\" or \"gateway\", got {other:?}"
         ))),
     }
 }
@@ -37,7 +39,7 @@ pub enum Scheme {
     None,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Route {
     pub prefix: String,
     pub base_url: String,
@@ -46,6 +48,22 @@ pub struct Route {
     pub provider_kind: String,
     #[serde(default)]
     pub provider_id: String,
+    /// Headers added to every request forwarded on this route, e.g. a gateway credential.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Route")
+            .field("prefix", &self.prefix)
+            .field("base_url", &self.base_url)
+            .field("auth", &self.auth)
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_id", &self.provider_id)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -81,10 +99,18 @@ impl std::fmt::Debug for Config {
 }
 
 fn build_forward_client() -> reqwest::Client {
+    build_forward_client_trusting(&[])
+}
+
+/// The forward client, trusting `extra` on top of the built-in roots.
+fn build_forward_client_trusting(extra: &[reqwest::Certificate]) -> reqwest::Client {
     let build = || {
-        reqwest::Client::builder()
-            .use_rustls_tls()
-            .redirect(reqwest::redirect::Policy::none())
+        extra.iter().cloned().fold(
+            reqwest::Client::builder()
+                .use_rustls_tls()
+                .redirect(reqwest::redirect::Policy::none()),
+            |b, c| b.add_root_certificate(c),
+        )
     };
     build().build().unwrap_or_else(|e| {
         log::warn!("forward client build failed ({e}), retrying without proxy env vars");
@@ -116,6 +142,22 @@ struct RoutesFile {
     routes: Vec<Route>,
     #[serde(default)]
     caller_token: Option<String>,
+    #[serde(default)]
+    ca_certs: Option<String>,
+}
+
+/// Every certificate in a PEM bundle; an unreadable one trusts nothing extra.
+fn extra_roots(pem: Option<&str>) -> Vec<reqwest::Certificate> {
+    let Some(pem) = pem.filter(|p| !p.trim().is_empty()) else {
+        return Vec::new();
+    };
+    match reqwest::Certificate::from_pem_bundle(pem.as_bytes()) {
+        Ok(certs) => certs,
+        Err(e) => {
+            log::error!("the configured gateway CA certificates are unreadable: {e}");
+            Vec::new()
+        }
+    }
 }
 
 impl Config {
@@ -124,9 +166,17 @@ impl Config {
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
         let parsed: RoutesFile =
             serde_json::from_str(&raw).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+        let roots = extra_roots(parsed.ca_certs.as_deref());
+        if !roots.is_empty() {
+            log::info!(
+                "trusting {} extra CA certificate(s) for the gateway",
+                roots.len()
+            );
+        }
         Ok(Self {
             routes: parsed.routes,
             caller_token: parsed.caller_token,
+            client: build_forward_client_trusting(&roots),
             ..Self::default()
         })
     }
@@ -160,6 +210,7 @@ mod tests {
                     auth: Auth::Bare(BareAuth::Passthrough),
                     provider_kind: "anthropic_oauth".to_string(),
                     provider_id: "anthropic".to_string(),
+                    headers: std::collections::BTreeMap::new(),
                 },
                 Route {
                     prefix: "openrouter".to_string(),
@@ -170,6 +221,7 @@ mod tests {
                     },
                     provider_kind: "openrouter".to_string(),
                     provider_id: "openrouter".to_string(),
+                    headers: std::collections::BTreeMap::new(),
                 },
                 Route {
                     prefix: "local".to_string(),
@@ -180,6 +232,7 @@ mod tests {
                     },
                     provider_kind: "local".to_string(),
                     provider_id: "local".to_string(),
+                    headers: std::collections::BTreeMap::new(),
                 },
             ],
             usage_path: PathBuf::from("/usage/usage.jsonl"),
@@ -240,6 +293,55 @@ mod tests {
         let _client = build_forward_client();
     }
 
+    /// A self-signed test CA (no private key kept).
+    const TEST_CA: &str = concat!(
+        "-----BEGIN CERTIFICATE-----\n",
+        "MIIBnjCCAUWgAwIBAgIUdX9+pClcGzp4HhRB04E+Kj8J5+0wCgYIKoZIzj0EAwIw\n",
+        "JDEiMCAGA1UEAwwZU3BlZWR3YXZlIFRlc3QgR2F0ZXdheSBDQTAgFw0yNjEwMDUw\n",
+        "OTQyMzZaGA8yMTI2MDkxMTA5NDIzNlowJDEiMCAGA1UEAwwZU3BlZWR3YXZlIFRl\n",
+        "c3QgR2F0ZXdheSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABAwGwtCmS32x\n",
+        "D+KYHXmVmeOVJaVwwwqmYFdYpM+boBUg7z8SwVbtJ1Os+tDRnRMipRYQZWvwOaGe\n",
+        "/gDaqazbNPSjUzBRMB0GA1UdDgQWBBQna3aIu5iXFKyrzDoKHjqrZ/On3jAfBgNV\n",
+        "HSMEGDAWgBQna3aIu5iXFKyrzDoKHjqrZ/On3jAPBgNVHRMBAf8EBTADAQH/MAoG\n",
+        "CCqGSM49BAMCA0cAMEQCIDF9ciVV0dQ/HVEMK53R9HwDBEdEnppUxl9UyAPNLtvy\n",
+        "AiBk4VSP6nHLCD6zCfv5qp3be43+rV0QXyT1xm9FqPcoXQ==\n",
+        "-----END CERTIFICATE-----\n",
+    );
+
+    #[test]
+    fn configured_ca_certificates_become_extra_roots() {
+        assert_eq!(extra_roots(Some(TEST_CA)).len(), 1);
+        let two = format!("{TEST_CA}{TEST_CA}");
+        assert_eq!(extra_roots(Some(&two)).len(), 2);
+        assert!(extra_roots(None).is_empty());
+        assert!(extra_roots(Some("  ")).is_empty());
+        assert!(extra_roots(Some("not a certificate")).is_empty());
+    }
+
+    #[test]
+    fn a_gateway_route_parses_and_never_prints_its_header_values() {
+        let route: Route = serde_json::from_value(serde_json::json!({
+            "prefix": "anthropic",
+            "base_url": "https://gateway.example",
+            "auth": "gateway",
+            "headers": {"x-gateway-key": "secret-value"}
+        }))
+        .unwrap();
+        assert_eq!(route.auth, Auth::Bare(BareAuth::Gateway));
+        let printed = format!("{route:?}");
+        assert!(printed.contains("x-gateway-key") && !printed.contains("secret-value"));
+    }
+
+    #[test]
+    fn a_config_with_a_ca_loads_and_builds_its_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.json");
+        let doc = serde_json::json!({ "routes": [], "ca_certs": TEST_CA });
+        std::fs::write(&path, doc.to_string()).unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert!(cfg.routes.is_empty());
+    }
+
     #[test]
     fn build_forward_client_no_proxy_fallback_chain_builds() {
         let build = || {
@@ -267,6 +369,7 @@ mod tests {
                 },
                 provider_kind: "openrouter".to_string(),
                 provider_id: "my-or".to_string(),
+                headers: std::collections::BTreeMap::new(),
             }],
             usage_path: PathBuf::from("/usage/usage.jsonl"),
             ..Default::default()

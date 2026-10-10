@@ -1,5 +1,6 @@
-use crate::config::{LlmConfig, LlmProviderKind};
+use crate::config::{LlmConfig, LlmProviderKind, ManagedLlmEgressConfig};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
@@ -19,6 +20,8 @@ struct RenderRoute {
     auth: RouteAuth,
     provider_kind: &'static str,
     provider_id: String,
+    #[serde(rename = "headers", skip_serializing_if = "BTreeMap::is_empty")]
+    extra_headers: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -26,7 +29,12 @@ struct RenderConfig {
     routes: Vec<RenderRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     caller_token: Option<String>,
+    /// PEM roots the forwarder trusts for the `llm_egress` gateway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ca_certs: Option<String>,
 }
+
+const ANTHROPIC_UPSTREAM: &str = "https://api.anthropic.com";
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
 pub const PROXY_PORT: u16 = 4000;
@@ -83,10 +91,15 @@ pub fn ensure_caller_token_in(data_dir: &Path, project: &str) -> anyhow::Result<
 /// Renders the proxy routing config (a `routes` array consumed by the forwarder
 /// `containers/proxy/src/router.rs`). Pure; `write_proxy_config_in` persists it.
 pub fn render_proxy_config(llm: &LlmConfig) -> String {
-    render_proxy_config_with(llm, None)
+    render_proxy_config_with(llm, None, None, None)
 }
 
-pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> String {
+pub fn render_proxy_config_with(
+    llm: &LlmConfig,
+    caller_token: Option<&str>,
+    egress: Option<&ManagedLlmEgressConfig>,
+    project: Option<&str>,
+) -> String {
     let mut routes = Vec::new();
 
     let anthropic_kind = match llm.active_provider().map(|p| p.kind) {
@@ -94,17 +107,44 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
         _ => LlmProviderKind::AnthropicOauth.wire_str(),
     };
 
+    let (anthropic_base, anthropic_auth, anthropic_headers) = match egress {
+        Some(e) => {
+            let mut headers = e.headers.clone();
+            if let (Some(name), Some(p)) = (e.project_header.as_ref(), project) {
+                headers.insert(name.clone(), p.to_string());
+            }
+            (
+                e.anthropic_base_url.clone().unwrap_or_default(),
+                RouteAuth::Bare("gateway"),
+                headers,
+            )
+        }
+        None => (
+            ANTHROPIC_UPSTREAM.to_string(),
+            RouteAuth::Bare("passthrough"),
+            BTreeMap::new(),
+        ),
+    };
+
     routes.push(RenderRoute {
         prefix: "anthropic".into(),
-        base_url: "https://api.anthropic.com".into(),
-        auth: RouteAuth::Bare("passthrough"),
+        base_url: anthropic_base,
+        auth: anthropic_auth,
         provider_kind: anthropic_kind,
         provider_id: "anthropic".into(),
+        extra_headers: anthropic_headers,
     });
 
     for entry in &llm.providers {
         if !crate::plugin::is_valid_slug(&entry.id) {
             log::warn!("skipping provider with invalid id");
+            continue;
+        }
+        if egress.is_some() && !entry.kind.is_anthropic() {
+            log::info!(
+                "provider '{}' not routed: the organisation's egress policy is in force",
+                entry.id
+            );
             continue;
         }
         match entry.kind {
@@ -119,6 +159,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
                     },
                     provider_kind: "openrouter",
                     provider_id: entry.id.clone(),
+                    extra_headers: BTreeMap::new(),
                 });
             }
             LlmProviderKind::Local => {
@@ -148,6 +189,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
                     auth,
                     provider_kind: "local",
                     provider_id: entry.id.clone(),
+                    extra_headers: BTreeMap::new(),
                 });
             }
         }
@@ -156,6 +198,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
     serde_json::to_string(&RenderConfig {
         routes,
         caller_token: caller_token.map(str::to_string),
+        ca_certs: egress.and_then(|e| e.ca_pem()).map(str::to_string),
     })
     .unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
@@ -174,7 +217,11 @@ pub fn write_proxy_config_in(
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
     let token = ensure_caller_token_in(data_dir, project)?;
-    let content = render_proxy_config_with(llm, Some(&token));
+    let egress = crate::managed_config::load_managed_config()?.and_then(|m| m.llm_egress);
+    if let Some(e) = &egress {
+        e.validate()?;
+    }
+    let content = render_proxy_config_with(llm, Some(&token), egress.as_ref(), Some(project));
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
 }
@@ -339,7 +386,7 @@ mod tests {
     #[test]
     fn render_embeds_caller_token_when_present_and_omits_when_none() {
         let cfg = full_provider_mix();
-        let with = render_proxy_config_with(&cfg, Some("secret-abc"));
+        let with = render_proxy_config_with(&cfg, Some("secret-abc"), None, None);
         assert!(
             with.contains(r#""caller_token":"secret-abc""#),
             "token must be embedded"
@@ -348,6 +395,71 @@ mod tests {
         assert!(
             !without.contains("caller_token"),
             "no token field when absent: {without}"
+        );
+    }
+
+    fn gateway_policy() -> ManagedLlmEgressConfig {
+        ManagedLlmEgressConfig {
+            anthropic_base_url: Some("https://gateway.example/llm".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn managed_egress_routes_anthropic_to_the_gateway_with_its_headers() {
+        let cfg = full_provider_mix();
+        let mut egress = gateway_policy();
+        egress.headers.insert("x-gateway-key".into(), "k".into());
+        let out: serde_json::Value =
+            serde_json::from_str(&render_proxy_config_with(&cfg, None, Some(&egress), None))
+                .unwrap();
+        let route = &out["routes"][0];
+        assert_eq!(route["base_url"], "https://gateway.example/llm");
+        assert_eq!(route["auth"], "gateway");
+        assert_eq!(route["headers"]["x-gateway-key"], "k");
+        assert!(render_proxy_config(&cfg).contains(r#""auth":"passthrough""#));
+    }
+
+    #[test]
+    fn managed_egress_leaves_no_route_past_the_gateway() {
+        let cfg = full_provider_mix();
+        let out = render_proxy_config_with(&cfg, None, Some(&gateway_policy()), None);
+        assert!(out.contains("gateway.example"));
+        assert!(!out.contains("openrouter.ai"), "{out}");
+        assert!(render_proxy_config(&cfg).contains("openrouter.ai"));
+    }
+
+    #[test]
+    fn managed_egress_hands_its_ca_to_the_forwarder() {
+        let cfg = full_provider_mix();
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+        let egress = ManagedLlmEgressConfig {
+            ca_certs: Some(pem.into()),
+            ..gateway_policy()
+        };
+        let out: serde_json::Value =
+            serde_json::from_str(&render_proxy_config_with(&cfg, None, Some(&egress), None))
+                .unwrap();
+        assert_eq!(out["ca_certs"], pem);
+        let junk = ManagedLlmEgressConfig {
+            ca_certs: Some("nope".into()),
+            ..gateway_policy()
+        };
+        assert!(!render_proxy_config_with(&cfg, None, Some(&junk), None).contains("ca_certs"));
+        assert!(!render_proxy_config(&cfg).contains("ca_certs"));
+    }
+
+    #[test]
+    fn managed_egress_names_the_project_in_the_header_the_policy_names() {
+        let cfg = full_provider_mix();
+        let mut egress = gateway_policy();
+        let unnamed = render_proxy_config_with(&cfg, None, Some(&egress), Some("billing-bot"));
+        assert!(!unnamed.contains("billing-bot"), "{unnamed}");
+        egress.project_header = Some("X-Gateway-Project".into());
+        let out = render_proxy_config_with(&cfg, None, Some(&egress), Some("billing-bot"));
+        assert!(
+            out.contains(r#""X-Gateway-Project":"billing-bot""#),
+            "{out}"
         );
     }
 

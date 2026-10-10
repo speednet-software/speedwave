@@ -287,9 +287,56 @@ pub(crate) fn switch_project_core(
     }
 }
 
+/// The machine's MDM `llm_egress` policy, if any.
+pub(crate) fn managed_llm_egress() -> Option<speedwave_runtime::config::ManagedLlmEgressConfig> {
+    speedwave_runtime::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.llm_egress)
+}
+
+/// An MDM `llm_egress` policy fixes the LLM route for every project on this machine.
+pub(crate) fn llm_locked_by_policy() -> bool {
+    managed_llm_egress().is_some()
+}
+
+/// The machine's MDM `management` block, if any (ADR-091).
+pub(crate) fn managed_management() -> Option<speedwave_runtime::config::ManagedManagementConfig> {
+    speedwave_runtime::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.management)
+}
+
+/// The machine's MDM `services` policy, if any (ADR-091).
+pub(crate) fn managed_services() -> Option<speedwave_runtime::config::ManagedServicesConfig> {
+    speedwave_runtime::managed_config::load_managed_config()
+        .ok()
+        .flatten()
+        .and_then(|m| m.services)
+}
+
+/// Whether the organisation's policy keeps the service under `key` from running.
+pub(crate) fn service_blocked_in(
+    policy: Option<&speedwave_runtime::config::ManagedServicesConfig>,
+    key: &str,
+) -> bool {
+    policy.is_some_and(|p| !p.allows(key))
+}
+
+pub(crate) const LLM_LOCKED_MSG: &str = config::LLM_ROUTE_LOCKED_MSG;
+
 pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String> {
-    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
-    project_llm_is_unconfigured_in(&user_config, project)
+    let mut user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    if !project_llm_is_unconfigured_in(&user_config, project)? {
+        return Ok(false);
+    }
+    if llm_locked_by_policy() && config::adopt_policy_provider(&mut user_config, project) {
+        config::save_user_config(&user_config).map_err(|e| e.to_string())?;
+        log::info!("project '{project}': LLM provider set to anthropic by the organisation's egress policy");
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn project_llm_is_unconfigured_in(
@@ -335,7 +382,7 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let expected_paths =
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
             .map_err(|e| e.to_string())?
-            .with_telemetry_locked(resolved.telemetry.any_locked);
+            .with_telemetry_locked(config::managed_settings_required(&resolved.telemetry));
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         return Err(format!(
@@ -890,12 +937,17 @@ fn settings_project<'a>(
 
 #[tauri::command]
 pub fn get_llm_config(project: Option<String>) -> Result<LlmConfigResponse, String> {
-    get_llm_config_in(speedwave_runtime::consts::data_dir(), project.as_deref())
+    get_llm_config_in(
+        speedwave_runtime::consts::data_dir(),
+        project.as_deref(),
+        llm_locked_by_policy(),
+    )
 }
 
 fn get_llm_config_in(
     data_dir: &std::path::Path,
     project: Option<&str>,
+    locked_by_policy: bool,
 ) -> Result<LlmConfigResponse, String> {
     let user_config =
         config::load_user_config_from(&data_dir.join("config.json")).map_err(|e| e.to_string())?;
@@ -907,6 +959,9 @@ fn get_llm_config_in(
         .unwrap_or_default();
     if let Some(name) = project {
         llm.sync_has_api_key_from_disk_in(data_dir, name);
+    }
+    if locked_by_policy {
+        config::lock_llm_to_policy(&mut llm);
     }
     let default_base_url = llm
         .provider
@@ -923,6 +978,7 @@ fn get_llm_config_in(
     Ok(LlmConfigResponse {
         llm,
         default_base_url,
+        locked_by_policy,
     })
 }
 
@@ -1530,6 +1586,9 @@ pub fn set_provider_model(
     model: String,
     context_tokens: Option<u32>,
 ) -> Result<(), String> {
+    if llm_locked_by_policy() {
+        return Err(LLM_LOCKED_MSG.to_string());
+    }
     set_provider_model_in(
         speedwave_runtime::consts::data_dir(),
         project_id,
@@ -1680,6 +1739,9 @@ async fn apply_model_auto_defaults(
 
 #[tauri::command]
 pub async fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
+    if llm_locked_by_policy() {
+        return Err(LLM_LOCKED_MSG.to_string());
+    }
     update_llm_config_in(speedwave_runtime::consts::data_dir(), update).await
 }
 
@@ -1999,6 +2061,9 @@ pub fn set_llm_provider_key(
     key: Option<String>,
     project: Option<String>,
 ) -> Result<(), String> {
+    if llm_locked_by_policy() {
+        return Err(LLM_LOCKED_MSG.to_string());
+    }
     set_llm_provider_key_in(
         speedwave_runtime::consts::data_dir(),
         &provider_id,
@@ -2068,6 +2133,9 @@ fn set_llm_provider_key_in(
 
 #[tauri::command]
 pub fn clear_active_llm_provider(project: Option<String>) -> Result<(), String> {
+    if llm_locked_by_policy() {
+        return Err(LLM_LOCKED_MSG.to_string());
+    }
     clear_active_llm_provider_in(speedwave_runtime::consts::data_dir(), project.as_deref())
 }
 
@@ -2225,6 +2293,24 @@ fn mirror_local_key_to_llm_namespace(
     reason = "test assertions may unwrap/expect freely"
 )]
 mod tests {
+    #[test]
+    fn a_service_is_blocked_only_by_a_policy_that_denies_it() {
+        use speedwave_runtime::config::{ManagedServicesConfig, ServiceAccess};
+        let policy = ManagedServicesConfig {
+            default: ServiceAccess::Allow,
+            rules: [("slack".to_string(), ServiceAccess::Deny)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(service_blocked_in(Some(&policy), "slack"));
+        assert!(!service_blocked_in(Some(&policy), "github"));
+        assert!(!service_blocked_in(None, "slack"));
+        assert!(service_blocked_in(
+            Some(&ManagedServicesConfig::deny_all()),
+            "plugin:acme-crm"
+        ));
+    }
+
     use super::*;
     use crate::types::{CustomPolicyDtoInput, SecurityPolicyCustomPatternInput};
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
@@ -2750,8 +2836,8 @@ mod tests {
     fn the_llm_form_loads_the_project_it_was_built_for_not_the_active_one() {
         let tmp = two_local_projects_tempdir();
 
-        let named = get_llm_config_in(tmp.path(), Some("beta")).unwrap();
-        let active = get_llm_config_in(tmp.path(), None).unwrap();
+        let named = get_llm_config_in(tmp.path(), Some("beta"), false).unwrap();
+        let active = get_llm_config_in(tmp.path(), None, false).unwrap();
 
         assert_eq!(named.llm.providers[0].model.as_deref(), Some("llama-beta"));
         assert_eq!(
@@ -2766,18 +2852,29 @@ mod tests {
         speedwave_runtime::compose::write_llm_provider_key_in(tmp.path(), "beta", "local", "sk-b")
             .unwrap();
 
-        let named = get_llm_config_in(tmp.path(), Some("beta")).unwrap();
-        let active = get_llm_config_in(tmp.path(), None).unwrap();
+        let named = get_llm_config_in(tmp.path(), Some("beta"), false).unwrap();
+        let active = get_llm_config_in(tmp.path(), None, false).unwrap();
 
         assert!(named.llm.providers[0].has_api_key);
         assert!(!active.llm.providers[0].has_api_key);
     }
 
     #[test]
+    fn under_an_egress_policy_the_llm_form_shows_only_the_organisations_route() {
+        let tmp = two_local_projects_tempdir();
+
+        let locked = get_llm_config_in(tmp.path(), Some("beta"), true).unwrap();
+
+        assert!(locked.locked_by_policy);
+        assert!(locked.llm.providers.iter().all(|p| p.kind.is_anthropic()));
+        assert!(locked.llm.providers.iter().all(|p| p.model.is_none()));
+    }
+
+    #[test]
     fn the_llm_form_of_a_project_missing_from_the_config_loads_empty() {
         let tmp = two_local_projects_tempdir();
 
-        let missing = get_llm_config_in(tmp.path(), Some("gamma")).unwrap();
+        let missing = get_llm_config_in(tmp.path(), Some("gamma"), false).unwrap();
 
         assert!(missing.llm.providers.is_empty());
         assert!(missing.llm.active.is_none());

@@ -315,6 +315,7 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
         .ok_or_else(|| format!("project '{}' not found in config", project))?;
     let integrations =
         config::resolve_integrations(std::path::Path::new(project_dir), &user_config, &project);
+    let services_policy = crate::containers_cmd::managed_services();
 
     let tokens_dir = speedwave_runtime::consts::data_dir()
         .join("tokens")
@@ -397,6 +398,10 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
         service_entries.push(IntegrationStatusEntry {
             service: svc.to_string(),
             enabled,
+            blocked_by_policy: crate::containers_cmd::service_blocked_in(
+                services_policy.as_ref(),
+                svc,
+            ),
             configured,
             display_name: display_name.to_string(),
             description: description.to_string(),
@@ -418,6 +423,10 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
                 enabled: integrations
                     .is_os_service_enabled(svc.config_key)
                     .unwrap_or(false),
+                blocked_by_policy: crate::containers_cmd::service_blocked_in(
+                    services_policy.as_ref(),
+                    &format!("{}{}", config::OS_SERVICE_PREFIX, svc.config_key),
+                ),
                 display_name: svc.display_name.to_string(),
                 description: svc.description.to_string(),
             })
@@ -1255,72 +1264,79 @@ pub async fn restart_integration_containers(
 ) -> Result<(), String> {
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
-        crate::containers_cmd::ensure_images_ready()?;
-        check_project(&project)?;
-        if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
-            if let Some(p) = cfg.find_project(&project) {
-                speedwave_runtime::cloudstorage::check_project_readable_or_err(
-                    std::path::Path::new(&p.dir),
-                )?;
-            }
-        }
-        log::info!(
-            "restarting integration containers project={project} just_enabled={just_enabled:?}"
-        );
-        let rt = speedwave_runtime::runtime::detect_runtime();
-        rt.ensure_ready().map_err(|e| e.to_string())?;
-
-        if let Err(sanitized) = ensure_project_images_built(&rt, &project) {
-            log::error!("image build failed while restarting integration containers: {sanitized}");
-            if let Some(svc) = just_enabled.as_deref() {
-                rollback_integration_to_disabled(&project, svc);
-            }
-            return Err(format!(
-                "Image build failed: {sanitized}. Containers are still running with the previous configuration."
-            ));
-        }
-
-        rt.transaction(&project, |rt| -> anyhow::Result<()> {
-            speedwave_runtime::update::save_snapshot(&project).map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot safely restart: failed to write rollback snapshot ({e})"
-                )
-            })?;
-
-            crate::ensure_oauth_running(&oauth_arc, &project);
-
-            use crate::types::IntoAnyhow;
-            crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
-
-            let up_result =
-                speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)
-                    .and_then(|()| rt.compose_up(&project));
-
-            if let Err(e) = up_result {
-                log::error!("compose up failed while restarting integration containers: {e}, attempting rollback");
-                if let Some(svc) = just_enabled.as_deref() {
-                    rollback_integration_to_disabled(&project, svc);
-                }
-                if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
-                    log::error!("rollback also failed after restart failure: {rb_err}");
-                    anyhow::bail!(
-                        "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
-                    );
-                }
-                log::warn!("restart of '{project}' failed and its containers were rolled back to the previous configuration");
-                anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
-            }
-
-            Ok(())
-        })
-        .map_err(|e| e.to_string())?;
-
-        prune_unused_worker_images(&rt, &project);
-
-        Ok(())
+        restart_project_containers(project, just_enabled, oauth_arc)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Re-renders the project's compose and brings its containers up again, rolling back on failure.
+pub(crate) fn restart_project_containers(
+    project: String,
+    just_enabled: Option<String>,
+    oauth_arc: crate::reconcile::SharedOauth,
+) -> Result<(), String> {
+    crate::containers_cmd::ensure_images_ready()?;
+    check_project(&project)?;
+    if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
+        if let Some(p) = cfg.find_project(&project) {
+            speedwave_runtime::cloudstorage::check_project_readable_or_err(std::path::Path::new(
+                &p.dir,
+            ))?;
+        }
+    }
+    log::info!("restarting integration containers project={project} just_enabled={just_enabled:?}");
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    rt.ensure_ready().map_err(|e| e.to_string())?;
+
+    if let Err(sanitized) = ensure_project_images_built(&rt, &project) {
+        log::error!("image build failed while restarting integration containers: {sanitized}");
+        if let Some(svc) = just_enabled.as_deref() {
+            rollback_integration_to_disabled(&project, svc);
+        }
+        return Err(format!(
+            "Image build failed: {sanitized}. Containers are still running with the previous configuration."
+        ));
+    }
+
+    rt.transaction(&project, |rt| -> anyhow::Result<()> {
+        speedwave_runtime::update::save_snapshot(&project).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot safely restart: failed to write rollback snapshot ({e})"
+            )
+        })?;
+
+        crate::ensure_oauth_running(&oauth_arc, &project);
+
+        use crate::types::IntoAnyhow;
+        crate::containers_cmd::render_and_save_compose(&project).into_anyhow()?;
+
+        let up_result =
+            speedwave_runtime::runtime::compose_validate_with_retry(rt, &project)
+                .and_then(|()| rt.compose_up(&project));
+
+        if let Err(e) = up_result {
+            log::error!("compose up failed while restarting integration containers: {e}, attempting rollback");
+            if let Some(svc) = just_enabled.as_deref() {
+                rollback_integration_to_disabled(&project, svc);
+            }
+            if let Err(rb_err) = speedwave_runtime::update::rollback_containers(rt, &project) {
+                log::error!("rollback also failed after restart failure: {rb_err}");
+                anyhow::bail!(
+                    "Restart failed: {e}. Rollback also failed: {rb_err}. Containers may be in an inconsistent state. Run speedwave to restart manually."
+                );
+            }
+            log::warn!("restart of '{project}' failed and its containers were rolled back to the previous configuration");
+            anyhow::bail!("Restart failed: {e}. Rolled back to previous configuration.");
+        }
+
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    prune_unused_worker_images(&rt, &project);
+
+    Ok(())
 }
 
 #[cfg(test)]

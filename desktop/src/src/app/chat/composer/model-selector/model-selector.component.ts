@@ -19,11 +19,17 @@ import { DiscoveredModelsService } from '../../../services/discovered-models.ser
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
-import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
+import {
+  canonicalModelId,
+  type ModelPicker,
+  type ModelPickerRow,
+} from '../../../models/model-picker';
 import type { RefusedModelPick } from '../../../services/chat-state.service';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 import { SpinIconComponent } from '../../../shared/spin-icon.component';
+import { ManagedMarkComponent } from '../../../shared/managed-mark.component';
+import { ManagementService } from '../../../services/management.service';
 
 const MODEL_LIST_UNAVAILABLE = 'Model list unavailable.';
 const LOAD_FAILED = 'Failed to load models.';
@@ -58,7 +64,13 @@ export interface ModelSelection {
  */
 @Component({
   selector: 'app-model-selector',
-  imports: [FormsModule, TooltipDirective, EffortSliderComponent, SpinIconComponent],
+  imports: [
+    FormsModule,
+    TooltipDirective,
+    EffortSliderComponent,
+    SpinIconComponent,
+    ManagedMarkComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
   template: `
@@ -66,11 +78,17 @@ export interface ModelSelection {
       <button
         type="button"
         data-testid="composer-model-badge"
-        class="hidden text-[var(--teal)] hover:underline md:inline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
+        class="hidden items-center gap-1.5 text-[var(--teal)] hover:underline md:inline-flex disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
         [disabled]="streaming() || pickerPending()"
         [attr.title]="badgeTitle()"
         (click)="openCombobox()"
       >
+        @if (managed()) {
+          <app-managed-mark
+            data-testid="composer-model-managed-mark"
+            class="h-3 w-3 text-[var(--ink)]"
+          />
+        }
         {{ displayModelLabel() }}
       </button>
       @if (showEffortSegment()) {
@@ -103,6 +121,18 @@ export interface ModelSelection {
           class="absolute bottom-full right-0 z-40 mb-2 w-80 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
           role="dialog"
         >
+          @if (managed()) {
+            <div
+              data-testid="model-selector-managed"
+              class="mono flex items-center gap-2 border-b border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+            >
+              <app-managed-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
+              <span class="text-[var(--ink)]">{{
+                management.active()?.provider || 'Managed'
+              }}</span>
+              <span class="truncate">· {{ managedOrganization() }}</span>
+            </div>
+          }
           <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
             <input
               data-testid="model-selector-search"
@@ -248,6 +278,7 @@ export class ModelSelectorComponent {
   private readonly picker = inject(ModelPickerService);
   private readonly discovered = inject(DiscoveredModelsService);
   private readonly log = inject(LoggerService);
+  protected readonly management = inject(ManagementService);
 
   readonly projectId = input.required<string>();
   readonly streaming = input(false);
@@ -294,12 +325,39 @@ export class ModelSelectorComponent {
   private readonly providerKnown = computed(() => this.summary() !== null);
 
   protected readonly pickerPending = computed(
-    () => this.isAnthropic() && this.control.sessionInfoState(this.projectId()).state === 'pending'
+    () =>
+      this.isAnthropic() &&
+      !this.managed() &&
+      this.control.sessionInfoState(this.projectId()).state === 'pending'
   );
 
   protected readonly awaitingSession = computed(() => this.isAnthropic() && this.sessionAwaited());
 
+  /** A managed policy is on this machine: the models are the ones the organisation allows the project. */
+  protected readonly managed = computed(
+    () => !!this.management.statusFor(this.projectId())?.managed
+  );
+
+  protected readonly managedOrganization = computed(
+    () => this.management.statusFor(this.projectId())?.organization ?? 'your organisation'
+  );
+
+  private readonly managedOptions = computed<ModelOption[]>(() => {
+    const project = this.management.statusFor(this.projectId())?.project;
+    if (!project) return [];
+    return project.models.map((m) => ({
+      id: m,
+      label: this.picker.label(m, this.projectId()),
+      wireId: m,
+      isDefault: m === project.default_model,
+      contextTokens: null,
+      description: project.pinned ? `${m} · pinned by ${this.managedOrganization()}` : m,
+      requiresUsageCredits: false,
+    }));
+  });
+
   private readonly options = computed<ModelOption[]>(() => {
+    if (this.managed()) return this.managedOptions();
     if (!this.isAnthropic()) return this.discoveredOptions();
     const projectId = this.projectId();
     const held = this.picker.picker(projectId);
@@ -308,7 +366,7 @@ export class ModelSelectorComponent {
 
   protected readonly listLoading = computed(
     () =>
-      this.loading() ||
+      (this.managed() ? this.options().length === 0 && this.loading() : this.loading()) ||
       ((this.pickerPending() || this.awaitingSession()) && this.options().length === 0)
   );
 
@@ -319,7 +377,17 @@ export class ModelSelectorComponent {
     return this.pickerPending() ? 'Loading models...' : 'Change model';
   });
 
-  protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
+  protected readonly activeOptionId = computed<string | null>(() => {
+    if (!this.managed()) return this.activeRow()?.id ?? null;
+    const opts = this.options();
+    const shown = canonicalModelId(this.displayModel());
+    return (
+      opts.find((o) => canonicalModelId(o.id) === shown)?.id ??
+      opts.find((o) => o.isDefault)?.id ??
+      opts[0]?.id ??
+      null
+    );
+  });
 
   private readonly activeRow = computed<ModelPickerRow | null>(() =>
     this.isAnthropic() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
@@ -368,9 +436,11 @@ export class ModelSelectorComponent {
     return level ? capitalizeLevel(level) : 'Default';
   });
 
-  protected readonly displayModelLabel = computed<string>(() =>
-    this.picker.label(this.displayModel(), this.projectId())
-  );
+  protected readonly displayModelLabel = computed<string>(() => {
+    if (this.managed())
+      return this.picker.label(this.activeOptionId() ?? this.displayModel(), this.projectId());
+    return this.picker.label(this.displayModel(), this.projectId());
+  });
 
   private lastSessionModel = '';
 
@@ -381,6 +451,10 @@ export class ModelSelectorComponent {
     effect(() => {
       const id = this.projectId();
       if (id) void this.loadSummary(id);
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (id) void this.management.refresh(id);
     });
     effect(() => {
       const id = this.projectId();
@@ -529,6 +603,14 @@ export class ModelSelectorComponent {
     this.error.set('');
     this.stale.set(false);
     try {
+      if (this.managed()) {
+        const status = await this.management.refresh(this.projectId(), force);
+        if (!latest()) return;
+        if (this.options().length === 0) {
+          this.error.set(status?.error ?? 'Your organisation allows no model for this project.');
+        }
+        return;
+      }
       if (isAnthropicKind(summary.kind)) {
         const projectId = this.projectId();
         if (force) await this.control.refreshSessionInfo(projectId);

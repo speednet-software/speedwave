@@ -82,6 +82,13 @@ pub fn outbound_headers_with(
                 }
             }
         }
+        Auth::Bare(BareAuth::Gateway) => {
+            for name in &["anthropic-beta", "anthropic-version", "content-type"] {
+                if let Some(v) = inbound.get(*name) {
+                    out.insert(axum::http::header::HeaderName::from_static(name), v.clone());
+                }
+            }
+        }
         Auth::Bare(BareAuth::None) => {
             for name in &["anthropic-version", "content-type"] {
                 if let Some(v) = inbound.get(*name) {
@@ -364,6 +371,9 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
 
     let mut req = client.post(&upstream_url).body(outbound_body);
     for (name, value) in &out_headers {
+        req = req.header(name, value);
+    }
+    for (name, value) in &route.headers {
         req = req.header(name, value);
     }
 
@@ -676,6 +686,22 @@ mod tests {
     }
 
     #[test]
+    fn gateway_drops_the_containers_credential_and_keeps_the_betas() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "authorization",
+            "Bearer sk-no-key-required".parse().unwrap(),
+        );
+        h.insert("x-api-key", "sk-no-key-required".parse().unwrap());
+        h.insert("anthropic-beta", "oauth-2025-04-20".parse().unwrap());
+        h.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        let out = outbound_headers_with(&Auth::Bare(BareAuth::Gateway), &h, |_| None);
+        assert!(out.get("authorization").is_none() && out.get("x-api-key").is_none());
+        assert_eq!(out.get("anthropic-beta").unwrap(), "oauth-2025-04-20");
+        assert_eq!(out.get("anthropic-version").unwrap(), "2023-06-01");
+    }
+
+    #[test]
     fn passthrough_never_injects_a_stored_key() {
         let out = outbound_headers(&Auth::Bare(BareAuth::Passthrough), &HeaderMap::new());
         assert!(out.get("authorization").is_none() && out.get("x-api-key").is_none());
@@ -943,6 +969,7 @@ mod tests {
             auth: Auth::Bare(BareAuth::None),
             provider_kind: provider_kind.to_string(),
             provider_id: prefix.to_string(),
+            headers: std::collections::BTreeMap::new(),
         }
     }
 

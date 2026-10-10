@@ -60,6 +60,10 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             "${1}***REDACTED***",
         ),
         (r"(?i)(x-speedwave-proxy-auth:\s*)\S+", "${1}***REDACTED***"),
+        (
+            r#"(?i)(\bx-[a-z0-9-]*-(?:token|key|secret)"?\s*[:=]\s*)(?:"[^"]*"|[^\s,;]+)"#,
+            "${1}***REDACTED***",
+        ),
     ];
 
     definitions
@@ -113,7 +117,7 @@ mod tests {
     use super::*;
 
     /// Expected number of compiled rules; a mismatch flags a silently dropped rule.
-    const EXPECTED_RULE_COUNT: usize = 25;
+    const EXPECTED_RULE_COUNT: usize = 26;
 
     #[test]
     fn test_rules_count() {
@@ -156,6 +160,7 @@ mod tests {
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             r"(OTEL_EXPORTER_OTLP_HEADERS=)[^\r\n]+",
             r"(?i)(x-speedwave-proxy-auth:\s*)\S+",
+            r#"(?i)(\bx-[a-z0-9-]*-(?:token|key|secret)"?\s*[:=]\s*)(?:"[^"]*"|[^\s,;]+)"#,
         ];
 
         assert_eq!(
@@ -1290,5 +1295,24 @@ mod tests {
             !out.contains("secret-token-value"),
             "rule literal drifted from PROXY_CALLER_AUTH_HEADER: {out}"
         );
+    }
+
+    #[test]
+    fn a_gateway_credential_header_is_redacted() {
+        let out = sanitize(
+            "forwarding with X-Auditor-Host-Token: synthetic-host and x-gateway-key=synthetic-key",
+        );
+        assert!(
+            !out.contains("synthetic-host") && !out.contains("synthetic-key"),
+            "{out}"
+        );
+        let json = sanitize(r#"{"x-gateway-key":"synthetic-json"}"#);
+        assert!(!json.contains("synthetic-json"), "{json}");
+    }
+
+    #[test]
+    fn header_names_without_a_secret_are_left_alone() {
+        let input = "x-request-id: 42 and x-gateway-project: billing";
+        assert_eq!(sanitize(input), input);
     }
 }

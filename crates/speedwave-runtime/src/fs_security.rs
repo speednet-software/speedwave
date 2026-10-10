@@ -190,6 +190,7 @@ pub(crate) fn collect_security_paths(
     files.push(crate::claude_managed::managed_settings_path(
         data_dir, project,
     ));
+    files.push(crate::claude_managed::gateway_ca_path(data_dir, project));
 
     (dirs, files)
 }
@@ -292,7 +293,8 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("claude-managed")));
         assert!(dirs.contains(&data_dir.join("claude-managed/proj")));
 
-        assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
+        assert_eq!(files.len(), 17, "expected 17 files, got: {files:?}");
+        assert!(files.contains(&data_dir.join("claude-managed/proj/gateway-ca.pem")));
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));

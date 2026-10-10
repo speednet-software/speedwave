@@ -51,10 +51,25 @@ export interface SaveCredentialsEvent {
           <span
             class="mono text-[10px] px-2 py-0.5 rounded font-medium uppercase tracking-widest"
             data-testid="badge"
-            [attr.data-status]="svc().configured ? 'configured' : 'not-configured'"
-            [style.color]="svc().configured ? 'var(--green)' : 'var(--ink-mute)'"
+            [attr.title]="svc().blocked_by_policy ? blockedByPolicy : null"
+            [attr.data-status]="
+              svc().blocked_by_policy
+                ? 'blocked'
+                : svc().configured
+                  ? 'configured'
+                  : 'not-configured'
+            "
+            [style.color]="
+              svc().configured && !svc().blocked_by_policy ? 'var(--green)' : 'var(--ink-mute)'
+            "
           >
-            {{ svc().configured ? 'Configured' : 'Not Configured' }}
+            {{
+              svc().blocked_by_policy
+                ? 'Not allowed yet'
+                : svc().configured
+                  ? 'Configured'
+                  : 'Not Configured'
+            }}
           </span>
         </button>
         <div class="flex items-center gap-3">
@@ -180,6 +195,7 @@ export class ServiceCardComponent {
   readonly oauthStatusMessage = input('');
   readonly redirectUri = input<string | null>(null);
 
+  readonly blockedByPolicy = 'Runs once your organisation allows it';
   readonly toggleExpand = output<string>();
   readonly toggleService = output<{ svc: IntegrationStatusEntry; event: Event }>();
   readonly saveCredentials = output<SaveCredentialsEvent>();

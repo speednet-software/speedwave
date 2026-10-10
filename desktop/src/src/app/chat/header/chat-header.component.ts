@@ -63,7 +63,7 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
         {{ viewTitle() }}
       </h1>
 
-      <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+      <div class="ml-auto flex min-w-0 items-center gap-3">
         <app-project-pill />
       </div>
     </div>

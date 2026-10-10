@@ -25,6 +25,9 @@ import { ServiceCardComponent, SaveCredentialsEvent } from './service-card/servi
 import { RedmineConfigComponent } from './redmine-config/redmine-config.component';
 import { IdeBridgeComponent } from './ide-bridge/ide-bridge.component';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
+import { ManagedMarkComponent } from '../shared/managed-mark.component';
+import { ManagementService } from '../services/management.service';
+import { ManagedAccessService } from '../services/managed-access.service';
 
 /** Per-service dot colour cycle used in the table. */
 const SERVICE_DOT_COLOURS: readonly string[] = [
@@ -48,7 +51,13 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
 /** Manages MCP service integrations and native OS integration toggles. */
 @Component({
   selector: 'app-integrations',
-  imports: [ServiceCardComponent, RedmineConfigComponent, IdeBridgeComponent, ProjectPillComponent],
+  imports: [
+    ServiceCardComponent,
+    RedmineConfigComponent,
+    IdeBridgeComponent,
+    ProjectPillComponent,
+    ManagedMarkComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -144,6 +153,50 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
               </tr>
             </thead>
             <tbody class="divide-y divide-[var(--line)]">
+              @if (management.active(); as a) {
+                @if (a.managed) {
+                  <tr data-testid="integrations-row-management">
+                    <td class="px-4 py-2.5">
+                      <div class="flex items-center gap-2">
+                        <app-managed-mark class="h-3.5 w-3.5 text-[var(--ink)]" />
+                        <span class="text-[var(--ink)]">{{ a.provider || 'management' }}</span>
+                        @if (a.organization) {
+                          <span class="mono text-[11px] text-[var(--ink-mute)]"
+                            >· {{ a.organization }}</span
+                          >
+                        }
+                      </div>
+                    </td>
+                    <td class="px-4 py-2.5">
+                      @if (a.reachable) {
+                        <span class="pill green" data-testid="integrations-management-status"
+                          >connected</span
+                        >
+                      } @else {
+                        <span class="pill amber" data-testid="integrations-management-status"
+                          >unreachable</span
+                        >
+                      }
+                    </td>
+                    <td
+                      class="mono hidden px-4 py-2.5 text-[var(--ink)] md:table-cell"
+                      data-testid="integrations-management-ver"
+                    >
+                      {{ a.package_version || '—' }}
+                    </td>
+                    <td class="mono hidden px-4 py-2.5 text-[var(--ink-mute)] lg:table-cell">
+                      {{ a.reachable && a.latency_ms !== null ? a.latency_ms + ' ms' : '—' }}
+                    </td>
+                    <td class="mono hidden px-4 py-2.5 text-[var(--ink-mute)] lg:table-cell">—</td>
+                    <td class="px-4 py-2.5 text-right">
+                      <span
+                        class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+                        >managed</span
+                      >
+                    </td>
+                  </tr>
+                }
+              }
               @for (svc of services; track svc.service; let idx = $index) {
                 <tr
                   class="hover-bg cursor-pointer"
@@ -168,6 +221,14 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                       >
                         {{ svc.service }}
                       </span>
+                      @if (access.service(svc.service); as lamp) {
+                        <app-managed-mark
+                          [attr.data-testid]="'integrations-managed-' + svc.service"
+                          class="h-3 w-3 text-[var(--ink)]"
+                          [lamp]="lamp"
+                          [provider]="access.provider()"
+                        />
+                      }
                     </div>
                   </td>
                   <td class="px-4 py-2.5">
@@ -307,6 +368,14 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                 @for (os of osIntegrations; track os.service) {
                   <div class="flex items-center gap-3 px-4 py-2.5">
                     <span class="mono text-[13px] text-[var(--ink)]">{{ os.display_name }}</span>
+                    @if (access.service('os.' + os.service); as lamp) {
+                      <app-managed-mark
+                        [attr.data-testid]="'integrations-os-managed-' + os.service"
+                        class="h-3 w-3 text-[var(--ink)]"
+                        [lamp]="lamp"
+                        [provider]="access.provider()"
+                      />
+                    }
                     <span class="mono text-[11px] text-[var(--ink-mute)]">{{
                       os.description
                     }}</span>
@@ -317,6 +386,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
                       [attr.aria-pressed]="os.enabled"
                       [attr.aria-label]="(os.enabled ? 'Disable ' : 'Enable ') + os.service"
                       [attr.data-testid]="'integrations-os-toggle-' + os.service"
+                      [attr.title]="os.blocked_by_policy ? blockedByPolicy : null"
                       (click)="onOsToggleClick(os, $event)"
                     ></button>
                   </div>
@@ -333,6 +403,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
+  readonly blockedByPolicy = 'Runs once your organisation allows it';
   private static readonly BETA_ONLY_SERVICES = new Set(['office']);
 
   /** List of container-based MCP service integrations. */
@@ -362,6 +433,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private oauthProjectAtStart: string | null = null;
   private oauthStartNonce = 0;
   private unlistenOAuth: (() => void) | null = null;
+  private unlistenPolicy: (() => void) | null = null;
   private unlistenGithubOAuth: (() => void) | null = null;
   private unlistenSlackOAuth: (() => void) | null = null;
 
@@ -370,6 +442,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
   private beta = inject(BetaService);
+  /** The organisation's management on this machine — shown first in Services when its policy is present. */
+  protected readonly management = inject(ManagementService);
+  /** Whether the organisation's policy lets each service run — the lamp beside it. */
+  protected readonly access = inject(ManagedAccessService);
   private unsubProjectSettled: (() => void) | null = null;
   private unsubStatusRefresher: (() => void) | null = null;
 
@@ -396,6 +472,9 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       await this.loadIntegrations();
     });
     this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
+      void this.loadIntegrations();
+    });
+    this.unlistenPolicy = await this.tauri.listen<string | null>('managed_policy_changed', () => {
       void this.loadIntegrations();
     });
 
@@ -459,6 +538,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
   /** Cleans up event listeners. */
   ngOnDestroy(): void {
+    this.unlistenPolicy?.();
+    this.unlistenPolicy = null;
     if (this.unsubProjectSettled) {
       this.unsubProjectSettled();
       this.unsubProjectSettled = null;

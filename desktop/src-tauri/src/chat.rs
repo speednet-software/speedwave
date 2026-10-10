@@ -1865,6 +1865,10 @@ impl ChatSession {
             flags.push(level);
         }
 
+        if let Some(model) = crate::management_cmd::policy_model_flag(project_name) {
+            flags.push("--model".to_string());
+            flags.push(model);
+        }
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 

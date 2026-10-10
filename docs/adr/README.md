@@ -95,6 +95,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-087](ADR-087-vendored-pocock-skills.md)                           | Vendored Matt Pocock skills as `speedwave-*` core skills; `superpowers` retired from the bundled plugin set                 | Accepted                                                |
 | [ADR-088](ADR-088-chat-slash-commands-and-model-control.md)            | Chat UI Slash-Command Allowlist and Composer Model/Effort Control                                                           | Accepted (model sources amended by ADR-089)             |
 | [ADR-089](ADR-089-claude-code-control-channel-as-source-of-truth.md)   | Claude Code's control channel as the source of truth for Anthropic models, context and plan limits                          | Accepted                                                |
+| [ADR-090](ADR-090-mdm-managed-llm-egress-gateway.md)                   | MDM-managed LLM egress: the organisation's gateway as the only AI route                                                     | Proposed                                                |
+| [ADR-091](ADR-091-mdm-managed-services-and-inventory.md)               | MDM-managed services, the management inventory and live policy                                                              | Proposed                                                |
 
 ## Creating a New ADR
 

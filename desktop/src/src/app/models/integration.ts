@@ -14,6 +14,8 @@ export interface AuthField {
 export interface IntegrationStatusEntry {
   service: string;
   enabled: boolean;
+  /** The organisation's managed `services` policy keeps it from running (ADR-091). */
+  blocked_by_policy?: boolean;
   configured: boolean;
   display_name: string;
   description: string;
@@ -33,6 +35,8 @@ export interface IntegrationStatusEntry {
 export interface OsIntegrationStatusEntry {
   service: string;
   enabled: boolean;
+  /** The organisation's managed `services` policy keeps it from running (ADR-091). */
+  blocked_by_policy?: boolean;
   display_name: string;
   description: string;
 }

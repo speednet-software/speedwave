@@ -68,6 +68,8 @@ export interface PluginStatusEntry {
   /** Markdown release notes from the plugin's `CHANGELOG.md`; absent when the package ships none. */
   changelog?: string;
   enabled: boolean;
+  /** The organisation's managed `services` policy keeps it from running (ADR-091). */
+  blocked_by_policy?: boolean;
   configured: boolean;
   auth_fields: PluginAuthField[];
   /** Stored values keyed by `auth_fields[].key`, for prefilling the form; secret fields are never included. */

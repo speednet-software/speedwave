@@ -31,6 +31,8 @@ mod ide_bridge_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
+mod managed_policy_watch;
+mod management_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
 mod model_picker;
@@ -849,6 +851,15 @@ fn main() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
             }
 
+            speedwave_runtime::management::refresh_inventory();
+            match managed_policy_watch::start(app.handle().clone()) {
+                Ok(Some(watch)) => {
+                    app.manage(std::sync::Mutex::new(watch));
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("the organisation's policy is not watched: {e:#}"),
+            }
+
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
@@ -861,6 +872,15 @@ fn main() {
                      Contact your administrator to correct the managed configuration."
                 );
                 log::error!("telemetry policy check failed: {}", e);
+                show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
+            }
+
+            if let Err(e) = speedwave_runtime::config::check_llm_egress_policy_at_boot() {
+                let body = format!(
+                    "Speedwave could not apply the organization AI route policy.\n\n{e}\n\n\
+                     Contact your administrator to correct the managed configuration."
+                );
+                log::error!("AI route policy check failed: {}", e);
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
@@ -1229,6 +1249,8 @@ fn main() {
             update_commands::set_update_settings,
             update_commands::get_bundle_reconcile_state,
             ui_prefs_cmd::get_beta_enabled,
+            management_cmd::get_management_status,
+            management_cmd::get_managed_access,
             export_diagnostics,
             integrations_cmd::get_integrations,
             integrations_cmd::set_integration_enabled,

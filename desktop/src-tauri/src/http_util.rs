@@ -47,12 +47,28 @@ pub(crate) async fn read_body_limited(
 pub(crate) fn build_hardened_client(
     default_headers: Option<reqwest::header::HeaderMap>,
 ) -> Result<reqwest::Client, String> {
+    build_hardened_client_trusting(default_headers, None)
+}
+
+/// [`build_hardened_client`] that also trusts the PEM certificates in `extra_roots` (a managed
+/// gateway behind the organisation's internal CA) on top of the built-in roots.
+pub(crate) fn build_hardened_client_trusting(
+    default_headers: Option<reqwest::header::HeaderMap>,
+    extra_roots: Option<&str>,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(DEFAULT_REQUEST_TIMEOUT)
         .user_agent(format!("Speedwave-Desktop/{}", env!("SPEEDWAVE_VERSION")));
     if let Some(headers) = default_headers {
         builder = builder.default_headers(headers);
+    }
+    if let Some(pem) = extra_roots {
+        let certs = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+            .map_err(|e| format!("Invalid CA certificates: {e}"))?;
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
     }
     builder
         .build()
