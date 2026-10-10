@@ -180,10 +180,19 @@ pub fn anthropic_wire_model_id(catalog_id: &str, plan: AnthropicPlan) -> String 
     }
 }
 
+/// Claude Code's `--model` alias for the account default model.
+pub const DEFAULT_MODEL_ALIAS: &str = "default";
+
 /// Claude Code's built-in `--model` aliases, in the order Claude Code's docs list them;
 /// `containers/entrypoint.sh`'s settings.json foreign-model guard mirrors this list.
 pub const CLAUDE_CODE_MODEL_ALIASES: &[&str] = &[
-    "default", "best", "fable", "sonnet", "opus", "haiku", "opusplan",
+    DEFAULT_MODEL_ALIAS,
+    "best",
+    "fable",
+    "sonnet",
+    "opus",
+    "haiku",
+    "opusplan",
 ];
 
 /// A settings.json `model` value `containers/entrypoint.sh`'s foreign-model guard keeps: a

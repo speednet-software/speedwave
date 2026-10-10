@@ -110,25 +110,22 @@ impl ChatSessions {
         self.entry_for_project(project).map(|e| e.session)
     }
 
+    pub(crate) fn check_transcript_free(
+        &self,
+        tab_id: &str,
+        transcript: Option<&str>,
+    ) -> Result<(), String> {
+        let tabs = self.lock_tabs();
+        Self::ensure_transcript_free(&tabs, tab_id, transcript)
+    }
+
     pub(crate) fn claim_transcript(
         &self,
         tab_id: &str,
         transcript: Option<&str>,
     ) -> Result<(), String> {
         let tabs = self.lock_tabs();
-        if let Some(sid) = transcript {
-            let taken_elsewhere = tabs.iter().any(|(id, e)| {
-                id != tab_id
-                    && e.transcript
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_deref()
-                        == Some(sid)
-            });
-            if taken_elsewhere {
-                return Err(MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB.to_string());
-            }
-        }
+        Self::ensure_transcript_free(&tabs, tab_id, transcript)?;
         if let Some(entry) = tabs.get(tab_id) {
             *entry
                 .transcript
@@ -136,6 +133,39 @@ impl ChatSessions {
                 .unwrap_or_else(PoisonError::into_inner) = transcript.map(str::to_string);
         }
         Ok(())
+    }
+
+    pub(crate) fn tab_owning_transcript(&self, transcript: &str) -> Option<String> {
+        self.lock_tabs()
+            .iter()
+            .find(|(_, e)| Self::holds_transcript(e, transcript))
+            .map(|(id, _)| id.clone())
+    }
+
+    fn ensure_transcript_free(
+        tabs: &HashMap<String, TabEntry>,
+        tab_id: &str,
+        transcript: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(sid) = transcript else {
+            return Ok(());
+        };
+        let taken_elsewhere = tabs
+            .iter()
+            .any(|(id, e)| id != tab_id && Self::holds_transcript(e, sid));
+        if taken_elsewhere {
+            return Err(MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB.to_string());
+        }
+        Ok(())
+    }
+
+    fn holds_transcript(entry: &TabEntry, transcript: &str) -> bool {
+        entry
+            .transcript
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_deref()
+            == Some(transcript)
     }
 
     pub(crate) fn other_entry_for_project(&self, project: &str, tab_id: &str) -> bool {
@@ -286,6 +316,37 @@ mod tests {
         reg.claim_transcript(TAB_A, Some(SID)).unwrap();
         reg.remove(TAB_A).unwrap();
         reg.claim_transcript(TAB_B, Some(SID)).unwrap();
+    }
+
+    #[test]
+    fn check_transcript_free_rejects_a_transcript_held_elsewhere_and_writes_nothing() {
+        let reg = ChatSessions::default();
+        let a = reg.prepare(TAB_A, "acme").unwrap();
+        let b = reg.prepare(TAB_B, "acme").unwrap();
+        reg.claim_transcript(TAB_A, Some(SID)).unwrap();
+
+        let err = reg.check_transcript_free(TAB_B, Some(SID)).unwrap_err();
+
+        assert_eq!(err, MSG_TRANSCRIPT_OPEN_IN_OTHER_TAB);
+        assert_eq!(a.transcript.lock().unwrap().as_deref(), Some(SID));
+        assert_eq!(b.transcript.lock().unwrap().as_deref(), None);
+        reg.check_transcript_free(TAB_A, Some(SID)).unwrap();
+        reg.check_transcript_free(TAB_B, None).unwrap();
+        assert_eq!(b.transcript.lock().unwrap().as_deref(), None);
+    }
+
+    #[test]
+    fn tab_owning_transcript_names_the_holder_until_it_is_removed() {
+        let reg = ChatSessions::default();
+        reg.prepare(TAB_A, "acme").unwrap();
+        reg.prepare(TAB_B, "acme").unwrap();
+        assert_eq!(reg.tab_owning_transcript(SID), None);
+
+        reg.claim_transcript(TAB_B, Some(SID)).unwrap();
+        assert_eq!(reg.tab_owning_transcript(SID).as_deref(), Some(TAB_B));
+
+        reg.remove(TAB_B).unwrap();
+        assert_eq!(reg.tab_owning_transcript(SID), None);
     }
 
     #[test]

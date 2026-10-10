@@ -1191,6 +1191,7 @@ fn main() {
             chat_session_cmd::apply_chat_effort,
             chat_session_cmd::get_plan_usage,
             chat_session_cmd::get_context_usage,
+            chat_session_cmd::tab_owning_transcript,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,

@@ -44,7 +44,7 @@ fn start_session_inner(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     registry
-        .claim_transcript(tab_id, resume_session_id)
+        .check_transcript_free(tab_id, resume_session_id)
         .map_err(kept_session_error)?;
 
     let oauth_just_started = ensure_oauth_running(&oauth_arc, project);
@@ -67,6 +67,10 @@ fn start_session_inner(
     .map_err(|e| failure_before_swap(!recreated, e))?;
 
     speedwave_runtime::session::reap_unconfirmed(&rt, &chat::claude_container_name(project))
+        .map_err(|e| failure_before_swap(!recreated, e))?;
+
+    registry
+        .claim_transcript(tab_id, resume_session_id)
         .map_err(|e| failure_before_swap(!recreated, e))?;
 
     log::info!("extracting old session for this tab");
@@ -379,6 +383,10 @@ fn control_handle_for(
     let session_arc = registry
         .any_for_project(project)
         .ok_or_else(|| MSG_NO_SESSION_FOR_PROJECT.to_string())?;
+    session_control_handle(&session_arc)
+}
+
+fn session_control_handle(session_arc: &Arc<Mutex<ChatSession>>) -> Result<ControlHandle, String> {
     let session = session_arc
         .try_lock()
         .map_err(|_| MSG_SESSION_BUSY.to_string())?;
@@ -399,6 +407,15 @@ fn control_query_inner<T>(
 }
 
 #[tauri::command]
+pub(crate) async fn tab_owning_transcript(
+    session_id: String,
+    state: tauri::State<'_, SharedChatSessions>,
+) -> Result<Option<String>, String> {
+    crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
+    Ok(state.inner().tab_owning_transcript(&session_id))
+}
+
+#[tauri::command]
 pub(crate) async fn get_chat_session_info(
     project: String,
     state: tauri::State<'_, SharedChatSessions>,
@@ -407,14 +424,15 @@ pub(crate) async fn get_chat_session_info(
     Ok(session_info_state_inner(state.inner(), &project))
 }
 
-const MAX_MODEL_ID_LEN: usize = 256;
-
 fn validate_model_pick(model: &str) -> Result<(), String> {
     if model.is_empty() {
         return Err("model must not be empty".to_string());
     }
-    if model.len() > MAX_MODEL_ID_LEN {
-        return Err(format!("model id is longer than {MAX_MODEL_ID_LEN} bytes"));
+    if model.len() > chat::MAX_MODEL_ID_LEN {
+        return Err(format!(
+            "model id is longer than {} bytes",
+            chat::MAX_MODEL_ID_LEN
+        ));
     }
     if model.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("model id must not contain whitespace or control characters".to_string());
@@ -548,26 +566,23 @@ pub(crate) async fn get_plan_usage(
 #[tauri::command]
 pub(crate) async fn get_context_usage(
     project: String,
+    tab_id: String,
     state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<ContextUsage, String> {
     check_project(&project)?;
-    let registry = state.inner().clone();
-    tokio::task::spawn_blocking(move || context_usage_inner(&registry, &project))
+    let session_arc = tab_session_for_project(state.inner(), &tab_id, &project)?;
+    tokio::task::spawn_blocking(move || context_usage_inner(&session_arc))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn context_usage_inner(
-    registry: &SharedChatSessions,
-    project: &str,
-) -> Result<ContextUsage, String> {
-    control_query_inner(
-        registry,
-        project,
-        ControlQuery::ContextUsage,
-        control_channel::parse_context_usage,
-    )
-    .map(ContextUsage::drawn_categories_only)
+fn context_usage_inner(session_arc: &Arc<Mutex<ChatSession>>) -> Result<ContextUsage, String> {
+    let handle = session_control_handle(session_arc)?;
+    handle
+        .query(ControlQuery::ContextUsage)
+        .and_then(|value| control_channel::parse_context_usage(&value))
+        .map_err(|e| e.to_string())
+        .map(ContextUsage::drawn_categories_only)
 }
 
 #[cfg(test)]
@@ -758,18 +773,37 @@ mod tests {
     }
 
     #[test]
-    fn start_session_inner_claims_the_transcript_before_any_start_work() {
+    fn start_session_inner_checks_the_transcript_before_any_start_work() {
+        let source = include_str!("chat_session_cmd.rs");
+        let body = extract_fn_body(source, "fn start_session_inner(");
+        let check_pos = body
+            .find("check_transcript_free")
+            .expect("start_session_inner must check the transcript for this tab");
+        let work_pos = body
+            .find("ensure_oauth_running")
+            .expect("start_session_inner must call ensure_oauth_running");
+        assert!(
+            check_pos < work_pos,
+            "the resume dedup must reject a doubly-opened conversation before any start work"
+        );
+    }
+
+    #[test]
+    fn start_session_inner_claims_the_transcript_after_the_last_check_that_keeps_the_session() {
         let source = include_str!("chat_session_cmd.rs");
         let body = extract_fn_body(source, "fn start_session_inner(");
         let claim_pos = body
             .find("claim_transcript")
             .expect("start_session_inner must claim the transcript for this tab");
-        let work_pos = body
-            .find("ensure_oauth_running")
-            .expect("start_session_inner must call ensure_oauth_running");
+        let reap_pos = body
+            .find("reap_unconfirmed")
+            .expect("start_session_inner must reap unconfirmed instances");
+        let swap_pos = body
+            .find("std::mem::replace(")
+            .expect("start_session_inner must swap the session");
         assert!(
-            claim_pos < work_pos,
-            "the resume dedup must reject a doubly-opened conversation before any start work"
+            reap_pos < claim_pos && claim_pos < swap_pos,
+            "a failure that keeps the running session must leave its transcript slot untouched"
         );
     }
 
@@ -1264,13 +1298,14 @@ mod tests {
         let fixture: serde_json::Value =
             serde_json::from_str(control_channel::FIXTURE).expect("fixture is valid JSON");
         let captured = &fixture["run_A"]["get_context_usage/claude-opus-5"];
-        let (reg, entry) = registry_with("acme");
+        let (_, entry) = registry_with("acme");
         let control = {
             let mut session = entry.session.lock().unwrap();
             session.set_test_stdin_sink(Vec::new());
             session.control_channel_for_test()
         };
-        let reader = std::thread::spawn(move || context_usage_inner(&reg, "acme"));
+        let session_arc = entry.session.clone();
+        let reader = std::thread::spawn(move || context_usage_inner(&session_arc));
 
         let usage = answer_the_pending_query(&control, reader, captured).expect("context usage");
 
@@ -1448,7 +1483,7 @@ mod tests {
         ] {
             assert_eq!(validate_model_pick(good), Ok(()), "{good}");
         }
-        let too_long = "m".repeat(MAX_MODEL_ID_LEN + 1);
+        let too_long = "m".repeat(chat::MAX_MODEL_ID_LEN + 1);
         for bad in [
             "",
             " claude-haiku-4-5",
@@ -1488,7 +1523,11 @@ mod tests {
     #[test]
     fn model_and_effort_picks_resolve_their_tab_before_spawn_blocking() {
         let source = include_str!("chat_session_cmd.rs");
-        for signature in ["async fn switch_chat_model(", "async fn apply_chat_effort("] {
+        for signature in [
+            "async fn switch_chat_model(",
+            "async fn apply_chat_effort(",
+            "async fn get_context_usage(",
+        ] {
             let body = extract_fn_body(source, signature);
             let resolved = body
                 .find("tab_session_for_project(")

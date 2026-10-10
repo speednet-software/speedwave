@@ -1616,12 +1616,14 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
+pub(crate) const MAX_MODEL_ID_LEN: usize = 128;
+
 pub(crate) fn validate_launch_model(model: &str) -> Result<(), String> {
     if model.is_empty() {
         return Err("model id must not be empty".to_string());
     }
-    if model.len() > 128 {
-        return Err("model id too long (max 128 chars)".to_string());
+    if model.len() > MAX_MODEL_ID_LEN {
+        return Err(format!("model id too long (max {MAX_MODEL_ID_LEN} chars)"));
     }
     let base = model
         .strip_suffix(speedwave_runtime::defaults::ONE_MILLION_SUFFIX)
@@ -2991,6 +2993,25 @@ mod tests {
         assert_eq!(v["tab_id"], "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(v["chunk_type"], "Text");
         assert_eq!(v["data"]["content"], "hi");
+    }
+
+    #[test]
+    fn tab_stream_chunk_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        assert!(
+            ts.contains("export type TabStreamChunk = StreamChunk & { tab_id: string };"),
+            "models/chat.ts must mirror TabStreamChunk as the tagged chunk plus tab_id"
+        );
+        let wrapped = TabStreamChunk {
+            tab_id: "550e8400-e29b-41d4-a716-446655440000",
+            chunk: StreamChunk::Text {
+                content: "hi".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&wrapped).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["chunk_type", "data", "tab_id"]);
     }
 
     #[test]

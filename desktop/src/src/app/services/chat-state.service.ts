@@ -162,6 +162,17 @@ export class ChatStateService {
     return undefined;
   }
 
+  private async backendOwnerOf(sessionId: string): Promise<ChatSessionStore | undefined> {
+    if (this._tabs().size < 2) return undefined;
+    try {
+      const tabId = await this.tauri.invoke<string | null>('tab_owning_transcript', { sessionId });
+      return tabId ? this._tabs().get(tabId) : undefined;
+    } catch (err) {
+      this.log.debug(`[chat-state] tab_owning_transcript failed: ${String(err)}`);
+      return undefined;
+    }
+  }
+
   /**
    * Creates a new tab, eagerly starts its backend session, and activates it.
    * @returns The new tab's id.
@@ -189,10 +200,8 @@ export class ChatStateService {
   }
 
   /**
-   * Removes the tab from the strip at once and activates its right neighbor, else its left one;
-   * closing the last tab replaces it with a fresh one instead of leaving zero tabs. The backend
-   * teardown (interrupt, `close_chat_tab`) runs after the strip updates; the returned promise
-   * settles once it is done.
+   * Removes the tab at once and activates its right neighbor, else its left one; the last tab is
+   * replaced by a fresh one. The returned promise settles once the backend teardown is done.
    * @param tabId - Id of the tab to close.
    */
   async closeTab(tabId: string): Promise<void> {
@@ -278,18 +287,13 @@ export class ChatStateService {
   }
 
   /**
-   * Resumes a conversation. A tab already owning the session is activated; if that tab's
-   * backend session already ended (e.g. a container restart while it was backgrounded), the
-   * activation is followed by a real reconnect instead of a silent no-op. Otherwise, with the
-   * beta tab UI on and under the tab cap, resuming always opens a new tab, even when the
-   * active tab is pristine, so a resumed conversation never silently replaces whatever the
-   * active tab was showing. Without beta, or at the cap, the active tab resumes in place
-   * (today's replace semantics).
+   * Resumes a conversation: the tab owning it is activated (and reconnected if its session ended);
+   * otherwise beta under the cap opens a new tab, and without beta the active tab resumes in place.
    * @param sessionId - Session UUID to resume.
    */
   async openConversation(sessionId: string): Promise<void> {
     if (this._closingTabs.size > 0) await this.closingTabsSettled();
-    const owner = this.findTabOwning(sessionId);
+    const owner = this.findTabOwning(sessionId) ?? (await this.backendOwnerOf(sessionId));
     if (owner) {
       this.activateTab(owner.tabId);
       if (owner.sessionEnded()) {
@@ -366,9 +370,7 @@ export class ChatStateService {
   readonly launchModel: Signal<string | null> = computed(() => this.activeStore().launchModel());
 
   /**
-   * Takes a composer model pick for the ACTIVE TAB ONLY (SPEED-388): a `set_model` on a live
-   * session, queued while busy, or an idle respawn carrying `--model`; routed picks keep the
-   * project-level config write-through plus the compose re-render.
+   * Takes a composer model pick for the active tab only (ADR-092).
    * @param sel - Selected model triad emitted by the model selector.
    */
   applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -411,10 +413,8 @@ export class ChatStateService {
   }
 
   /**
-   * Unregistering (null) makes overflow default to auto-resume. Remembered at the facade
-   * level (`_resumeDecider`) so a project switch, which discards the active store and
-   * replaces it with a fresh one, carries the registration over instead of silently
-   * dropping it.
+   * Registers the overflow decider (null restores auto-resume); kept at the facade so a project
+   * switch carries it over to the fresh store.
    * @param cb - Decider callback, or null to unregister.
    */
   setResumeDecider(cb: (() => Promise<'resume' | 'fresh'>) | null): void {
@@ -642,9 +642,8 @@ export class ChatStateService {
   }
 
   /**
-   * Re-reads `get_llm_config()` and updates every open tab's fallback-chain cache — a provider
-   * config save is project-level, so a background tab must not keep a stale cache until its own
-   * next `refreshControlData()` cycle.
+   * Re-reads `get_llm_config()` into every open tab's fallback-chain cache, since a provider
+   * config save is project-level.
    */
   async refreshLlmConfigCacheAll(): Promise<void> {
     await Promise.all(Array.from(this._tabs().values(), (store) => store.refreshLlmConfigCache()));

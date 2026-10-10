@@ -678,7 +678,7 @@ pub struct ProjectUserEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
     /// Default Anthropic model for new chat tabs (wire id, `[1m]` allowed);
-    /// `None` = no pin, so a spawn without a tab override sends `--model default`.
+    /// `None` = no pin, so a spawn without a tab override passes no `--model` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_pin: Option<String>,
     /// One-shot marker: the legacy `settings.json` `model` key was migrated into

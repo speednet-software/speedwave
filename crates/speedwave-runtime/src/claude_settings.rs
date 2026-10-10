@@ -5,11 +5,15 @@ use std::path::Path;
 
 use crate::fs_perms;
 
+const MODEL_KEY: &str = "model";
+
 /// The `model` pin of the project's `settings.json`, or `None` when unset or unreadable.
+#[cfg(test)]
 pub fn get_model_pin(data_dir: &Path, project: &str) -> Option<String> {
-    read_settings_string_key(data_dir, project, "model")
+    read_settings_string_key(data_dir, project, MODEL_KEY)
 }
 
+#[cfg(test)]
 fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option<String> {
     let path = settings_path(data_dir, project);
     let contents = fs_perms::read_regular_file_no_follow(&path)
@@ -23,8 +27,6 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
 pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     take_settings_key(data_dir, project, "effortLevel")
 }
-
-const MODEL_KEY: &str = "model";
 
 /// Removes the legacy `model` key and returns its string value, if any.
 pub fn take_legacy_model_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {

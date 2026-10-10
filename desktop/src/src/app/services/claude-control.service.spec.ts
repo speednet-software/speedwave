@@ -214,7 +214,7 @@ describe('ClaudeControlService', () => {
     expect(logger.debug).toHaveBeenCalledWith('get_plan_usage failed: control request timed out');
   });
 
-  it('returns the context usage of the project', async () => {
+  it('returns the context usage of the tab', async () => {
     const calls: Array<Record<string, unknown> | undefined> = [];
     mockTauri.invokeHandler = async (cmd, args) => {
       if (cmd !== 'get_context_usage') return undefined;
@@ -223,8 +223,8 @@ describe('ClaudeControlService', () => {
     };
     const service = createService();
 
-    expect(await service.contextUsage('acme')).toEqual(CONTEXT);
-    expect(calls).toEqual([{ project: 'acme' }]);
+    expect(await service.contextUsage('acme', 'tab-1')).toEqual(CONTEXT);
+    expect(calls).toEqual([{ project: 'acme', tabId: 'tab-1' }]);
   });
 
   it('degrades context usage to null on any failure', async () => {
@@ -233,7 +233,7 @@ describe('ClaudeControlService', () => {
     };
     const service = createService();
 
-    expect(await service.contextUsage('acme')).toBeNull();
+    expect(await service.contextUsage('acme', 'tab-1')).toBeNull();
   });
 
   it('stays usable when the event subscription fails', async () => {

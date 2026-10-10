@@ -95,7 +95,7 @@ fn is_adoptable_legacy_model_pin(model: &str) -> bool {
     let base = model
         .strip_suffix(speedwave_runtime::defaults::ONE_MILLION_SUFFIX)
         .unwrap_or(model);
-    base != "default"
+    base != speedwave_runtime::defaults::DEFAULT_MODEL_ALIAS
 }
 
 fn set_model_pin_in(

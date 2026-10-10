@@ -5,11 +5,9 @@ use serde::Serialize;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
     anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
-    OneMillionContext, ANTHROPIC_MODELS, EFFORT_LEVELS,
+    OneMillionContext, ANTHROPIC_MODELS, DEFAULT_MODEL_ALIAS, EFFORT_LEVELS,
 };
 use std::path::Path;
-
-const DEFAULT_ROW_VALUE: &str = "default";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct PickerRow {
@@ -70,7 +68,7 @@ fn group_of<'a>(id: &str, info: &'a SessionInfo) -> Vec<&'a ModelRow> {
     let named: Vec<&ModelRow> = group
         .iter()
         .copied()
-        .filter(|m| m.value != DEFAULT_ROW_VALUE)
+        .filter(|m| m.value != DEFAULT_MODEL_ALIAS)
         .collect();
     if named.is_empty() {
         group
@@ -178,7 +176,7 @@ pub(crate) fn build_picker(info: &SessionInfo, plan: AnthropicPlan) -> Option<Mo
     let default_id = info
         .models
         .iter()
-        .find(|m| m.value == DEFAULT_ROW_VALUE)
+        .find(|m| m.value == DEFAULT_MODEL_ALIAS)
         .map(|m| canonical_anthropic_model_id(row_model(m)).to_string());
 
     let mut rows: Vec<PickerRow> = Vec::new();

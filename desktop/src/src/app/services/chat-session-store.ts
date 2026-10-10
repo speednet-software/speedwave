@@ -535,17 +535,14 @@ export class ChatSessionStore {
   private readonly _launchModel = signal<string | null>(null);
   private _launchRead = 0;
   /**
-   * Anthropic model this tab's latest spawn launched with: its override, else the project pin
-   * read at the spawn, else `DEFAULT_ALIAS`; null before the first spawn. Badge source until
-   * the session reports its model.
+   * Model this tab's latest spawn launched with (override, else project pin, else `DEFAULT_ALIAS`);
+   * null before the first spawn. Badge source until the session reports its model.
    */
   readonly launchModel: Signal<string | null> = this._launchModel.asReadonly();
 
   /**
-   * Takes a composer model pick for THIS TAB ONLY (SPEED-388, ADR-092): a live session gets a
-   * `set_model` and records it once accepted, a busy chat queues it, an idle tab records it and
-   * respawns with `--model`. Anthropic picks record the tab override and persist nothing
-   * project-wide; routed picks keep the config write-through plus a compose re-render.
+   * Takes a composer model pick for this tab only (ADR-092): `set_model` on a live session, queued
+   * while busy, else recorded for the respawn; routed picks keep the config write-through.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
@@ -887,7 +884,7 @@ export class ChatSessionStore {
 
   private async refreshContextUsage(project: string): Promise<void> {
     const generation = this._sessionGeneration;
-    const usage = await this.deps.control.contextUsage(project);
+    const usage = await this.deps.control.contextUsage(project, this.tabId);
     if (generation !== this._sessionGeneration) return;
     if (project !== this.deps.projectState.activeProject()) return;
     this._contextSnapshot = usage;
@@ -2215,10 +2212,8 @@ export class ChatSessionStore {
   }
 
   /**
-   * Marks the store disposed, drops its queued picks and unregisters the resume decider;
-   * called on tab close and project switch. In-flight async flows still complete against this
-   * store, but the disposed flag stops every side effect that escapes it (project-status
-   * writes, `retryAuth`, session restarts on its tab id).
+   * Marks the store disposed (tab close, project switch): queued picks are dropped and in-flight
+   * flows finish without side effects that escape this store.
    */
   dispose(): void {
     this._disposed = true;

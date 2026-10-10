@@ -908,6 +908,63 @@ describe('ChatStateService', () => {
         expect(store2.sessionEnded()).toBe(false);
       });
 
+      it('branch 1: activates the tab the backend registry names as the transcript owner when the frontend ids do not match', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(true);
+        const tab1 = service.activeTabId();
+        const tab2 = await service.openTab();
+        service.activateTab(tab1);
+        mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+          if (cmd === 'tab_owning_transcript') {
+            return args?.['sessionId'] === 'backend-owned' ? tab2 : null;
+          }
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('backend-owned');
+
+        expect(service.activeTabId()).toBe(tab2);
+        expect(service.tabs().size).toBe(2);
+        expect(invokeSpy).not.toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'backend-owned' })
+        );
+      });
+
+      it('branch 1: a backend owner that is no longer an open tab falls through to a new resuming tab', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        betaEnabled.set(true);
+        await service.openTab();
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'tab_owning_transcript') return 'closed-tab-id';
+          if (cmd === 'get_conversation') return { session_id: 'orphan-owned', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('orphan-owned');
+
+        expect(service.tabs().size).toBe(3);
+        expect(invokeSpy).toHaveBeenCalledWith(
+          'resume_conversation',
+          expect.objectContaining({ sessionId: 'orphan-owned', tabId: service.activeTabId() })
+        );
+      });
+
+      it('single tab: never asks the backend for the transcript owner', async () => {
+        TestBed.inject(ProjectStateService).activeProject.set('test');
+        mockTauri.invokeHandler = async (cmd: string) => {
+          if (cmd === 'get_conversation') return { session_id: 'solo', messages: [] };
+          return undefined;
+        };
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+        await service.openConversation('solo');
+
+        expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('tab_owning_transcript');
+      });
+
       it('branch 1: also matches a tab that only optimistically claims the session', async () => {
         const tab1 = service.activeTabId();
         const tab2 = await service.openTab();

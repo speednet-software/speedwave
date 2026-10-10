@@ -28,4 +28,10 @@ The requested behavior: a new tab opens on the project default model, and a mode
 
 Decision 3's live transport changes: a composer pick on a live session is a `set_model` control request to that tab's process (`switch_chat_model` with `tab_id`), never a wire `/model` input (ADR-088 SPEED-696/SPEED-709 amendments). The pick becomes the tab override only when Claude Code confirms it (or does not answer in time); a refused pick records nothing and hands the badge back. The dev-side restore of an Anthropic `settings.json` pin for a kept session (`restore_model_pin`) is not carried over: the kept session's tab override is restored in its store instead, since no composer pick writes a project store. The 0.18 config self-heal (`config.rs::carry_anthropic_model_to_pin`) still writes the legacy `settings.json` `model` key, which decision 1's one-shot migration adopts into `model_pin`.
 
+## Amendment (2026-10-10, review of PR #1261)
+
+Model ids have one length cap: `chat.rs::MAX_MODEL_ID_LEN` (128) bounds both `validate_launch_model` and the live pick validator `chat_session_cmd.rs::validate_model_pick`, so a `set_model` pick can no longer be accepted at a length the next spawn rejects. The `default` alias literal is `defaults.rs::DEFAULT_MODEL_ALIAS`, read by the alias list, the legacy-pin adoption in `pin_cmd.rs` and the picker's default row.
+
+The per-tab model selection of this ADR is not beta-gated: a composer pick is a tab override and never a project write for every user, and the Set default row action is shown for every user (the e2e `20-slash-and-model-selector.spec.ts` persistence tests pin this without beta). Only the tab strip and its surfaces are beta-gated (desktop-ui rules).
+
 [^1]: Claude Code settings precedence and `/model` persistence: https://docs.anthropic.com/en/docs/claude-code/settings
