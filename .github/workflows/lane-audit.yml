@@ -1,0 +1,34 @@
+name: lane-audit
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-cache-workspaces: |
+            . -> target
+            ./desktop/src-tauri -> target
+          node-cache-dependency-path: |
+            mcp-servers/package-lock.json
+            desktop/src/package-lock.json
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Diff known advisories between the target branch and the PR head
+        env:
+          AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: scripts/audit-diff.sh

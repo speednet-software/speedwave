@@ -35,7 +35,7 @@ Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain
 
 ### Running Tests
 
-The required CI checks on every PR to `dev`/`main` (macOS + Windows) are the test and quality gate; the commands below are optional for a local pass. The pre-push hook runs only `make check-fmt` (fast format check, no builds/tests).
+The required CI checks on every PR to `dev` (macOS + Windows) are the test and quality gate; the commands below are optional for a local pass. There are no git hooks: run `make check-fmt` (fast format check, no builds/tests) and the test targets you touched before committing.
 
 ```bash
 # Run all tests (Rust + MCP) — optional locally; CI runs it
@@ -59,7 +59,7 @@ make check-all
 
 ## Commit Conventions
 
-This project uses [Conventional Commits](https://www.conventionalcommits.org/). Commit messages are validated by commitlint via a git hook.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/). The PR title is validated by commitlint in the required `validate` check (`.github/workflows/pr-title.yml`), since a squash merge turns it into the commit message on `dev`.
 
 Format: `type(scope): description`
 
@@ -84,11 +84,12 @@ docs: update installation instructions
 chore(deps): bump tokio to 1.40
 ```
 
-**Version bumps from commits:** Conventional commits drive automated releases via [release-please](https://github.com/googleapis/release-please):
+**Release notes from commits:** every merge to `dev` becomes a beta release within the hour, and conventional commit types drive the changelog git-cliff generates for it (see [RELEASING.md](RELEASING.md)), not a version bump — the version always comes from git (commit count), never from the commit type:
 
-- `fix:` → patch bump (e.g. `0.3.0` → `0.3.1`)
-- `feat:` → minor bump (e.g. `0.3.0` → `0.4.0`)
-- `BREAKING CHANGE` footer → major bump (minor while `0.x`)
+- `feat:` → "Features" section
+- `fix:` → "Bug Fixes" section
+- `!` suffix or a `BREAKING CHANGE` footer → "Breaking changes" section
+- everything else (`chore`, `docs`, `ci`, `test`, `style`, `build`, `refactor`, `revert`) is hidden from the changelog
 
 ## Pull Request Process
 

@@ -148,6 +148,45 @@ setup() {
 }
 
 
+@test "beta version with build number passes with assets named as uploaded" {
+  export VERSION=0.21.0+115
+  export TAG_NAME=v0.21.0+115
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-beta.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-beta.json"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+
+@test "beta version passes when GitHub stores '+' in asset names as '.'" {
+  export VERSION=0.21.0+115
+  export TAG_NAME=v0.21.0+115
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-beta-dotted.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-beta.json"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+
+@test "beta version missing a signature fails with the expected name" {
+  export VERSION=0.21.0+115
+  export TAG_NAME=v0.21.0+115
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-beta-missing-macos-sig.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-beta.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing signature: Speedwave_0.21.0+115_macOS_Apple_Silicon.app.tar.gz.sig" ]]
+}
+
+
+@test "non-numeric build metadata in VERSION fails" {
+  export VERSION=0.21.0+abc
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Invalid VERSION format" ]]
+}
+
+
 @test "missing latest.json asset fails with expected message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-missing-latest.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
@@ -195,7 +234,7 @@ setup() {
 @test "empty sig file fails with 'signature file empty' message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
-  export EMPTY_SIG_NAME="Speedwave_0.8.1_macOS_Intel.app.tar.gz.sig"
+  export EMPTY_SIG_NAME="Speedwave_0.8.1_x64_en-US.msi.zip.sig"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "signature file empty:" ]]
@@ -253,7 +292,7 @@ setup() {
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-missing-platform-key.json"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "latest.json missing required platform key: darwin-x86_64" ]]
+  [[ "$output" =~ "latest.json missing required platform key: windows-x86_64-msi" ]]
 }
 
 
@@ -280,7 +319,7 @@ setup() {
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-browser-download-url.json"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "platforms.darwin-x86_64.url does not start with" ]]
+  [[ "$output" =~ "platforms.darwin-aarch64.url does not start with" ]]
 }
 
 

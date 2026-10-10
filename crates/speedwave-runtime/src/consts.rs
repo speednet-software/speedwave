@@ -326,6 +326,12 @@ pub const CLOUDSTORAGE_TCC_PREFIX: &str = "CloudStorage TCC required: ";
 /// Desktop updater (`UpdateSettings::check_interval_hours` default).
 pub const UPDATE_CHECK_INTERVAL_HOURS: u32 = 24;
 
+/// Default timeout for outbound HTTP requests (ADR-041).
+pub const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Maximum outbound HTTP response body size (5 MiB) to prevent OOM from rogue servers.
+pub const HTTP_MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
+
 /// Delay in seconds after `compose_up_recreate` before checking container health.
 /// Allows crash-looping containers to exit before `compose_ps` reports state.
 pub const CONTAINER_STABILIZATION_DELAY_SECS: u64 = 3;

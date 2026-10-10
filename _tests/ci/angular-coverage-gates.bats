@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
-WORKFLOW=".github/workflows/test.yml"
+WORKFLOW=".github/workflows/lane-test-desktop.yml"
 CI_STEP="Angular tests + coverage"
 
 setup() {

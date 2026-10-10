@@ -1,0 +1,33 @@
+name: lane-ci-config
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: CI workflow shape tests
+        run: make test-ci
+
+      - name: Install actionlint
+        run: |
+          curl -fsSLO https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSL -o checksums.txt https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          grep 'actionlint_1.7.12_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+          chmod +x actionlint
+
+      - name: actionlint (invalid workflow, e.g. typo'd needs, bad expressions, unknown events/inputs, shellcheck of run steps)
+        run: ./actionlint -color

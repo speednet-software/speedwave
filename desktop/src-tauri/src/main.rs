@@ -989,10 +989,6 @@ fn main() {
                                         "update available from tray check: {}",
                                         info.version
                                     );
-                                    use tauri::Emitter;
-                                    if let Err(e) = app_clone.emit("update_available", &info) {
-                                        log::error!("failed to emit update_available event: {e}");
-                                    }
                                 }
                                 Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray update check found no new version");

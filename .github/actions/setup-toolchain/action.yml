@@ -1,31 +1,58 @@
 name: 'Setup Toolchain'
-description: 'Sets up Node.js (version from .node-version) + Rust stable + swatinem/rust-cache. Shared by desktop-build.yml and desktop-release.yml so the pinned action SHAs live in one place.'
+description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Cargo/Rust caching. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
 inputs:
-  rust-targets:
-    description: 'Comma-separated rustup targets to install with the toolchain (empty for none)'
+  node:
+    description: 'Whether to set up Node.js at all'
     required: false
-    default: ''
-  rust-cache-workspaces:
-    description: 'swatinem/rust-cache `workspaces` value (newline-separated dir -> cache-dir entries)'
-    required: true
+    default: 'true'
+  node-cache:
+    description: 'Whether setup-node caches the npm store'
+    required: false
+    default: 'true'
   node-cache-dependency-path:
     description: 'setup-node cache-dependency-path (lockfiles that key the npm cache)'
     required: false
     default: 'desktop/src/package-lock.json'
+  rust-targets:
+    description: 'Comma-separated rustup targets to install with the toolchain (empty for none)'
+    required: false
+    default: ''
+  rust-components:
+    description: 'Comma-separated rustup components to install with the toolchain (empty for none)'
+    required: false
+    default: ''
+  rust-cache-workspaces:
+    description: 'swatinem/rust-cache `workspaces` value (newline-separated dir -> cache-dir entries); empty skips this cache'
+    required: false
+    default: ''
+  cargo-cache-paths:
+    description: 'actions/cache `path` value for a plain Cargo cache (newline-separated); empty skips this cache'
+    required: false
+    default: ''
+  cargo-cache-key:
+    description: 'actions/cache `key` for the plain Cargo cache (required when cargo-cache-paths is set)'
+    required: false
+    default: ''
+  cargo-cache-restore-keys:
+    description: 'actions/cache `restore-keys` for the plain Cargo cache'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
     - name: Setup Node.js
+      if: inputs.node == 'true'
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
       with:
         node-version-file: .node-version
-        cache: npm
+        cache: ${{ inputs.node-cache == 'true' && 'npm' || '' }}
         cache-dependency-path: ${{ inputs.node-cache-dependency-path }}
 
     - name: Install Rust stable
       uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
       with:
         targets: ${{ inputs.rust-targets }}
+        components: ${{ inputs.rust-components }}
 
     - name: Ensure cross-compile target is installed
       if: inputs.rust-targets != ''
@@ -33,14 +60,21 @@ runs:
       env:
         RUST_TARGETS: ${{ inputs.rust-targets }}
       run: |
-        # rust-toolchain's `targets` is best-effort; add explicitly so a cache
-        # hit that skipped the toolchain install still has the targets.
         IFS=',' read -ra _targets <<< "$RUST_TARGETS"
         for t in "${_targets[@]}"; do
           [ -n "$t" ] && rustup target add "$t"
         done
 
     - name: Rust cache
+      if: inputs.rust-cache-workspaces != ''
       uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       with:
         workspaces: ${{ inputs.rust-cache-workspaces }}
+
+    - name: Cache Cargo
+      if: inputs.cargo-cache-paths != ''
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ${{ inputs.cargo-cache-paths }}
+        key: ${{ inputs.cargo-cache-key }}
+        restore-keys: ${{ inputs.cargo-cache-restore-keys }}

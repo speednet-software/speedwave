@@ -1,178 +1,92 @@
 version: 2
+
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: cron
+      cronjob: '0 6 * * 1'
+      timezone: Europe/Warsaw
+    target-branch: dev
+    labels:
+      - dependencies
+
 updates:
   - package-ecosystem: cargo
     directories:
       - /
       - /desktop/src-tauri
       - /containers/proxy
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-    groups:
-      rust-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-        group-by: dependency-name
-      rust-major:
-        patterns:
-          - "*"
-        update-types:
-          - major
-        group-by: dependency-name
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
 
   - package-ecosystem: npm
     directory: /
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      npm-root-minor-patch:
-        update-types:
-          - minor
-          - patch
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
 
   - package-ecosystem: npm
     directory: /mcp-servers
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      npm-mcp-minor-patch:
-        update-types:
-          - minor
-          - patch
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
 
   - package-ecosystem: npm
     directory: /mcp-servers/playwright
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      npm-playwright-minor-patch:
-        update-types:
-          - minor
-          - patch
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
 
   - package-ecosystem: npm
     directory: /desktop/src
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      angular:
-        patterns:
-          - "@angular/*"
-          - "angular-eslint"
-          - "@angular-eslint/*"
-      npm-desktop-minor-patch:
-        update-types:
-          - minor
-          - patch
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
     ignore:
-      - dependency-name: "typescript"
-        versions: [">=6.1"]
+      - dependency-name: 'typescript'
+        versions: ['>=6.1']
 
   - package-ecosystem: npm
     directory: /desktop/e2e
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      npm-e2e-minor-patch:
-        update-types:
-          - minor
-          - patch
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
     ignore:
-      - dependency-name: "typescript"
-        versions: [">=7"]
+      - dependency-name: 'typescript'
+        versions: ['>=7']
 
   - package-ecosystem: github-actions
     directories:
       - /
-      - "/.github/actions/*"
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      actions-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-        group-by: dependency-name
-      actions-major:
-        patterns:
-          - "*"
-        update-types:
-          - major
-        group-by: dependency-name
+      - '/.github/actions/*'
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
 
   - package-ecosystem: docker
-    directory: /mcp-servers/hub
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    labels:
-      - dependencies
-
-  - package-ecosystem: docker
-    directory: /mcp-servers/slack
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    labels:
-      - dependencies
-
-  - package-ecosystem: docker
-    directory: /mcp-servers/sharepoint
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    labels:
-      - dependencies
-
-  - package-ecosystem: docker
-    directory: /mcp-servers/redmine
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    labels:
-      - dependencies
-
-  - package-ecosystem: docker
-    directory: /mcp-servers/gitlab
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    labels:
-      - dependencies
+    directories:
+      - /mcp-servers/hub
+      - /mcp-servers/slack
+      - /mcp-servers/sharepoint
+      - /mcp-servers/redmine
+      - /mcp-servers/gitlab
+    patterns: ['*']
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 3
+      semver-major-days: 14

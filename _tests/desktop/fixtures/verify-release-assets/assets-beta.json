@@ -1,0 +1,16 @@
+[
+  {"name": "latest.json"},
+  {"name": "Speedwave_0.21.0+115_macOS_Apple_Silicon.app.tar.gz"},
+  {"name": "Speedwave_0.21.0+115_macOS_Apple_Silicon.app.tar.gz.sig"},
+  {"name": "Speedwave_0.21.0+115_macOS_Apple_Silicon.dmg"},
+  {"name": "Speedwave_0.21.0+115_x64-setup.exe"},
+  {"name": "Speedwave_0.21.0+115_x64-setup.exe.sig"},
+  {"name": "Speedwave_0.21.0+115_x64-setup.nsis.zip"},
+  {"name": "Speedwave_0.21.0+115_x64-setup.nsis.zip.sig"},
+  {"name": "Speedwave_0.21.0+115_x64_en-US.msi"},
+  {"name": "Speedwave_0.21.0+115_x64_en-US.msi.sig"},
+  {"name": "Speedwave_0.21.0+115_x64_en-US.msi.zip"},
+  {"name": "Speedwave_0.21.0+115_x64_en-US.msi.zip.sig"},
+  {"name": "speedwave-v0.21.0+115-aarch64-apple-darwin.tar.gz"},
+  {"name": "speedwave-v0.21.0+115-x86_64-pc-windows-msvc.zip"}
+]

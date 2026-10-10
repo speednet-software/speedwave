@@ -6,16 +6,15 @@ set -euo pipefail
 : "${RID:?RID required}"
 : "${TAG_NAME:?TAG_NAME required}"
 
-[[ "$VERSION"  =~ ^[0-9]+\.[0-9]+\.[0-9]+$           ]] || { echo "::error::Invalid VERSION format: '$VERSION' (expected X.Y.Z)" >&2; exit 1; }
+[[ "$VERSION"  =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?$  ]] || { echo "::error::Invalid VERSION format: '$VERSION' (expected X.Y.Z or X.Y.Z+N)" >&2; exit 1; }
 [[ "$REPO"     =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$  ]] || { echo "::error::Invalid REPO format: '$REPO' (expected owner/name)" >&2; exit 1; }
-[[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$          ]] || { echo "::error::Invalid TAG_NAME format: '$TAG_NAME' (expected vX.Y.Z)" >&2; exit 1; }
+[[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?$ ]] || { echo "::error::Invalid TAG_NAME format: '$TAG_NAME' (expected vX.Y.Z or vX.Y.Z+N)" >&2; exit 1; }
 [[ "$RID"      =~ ^[0-9]+$                           ]] || { echo "::error::Invalid RID format: '$RID' (expected numeric ID)" >&2; exit 1; }
 
 V="$VERSION"
 
 SIGNED_ASSETS=(
   "Speedwave_${V}_macOS_Apple_Silicon.app.tar.gz"
-  "Speedwave_${V}_macOS_Intel.app.tar.gz"
   "Speedwave_${V}_x64-setup.exe"
   "Speedwave_${V}_x64-setup.nsis.zip"
   "Speedwave_${V}_x64_en-US.msi"
@@ -25,9 +24,7 @@ SIGNED_ASSETS=(
 UNSIGNED_ASSETS=(
   "latest.json"
   "Speedwave_${V}_macOS_Apple_Silicon.dmg"
-  "Speedwave_${V}_macOS_Intel.dmg"
   "speedwave-v${V}-aarch64-apple-darwin.tar.gz"
-  "speedwave-v${V}-x86_64-apple-darwin.tar.gz"
   "speedwave-v${V}-x86_64-pc-windows-msvc.zip"
 )
 
@@ -42,12 +39,19 @@ while IFS= read -r line; do
   PRESENT+=("$line")
 done < <(gh api "repos/${REPO}/releases/${RID}/assets" --jq '.[].name')
 
-has_asset() {
+stored_name() {
   local needle="$1" a
   for a in "${PRESENT[@]}"; do
-    [ "$a" = "$needle" ] && return 0
+    if [ "$a" = "$needle" ] || [ "$a" = "${needle//+/.}" ]; then
+      printf '%s\n' "$a"
+      return 0
+    fi
   done
   return 1
+}
+
+has_asset() {
+  stored_name "$1" >/dev/null
 }
 
 for name in "${UNSIGNED_ASSETS[@]}" "${SIGNED_ASSETS[@]}"; do
@@ -77,7 +81,6 @@ if not isinstance(platforms, dict) or not platforms:
     sys.exit("latest.json platforms is empty")
 # Missing keys = auto-update broken for that platform. Extra keys are allowed.
 required_keys = (
-    "darwin-x86_64", "darwin-x86_64-app",
     "darwin-aarch64", "darwin-aarch64-app",
     "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis",
 )
@@ -97,7 +100,7 @@ for key in required_keys:
 PY
 
 for name in "${SIGNED_ASSETS[@]}"; do
-  sig="${name}.sig"
+  sig="$(stored_name "${name}.sig")"
   gh release download "$TAG_NAME" --repo "$REPO" --pattern "$sig" --dir "$TMP"
   [ -s "$TMP/$sig" ] || fail "signature file empty: $sig"
 done

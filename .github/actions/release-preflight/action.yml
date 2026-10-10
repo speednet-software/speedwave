@@ -1,0 +1,36 @@
+name: 'Release preflight'
+description: 'Node + Rust toolchain, cache and the full audit gate shared by the release promote and hotfix jobs. Caller must checkout the repo first (local composite actions need the repo on disk).'
+runs:
+  using: 'composite'
+  steps:
+    - name: Fetch release lines and tags
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*' --no-tags
+        git fetch origin --tags --force
+
+    - name: Setup Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version-file: .node-version
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+    - name: Rust cache
+      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      with:
+        shared-key: speedwave-version
+
+    - name: npm audit (both workspaces)
+      shell: bash
+      run: make audit-mcp audit-desktop
+
+    - name: Install cargo-audit
+      shell: bash
+      run: cargo install cargo-audit --locked
+
+    - name: Full audit on the release commit (a red audit blocks promote and hotfix alike)
+      shell: bash
+      run: make audit-rust

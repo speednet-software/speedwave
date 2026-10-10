@@ -7,6 +7,7 @@ use speedwave_runtime::engine_path;
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
+use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
 use strum::IntoEnumIterator;
 
@@ -252,7 +253,7 @@ fn maybe_print_update_hint() {
         return;
     }
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = env!("SPEEDWAVE_VERSION");
 
     if let Some(cache) = read_update_cache() {
         let elapsed = now_secs().saturating_sub(cache.last_check);
@@ -274,23 +275,14 @@ fn maybe_print_update_hint() {
     }
 
     std::thread::spawn(move || {
-        let latest = match self_update::backends::github::Update::configure()
-            .repo_owner(REPO_OWNER)
-            .repo_name(REPO_NAME)
-            .bin_name(consts::CLI_BINARY)
-            .current_version(current)
-            .build()
-        {
-            Ok(updater) => match updater.get_latest_release() {
-                Ok(release) => release.version,
-                Err(_) => return,
-            },
-            Err(_) => return,
+        let channel = update_channel::read_update_channel();
+        let Ok(target_tag) = target_release_tag(channel) else {
+            return;
         };
 
         write_update_cache(&UpdateCheckCache {
             last_check: now_secs(),
-            latest_version: latest,
+            latest_version: target_tag.trim_start_matches('v').to_string(),
         });
     });
 }
@@ -320,9 +312,23 @@ fn run_self_update() -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to locate current binary: {e}"))?;
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = env!("SPEEDWAVE_VERSION");
     out!("Current version: {}", current);
+
+    let channel = update_channel::read_update_channel();
+    out!("Update channel: {}", channel);
     out!("Checking for updates...");
+
+    let target_tag = target_release_tag(channel)?;
+
+    if !tag_is_newer_than(current, &target_tag)? {
+        out!("Already up to date ({}).", current);
+        write_update_cache(&UpdateCheckCache {
+            last_check: now_secs(),
+            latest_version: target_tag.trim_start_matches('v').to_string(),
+        });
+        return Ok(());
+    }
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -330,6 +336,7 @@ fn run_self_update() -> anyhow::Result<()> {
         .bin_name(consts::CLI_BINARY)
         .show_download_progress(true)
         .current_version(current)
+        .release_tag(&target_tag)
         .build()?
         .update()?;
 
@@ -338,7 +345,7 @@ fn run_self_update() -> anyhow::Result<()> {
         latest_version: status.version().to_string(),
     });
 
-    if status.updated() {
+    if status.is_updated() {
         out!("Updated to version {}.", status.version());
         let resources_version = speedwave_runtime::build::resolve_build_root()
             .ok()
@@ -366,6 +373,20 @@ fn run_self_update() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
+    update_channel::fetch_release_tag(channel).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `true` when `tag` is a strictly newer release than `current` (full `Ord`, build metadata included).
+fn tag_is_newer_than(current: &str, tag: &str) -> anyhow::Result<bool> {
+    let current_version = semver::Version::parse(current)
+        .map_err(|e| anyhow::anyhow!("Cannot parse current version {current}: {e}"))?;
+    let candidate = tag.trim_start_matches('v');
+    let candidate_version = semver::Version::parse(candidate)
+        .map_err(|e| anyhow::anyhow!("Cannot parse release tag {tag}: {e}"))?;
+    Ok(candidate_version > current_version)
 }
 
 fn validate_project_name(name: &str) -> Result<(), String> {
@@ -501,7 +522,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if action == CliAction::Version {
-        out!("speedwave {}", env!("CARGO_PKG_VERSION"));
+        out!("speedwave {}", env!("SPEEDWAVE_VERSION"));
         std::process::exit(0);
     }
 
@@ -1990,6 +2011,83 @@ mod tests {
     }
 
     #[test]
+    fn run_self_update_resolves_target_tag_before_building() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let channel_read = fn_body
+            .find("read_update_channel()")
+            .expect("run_self_update must read the installation channel");
+        let tag_resolution = fn_body
+            .find("target_release_tag(")
+            .expect("run_self_update must resolve a target release tag");
+        let release_tag_call = fn_body
+            .find(".release_tag(")
+            .expect("run_self_update must pass release_tag to self_update");
+        let build_call = fn_body
+            .find(".build()?")
+            .expect("run_self_update must call .build()");
+        assert!(
+            channel_read < tag_resolution,
+            "the channel must be read before resolving a tag"
+        );
+        assert!(
+            tag_resolution < release_tag_call,
+            "the resolved tag must be passed to release_tag"
+        );
+        assert!(
+            release_tag_call < build_call,
+            "release_tag must be set before build()"
+        );
+    }
+
+    #[test]
+    fn run_self_update_blocks_downgrade_before_configuring_self_update() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let newer_check = fn_body
+            .find("tag_is_newer_than(")
+            .expect("run_self_update must gate on tag_is_newer_than before installing");
+        let configure_call = fn_body
+            .find("self_update::backends::github::Update::configure()")
+            .expect("run_self_update must configure self_update");
+        assert!(
+            newer_check < configure_call,
+            "the no-downgrade check must run before self_update is configured"
+        );
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_a_higher_version_tag_as_newer() {
+        assert!(tag_is_newer_than("0.21.0", "v0.22.0+41").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_the_same_version_as_not_newer() {
+        assert!(!tag_is_newer_than("0.21.0+37", "v0.21.0+37").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_a_lower_version_tag_as_not_newer() {
+        assert!(!tag_is_newer_than("0.21.1", "v0.21.0").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_compares_build_metadata() {
+        assert!(tag_is_newer_than("0.21.0+37", "v0.21.0+38").unwrap());
+        assert!(!tag_is_newer_than("0.21.0+38", "v0.21.0+37").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_errors_on_unparsable_current_version() {
+        assert!(tag_is_newer_than("not-a-version", "v0.21.0").is_err());
+    }
+
+    #[test]
+    fn tag_is_newer_than_errors_on_unparsable_tag() {
+        assert!(tag_is_newer_than("0.21.0", "not-a-tag").is_err());
+    }
+
+    #[test]
     fn main_heals_llm_config_before_project_actions() {
         let source = include_str!("main.rs");
         let heal = source
@@ -2367,6 +2465,24 @@ mod tests {
     }
 
     #[test]
+    fn maybe_print_update_hint_resolves_tag_by_channel() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn maybe_print_update_hint(");
+        assert!(
+            fn_body.contains("read_update_channel()"),
+            "the background hint must read the installation channel"
+        );
+        assert!(
+            fn_body.contains("target_release_tag("),
+            "the background hint must resolve the same tag self-update would"
+        );
+        assert!(
+            !fn_body.contains("get_latest_release()"),
+            "the hint must not use self_update's own channel-blind release lookup"
+        );
+    }
+
+    #[test]
     fn now_secs_is_nonzero() {
         assert!(now_secs() > 0);
     }
@@ -2690,11 +2806,11 @@ mod tests {
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
         let updated_check = fn_body
-            .find("status.updated()")
-            .expect("must check status.updated()");
+            .find("status.is_updated()")
+            .expect("must check status.is_updated()");
         let rebuild_call = fn_body.find("run_rebuild(").expect("must call run_rebuild");
         let already_up_to_date = fn_body
-            .find("Already up to date")
+            .rfind("Already up to date")
             .expect("must have 'Already up to date' branch");
 
         assert!(

@@ -1,0 +1,81 @@
+name: lane-test-desktop
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-desktop:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-components: clippy
+          cargo-cache-paths: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+          cargo-cache-key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          cargo-cache-restore-keys: ${{ runner.os }}-cargo-desktop-
+          node-cache-dependency-path: desktop/src/package-lock.json
+
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
+      - name: Install dependencies
+        working-directory: desktop/src-tauri
+        run: cargo fetch
+
+      - name: Install Angular dependencies
+        working-directory: desktop/src
+        run: npm ci
+
+      - name: Install mcp-servers dependencies
+        working-directory: mcp-servers
+        run: npm ci
+
+      - name: Create resource stubs for Tauri build script
+        run: scripts/create-desktop-stubs.sh
+
+      - name: Desktop clippy
+        working-directory: desktop/src-tauri
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: cargo clippy -- -D warnings
+
+      - name: Desktop tests
+        env:
+          SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
+        run: make test-desktop-run
+
+      - name: mcp-os bundle upgrade-path test
+        run: make test-mcp-os-bundle
+
+      - name: Angular ESLint
+        working-directory: desktop/src
+        run: npx eslint 'src/**/*.ts'
+
+      - name: Angular tests + coverage
+        working-directory: desktop/src
+        run: npx ng test --no-watch --coverage
+
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: Desktop config tests (fast)
+        run: make test-desktop-config
+
+      - name: Release-gate tests (gh shim)
+        run: make test-release-gate
+
+      - name: Desktop bats tests
+        run: make test-desktop-build

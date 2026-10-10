@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-runtime"
-version = "0.20.0"
+version = "0.0.0"
 edition = "2021"
 publish = false
 description = "Container runtime abstraction for Speedwave (Lima on macOS, WSL2 on Windows)"
@@ -38,7 +38,7 @@ strum_macros = "0.28"
 tempfile = "3"
 
 hound = { version = "3", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"] }
 whisper-rs = { version = "0.16", optional = true, features = ["log_backend"] }
 num_cpus = { version = "1", optional = true }
 
@@ -66,7 +66,7 @@ windows-sys = { version = "0.61", features = [
 rustix = { version = "1", features = ["fs"] }
 
 [features]
-audio-transcription = ["dep:hound", "dep:num_cpus", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
+audio-transcription = ["dep:hound", "dep:num_cpus", "dep:whisper-rs", "windows-capture"]
 windows-capture = ["dep:ash", "dep:cpal", "dep:wasapi"]
 test-support = []
 mcp-os-bundle-e2e = []
@@ -75,6 +75,9 @@ mcp-os-bundle-e2e = []
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 mockito = "1"
 serial_test = "4"
+
+[build-dependencies]
+speedwave-version = { path = "../speedwave-version" }
 
 [lints]
 workspace = true

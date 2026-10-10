@@ -1,0 +1,26 @@
+{
+  "database": { "advisory-count": 800 },
+  "lockfile": { "dependency-count": 400 },
+  "settings": { "target_arch": null, "target_os": null, "severity": null, "ignore": [], "informational_warnings": [] },
+  "vulnerabilities": {
+    "found": true,
+    "count": 1,
+    "list": [
+      {
+        "advisory": {
+          "id": "RUSTSEC-2026-0194",
+          "package": "quick-xml",
+          "title": "quick-xml DoS via unbounded entity expansion",
+          "date": "2026-01-10",
+          "url": "https://rustsec.org/advisories/RUSTSEC-2026-0194",
+          "categories": ["denial-of-service"],
+          "severity": "medium"
+        },
+        "versions": { "patched": [">=0.41.0"], "unaffected": [] },
+        "affected": null,
+        "package": { "name": "quick-xml", "version": "0.37.2" }
+      }
+    ]
+  },
+  "warnings": {}
+}

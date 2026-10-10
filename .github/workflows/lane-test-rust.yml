@@ -1,0 +1,49 @@
+name: lane-test-rust
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-rust:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          node: 'false'
+          cargo-cache-paths: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            containers/proxy/target/
+          cargo-cache-key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock', 'containers/proxy/Cargo.lock') }}
+          cargo-cache-restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Install cmake
+        run: brew install cmake
+
+      - name: Fetch cargo dependencies
+        run: cargo fetch
+
+      - name: Install cargo-llvm-cov
+        run: |
+          rustup component add llvm-tools-preview
+          curl -fsSLO https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-aarch64-apple-darwin.tar.gz
+          echo "7e821a6c90c0884f79f759f5d9be50799ade67bb82515186d922f26032ef43b8  cargo-llvm-cov-aarch64-apple-darwin.tar.gz" | shasum -a 256 -c -
+          tar -xzf cargo-llvm-cov-aarch64-apple-darwin.tar.gz -C "$HOME/.cargo/bin" cargo-llvm-cov
+
+      - name: Rust coverage (>=70% lines, catches an untested regression before merge)
+        run: make coverage-rust
+
+      - name: Audio transcription tests
+        run: make test-transcription
+
+      - name: Proxy tests
+        run: make test-proxy

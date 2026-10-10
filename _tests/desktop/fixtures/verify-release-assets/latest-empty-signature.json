@@ -11,14 +11,6 @@
       "signature": "canned-sig",
       "url": "https://api.github.com/repos/test/repo/releases/assets/101"
     },
-    "darwin-x86_64": {
-      "signature": "canned-sig",
-      "url": "https://api.github.com/repos/test/repo/releases/assets/102"
-    },
-    "darwin-x86_64-app": {
-      "signature": "canned-sig",
-      "url": "https://api.github.com/repos/test/repo/releases/assets/102"
-    },
     "windows-x86_64": {
       "signature": "canned-sig",
       "url": "https://api.github.com/repos/test/repo/releases/assets/103"

@@ -6,7 +6,8 @@ Every change must work on **both macOS and Windows**.
 
 ## How to work in this repo
 
-- **Commands run through the Makefile**, never `cargo`/`npm` directly. Write tests alongside every change and run the targets you touched (e.g. `make test-rust`); the pre-push hook runs `make check-fmt`, and the required CI checks (macOS + Windows) are the real test gate. Full command list: `.claude/rules/commands.md`.
+- **Commands run through the Makefile**, never `cargo`/`npm` directly. Write tests alongside every change and run the targets you touched (e.g. `make test-rust`); the required CI checks (macOS + Windows) are the real test gate. Full command list: `.claude/rules/commands.md`.
+- **There are no git hooks.** Run `make check-fmt` and the test targets you touched before every commit and before finishing work; CI is the gate.
 - **This file stays thin on purpose.** The real guidance lives in `.claude/rules/` — the SSOT registry, architecture map, alignment pairs, and per-area pitfalls are there, kept next to the code they describe. When a rule and the code disagree, trust the code and fix the rule.
 - If a needed guideline is missing, add it as a new file in `.claude/rules/` — never as a link out to `docs/` or an ADR. These rule files must stay self-contained.
 
@@ -16,7 +17,7 @@ Every change must work on **both macOS and Windows**.
 
 - `engineering-principles.md` — KISS/YAGNI/DRY/SSOT/SOLID + code hygiene (comments, tests, dead code, no marker comments, no lint suppression).
 - `security.md` — the non-negotiable security invariants; every change must preserve or improve them.
-- `git-workflow.md` — branches, PR titles (`dev→main` is `feat`/`fix` only), merges, hooks and CI you must never bypass.
+- `git-workflow.md` — branches, PR titles (`dev→main` is `feat`/`fix` only), merges, CI you must never bypass.
 - `architecture.md` — the system map: runtime handle, compose renderer, hub/proxy/workers, config merge, updates/rollback, Claude-in-container.
 - `commands.md` — the Makefile targets.
 
