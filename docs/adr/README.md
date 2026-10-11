@@ -97,7 +97,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-089](ADR-089-claude-code-control-channel-as-source-of-truth.md)   | Claude Code's control channel as the source of truth for Anthropic models, context and plan limits                          | Accepted                                                                           |
 | [ADR-090](ADR-090-tab-keyed-chat-sessions.md)                          | Tab-keyed chat session registry replacing the single-session singleton                                                      | Accepted                                                                           |
 | [ADR-091](ADR-091-tab-aware-claude-memory-ceiling.md)                  | Tab-aware Claude memory ceiling: a formula over tab capacity and VM size                                                    | Accepted                                                                           |
-| [ADR-092](ADR-092-per-tab-model-selection.md)                          | Per-tab model selection with a config-backed project default                                                                | Accepted                                                                           |
+| [ADR-092](ADR-092-per-tab-model-selection.md)                          | Per-tab model selection with a settings.json-backed project default                                                         | Accepted                                                                           |
 
 ## Creating a New ADR
 

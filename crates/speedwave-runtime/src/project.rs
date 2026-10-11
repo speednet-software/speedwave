@@ -177,8 +177,6 @@ fn add_project_with_validated_dir(
         plugin_settings: None,
         policy: None,
         effort_pin: None,
-        model_pin: None,
-        model_pin_migrated: false,
     };
 
     user_config.projects.push(entry);
@@ -422,8 +420,6 @@ mod tests {
                     plugin_settings: None,
                     policy: None,
                     effort_pin: None,
-                    model_pin: None,
-                    model_pin_migrated: false,
                 })
                 .collect(),
             active_project: Some(active.to_string()),
@@ -599,8 +595,6 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
-                model_pin: None,
-                model_pin_migrated: false,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -680,8 +674,6 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
-                model_pin: None,
-                model_pin_migrated: false,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -750,8 +742,6 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
-                model_pin: None,
-                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,
@@ -788,8 +778,6 @@ mod tests {
                 plugin_settings: None,
                 policy: None,
                 effort_pin: None,
-                model_pin: None,
-                model_pin_migrated: false,
             }],
             active_project: None,
             selected_ide: None,

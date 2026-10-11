@@ -234,7 +234,6 @@ const PLAN_MODE_PREFIX =
             [launchModel]="launchModel()"
             [sessionAwaited]="sessionAwaited()"
             (modelSelected)="modelSelected.emit($event)"
-            (defaultModelSelected)="defaultModelSelected.emit($event)"
             (effortSelected)="effortSelected.emit($event)"
           />
           @if (streaming()) {
@@ -358,8 +357,6 @@ export class ComposerComponent implements AfterViewInit {
   readonly stopRequested = output<void>();
 
   readonly modelSelected = output<ModelSelection>();
-
-  readonly defaultModelSelected = output<ModelSelection>();
 
   readonly effortSelected = output<string>();
 

@@ -160,71 +160,54 @@ export interface ModelSelection {
               </div>
             } @else {
               @for (opt of filteredOptions(); track opt.id) {
-                <div class="flex w-full items-stretch">
-                  <button
-                    type="button"
-                    [attr.data-testid]="'model-selector-option-' + opt.id"
-                    class="mono hover-bg flex min-w-0 flex-1 items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
-                    [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
-                    (click)="select(opt)"
-                  >
-                    <span class="flex min-w-0 items-start gap-2">
-                      @if (isAnthropic()) {
-                        <span
-                          class="inline-block w-3 shrink-0 text-[var(--teal)]"
-                          aria-hidden="true"
-                        >
-                          @if (opt.id === activeOptionId()) {
-                            <span data-testid="model-selector-active-mark">&#x2713;</span>
-                          }
-                        </span>
-                      }
-                      <span class="flex min-w-0 flex-col gap-0.5">
-                        <span class="flex items-center gap-2">
-                          <span>{{ opt.label }}</span>
-                          @if (isDefaultOption(opt)) {
-                            <span
-                              data-testid="model-selector-default-badge"
-                              class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
-                              >Default</span
-                            >
-                          }
-                          @if (opt.requiresUsageCredits) {
-                            <span
-                              data-testid="model-selector-usage-credits-badge"
-                              class="rounded border border-amber-500/60 px-1 text-[9px] uppercase tracking-wide text-amber-300"
-                              >Usage credits</span
-                            >
-                          }
-                        </span>
-                        @if (opt.description) {
+                <button
+                  type="button"
+                  [attr.data-testid]="'model-selector-option-' + opt.id"
+                  class="mono hover-bg flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
+                  [attr.aria-current]="opt.id === activeOptionId() ? 'true' : null"
+                  (click)="select(opt)"
+                >
+                  <span class="flex min-w-0 items-start gap-2">
+                    @if (isAnthropic()) {
+                      <span class="inline-block w-3 shrink-0 text-[var(--teal)]" aria-hidden="true">
+                        @if (opt.id === activeOptionId()) {
+                          <span data-testid="model-selector-active-mark">&#x2713;</span>
+                        }
+                      </span>
+                    }
+                    <span class="flex min-w-0 flex-col gap-0.5">
+                      <span class="flex items-center gap-2">
+                        <span>{{ opt.label }}</span>
+                        @if (opt.isDefault) {
                           <span
-                            [attr.data-testid]="'model-selector-description-' + opt.id"
-                            class="whitespace-normal text-[10px] leading-tight text-[var(--ink-mute)]"
-                            >{{ opt.description }}</span
+                            data-testid="model-selector-default-badge"
+                            class="rounded border border-[var(--line-strong)] px-1 text-[9px] uppercase tracking-wide text-[var(--ink-mute)]"
+                            >Default</span
+                          >
+                        }
+                        @if (opt.requiresUsageCredits) {
+                          <span
+                            data-testid="model-selector-usage-credits-badge"
+                            class="rounded border border-amber-500/60 px-1 text-[9px] uppercase tracking-wide text-amber-300"
+                            >Usage credits</span
                           >
                         }
                       </span>
+                      @if (opt.description) {
+                        <span
+                          [attr.data-testid]="'model-selector-description-' + opt.id"
+                          class="whitespace-normal text-[10px] leading-tight text-[var(--ink-mute)]"
+                          >{{ opt.description }}</span
+                        >
+                      }
                     </span>
-                    @if (opt.promptPrice !== undefined) {
-                      <span class="text-[var(--ink-mute)]"
-                        >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
-                      >
-                    }
-                  </button>
-                  @if (isAnthropic() && !isDefaultOption(opt)) {
-                    <button
-                      type="button"
-                      [attr.data-testid]="'model-selector-make-default-' + opt.id"
-                      class="mono hover-bg shrink-0 px-2 text-[9px] uppercase tracking-wide text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                      appTooltip="Use this model for new tabs"
-                      placement="top"
-                      (click)="selectDefault(opt)"
+                  </span>
+                  @if (opt.promptPrice !== undefined) {
+                    <span class="text-[var(--ink-mute)]"
+                      >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
                     >
-                      Set default
-                    </button>
                   }
-                </div>
+                </button>
               }
             }
           </div>
@@ -278,8 +261,6 @@ export class ModelSelectorComponent {
 
   readonly modelSelected = output<ModelSelection>();
 
-  readonly defaultModelSelected = output<ModelSelection>();
-
   readonly effortSelected = output<string>();
 
   readonly open = signal(false);
@@ -299,8 +280,6 @@ export class ModelSelectorComponent {
 
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
-
-  protected readonly projectPin = signal<string | null>(null);
 
   private readonly modelHint = signal('');
 
@@ -338,22 +317,6 @@ export class ModelSelectorComponent {
   });
 
   protected readonly activeOptionId = computed<string | null>(() => this.activeRow()?.id ?? null);
-
-  protected readonly defaultOptionId = computed<string | null>(() => {
-    if (!this.isAnthropic()) return null;
-    const project = this.projectId();
-    const pin = this.projectPin();
-    if (pin) {
-      const row = this.picker.rowFor(project, pin);
-      if (row) return row.id;
-    }
-    return this.picker.picker(project)?.rows.find((r) => r.is_default)?.id ?? null;
-  });
-
-  protected isDefaultOption(opt: { id: string; isDefault: boolean }): boolean {
-    const id = this.defaultOptionId();
-    return id === null ? opt.isDefault : opt.id === id;
-  }
 
   private readonly activeRow = computed<ModelPickerRow | null>(() =>
     this.isAnthropic() ? this.picker.rowFor(this.projectId(), this.displayModel()) : null
@@ -432,10 +395,6 @@ export class ModelSelectorComponent {
       const id = this.projectId();
       if (!this.isAnthropic() || !id) return;
       if (this.control.sessionInfoState(id).state !== 'pending') void this.picker.refresh(id);
-    });
-    effect(() => {
-      const id = this.projectId();
-      if (this.isAnthropic() && id) void this.loadProjectPin(id);
     });
     effect(() => {
       const live = this.sessionModel();
@@ -628,25 +587,6 @@ export class ModelSelectorComponent {
     this.open.set(false);
   }
 
-  /**
-   * Emits the Set-default action for a row: the project default model for new tabs.
-   * The account-default row clears the pin instead of setting one.
-   * @param opt - The row whose model becomes the project default.
-   */
-  protected selectDefault(opt: ModelOption): void {
-    const summary = this.summary();
-    if (!summary || !isAnthropicKind(summary.kind)) return;
-    this.defaultModelSelected.emit({
-      catalogId: opt.id,
-      wireId: opt.wireId,
-      providerId: summary.provider_id,
-      kind: summary.kind,
-      isDefault: opt.isDefault,
-      contextTokens: opt.contextTokens,
-    });
-    this.projectPin.set(opt.isDefault ? null : opt.wireId);
-  }
-
   private async loadSummary(projectId: string): Promise<void> {
     try {
       const summary = await this.tauri.invoke<ActiveProviderSummary>(
@@ -677,17 +617,6 @@ export class ModelSelectorComponent {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: get_model_hint failed: ${msg}`);
-    }
-  }
-
-  private async loadProjectPin(projectId: string): Promise<void> {
-    try {
-      const pin = await this.tauri.invoke<string | null>('get_model_pin', { projectId });
-      if (this.projectId() !== projectId) return;
-      this.projectPin.set(pin);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`model-selector: get_model_pin failed: ${msg}`);
     }
   }
 

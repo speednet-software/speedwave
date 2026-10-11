@@ -188,7 +188,7 @@ describe('ChatStateService', () => {
       expect(spy).toHaveBeenCalledWith('start_chat', {
         project: 'test',
         tabId: service.tabId,
-        model: null,
+        model: DEFAULT_ALIAS,
       });
     });
 
@@ -338,7 +338,10 @@ describe('ChatStateService', () => {
         expect(store1.tabModel()).toBe('claude-haiku-4-5');
         expect(store2.tabModel()).toBeNull();
         expect(store2.pickedModel()).toBe('');
-        expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('set_model_pin');
+        expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+          projectId: '',
+          model: 'claude-haiku-4-5',
+        });
 
         const projectState = TestBed.inject(ProjectStateService);
         projectState.activeProject.set('test');
@@ -346,7 +349,7 @@ describe('ChatStateService', () => {
         invokeSpy.mockClear();
         await store2.startChatSession();
         const tab2Start = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
-        expect(tab2Start?.[1]).toEqual({ project: 'test', tabId: tab2, model: null });
+        expect(tab2Start?.[1]).toEqual({ project: 'test', tabId: tab2, model: DEFAULT_ALIAS });
       });
 
       it('the composer badge follows the active tab pick per tab', async () => {
@@ -711,8 +714,8 @@ describe('ChatStateService', () => {
       });
     });
 
-    describe('launchModel after Set default', () => {
-      it('gives a tab opened after Set default the new default while the older tab keeps its own', async () => {
+    describe('a pick persists the project default for new tabs', () => {
+      it('propagates a concrete pick and the Default row to later tabs, never re-reading the pin for a tab that already resolved one', async () => {
         let pin: string | null = 'claude-sonnet-5';
         const handler = mockTauri.invokeHandler;
         mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
@@ -733,7 +736,7 @@ describe('ChatStateService', () => {
         const tab1 = service.activeTabId();
         expect(service.launchModel()).toBe('claude-sonnet-5');
 
-        await service.applyDefaultModelSelection({
+        await service.applyModelSelection({
           catalogId: 'claude-opus-5-5',
           wireId: 'claude-opus-5-5[1m]',
           providerId: 'anthropic',
@@ -741,25 +744,37 @@ describe('ChatStateService', () => {
           isDefault: false,
           contextTokens: 1_000_000,
         });
+        expect(pin).toBe('claude-opus-5-5[1m]');
+        expect(service.tabs().get(tab1)!.tabModel()).toBe('claude-opus-5-5[1m]');
+
         const tab2 = await service.openTab();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(service.activeTabId()).toBe(tab2);
         expect(service.launchModel()).toBe('claude-opus-5-5[1m]');
-        expect(service.tabs().get(tab1)!.launchModel()).toBe('claude-sonnet-5');
 
-        await service.applyDefaultModelSelection({
-          catalogId: 'claude-fable-5',
-          wireId: 'claude-fable-5',
+        pin = 'claude-fable-5';
+        expect(service.tabs().get(tab1)!.launchModel()).toBe('claude-opus-5-5[1m]');
+        expect(service.tabs().get(tab2)!.launchModel()).toBe('claude-opus-5-5[1m]');
+
+        const tab3 = await service.openTab();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(service.tabs().get(tab3)!.launchModel()).toBe('claude-fable-5');
+
+        await service.applyModelSelection({
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
           providerId: 'anthropic',
           kind: 'anthropic_oauth',
           isDefault: true,
           contextTokens: 200_000,
         });
-        await service.openTab();
+        expect(pin).toBeNull();
+
+        const tab4 = await service.openTab();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
-        expect(service.launchModel()).toBe(DEFAULT_ALIAS);
+        expect(service.tabs().get(tab4)!.launchModel()).toBe(DEFAULT_ALIAS);
       });
     });
 
