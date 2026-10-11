@@ -4105,7 +4105,7 @@ mod tests {
             "Rust MessageBlock::ControlChip must serialize with tag control_chip, got: {json}"
         );
 
-        let ts = include_str!("../../src/src/app/services/chat-state.service.ts");
+        let ts = include_str!("../../src/src/app/services/chat-session-store.ts");
         assert!(
             ts.contains("'control_chip'"),
             "TS normalizeHistoryBlocks must match the 'control_chip' history tag"

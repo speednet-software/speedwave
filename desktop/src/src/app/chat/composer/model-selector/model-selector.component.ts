@@ -14,13 +14,12 @@ import { TooltipDirective } from '../../../shared/tooltip.directive';
 import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { ClaudeControlService } from '../../../services/claude-control.service';
-import { ModelPickerService } from '../../../services/model-picker.service';
+import { DEFAULT_ALIAS, ModelPickerService } from '../../../services/model-picker.service';
 import { DiscoveredModelsService } from '../../../services/discovered-models.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoveredModel } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
 import type { ModelPicker, ModelPickerRow } from '../../../models/model-picker';
-import type { RefusedModelPick } from '../../../services/chat-state.service';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 import { SpinIconComponent } from '../../../shared/spin-icon.component';
@@ -51,10 +50,8 @@ export interface ModelSelection {
 }
 
 /**
- * Clickable model badge opening a searchable combobox; sources depend on the
- * active provider kind (anthropic catalog / local discovery / OpenRouter catalog).
- * Emits exactly ONE `modelSelected` event per pick; all session-live/pending/
- * write-through decisions live in `ChatStateService.applyModelSelection`.
+ * Clickable model badge opening a searchable combobox sourced per provider kind. Emits one
+ * `modelSelected` event per pick; `ChatStateService.applyModelSelection` decides what it does.
  */
 @Component({
   selector: 'app-model-selector',
@@ -256,9 +253,11 @@ export class ModelSelectorComponent {
 
   readonly sessionModel = input('');
 
-  readonly sessionAwaited = input(false);
+  readonly pickedModel = input('');
 
-  readonly refusedPick = input<RefusedModelPick | null>(null);
+  readonly launchModel = input<string | null>(null);
+
+  readonly sessionAwaited = input(false);
 
   readonly modelSelected = output<ModelSelection>();
 
@@ -281,8 +280,6 @@ export class ModelSelectorComponent {
 
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
-
-  private readonly lastPicked = signal('');
 
   private readonly modelHint = signal('');
 
@@ -406,22 +403,12 @@ export class ModelSelectorComponent {
       this.lastSessionModel = live;
       const id = this.projectId();
       if (changed && this.providerKnown() && id) void this.loadEffortState(id);
-      if (ended) {
-        this.lastPicked.set('');
-        if (id && !this.summary()?.model) void this.loadModelHint(id);
-      }
+      if (ended && id && !this.summary()?.model) void this.loadModelHint(id);
     });
     effect(() => {
       this.projectId();
       this.showEffortSegment();
       untracked(() => this.effortOpen.set(false));
-    });
-    effect(() => {
-      const refused = this.refusedPick();
-      if (!refused) return;
-      untracked(() => {
-        if (this.lastPicked() === refused.catalogId) this.lastPicked.set(refused.running ?? '');
-      });
     });
     effect(() => {
       const err = this.modelError();
@@ -434,14 +421,16 @@ export class ModelSelectorComponent {
 
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
-    const picked = this.lastPicked();
+    const picked = this.pickedModel();
     if (picked) return picked;
     const live = this.sessionModel();
     if (live) return s ? normalizeObserved(live, s.provider_id) : live;
+    const launched = this.isAnthropic() ? this.launchModel() : null;
+    if (launched) return s ? normalizeObserved(launched, s.provider_id) : launched;
     if (s?.model) return normalizeObserved(s.model, s.provider_id);
     const hint = this.modelHint();
     if (hint) return s ? normalizeObserved(hint, s.provider_id) : hint;
-    return 'default';
+    return DEFAULT_ALIAS;
   });
 
   readonly filteredOptions = computed<ModelOption[]>(() => {
@@ -457,10 +446,8 @@ export class ModelSelectorComponent {
   });
 
   /**
-   * Opens the combobox and starts the option fetch. Awaits the summary if it is
-   * missing or stale for the current project, then kicks off `fetchOptions`
-   * without awaiting it, so the combobox can render its loading state while the
-   * catalog request is in flight.
+   * Opens the combobox: awaits a missing or stale summary, then starts `fetchOptions` without
+   * awaiting it so the loading state renders while the catalog request is in flight.
    */
   async openCombobox(): Promise<void> {
     if (this.streaming()) return;
@@ -514,10 +501,8 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Fetches the option list for the active provider kind (badge combobox source).
-   * A selector instance probes a local/OpenRouter provider once per `kind|base_url`; pass
-   * `force` to re-probe. A failed probe falls back to the last known list, marked stale.
-   * Anthropic rows are the `ModelPickerService` rows; only the latest fetch writes the state.
+   * Fetches the option list for the active provider kind; a local/OpenRouter provider is probed
+   * once per `kind|base_url`, a failed probe keeps the last list marked stale.
    * @param force - Re-issue the discovery probe (or re-read the session info) even when held.
    */
   async fetchOptions(force = false): Promise<void> {
@@ -599,7 +584,6 @@ export class ModelSelectorComponent {
       isDefault: opt.isDefault,
       contextTokens: opt.contextTokens,
     });
-    this.lastPicked.set(opt.id);
     this.open.set(false);
   }
 
@@ -614,7 +598,6 @@ export class ModelSelectorComponent {
       if (this.projectId() !== projectId) return;
       this.summary.set(summary);
       this.summaryProjectId = projectId;
-      this.lastPicked.set('');
       if (!summary.model) {
         void this.loadModelHint(projectId);
       } else {

@@ -2,13 +2,16 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  Injector,
   OnDestroy,
   OnInit,
   ViewChild,
+  afterNextRender,
   computed,
   effect,
   inject,
   signal,
+  untracked,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
@@ -19,6 +22,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
+import { BetaService } from '../services/beta.service';
 import type { ConversationSummary, ChatAttachment } from '../models/chat';
 import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
@@ -88,17 +92,23 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly contextOverflowOpen = signal(false);
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
-  @ViewChild('composer') private composer?: { focusInput: () => void };
+  readonly restartConfirmOpen = signal(false);
+  readonly restartConfirmBody = signal('');
+
+  @ViewChild('composer') private composer?: ComposerComponent;
+  @ViewChild(ChatMessageListComponent) private messageList?: ChatMessageListComponent;
 
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
   private readonly planUsage = inject(PlanUsageService);
   readonly ui = inject(UiStateService);
   readonly transcription = inject(TranscriptionService);
+  private readonly beta = inject(BetaService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
   private log = inject(LoggerService);
+  private readonly injector = inject(Injector);
   private unsubProjectReady: (() => void) | null = null;
   private unsubAuthWatch: (() => void) | null = null;
 
@@ -134,6 +144,65 @@ export class ChatComponent implements OnInit, OnDestroy {
     effect(() => {
       if (this.ui.memoryOpen()) void this.loadProjectMemory();
     });
+
+    effect(() => {
+      const activeId = this.chat.activeTabId();
+      untracked(() => {
+        const outgoingId = this.previousTabId;
+        this.previousTabId = activeId;
+        if (outgoingId === null || outgoingId === activeId) return;
+        this.saveOutgoingTabState(outgoingId);
+        this.restoreIncomingTabState(activeId);
+      });
+    });
+
+    effect(() => {
+      const requested = this.ui.restartRequested();
+      untracked(() => {
+        const previous = this.previousRestartRequest;
+        this.previousRestartRequest = requested;
+        if (previous === null || previous === requested) return;
+        void this.newConversation();
+      });
+    });
+  }
+
+  private previousTabId: string | null = null;
+  /**
+   * Last seen value of `UiStateService.restartRequested`; `null` until the first effect run so a
+   * component (re)mount never replays a request bumped before it existed (shell's ⌘R channel).
+   */
+  private previousRestartRequest: number | null = null;
+
+  /**
+   * Snapshots the outgoing tab's composer draft and scroll offset before the view rebinds.
+   * @param tabId - Id of the tab being switched away from.
+   */
+  private saveOutgoingTabState(tabId: string): void {
+    const store = this.chat.tabs().get(tabId);
+    if (!store) return;
+    store.composerDraft.set(this.composer?.text.value ?? '');
+    const el = this.messageList?.scrollContainer?.nativeElement;
+    store.scrollPosition = el ? el.scrollTop : null;
+  }
+
+  /**
+   * Restores the incoming tab's composer draft immediately and its scroll offset via
+   * `afterNextRender`, after the view has rebound, so the list's auto-scroll cannot overwrite it.
+   * @param tabId - Id of the tab being switched to.
+   */
+  private restoreIncomingTabState(tabId: string): void {
+    const store = this.chat.tabs().get(tabId);
+    if (!store) return;
+    this.composer?.setText(store.composerDraft());
+    afterNextRender(
+      () => {
+        const el = this.messageList?.scrollContainer?.nativeElement;
+        if (!el) return;
+        el.scrollTop = store.scrollPosition ?? el.scrollHeight;
+      },
+      { injector: this.injector }
+    );
   }
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
@@ -355,8 +424,38 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
+  /**
+   * Restarts the current conversation (plus button, ⌘N; ⌘R with beta). With beta on, a tab holding
+   * content or a streaming turn asks for confirmation first; without beta it resets at once.
+   */
   async newConversation(): Promise<void> {
+    if (this.beta.enabled() && (this.chat.isStreaming || this.chat.hasConversation())) {
+      this.restartConfirmBody.set(
+        this.chat.isStreaming
+          ? 'The response in progress will be discarded.'
+          : 'The current conversation will be discarded.'
+      );
+      this.restartConfirmOpen.set(true);
+      this.cdr.markForCheck();
+      return;
+    }
+    await this.resetConversation();
+  }
+
+  /** User confirmed the restart: closes the dialog and performs the reset. */
+  async onRestartConfirm(): Promise<void> {
+    this.restartConfirmOpen.set(false);
+    await this.resetConversation();
+  }
+
+  /** User dismissed the restart confirmation (Cancel, backdrop, or Esc): no reset. */
+  onRestartCancel(): void {
+    this.restartConfirmOpen.set(false);
+    this.cdr.markForCheck();
+  }
+
+  /** Clears all chat + drawer state and re-runs the chat session bootstrap. */
+  private async resetConversation(): Promise<void> {
     this.ui.closeSidebar();
     this.ui.closeMemory();
     this.chat.resetForNewConversation();

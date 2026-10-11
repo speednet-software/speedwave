@@ -1,4 +1,4 @@
-use crate::chat::SharedChatSession;
+use crate::chat_registry::SharedChatSessions;
 use crate::control_channel::{ModelRow, SessionInfo, SessionInfoState};
 use crate::types::check_project;
 use serde::Serialize;
@@ -6,11 +6,9 @@ use speedwave_runtime::claude_settings;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
     anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
-    OneMillionContext, ANTHROPIC_MODELS, EFFORT_LEVELS,
+    OneMillionContext, ANTHROPIC_MODELS, DEFAULT_MODEL_ALIAS, EFFORT_LEVELS,
 };
 use std::path::Path;
-
-const DEFAULT_ROW_VALUE: &str = "default";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct PickerRow {
@@ -71,7 +69,7 @@ fn group_of<'a>(id: &str, info: &'a SessionInfo) -> Vec<&'a ModelRow> {
     let named: Vec<&ModelRow> = group
         .iter()
         .copied()
-        .filter(|m| m.value != DEFAULT_ROW_VALUE)
+        .filter(|m| m.value != DEFAULT_MODEL_ALIAS)
         .collect();
     if named.is_empty() {
         group
@@ -179,7 +177,7 @@ pub(crate) fn build_picker(info: &SessionInfo, plan: AnthropicPlan) -> Option<Mo
     let default_id = info
         .models
         .iter()
-        .find(|m| m.value == DEFAULT_ROW_VALUE)
+        .find(|m| m.value == DEFAULT_MODEL_ALIAS)
         .map(|m| canonical_anthropic_model_id(row_model(m)).to_string());
 
     let mut rows: Vec<PickerRow> = Vec::new();
@@ -236,10 +234,10 @@ pub(crate) fn normalize_pin_for_session(
 }
 
 pub(crate) fn session_info_for(
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
 ) -> Option<SessionInfo> {
-    match crate::chat_session_cmd::session_info_state_inner(session_arc, project) {
+    match crate::chat_session_cmd::session_info_state_inner(registry, project) {
         SessionInfoState::Ready { info } => Some(info),
         SessionInfoState::Pending | SessionInfoState::Unavailable => None,
     }
@@ -247,14 +245,14 @@ pub(crate) fn session_info_for(
 
 pub(crate) fn picker_for(
     user_config: &config::SpeedwaveUserConfig,
-    session_arc: &SharedChatSession,
+    registry: &SharedChatSessions,
     project: &str,
 ) -> Result<Option<ModelPicker>, String> {
     let summary = crate::containers_cmd::active_provider_summary_from(user_config, project)?;
     if !summary.kind.is_anthropic() {
         return Err("the model picker rows exist for Anthropic providers only".to_string());
     }
-    let info = session_info_for(session_arc, project);
+    let info = session_info_for(registry, project);
     let plan = plan_for(summary.kind, info.as_ref());
     Ok(info.as_ref().and_then(|info| build_picker(info, plan)))
 }
@@ -262,7 +260,7 @@ pub(crate) fn picker_for(
 #[tauri::command]
 pub(crate) fn list_model_picker(
     project: String,
-    state: tauri::State<'_, SharedChatSession>,
+    state: tauri::State<'_, SharedChatSessions>,
 ) -> Result<Option<ModelPicker>, String> {
     check_project(&project)?;
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -982,23 +980,29 @@ mod tests {
         }
     }
 
-    fn idle_session(project: &str) -> SharedChatSession {
-        std::sync::Arc::new(std::sync::Mutex::new(crate::chat::ChatSession::new(
-            project,
-        )))
+    fn idle_registry(project: &str) -> (SharedChatSessions, crate::chat_registry::TabEntry) {
+        crate::chat_registry::test_support::registry_with(project)
     }
 
     #[test]
     fn picker_offers_no_rows_until_the_session_reports_its_models() {
         let cfg = anthropic_oauth_config("proj");
-        let session = idle_session("proj");
+        let (registry, entry) = idle_registry("proj");
 
-        assert_eq!(picker_for(&cfg, &session, "proj").unwrap(), None);
+        assert_eq!(picker_for(&cfg, &registry, "proj").unwrap(), None);
 
-        let held = session.lock().unwrap();
-        let respawning = picker_for(&cfg, &session, "proj");
+        let held = entry.session.lock().unwrap();
+        let respawning = picker_for(&cfg, &registry, "proj");
         drop(held);
         assert_eq!(respawning.unwrap(), None);
+    }
+
+    #[test]
+    fn picker_offers_no_rows_for_a_project_without_a_tab() {
+        let cfg = anthropic_oauth_config("proj");
+        let registry: SharedChatSessions =
+            std::sync::Arc::new(crate::chat_registry::ChatSessions::default());
+        assert_eq!(picker_for(&cfg, &registry, "proj").unwrap(), None);
     }
 
     #[test]
@@ -1014,7 +1018,7 @@ mod tests {
         llm.providers[0].kind = LlmProviderKind::Local;
         llm.providers[0].base_url = Some("http://host.docker.internal:11434".to_string());
 
-        let err = picker_for(&cfg, &idle_session("proj"), "proj").unwrap_err();
+        let err = picker_for(&cfg, &idle_registry("proj").0, "proj").unwrap_err();
         assert!(err.contains("Anthropic providers only"), "{err}");
     }
 }

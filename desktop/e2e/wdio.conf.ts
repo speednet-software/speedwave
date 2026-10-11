@@ -27,6 +27,7 @@ const ALL_SPECS = [
   './specs/19-dirty-state-self-heal.spec.ts',
   './specs/20-slash-and-model-selector.spec.ts',
   './specs/21-usage-popover.spec.ts',
+  './specs/22-parallel-chat-tabs.spec.ts',
   FACTORY_RESET_SPEC,
 ];
 
