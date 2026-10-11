@@ -31,7 +31,7 @@ This is described here, not in another ADR. The legacy TCC.db rows were keyed by
 - Post-sign identifier assertion — `verify_identifier` in `scripts/sign-bundled-binaries.sh`
 - Startup auto-validation Tauri command (iterates `TOGGLEABLE_OS_SERVICES`, auto-disables stale toggles) — `validate_os_integrations_on_startup` in `desktop/src-tauri/src/integrations_cmd.rs`; OS-service list SSOT is `speedwave_runtime::consts::TOGGLEABLE_OS_SERVICES`
 - Auto-disable banner UI — `desktop/src/src/app/integrations/integrations.component.ts`
-- Tests — `_tests/desktop/native-cli-info-plist.bats`, `_tests/desktop/sign-bundled-binaries.bats`, `native/macos/shared/Tests/SharedCLITests/UtilitiesTests.swift`, `native/macos/{mail,notes}/Tests/{Mail,Notes}Tests.swift`, `desktop/src/src/app/integrations/integrations.component.spec.ts`
+- Tests — `_tests/desktop/native-cli-info-plist.bats` (identifier, executable and version of the embedded plist); the sub-identifier check in `sign-bundled-binaries.sh`'s `verify_identifier` has no bats coverage, manual alignment; `native/macos/shared/Tests/SharedCLITests/UtilitiesTests.swift`, `native/macos/{mail,notes}/Tests/{Mail,Notes}Tests.swift`, `desktop/src/src/app/integrations/integrations.component.spec.ts`
 
 ## Rejected alternatives
 

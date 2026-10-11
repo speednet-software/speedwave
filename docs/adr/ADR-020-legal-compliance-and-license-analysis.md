@@ -32,7 +32,7 @@ Speedwave never bundles or redistributes Claude Code and never routes Anthropic 
 
 ## Correction (was wrong)
 
-Earlier drafts of this ADR called for using a **MinGW** toolchain for Windows builds to dodge Microsoft Build Tools licensing. The shipped Windows target is `x86_64-pc-windows-msvc` (MSVC) — the only Windows target in `.github/workflows/desktop-release.yml`. Using GitHub's standard `windows-latest` MSVC toolchain carries no licensing concern, so the MinGW recommendation is withdrawn.
+Earlier drafts of this ADR called for using a **MinGW** toolchain for Windows builds to dodge Microsoft Build Tools licensing. The shipped Windows target is `x86_64-pc-windows-msvc` (MSVC) — the only Windows target in `.github/workflows/build-publish.yml`. Using GitHub's standard `windows-latest` MSVC toolchain carries no licensing concern, so the MinGW recommendation is withdrawn.
 
 ## Open compliance actions before public release
 
