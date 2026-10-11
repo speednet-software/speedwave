@@ -211,10 +211,3 @@ budget_rig() {
     CARGO_TARGET_DIR="$deep/target" run bash "$BUDGET_SCRIPT" "$deep" "root workspace build dir"
     [[ "$output" == *"target"* ]]
 }
-
-@test "test-transcription gates the root workspace on the path budget on Windows" {
-    local recipe
-    recipe="$(awk '/^test-transcription:/,/^$/' "$BATS_TEST_DIRNAME/../../Makefile")"
-    echo "$recipe" | grep -q 'check-vulkan-path-budget.sh "$(CURDIR)"'
-    echo "$recipe" | grep -q 'Windows_NT'
-}

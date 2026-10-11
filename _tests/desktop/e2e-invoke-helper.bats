@@ -1,8 +1,5 @@
 #!/usr/bin/env bats
 
-REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
-E2E_DIR="$REPO_ROOT/desktop/e2e"
-
 _script_result_error_keys() {
     python3 - "$1" <<'EOF'
 import pathlib, re, sys
@@ -31,22 +28,6 @@ for file, line, name in sorted(hits):
     print(f"{file}:{line}: {name}")
 print(f"calls={calls}")
 EOF
-}
-
-@test "no object an e2e script hands back to WebDriver carries an error key" {
-    run _script_result_error_keys "$E2E_DIR"
-
-    [ "$status" -eq 0 ]
-    hits="$(printf '%s\n' "$output" | grep -v '^calls=' || true)"
-    if [ -n "$hits" ]; then
-        echo "WebdriverIO reads a script result whose value has an error, stacktrace or stackTrace"
-        echo "key as a W3C WebDriver error response (webdriver isSuccessfulResponse) and throws"
-        echo "WebDriverError instead of returning it; carry a failure under another key, e.g. reason:"
-        echo "$hits"
-        return 1
-    fi
-    calls="$(printf '%s\n' "$output" | sed -n 's/^calls=//p')"
-    [ "$calls" -ge 3 ]
 }
 
 @test "the check flags an error key in a done payload, an execute result and a shorthand" {

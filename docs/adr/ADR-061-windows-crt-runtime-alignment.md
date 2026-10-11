@@ -36,7 +36,7 @@ Operationally:
 
 - `.sherpa-onnx-version` (root SSOT, value `1.13.2`) pinning is exact (`Cargo.toml`: `sherpa-onnx = "=1.13.2"`).
 - `scripts/lib/fetch-sherpa-onnx-md.sh` is the single download script — bash, idempotent, SHA-verified from upstream `checksum.txt`, prints the absolute `lib/` path on stdout. Used by `.github/actions/download-sherpa-onnx` (CI) and `scripts/e2e-vm.sh` (E2E, invoked via WSL bash + `wslpath` for the env var). Two env vars steer it: `SHERPA_ONNX_FETCH_DIR` overrides the extraction root (defaults to `$RUNNER_TEMP/sherpa-onnx-md` in CI, `/tmp/...` elsewhere; E2E sets `/mnt/c/sherpa-onnx-md` so `wslpath -w` yields a plain `C:\…` path); `SHERPA_ONNX_FETCH_FORCE=1` bypasses the idempotency guard for verifying a version bump locally.
-- Two workflows include the prefetch step gated on `windows-latest`: `desktop-build.yml` (PR + push CI) and `desktop-release.yml` (`publish-tauri` matrix job).
+- Two workflows include the prefetch step gated on `windows-latest`: `desktop-build.yml` (PR + push CI) and `desktop-release.yml` (`publish-tauri` matrix job). Both files, and the prefetch step itself, are gone from the current workflows (`crates/speedwave-runtime` carries no `sherpa` reference any more): ADR-075 removed `sherpa-onnx` and with it the CRT mismatch this ADR worked around, as the header above already states, and `desktop-build.yml`/`desktop-release.yml` were separately deleted in SPEED-674 ticket 7. Left as written since this ADR is itself a historical record.
 
 ## Consequences
 

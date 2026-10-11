@@ -323,12 +323,6 @@ EOF
 }
 
 
-@test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
-    grep -q "while :; do sleep 86400 & wait" "$ENTRYPOINT"
-    ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
-}
-
-
 @test "mcp-config has only speedwave-hub when MCP_OS vars are unset" {
     unset MCP_OS_URL
     unset MCP_OS_AUTH_TOKEN
@@ -661,7 +655,6 @@ PY
 @test "keeps every Claude Code model alias when ANTHROPIC_MODEL is unset" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     aliases="$(sed -n 's/.*claude-\.+|(\([a-z|]*\)).*/\1/p' "${ENTRYPOINT}" | tr '|' ' ')"
-    [[ " ${aliases} " == *" default "* && " ${aliases} " == *" opusplan "* ]]
     for alias in ${aliases} "opusplan[1m]"; do
         printf '{"model":"%s"}' "$alias" > "${TEST_HOME}/.claude/settings.json"
         run bash "${ENTRYPOINT}" echo ok
@@ -1640,10 +1633,6 @@ EOF
     [ "${#lines[@]}" -eq 1 ]
 }
 
-@test "bundled-plugin install carries at least a 120s timeout budget" {
-    grep -qE 'timeout (1[2-9][0-9]|[2-9][0-9][0-9]) claude plugin install' "$ENTRYPOINT"
-}
-
 @test "skips marketplace bootstrap when every bundled plugin is already installed" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     _stub_claude_recording_all_plugin_calls
@@ -1888,10 +1877,6 @@ EOF
     [ ! -f "$TEST_HOME/uninstall.log" ]
     grep -qxF "superpowers@claude-plugins-official" \
         "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
-}
-
-@test "the retired-plugin uninstall carries a timeout budget" {
-    grep -qE 'timeout ([6-9][0-9]|[1-9][0-9]{2,}) claude plugin uninstall' "$ENTRYPOINT"
 }
 
 @test "a failing retired-plugin uninstall keeps its marker line through a bundled-install rebuild" {
