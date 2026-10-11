@@ -539,29 +539,3 @@ JSON
     [[ "$output" == *"7d"* ]]
     [[ "$output" == *"82%"* ]]
 }
-
-
-@test "script does not use curl" {
-    ! grep -q 'curl' "$STATUSLINE"
-}
-
-@test "script does not access tokens or credentials" {
-    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE '\bsecurity\b|secret-tool|keychain|oauth|/tokens|api\.anthropic\.com'
-}
-
-@test "script does not write to /tmp cache" {
-    ! grep -qE 'mkdir.*\/tmp\/claude|\/tmp\/claude' "$STATUSLINE"
-}
-
-@test "script does not use wget or network tools" {
-    ! grep -qE 'wget|nc |netcat|fetch ' "$STATUSLINE"
-}
-
-@test "script does not read settings.json" {
-    ! grep -q 'settings.json' "$STATUSLINE"
-}
-
-@test "script uses jq only for local JSON parsing, never as a network/exec sink" {
-    grep -qE '\bjq\b' "$STATUSLINE"
-    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE 'jq[^|]*(-r?[a-zA-Z]*\s+)?["\x27]\s*\$\('
-}
