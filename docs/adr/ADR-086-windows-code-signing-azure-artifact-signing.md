@@ -31,7 +31,7 @@ Without that env the script exits 0 with a notice, so PR builds, `test.yml`'s `b
 - **Signing script (SSOT)**: `scripts/sign-windows-binaries.ps1` holds `$ModuleVersion`, `$TimestampServer`, `$SignTargets`, the credential exclusions and the post-sign verification. `$SignTargets` ↔ `tauri.windows.conf.json` `bundle.resources` is an alignment pair (alignments rules).
 - **Hooks**: `desktop/src-tauri/tauri.windows.conf.json`, `build.beforeBundleCommand` and `bundle.windows.signCommand`.
 - **Login and env export**: `.github/actions/azure-signing-login/action.yml`, used by the `publish-tauri` and `cli` jobs in `.github/workflows/desktop-release.yml`.
-- **Guards**: `_tests/desktop/sign-windows-binaries.bats` and `_tests/desktop/release-workflow-signing.bats`.
+- **Guards**: none, since SPEED-769 (2026-10-11). `_tests/desktop/sign-windows-binaries.bats` and `_tests/desktop/release-workflow-signing.bats` were deleted: every test in both files parsed workflow/script text with grep/awk/sed and asserted on that text, with no execution of the signing script or the release workflow. `$SignTargets` ↔ `tauri.windows.conf.json` `bundle.resources` is now a manual alignment (`.claude/rules/alignments.md`).
 
 ## Rejected alternatives
 
