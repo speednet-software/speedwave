@@ -6,7 +6,7 @@ use speedwave_runtime::claude_settings;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
     anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
-    OneMillionContext, ANTHROPIC_MODELS, EFFORT_LEVELS,
+    OneMillionContext, ANTHROPIC_MODELS, EFFORT_LEVELS, ONE_MILLION_SUFFIX,
 };
 use std::path::Path;
 
@@ -194,22 +194,6 @@ pub(crate) fn build_picker(info: &SessionInfo, plan: AnthropicPlan) -> Option<Mo
     Some(ModelPicker { rows })
 }
 
-fn pin_needs_rewrite(id: &str, pin: &str, wire_id: &str) -> bool {
-    if wire_id == pin {
-        return false;
-    }
-    let native =
-        catalog_entry(id).is_some_and(|m| m.one_million_context == OneMillionContext::Native);
-    if native {
-        let pin_base = pin.strip_suffix("[1m]").unwrap_or(pin);
-        let wire_base = wire_id.strip_suffix("[1m]").unwrap_or(wire_id);
-        if pin_base == wire_base {
-            return false;
-        }
-    }
-    true
-}
-
 pub(crate) fn normalized_pin(pin: &str, plan: AnthropicPlan) -> Option<String> {
     let id = canonical_anthropic_model_id(pin);
     let model = ANTHROPIC_MODELS.iter().find(|m| m.id == id)?;
@@ -249,6 +233,22 @@ pub(crate) fn normalize_pin_for_session(
         Ok(None) => {}
         Err(e) => log::warn!("could not normalize the model pin of project {project}: {e}"),
     }
+}
+
+fn pin_needs_rewrite(id: &str, pin: &str, wire_id: &str) -> bool {
+    if wire_id == pin {
+        return false;
+    }
+    let native =
+        catalog_entry(id).is_some_and(|m| m.one_million_context == OneMillionContext::Native);
+    if native {
+        let pin_base = pin.strip_suffix(ONE_MILLION_SUFFIX).unwrap_or(pin);
+        let wire_base = wire_id.strip_suffix(ONE_MILLION_SUFFIX).unwrap_or(wire_id);
+        if pin_base == wire_base {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn session_info_for(

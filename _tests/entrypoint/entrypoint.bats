@@ -1389,11 +1389,8 @@ setup_os_subservice_fixture() {
 }
 
 
-_stub_claude_recording_plugin_installs() {
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-echo "\$*" >> "$TEST_HOME/claude-calls.log"
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
+_plugin_install_recording_block() {
+    cat << EOF
 if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
     if [ "\$4" = "--marketplace" ]; then
         echo "\$3@\${5##*/}" >> "$TEST_HOME/installed-plugins.log"
@@ -1402,6 +1399,15 @@ if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
     fi
     exit 0
 fi
+EOF
+}
+
+_stub_claude_recording_plugin_installs() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+echo "\$*" >> "$TEST_HOME/claude-calls.log"
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 1; fi
+$(_plugin_install_recording_block)
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
@@ -1689,14 +1695,7 @@ if [ "\$1" = "plugin" ] && [ "\$2" = "uninstall" ]; then
     if [ -f "$TEST_HOME/uninstall-fail" ]; then cat "$TEST_HOME/uninstall-fail" >&2; exit 1; fi
     exit 0
 fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    if [ "\$4" = "--marketplace" ]; then
-        echo "\$3@\${5##*/}" >> "$TEST_HOME/installed-plugins.log"
-    else
-        echo "\$3" >> "$TEST_HOME/installed-plugins.log"
-    fi
-    exit 0
-fi
+$(_plugin_install_recording_block)
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"

@@ -164,6 +164,6 @@ fn long_prompt_tiers_are_priced_with_a_positive_threshold() {
     }
     assert!(
         saw_one,
-        "no catalog entry carries a long_prompt tier — this test asserts nothing"
+        "no catalog entry carries a long_prompt tier: this test asserts nothing"
     );
 }

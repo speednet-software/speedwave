@@ -149,7 +149,7 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     let info = crate::defaults::ANTHROPIC_MODELS
         .iter()
         .find(|m| m.id == base)?;
-    let p = if is_1m {
+    let base_pricing = if is_1m {
         info.pricing_1m.as_ref().unwrap_or_else(|| {
             log::warn!("model {base}[1m] has no 1M pricing; using base rate");
             &info.pricing
@@ -169,7 +169,7 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
         {
             &tiered.pricing
         }
-        _ => p,
+        _ => base_pricing,
     };
     let cost = (prompt_tokens as f64 * p.input
         + r.completion_tokens.unwrap_or(0) as f64 * p.output
