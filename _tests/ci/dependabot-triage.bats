@@ -45,12 +45,11 @@ _alert() {
     "$number" "$number" "$package" "$manifest" "$scope" "$number" "$number" "$cvss" "$epss" >>"$ALERTS_FILE"
 }
 
-@test "a version update with no open alert only turns on auto-merge" {
+@test "a version update with no open alert only reads the alerts" {
   run python3 "$TRIAGE"
   [ "$status" -eq 0 ]
-  _refute_log "issue create"
-  _refute_log "add-label"
-  grep -q "pr merge 42 --repo test/test --squash --auto" "$GH_LOG"
+  [ "$(wc -l <"$GH_LOG")" -eq 1 ]
+  grep -q " api --paginate " "$GH_LOG"
 }
 
 @test "alerts are read with the alerts token, writes with the workflow token" {
@@ -76,7 +75,6 @@ _alert() {
   [ "$status" -eq 0 ]
   grep -q "issue create" "$GH_LOG"
   _refute_log "add-label"
-  grep -q "pr merge 42" "$GH_LOG"
 }
 
 @test "a runtime alert at the EPSS threshold is critical whatever its CVSS" {
@@ -142,12 +140,12 @@ _alert() {
   [ "$(grep -c "issue create" "$GH_LOG")" -eq 1 ]
 }
 
-@test "a major update leaves auto-merge off and names the package" {
-  export UPDATED_DEPENDENCIES='[{"dependencyName":"vitest","directory":"/desktop/src","updateType":"version-update:semver-major"},{"dependencyName":"serde","directory":"/","updateType":"version-update:semver-patch"}]'
+@test "a critical fix is labelled but never merged" {
+  _alert 1 serde Cargo.lock runtime 9.8 0.99
   run python3 "$TRIAGE"
   [ "$status" -eq 0 ]
+  grep -q "add-label security" "$GH_LOG"
   _refute_log "pr merge"
-  [[ "$output" == *"auto-merge not enabled: vitest"* ]]
 }
 
 @test "the issue body carries the scores, the verdict and both links" {

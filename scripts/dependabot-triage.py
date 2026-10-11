@@ -6,7 +6,6 @@ import sys
 
 CRITICAL_CVSS = 9.0
 CRITICAL_EPSS_PERCENTILE = 0.95
-MAJOR_UPDATE = "version-update:semver-major"
 SECURITY_LABEL = "security"
 ISSUE_LABEL = "dependencies"
 
@@ -24,12 +23,6 @@ def main():
 
     if any(is_critical(alert) for alert in alerts):
         gh("pr", "edit", pr_number, "--repo", repo, "--add-label", SECURITY_LABEL)
-
-    majors = [d["dependencyName"] for d in dependencies if d.get("updateType") == MAJOR_UPDATE]
-    if majors:
-        print(f"::notice::major updates need review, auto-merge not enabled: {', '.join(majors)}")
-    else:
-        gh("pr", "merge", pr_number, "--repo", repo, "--squash", "--auto")
 
 
 def require_env(name):
