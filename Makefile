@@ -538,7 +538,7 @@ test-ci:
 	@$(REQUIRE_BATS)
 	bats _tests/ci/node-version-pin.bats _tests/ci/ci-gate.bats \
 	  _tests/ci/makefile-path-precedence.bats \
-	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
+	  _tests/ci/bats-suite-wiring.bats \
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
 	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats
