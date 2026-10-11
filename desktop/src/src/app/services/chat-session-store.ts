@@ -104,10 +104,11 @@ interface ModelPick extends ProjectPick {
   wireId: string;
   routed: boolean;
   sel: ModelSelectionInput;
+  clearsPin: boolean;
 }
 
 type SavedSelection =
-  | { routed: false; model: string | null }
+  | { routed: false; model: string | null; pin: string | null }
   | { routed: true; model: string; contextTokens: number | null };
 
 interface DroppedPickSave {
@@ -310,7 +311,17 @@ export class ChatSessionStore {
   }
 
   private async readSavedSelection(pick: ModelPick): Promise<SavedSelection | null> {
-    if (!pick.routed) return { routed: false, model: this._tabModel() };
+    if (!pick.routed) {
+      let pin: string | null = null;
+      try {
+        pin = await this.deps.tauri.invoke<string | null>('get_model_pin', {
+          projectId: pick.project ?? '',
+        });
+      } catch (e: unknown) {
+        this.deps.log.warn(`[chat-state] reading the saved model pin failed: ${String(e)}`);
+      }
+      return { routed: false, model: this._tabModel(), pin };
+    }
     try {
       const config = await this.deps.tauri.invoke<LlmConfigResponse>('get_llm_config', {
         project: pick.project,
@@ -328,6 +339,14 @@ export class ChatSessionStore {
   private async writeSavedSelection(pick: ModelPick, saved: SavedSelection): Promise<void> {
     if (!saved.routed) {
       this._tabModel.set(saved.model);
+      try {
+        await this.deps.tauri.invoke('restore_model_pin', {
+          projectId: pick.project ?? '',
+          model: saved.pin,
+        });
+      } catch (e: unknown) {
+        this.deps.log.warn(`[chat-state] restoring the saved model pin failed: ${String(e)}`);
+      }
       return;
     }
     try {
@@ -533,7 +552,6 @@ export class ChatSessionStore {
   readonly pickedModel: Signal<string> = this._pickedModel.asReadonly();
 
   private readonly _launchModel = signal<string | null>(null);
-  private _launchRead = 0;
   /**
    * Model this tab's latest spawn launched with (override, else project pin, else `DEFAULT_ALIAS`);
    * null before the first spawn. Badge source until the session reports its model.
@@ -542,78 +560,60 @@ export class ChatSessionStore {
 
   /**
    * Takes a composer model pick for this tab only (ADR-092): `set_model` on a live session, queued
-   * while busy, else recorded for the respawn; routed picks keep the config write-through.
+   * while busy, else recorded for the respawn; routed picks keep the config write-through. The
+   * Default row tracks the `default` alias and clears the project pin instead of writing it.
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     this._modelSelectionError.set('');
     const project = this.deps.projectState.activeProject();
     const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
+    const clearsPin = isAnthropic && sel.isDefault;
     const pick: ModelPick = {
-      wireId: sel.wireId,
+      wireId: clearsPin ? DEFAULT_ALIAS : sel.wireId,
       routed: !isAnthropic,
       project,
       mark: this.deps.projectState.settledMark(project),
       request: ++this._modelRequest,
       sel,
+      clearsPin,
     };
     this._pickedModel.set(sel.catalogId);
     await this.takeModelPick(pick, false);
   }
 
   /**
-   * Persists the project default model for NEW tabs (config `model_pin`); never touches
-   * this tab's live session. Picking the account-default row clears the pin instead.
-   * @param sel - Selected model triad emitted by the model selector's Set-default action.
+   * Resolves this tab's spawn model: the tab override if one is already recorded, else the
+   * project's `settings.json` pin (recorded as the tab's model so a restart reuses it), else
+   * `null` on a read failure so the backend falls back to the pin or `default` itself.
    */
-  async applyDefaultModelSelection(sel: ModelSelectionInput): Promise<void> {
-    this._modelSelectionError.set('');
-    const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
-    if (!isAnthropic) return;
-    try {
-      if (sel.isDefault) {
-        await this.deps.tauri.invoke('clear_model_pin', {
-          projectId: this.deps.projectState.activeProject() ?? '',
-        });
-      } else {
-        await this.deps.tauri.invoke('set_model_pin', {
-          projectId: this.deps.projectState.activeProject() ?? '',
-          model: sel.wireId,
-        });
+  private async resolveLaunchModel(): Promise<string | null> {
+    if (this._tabModel() === null) {
+      const project = this.deps.projectState.activeProject();
+      if (project) {
+        try {
+          const pin = await this.deps.tauri.invoke<string | null>('get_model_pin', {
+            projectId: project,
+          });
+          if (this._tabModel() === null) this._tabModel.set(pin ?? DEFAULT_ALIAS);
+        } catch (err) {
+          this.deps.log.debug(`[chat-state] launch model: get_model_pin failed: ${String(err)}`);
+        }
       }
-    } catch (e: unknown) {
-      this.reportSelectionFailure('default model persist', e);
     }
-  }
-
-  private recordLaunchModel(): string | null {
     const model = this._tabModel();
-    const read = ++this._launchRead;
     this._launchModel.set(model);
-    if (model === null) void this.readLaunchPin(read);
     return model;
-  }
-
-  private async readLaunchPin(read: number): Promise<void> {
-    const project = this.deps.projectState.activeProject();
-    if (!project) return;
-    try {
-      const pin = await this.deps.tauri.invoke<string | null>('get_model_pin', {
-        projectId: project,
-      });
-      if (read === this._launchRead) this._launchModel.set(pin ?? DEFAULT_ALIAS);
-    } catch (err) {
-      this.deps.log.debug(`[chat-state] launch model: get_model_pin failed: ${String(err)}`);
-    }
   }
 
   private async persistModelPick(
     pick: ModelPick,
-    beforeSave?: () => Promise<void>
+    beforeSave?: () => Promise<void>,
+    persistDefault = true
   ): Promise<boolean> {
     const outcome = await this.chainModelSave(async () => {
       await beforeSave?.();
-      return this.saveModelPick(pick);
+      return this.saveModelPick(pick, persistDefault);
     });
     if (outcome.saved) {
       this._savedModelRequest = Math.max(this._savedModelRequest, pick.request);
@@ -625,7 +625,7 @@ export class ChatSessionStore {
     return false;
   }
 
-  private async saveModelPick(pick: ModelPick): Promise<PinSave> {
+  private async saveModelPick(pick: ModelPick, persistDefault: boolean): Promise<PinSave> {
     const sel = pick.sel;
     try {
       if (pick.routed) {
@@ -637,11 +637,21 @@ export class ChatSessionStore {
         );
       } else {
         this._tabModel.set(pick.wireId);
+        if (persistDefault) await this.persistProjectDefault(pick);
       }
       this._modelSaves += 1;
       return { saved: true };
     } catch (error: unknown) {
       return { saved: false, error };
+    }
+  }
+
+  private async persistProjectDefault(pick: ModelPick): Promise<void> {
+    const projectId = pick.project ?? '';
+    if (pick.clearsPin) {
+      await this.deps.tauri.invoke('clear_model_pin', { projectId });
+    } else {
+      await this.deps.tauri.invoke('set_model_pin', { projectId, model: pick.wireId });
     }
   }
 
@@ -698,7 +708,7 @@ export class ChatSessionStore {
       });
     } catch (e: unknown) {
       if (!this.isNewestModelPick(pick)) return;
-      const saved = await this.persistModelPick(pick);
+      const saved = await this.persistModelPick(pick, undefined, false);
       if (saved && sameConversation() && this.isNewestModelPick(pick)) {
         this.reportSelectionFailure('model switch', e);
       }
@@ -709,7 +719,7 @@ export class ChatSessionStore {
       if (sameConversation()) this.takeBackRefusedPick(pick, answer.reason);
       return;
     }
-    const saved = await this.persistModelPick(pick);
+    const saved = await this.persistModelPick(pick, undefined, answer.outcome === 'confirmed');
     if (!sameConversation()) return;
     if (answer.outcome === 'confirmed') {
       this._confirmedModel = { catalogId: pick.sel.catalogId, generation };
@@ -1010,7 +1020,24 @@ export class ChatSessionStore {
   private recordTypedModelCommand(text: string): void {
     const match = /^\/model\s+(\S+)$/.exec(text.trim());
     if (!match) return;
-    if (match[1].startsWith('claude-')) this._tabModel.set(match[1]);
+    const model = match[1];
+    this._tabModel.set(model);
+    void this.persistTypedModelDefault(model);
+  }
+
+  private async persistTypedModelDefault(model: string): Promise<void> {
+    const projectId = this.deps.projectState.activeProject() ?? '';
+    try {
+      if (model === DEFAULT_ALIAS) {
+        await this.deps.tauri.invoke('clear_model_pin', { projectId });
+      } else {
+        await this.deps.tauri.invoke('restore_model_pin', { projectId, model });
+      }
+    } catch (err: unknown) {
+      this.deps.log.warn(
+        `[chat-state] typed /model project default persist failed: ${String(err)}`
+      );
+    }
   }
 
   private notifyChange(): void {
@@ -1080,7 +1107,7 @@ export class ChatSessionStore {
         await this.deps.tauri.invoke('start_chat', {
           project,
           tabId: this.tabId,
-          model: this.recordLaunchModel(),
+          model: await this.resolveLaunchModel(),
         });
         this.deps.log.debug('[chat-state] startChatSession: success');
         outcome = current(gen) && !this._disposed ? 'started' : 'skipped';
@@ -1255,7 +1282,7 @@ export class ChatSessionStore {
               await this.deps.tauri.invoke('start_chat', {
                 project: result.active_project,
                 tabId: this.tabId,
-                model: this.recordLaunchModel(),
+                model: await this.resolveLaunchModel(),
               });
             } finally {
               if (generation === this._sessionGeneration) this.startingSession = false;
@@ -1899,7 +1926,7 @@ export class ChatSessionStore {
         sessionId,
         userUuid,
         tabId: this.tabId,
-        model: this.recordLaunchModel(),
+        model: await this.resolveLaunchModel(),
       });
     } catch (err) {
       this.deps.log.error(`[chat-state] retryLastAssistant: invoke failed: ${String(err)}`);
@@ -2020,7 +2047,7 @@ export class ChatSessionStore {
         project,
         sessionId,
         tabId: this.tabId,
-        model: this.recordLaunchModel(),
+        model: await this.resolveLaunchModel(),
       });
       if (gen !== this._sessionGeneration || !sameProject()) return;
       const transcript = await this.deps.tauri

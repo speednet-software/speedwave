@@ -26,6 +26,15 @@ export async function modelPickerRowIds(project: string): Promise<string[] | nul
   return picker ? picker.rows.map((r) => r.id) : null;
 }
 
+export async function defaultModelPickerRowId(project: string): Promise<string | null> {
+  const picker = await invokeOr<{ rows: { id: string; is_default: boolean }[] } | null>(
+    null,
+    'list_model_picker',
+    { project }
+  );
+  return picker?.rows.find((r) => r.is_default)?.id ?? null;
+}
+
 export function catalogEntryForBadgeLabel(
   catalog: AnthropicCatalogEntry[],
   label: string

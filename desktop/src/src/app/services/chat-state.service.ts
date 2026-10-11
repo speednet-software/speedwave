@@ -377,14 +377,6 @@ export class ChatStateService {
     return this.activeStore().applyModelSelection(sel);
   }
 
-  /**
-   * Persists the project default model for new tabs; never touches any live session.
-   * @param sel - Selected model triad emitted by the model selector's Set-default action.
-   */
-  applyDefaultModelSelection(sel: ModelSelectionInput): Promise<void> {
-    return this.activeStore().applyDefaultModelSelection(sel);
-  }
-
   /** Session cost/usage stats from the most recent result. */
   get sessionStats(): SessionStats | null {
     return this.activeStore().sessionStats;

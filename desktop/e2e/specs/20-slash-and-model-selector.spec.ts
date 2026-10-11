@@ -4,12 +4,19 @@ import { waitForHealthy } from '../helpers/health';
 import { restartAppAndReconnect } from '../helpers/app-restart';
 import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
 import { pickComposerEffort } from '../helpers/applied-effort';
-import { clearModelPinFile, clearEffortPinFile, readModelPin } from '../helpers/host-files';
+import {
+  clearModelPinFile,
+  clearEffortPinFile,
+  readModelPin,
+  readBetaEnabled,
+  setBetaEnabled,
+} from '../helpers/host-files';
 import {
   anthropicCatalog,
   latestAnthropicModelIds,
   catalogEntryForBadgeLabel,
   modelPickerRowIds,
+  defaultModelPickerRowId,
   ONE_MILLION_MARKER,
   type AnthropicCatalogEntry,
 } from '../helpers/anthropic-catalog';
@@ -272,14 +279,15 @@ describe('Slash Popover + Model/Effort Selector', function () {
       clearEffortPinFile(ANTHROPIC_PROJECT);
     });
 
-    it('(a) a fresh, unpinned session spawns with no --model/--effort and reports the account default in SystemInit', async function () {
+    it('(a) a fresh, unpinned session spawns with --model default, no --effort, and reports the account default in SystemInit', async function () {
       this.timeout(120_000);
       const priorArgs = await lastSpawnArgs();
       await openChat();
       await sendMessageAndWait('Say hi in one word.');
       const freshArgs = await waitForFreshSpawnArgs(priorArgs);
 
-      expect(freshArgs).not.toContain('--model');
+      expect(freshArgs.filter((a) => a === '--model').length).toBe(1);
+      expect(freshArgs[freshArgs.indexOf('--model') + 1]).toBe('default');
       expect(freshArgs).not.toContain('--effort');
 
       const catalog = await anthropicCatalog();
@@ -313,7 +321,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
       await browser.keys('Escape');
     });
 
-    it('(b) a composer pick is tab-scoped: it wires the switch, rides the tab respawn as --model, and never writes the project pin (SPEED-388)', async function () {
+    it('(b) a composer pick is tab-scoped and writes the settings.json pin: it wires the switch, rides the tab respawn as --model, and sets the project default for new tabs (SPEED-388)', async function () {
       this.timeout(360_000);
       const catalog = await anthropicCatalog();
       const currentBadge = (
@@ -336,7 +344,13 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect(
         await (await $('[data-testid="control-chip"][data-command="model"]')).getText()
       ).not.toMatch(ONE_MILLION_MARKER);
-      expect(readModelPin(ANTHROPIC_PROJECT)).toBeNull();
+      await browser.waitUntil(async () => readModelPin(ANTHROPIC_PROJECT) !== null, {
+        timeout: 10_000,
+        timeoutMsg: 'the composer pick never wrote the settings.json model pin',
+      });
+      expect((readModelPin(ANTHROPIC_PROJECT) as string).replace(ONE_MILLION_MARKER, '')).toBe(
+        targetModel.id
+      );
 
       await sendMessageAndWait('Say hi in one word.');
       await browser.waitUntil(
@@ -365,11 +379,14 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect(newConversationArgs.filter((a) => a === '--model').length).toBe(1);
       const launchedModel = newConversationArgs[newConversationArgs.indexOf('--model') + 1];
       expect(launchedModel.replace(ONE_MILLION_MARKER, '')).toContain(targetModel.id);
-      expect(readModelPin(ANTHROPIC_PROJECT)).toBeNull();
+      expect((readModelPin(ANTHROPIC_PROJECT) as string).replace(ONE_MILLION_MARKER, '')).toBe(
+        targetModel.id
+      );
     });
 
-    it('(c) a tab pick does not survive an app restart; the effort pin does', async function () {
+    it('(c) a restart spawns with the tab model (carried by the settings.json pin); the effort pin survives too', async function () {
       this.timeout(360_000);
+      const pinBeforeRestart = readModelPin(ANTHROPIC_PROJECT);
       const priorArgs = await lastSpawnArgs();
       await restartAppAndReconnect();
 
@@ -381,7 +398,8 @@ describe('Slash Popover + Model/Effort Selector', function () {
       expect((await (await $('[data-testid="effort-segment"]')).getText()).trim()).toBe('Max');
 
       const freshArgs = await waitForFreshSpawnArgs(priorArgs);
-      expect(freshArgs).not.toContain('--model');
+      expect(freshArgs.filter((a) => a === '--model').length).toBe(1);
+      expect(freshArgs[freshArgs.indexOf('--model') + 1]).toBe(pinBeforeRestart);
       expect(freshArgs.filter((a) => a === '--effort').length).toBe(1);
       expect(freshArgs[freshArgs.indexOf('--effort') + 1]).toBe('max');
 
@@ -391,38 +409,83 @@ describe('Slash Popover + Model/Effort Selector', function () {
       ).toBe(0);
     });
 
-    it('(c2) Set default persists the config model_pin and every new conversation launches on it', async function () {
-      this.timeout(360_000);
-      const catalog = await anthropicCatalog();
-      const currentBadge = (
-        await (await $('[data-testid="composer-model-badge"]')).getText()
-      ).trim();
-      const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
+    it('(c2) with beta tabs, a pick in one tab sets the project default for the next new tab, and the Default row clears it', async function () {
+      this.timeout(420_000);
+      const priorBeta = readBetaEnabled();
+      setBetaEnabled(true);
+      await restartAppAndReconnect();
 
-      await openModelSelector();
-      const targetModel = firstListedAlternative(
-        catalog,
-        await listedModelIds(),
-        currentEntry?.id,
-        true
-      );
-      const setDefault = await $(`[data-testid="model-selector-make-default-${targetModel.id}"]`);
-      await setDefault.waitForExist({ timeout: 10_000 });
-      await setDefault.click();
-      await browser.keys('Escape');
+      try {
+        if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
+          await switchToProject(ANTHROPIC_PROJECT);
+        }
+        await openChat();
+        await $('[data-testid="chat-tabs"]').waitForExist({
+          timeout: 30_000,
+          timeoutMsg: 'chat tab bar never appeared after enabling beta features',
+        });
 
-      await browser.waitUntil(async () => readModelPin(ANTHROPIC_PROJECT) !== null, {
-        timeout: 10_000,
-        timeoutMsg: 'Set default never wrote the config model_pin',
-      });
-      const pin = readModelPin(ANTHROPIC_PROJECT) as string;
-      expect(pin.replace(ONE_MILLION_MARKER, '')).toContain(targetModel.id);
+        const catalog = await anthropicCatalog();
+        const currentBadge = (
+          await (await $('[data-testid="composer-model-badge"]')).getText()
+        ).trim();
+        const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
+        await openModelSelector();
+        const targetModel = firstListedAlternative(
+          catalog,
+          await listedModelIds(),
+          currentEntry?.id,
+          false
+        );
+        await pickModelOption(targetModel.id);
+        await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
+          timeout: 30_000,
+          timeoutMsg: `model control-chip never rendered after picking ${targetModel.id}`,
+        });
 
-      const priorArgs = await lastSpawnArgs();
-      await startNewConversation();
-      const freshArgs = await waitForFreshSpawnArgs(priorArgs);
-      expect(freshArgs.filter((a) => a === '--model').length).toBe(1);
-      expect(freshArgs[freshArgs.indexOf('--model') + 1]).toBe(pin);
+        const priorArgs = await lastSpawnArgs();
+        const newTabBtn = await $('[data-testid="chat-tabs-new"]');
+        await browser.waitUntil(async () => await newTabBtn.isEnabled(), {
+          timeout: 10_000,
+          timeoutMsg: 'chat-tabs-new never became enabled',
+        });
+        await newTabBtn.click();
+        const newTabArgs = await waitForFreshSpawnArgs(priorArgs);
+        expect(newTabArgs.filter((a) => a === '--model').length).toBe(1);
+        expect(newTabArgs[newTabArgs.indexOf('--model') + 1]).toBe(targetModel.id);
+
+        const defaultRowId = await defaultModelPickerRowId(ANTHROPIC_PROJECT);
+        if (!defaultRowId) throw new Error('the model picker reports no default row');
+        await openModelSelector();
+        await pickModelOption(defaultRowId);
+        await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
+          timeout: 30_000,
+          timeoutMsg: 'model control-chip never rendered after picking the Default row',
+        });
+
+        await browser.waitUntil(async () => readModelPin(ANTHROPIC_PROJECT) === null, {
+          timeout: 10_000,
+          timeoutMsg: 'picking the Default row never cleared the settings.json model key',
+        });
+
+        const priorArgsAfterDefault = await lastSpawnArgs();
+        const secondNewTabBtn = await $('[data-testid="chat-tabs-new"]');
+        await browser.waitUntil(async () => await secondNewTabBtn.isEnabled(), {
+          timeout: 10_000,
+          timeoutMsg: 'chat-tabs-new never became enabled',
+        });
+        await secondNewTabBtn.click();
+        const thirdTabArgs = await waitForFreshSpawnArgs(priorArgsAfterDefault);
+        expect(thirdTabArgs.filter((a) => a === '--model').length).toBe(1);
+        expect(thirdTabArgs[thirdTabArgs.indexOf('--model') + 1]).toBe('default');
+      } finally {
+        setBetaEnabled(priorBeta);
+        await restartAppAndReconnect();
+        if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
+          await switchToProject(ANTHROPIC_PROJECT);
+        }
+        await openChat();
+      }
     });
 
     it('(d) a model pick made mid-stream is queued and applied only after the turn ends', async function () {

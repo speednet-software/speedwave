@@ -1555,32 +1555,6 @@ describe('ChatComponent', () => {
         kind: 'anthropic_oauth',
       });
     });
-
-    it('forwards the composer defaultModelSelected event to ChatStateService.applyDefaultModelSelection', () => {
-      projectState.activeProject.set('test');
-      projectState.status.set('ready');
-      fixture.detectChanges();
-      const applySpy = vi
-        .spyOn(fixture.componentInstance.chat, 'applyDefaultModelSelection')
-        .mockResolvedValue(undefined);
-      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
-
-      composer.triggerEventHandler('defaultModelSelected', {
-        catalogId: 'claude-haiku-4-5',
-        wireId: 'claude-haiku-4-5',
-        providerId: 'anthropic',
-        kind: 'anthropic_oauth',
-        isDefault: false,
-      });
-
-      expect(applySpy).toHaveBeenCalledWith({
-        catalogId: 'claude-haiku-4-5',
-        wireId: 'claude-haiku-4-5',
-        providerId: 'anthropic',
-        kind: 'anthropic_oauth',
-        isDefault: false,
-      });
-    });
   });
 
   describe('deferred effort notice after a pick the live session did not take', () => {
