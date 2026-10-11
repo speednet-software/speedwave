@@ -104,7 +104,6 @@ updates:
         update-types: [minor, patch]
     cooldown:
       default-days: 3
-      semver-major-days: 14
 
   - package-ecosystem: docker
     directories:
@@ -121,4 +120,3 @@ updates:
         update-types: [minor, patch]
     cooldown:
       default-days: 3
-      semver-major-days: 14
