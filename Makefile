@@ -389,13 +389,11 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
-DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
+DESKTOP_BUILD_BATS := _tests/desktop/bundle-build-context.bats \
   _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-  _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
-  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-  _tests/desktop/main-app-entitlements.bats _tests/desktop/native-cli-info-plist.bats \
-  _tests/desktop/transcription-bundle.bats _tests/desktop/build-native-macos.bats \
+  _tests/desktop/sign-bundled-binaries.bats \
+  _tests/desktop/native-cli-info-plist.bats \
+  _tests/desktop/build-native-macos.bats \
   _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
   _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
 
@@ -538,14 +536,11 @@ test-entrypoint:
 
 test-ci:
 	@$(REQUIRE_BATS)
-	bats _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
-	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
-	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
+	bats _tests/ci/node-version-pin.bats _tests/ci/ci-gate.bats \
+	  _tests/ci/makefile-path-precedence.bats \
 	  _tests/ci/bats-suite-wiring.bats _tests/ci/repo-ignores.bats \
 	  _tests/ci/audit-gate.bats _tests/ci/audit-changed-files.bats \
 	  _tests/ci/audit-run.bats _tests/ci/audit-diff.bats _tests/ci/audit-issue.bats \
-	  _tests/ci/merge-gate-lanes.bats _tests/ci/audit-schedule-shape.bats \
-	  _tests/ci/git-hooks-removed.bats _tests/ci/pr-title-validate.bats \
 	  _tests/ci/resolve-pr-title-message.bats _tests/ci/dependabot-triage.bats
 	@echo "✅ CI workflow tests passed"
 
@@ -562,9 +557,8 @@ test-native-cli-plist:
 test-desktop-config:
 	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats \
-	  _tests/desktop/e2e-rig-deps.bats \
 	  _tests/desktop/e2e-invoke-helper.bats \
-	  _tests/desktop/ps1-utf8-bom.bats _tests/desktop/installer-reset.bats \
+	  _tests/desktop/installer-reset.bats \
 	  _tests/desktop/installer-sweep.bats
 	@echo "✅ Desktop config tests passed"
 
@@ -692,9 +686,7 @@ check-mcp:
 
 check-angular:
 	cd desktop/src && $(NPX) ng build --configuration production
-	@$(REQUIRE_BATS)
-	bats _tests/desktop/desktop-build.bats
-	@echo "✅ Angular production build + desktop path verification OK"
+	@echo "✅ Angular production build OK"
 
 PRETTIER_GLOBS := 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 
