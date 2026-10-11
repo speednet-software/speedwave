@@ -4001,7 +4001,7 @@ mod tests {
             |status| reported = Some(status),
         )
         .expect("a live session reports its status");
-        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 6));
+        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 5));
         assert_eq!(*slot.lock().unwrap(), status);
         assert_eq!(reported, Some(status));
     }
@@ -5492,15 +5492,15 @@ mod tests {
     }
 
     const SOFT_IMPOSE_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-soft-impose.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.295-soft-impose.sanitized.ndjson");
     const MID_TURN_COMMAND_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-model-command-mid-tool-turn.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.295-model-command-mid-tool-turn.sanitized.ndjson");
     const MODEL_PICKS_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-model-picks.sanitized.ndjson");
+        include_str!("../tests/fixtures/cc-2.1.295-model-picks.sanitized.ndjson");
     const MODEL_PICKS_REQUESTS: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-model-picks-requests.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.295-model-picks-requests.sanitized.json");
     const SET_MODEL_CHECK: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-set-model-check.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.295-set-model-check.sanitized.json");
 
     fn set_model_check() -> serde_json::Value {
         serde_json::from_str(SET_MODEL_CHECK).unwrap()
@@ -5981,16 +5981,12 @@ mod tests {
             confirmations,
             vec![
                 "<local-command-stdout>Set model to `claude-haiku-4-5`</local-command-stdout>",
-                "<local-command-stdout>Set model to `claude-opus-5-5[1m]`</local-command-stdout>",
+                "<local-command-stdout>Set model to `claude-opus-5-5`</local-command-stdout>",
             ]
         );
         assert_eq!(
             init_models(&lines)[..3],
-            [
-                "claude-opus-5-5[1m]",
-                "claude-haiku-4-5",
-                "claude-opus-5-5[1m]"
-            ]
+            ["claude-opus-5-5", "claude-haiku-4-5", "claude-opus-5-5"]
         );
     }
 
@@ -8012,7 +8008,7 @@ mod tests {
     }
 
     const SAFETY_CHECK_CAPTURE: &str =
-        include_str!("../tests/fixtures/cc-2.1.282-safety-check.sanitized.json");
+        include_str!("../tests/fixtures/cc-2.1.295-safety-check.sanitized.json");
 
     fn safety_check_capture() -> serde_json::Value {
         serde_json::from_str(SAFETY_CHECK_CAPTURE).unwrap()
@@ -8936,14 +8932,14 @@ mod tests {
             None,
             None,
             None,
-            Some("claude-sonnet-5[1m]"),
+            Some("claude-sonnet-4-6[1m]"),
         )
         .unwrap()
         .args;
         let count = args.iter().filter(|a| *a == "--model").count();
         assert_eq!(count, 1, "exactly one --model flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--model").unwrap();
-        assert_eq!(args[pos + 1], "claude-sonnet-5[1m]");
+        assert_eq!(args[pos + 1], "claude-sonnet-4-6[1m]");
     }
 
     #[test]
@@ -8956,7 +8952,7 @@ mod tests {
             None,
             None,
             Some("claude-opus-4-8"),
-            Some("claude-haiku-4-5"),
+            Some("claude-haiku-5-5"),
         )
         .unwrap()
         .args;

@@ -6,7 +6,7 @@ use speedwave_runtime::claude_settings;
 use speedwave_runtime::config::{self, LlmProviderKind};
 use speedwave_runtime::defaults::{
     anthropic_wire_model_id, canonical_anthropic_model_id, AnthropicModelInfo, AnthropicPlan,
-    OneMillionContext, ANTHROPIC_MODELS, DEFAULT_MODEL_ALIAS, EFFORT_LEVELS,
+    OneMillionContext, ANTHROPIC_MODELS, DEFAULT_MODEL_ALIAS, EFFORT_LEVELS, ONE_MILLION_SUFFIX,
 };
 use std::path::Path;
 
@@ -203,7 +203,7 @@ pub(crate) fn normalized_pin(pin: &str, plan: AnthropicPlan) -> Option<String> {
         return None;
     }
     let wanted = anthropic_wire_model_id(id, plan);
-    (wanted != pin).then_some(wanted)
+    pin_needs_rewrite(id, pin, &wanted).then_some(wanted)
 }
 
 pub(crate) fn normalize_pin_for_session(
@@ -221,7 +221,7 @@ pub(crate) fn normalize_pin_for_session(
                 .rows
                 .iter()
                 .find(|row| row.id == id)
-                .filter(|row| row.wire_id != pin)
+                .filter(|row| pin_needs_rewrite(id, pin, &row.wire_id))
                 .map(|row| row.wire_id.clone())
         } else {
             normalized_pin(pin, plan)
@@ -231,6 +231,22 @@ pub(crate) fn normalize_pin_for_session(
         Ok(None) => {}
         Err(e) => log::warn!("could not normalize the model pin of project {project}: {e}"),
     }
+}
+
+fn pin_needs_rewrite(id: &str, pin: &str, wire_id: &str) -> bool {
+    if wire_id == pin {
+        return false;
+    }
+    let native =
+        catalog_entry(id).is_some_and(|m| m.one_million_context == OneMillionContext::Native);
+    if native {
+        let pin_base = pin.strip_suffix(ONE_MILLION_SUFFIX).unwrap_or(pin);
+        let wire_base = wire_id.strip_suffix(ONE_MILLION_SUFFIX).unwrap_or(wire_id);
+        if pin_base == wire_base {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn session_info_for(
@@ -332,7 +348,11 @@ mod tests {
 
     #[test]
     fn listed_model_without_supports_effort_offers_no_stops() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        let info = info_of(
+            vec![listed("haiku", Some("claude-haiku-4-5"), "Haiku")],
+            Some("Claude Team"),
+        );
+        let picker = picker_of(&info, AnthropicPlan::Team);
         let (levels, default) = effort_of(&picker, "claude-haiku-4-5");
         assert!(levels.is_empty());
         assert_eq!(default, None);
@@ -347,12 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn captured_max_account_reports_all_five_stops_for_every_listed_effort_model() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+    fn captured_team_account_reports_all_five_stops_for_every_listed_model() {
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Team);
         for (id, catalog_default) in [
             ("claude-opus-5-5", "medium"),
             ("claude-fable-5-1", "high"),
-            ("claude-sonnet-5", "high"),
+            ("claude-sonnet-5-5", "medium"),
+            ("claude-haiku-5-5", "medium"),
         ] {
             let (levels, default) = effort_of(&picker, id);
             assert_eq!(levels, EFFORT_LEVELS, "{id}");
@@ -362,8 +383,10 @@ mod tests {
 
     #[test]
     fn successful_initialize_does_not_restore_models_claude_code_omits() {
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Team);
         for id in [
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
             "claude-opus-5",
             "claude-fable-5",
             "claude-opus-4-8",
@@ -446,15 +469,15 @@ mod tests {
     }
 
     #[test]
-    fn max_account_lists_every_reported_model_once_with_default_on_opus_5_5() {
+    fn team_account_lists_every_reported_model_once_with_default_on_opus_5_5() {
         for run in ["run_A", "run_B"] {
             let info = fixture_info(run);
             let plan = plan_for(LlmProviderKind::AnthropicOauth, Some(&info));
-            assert_eq!(plan, AnthropicPlan::Max);
+            assert_eq!(plan, AnthropicPlan::Team);
             let picker = picker_of(&info, plan);
             assert_eq!(
                 labels(&picker),
-                vec!["Opus 5.5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"],
+                vec!["Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 5.5"],
                 "{run}"
             );
             let defaults: Vec<&str> = picker
@@ -469,17 +492,17 @@ mod tests {
     }
 
     #[test]
-    fn max_account_wire_ids_are_exactly_the_reported_variants() {
+    fn team_account_wire_ids_are_exactly_the_reported_variants() {
         let info = fixture_info("run_A");
-        let picker = picker_of(&info, AnthropicPlan::Max);
+        let picker = picker_of(&info, AnthropicPlan::Team);
         let wire: Vec<&str> = picker.rows.iter().map(|r| r.wire_id.as_str()).collect();
         assert_eq!(
             wire,
             vec![
-                "claude-opus-5-5[1m]",
+                "claude-opus-5-5",
                 "claude-fable-5-1[1m]",
-                "claude-sonnet-5[1m]",
-                "claude-haiku-4-5"
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
             ]
         );
     }
@@ -501,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pro_account_gets_the_1m_window_of_opus_4_7_and_later() {
+    fn a_pro_account_gets_the_native_bare_id_of_opus_4_7_and_later() {
         let info = info_of(
             vec![
                 listed("opus[1m]", Some("claude-opus-5-5[1m]"), "Opus (1M)"),
@@ -512,7 +535,7 @@ mod tests {
 
         let pro = picker_of(&info, AnthropicPlan::Pro);
 
-        assert_eq!(pro.rows[0].wire_id, "claude-opus-5-5[1m]");
+        assert_eq!(pro.rows[0].wire_id, "claude-opus-5-5");
     }
 
     #[test]
@@ -615,16 +638,12 @@ mod tests {
 
     #[test]
     fn a_dated_and_a_plain_listing_of_one_model_make_one_row_on_the_catalog_id() {
-        let info = fixture_info("run_B");
-        let listed: Vec<Option<&str>> = info
-            .models
-            .iter()
-            .filter(|m| m.value.contains("haiku"))
-            .map(|m| m.resolved_model.as_deref())
-            .collect();
-        assert_eq!(
-            listed,
-            vec![Some("claude-haiku-4-5-20251001"), Some("claude-haiku-4-5")]
+        let info = info_of(
+            vec![
+                listed("haiku", Some("claude-haiku-4-5-20251001"), "Haiku"),
+                listed("claude-haiku-4-5", Some("claude-haiku-4-5"), "Haiku 4.5"),
+            ],
+            Some("Claude Max"),
         );
         let picker = picker_of(&info, AnthropicPlan::Max);
         let haiku: Vec<&PickerRow> = picker
@@ -763,22 +782,14 @@ mod tests {
     }
 
     #[test]
-    fn normalized_pin_moves_a_pin_to_the_id_the_policy_picks() {
-        assert_eq!(
-            normalized_pin("claude-sonnet-5", AnthropicPlan::Pro).as_deref(),
-            Some("claude-sonnet-5[1m]")
-        );
-        assert_eq!(
-            normalized_pin("claude-opus-5", AnthropicPlan::Max).as_deref(),
-            Some("claude-opus-5[1m]")
-        );
-        assert_eq!(
-            normalized_pin("claude-opus-5", AnthropicPlan::Pro).as_deref(),
-            Some("claude-opus-5[1m]")
-        );
+    fn normalized_pin_moves_a_plan_dependent_pin_to_the_id_the_policy_picks() {
         assert_eq!(
             normalized_pin("claude-opus-4-6[1m]", AnthropicPlan::Pro).as_deref(),
             Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            normalized_pin("claude-opus-4-6", AnthropicPlan::Max).as_deref(),
+            Some("claude-opus-4-6[1m]")
         );
         assert_eq!(
             normalized_pin("claude-haiku-4-5-20251001", AnthropicPlan::Max).as_deref(),
@@ -787,16 +798,37 @@ mod tests {
     }
 
     #[test]
+    fn normalized_pin_never_rewrites_a_native_models_legacy_1m_pin() {
+        for (pin, plan) in [
+            ("claude-sonnet-5", AnthropicPlan::Pro),
+            ("claude-sonnet-5[1m]", AnthropicPlan::Pro),
+            ("claude-opus-5", AnthropicPlan::Max),
+            ("claude-opus-5[1m]", AnthropicPlan::Max),
+            ("claude-opus-5-5[1m]", AnthropicPlan::Pro),
+            ("claude-fable-5-1[1m]", AnthropicPlan::Max),
+        ] {
+            assert_eq!(
+                normalized_pin(pin, plan),
+                None,
+                "{pin:?} on {plan:?}: a legacy `[1m]` pin is the same native-1M model as \
+                 the bare id and must not be migrated"
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_pin_moves_a_dated_native_pin_to_its_bare_id() {
+        assert_eq!(
+            normalized_pin("claude-sonnet-5-20260301", AnthropicPlan::Max).as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
+
+    #[test]
     fn normalized_pin_leaves_a_pin_that_already_matches_the_policy() {
-        assert_eq!(
-            normalized_pin("claude-fable-5-1[1m]", AnthropicPlan::Max),
-            None
-        );
+        assert_eq!(normalized_pin("claude-fable-5-1", AnthropicPlan::Max), None);
         assert_eq!(normalized_pin("claude-opus-4-6", AnthropicPlan::Pro), None);
-        assert_eq!(
-            normalized_pin("claude-opus-5-5[1m]", AnthropicPlan::Pro),
-            None
-        );
+        assert_eq!(normalized_pin("claude-opus-5-5", AnthropicPlan::Pro), None);
         assert_eq!(
             normalized_pin("claude-haiku-4-5", AnthropicPlan::Unknown),
             None
@@ -804,10 +836,10 @@ mod tests {
     }
 
     #[test]
-    fn normalized_pin_with_an_unknown_plan_touches_only_plan_independent_models() {
+    fn normalized_pin_with_an_unknown_plan_leaves_plan_dependent_and_native_pins_alone() {
         assert_eq!(
-            normalized_pin("claude-sonnet-5", AnthropicPlan::Unknown).as_deref(),
-            Some("claude-sonnet-5[1m]")
+            normalized_pin("claude-sonnet-5", AnthropicPlan::Unknown),
+            None
         );
         assert_eq!(
             normalized_pin("claude-opus-5[1m]", AnthropicPlan::Unknown),
@@ -834,7 +866,41 @@ mod tests {
     }
 
     #[test]
-    fn normalize_pin_for_session_rewrites_the_settings_file() {
+    fn normalize_pin_for_session_rewrites_a_plan_dependent_pin_to_the_reported_variant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir =
+            speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"model":"claude-opus-4-6"}"#).unwrap();
+
+        let info = info_of(
+            vec![
+                listed("opus[1m]", Some("claude-opus-4-6[1m]"), "Opus (1M)"),
+                listed("opus", Some("claude-opus-4-6"), "Opus"),
+            ],
+            Some("Claude Max"),
+        );
+        normalize_pin_for_session(
+            tmp.path(),
+            "proj",
+            LlmProviderKind::AnthropicOauth,
+            Some(&info),
+        );
+        assert_eq!(
+            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            Some("claude-opus-4-6[1m]")
+        );
+
+        normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
+        assert_eq!(
+            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
+            Some("claude-opus-4-6[1m]"),
+            "an unknown plan must not downgrade a plan-dependent pin"
+        );
+    }
+
+    #[test]
+    fn normalize_pin_for_session_leaves_a_native_models_pin_whatever_claude_code_reports() {
         let tmp = tempfile::tempdir().unwrap();
         let dir =
             speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
@@ -850,19 +916,14 @@ mod tests {
         );
         assert_eq!(
             claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
-            Some("claude-opus-5-5[1m]")
-        );
-
-        normalize_pin_for_session(tmp.path(), "proj", LlmProviderKind::AnthropicOauth, None);
-        assert_eq!(
-            claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
-            Some("claude-opus-5-5[1m]"),
-            "an unknown plan must not downgrade a plan-dependent pin"
+            Some("claude-opus-5-5"),
+            "a native-1M model's pin must not be rewritten just because the live \
+             session only lists its legacy [1m] alias"
         );
     }
 
     #[test]
-    fn normalize_pin_for_session_uses_the_reported_variant_not_a_synthetic_one() {
+    fn normalize_pin_for_session_leaves_a_native_models_legacy_1m_pin_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let dir =
             speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj").join(".claude");
@@ -885,7 +946,9 @@ mod tests {
         );
         assert_eq!(
             claude_settings::get_model_pin(tmp.path(), "proj").as_deref(),
-            Some("claude-sonnet-5")
+            Some("claude-sonnet-5[1m]"),
+            "a legacy `[1m]` pin is the same native model as the bare id Claude Code \
+             now reports and must not be migrated"
         );
     }
 
@@ -914,7 +977,7 @@ mod tests {
     #[test]
     fn model_picker_matches_ts_mirror() {
         let ts = include_str!("../../src/src/app/models/model-picker.ts");
-        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Max);
+        let picker = picker_of(&fixture_info("run_A"), AnthropicPlan::Team);
         let fields = |value: serde_json::Value| {
             let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
             keys.sort_unstable();
