@@ -18,8 +18,8 @@ def main():
     dependencies = json.loads(require_env("UPDATED_DEPENDENCIES"))
 
     alerts = matching_alerts(dependencies, open_alerts(repo, alerts_token))
-    for alert in alerts:
-        ensure_issue(repo, alert, pr_url)
+    for title, group in alerts_by_issue_title(alerts).items():
+        ensure_issue(repo, title, group, pr_url)
 
     if any(is_critical(alert) for alert in alerts):
         gh("pr", "edit", pr_number, "--repo", repo, "--add-label", SECURITY_LABEL)
@@ -85,11 +85,23 @@ def epss_percentile(alert):
     return percentile / 100 if percentile > 1 else percentile
 
 
-def ensure_issue(repo, alert, pr_url):
+def alerts_by_issue_title(alerts):
+    groups = {}
+    for alert in alerts:
+        groups.setdefault(issue_title(alert), []).append(alert)
+    return groups
+
+
+def issue_title(alert):
     ghsa = alert["security_advisory"]["ghsa_id"]
     package = alert["dependency"]["package"]["name"]
     manifest = alert["dependency"]["manifest_path"]
-    title = f"Dependabot: {ghsa} in {package} ({manifest})"
+    return f"Dependabot: {ghsa} in {package} ({manifest})"
+
+
+def ensure_issue(repo, title, alerts, pr_url):
+    ghsa = alerts[0]["security_advisory"]["ghsa_id"]
+    manifest = alerts[0]["dependency"]["manifest_path"]
     existing = gh(
         "issue", "list", "--repo", repo, "--state", "all", "--search", f'"{ghsa}" in:title',
         "--json", "number,title", "--jq", f'.[] | select(.title == "{title}") | .number',
@@ -98,10 +110,11 @@ def ensure_issue(repo, alert, pr_url):
         print(f"Issue for {ghsa} in {manifest} already exists: #{existing.split()[0]}")
         return
     gh("issue", "create", "--repo", repo, "--title", title, "--label", ISSUE_LABEL,
-       "--body", issue_body(alert, pr_url))
+       "--body", issue_body(alerts, pr_url))
 
 
-def issue_body(alert, pr_url):
+def issue_body(alerts, pr_url):
+    alert = max(alerts, key=lambda a: (is_critical(a), cvss_score(a), epss_percentile(a)))
     advisory = alert["security_advisory"]
     dependency = alert["dependency"]
     epss = epss_percentile(alert)
@@ -121,7 +134,7 @@ def issue_body(alert, pr_url):
         f"- CVSS: {cvss_score(alert)}",
         f"- EPSS percentile: {epss * 100:.1f}",
         f"- Verdict: {verdict}",
-        f"- Alert: {alert['html_url']}",
+        *(f"- Alert: {a['html_url']} (scope: {a['dependency'].get('scope') or 'unknown'})" for a in alerts),
         f"- Fix PR: {pr_url}",
     ])
 

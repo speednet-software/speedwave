@@ -52,7 +52,7 @@ Speedwave ships a beta on every merge to `dev` and promotes a tested beta to sta
 4. A `merge/release-0.M-into-dev` PR opens automatically, with the `CHANGELOG.md` section for `0.M.Z`, auto-merge on, assigned to whoever authored the hotfix. If it shows conflicts, resolve them by pushing to that PR's branch — never push directly to `release/0.M` (that is the next hotfix) and never resolve on the release branch.
 5. A second hotfix to the same line may show the same conflict the first one already resolved, in its own backport PR; that is expected.
 
-**A Dependabot security fix** is merged into `dev` like any other PR. When `dependabot-triage.yml` labels it `security` (alert scope `runtime` and CVSS at least 9 or EPSS percentile at least 0.95), its beta is a critical release and the fix also belongs on the highest release line: cherry-pick the squashed commit from `dev` onto a branch from `release/0.M` and open the hotfix PR from step 1. Every fixed alert also gets a GitHub issue with the scores and links.
+**A Dependabot security fix** is merged into `dev` like any other PR. When `dependabot-triage.yml` labels it `security` (alert scope `runtime` and CVSS at least 9 or EPSS percentile at least 0.95), its beta is a critical release and the fix also belongs on the highest release line: cherry-pick the squashed commit from `dev` onto a branch from `release/0.M` and open the hotfix PR from step 1. Every fixed advisory also gets a GitHub issue per manifest, with the scores and links to its alerts; nothing closes it on merge, so close it with the fix PR.
 
 Only the highest `release/0.*` line takes hotfixes. `release/0.20` (the cutover base marker) never does.
 
