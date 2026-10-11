@@ -18,7 +18,7 @@ serde_with = "3"
 anyhow = "1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
-dirs = "6"
+dirs = "7"
 uuid = { version = "1", features = ["v4"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 log = "0.4"
@@ -40,7 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 ctrlc = { version = "3", features = ["termination"] }
-jsonschema = { version = "0.52", default-features = false }
+jsonschema = { version = "0.58", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

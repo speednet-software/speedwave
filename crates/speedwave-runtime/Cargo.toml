@@ -17,7 +17,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-dirs = "6"
+dirs = "7"
 fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
@@ -47,7 +47,7 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
 cpal = { version = "0.18", optional = true }
-wasapi = { version = "0.24", optional = true }
+wasapi = { version = "0.25", optional = true }
 whisper-rs = { version = "0.16", optional = true, features = ["vulkan"] }
 ash = { version = "0.38", optional = true, default-features = false, features = ["loaded"] }
 windows-sys = { version = "0.61", features = [
