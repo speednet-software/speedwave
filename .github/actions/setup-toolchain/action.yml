@@ -1,5 +1,5 @@
 name: 'Setup Toolchain'
-description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Cargo/Rust caching. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
+description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Rust cache, saved only outside pull_request and merge_group so every run restores the cache written on dev. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
 inputs:
   node:
     description: 'Whether to set up Node.js at all'
@@ -22,19 +22,15 @@ inputs:
     required: false
     default: ''
   rust-cache-workspaces:
-    description: 'swatinem/rust-cache `workspaces` value (newline-separated dir -> cache-dir entries); empty skips this cache'
+    description: 'swatinem/rust-cache `workspaces` value (newline-separated dir -> cache-dir entries); empty skips the Rust cache'
     required: false
     default: ''
-  cargo-cache-paths:
-    description: 'actions/cache `path` value for a plain Cargo cache (newline-separated); empty skips this cache'
+  rust-cache-shared-key:
+    description: 'swatinem/rust-cache `shared-key`: one cache shared by every job that passes the same value (empty keys the cache by job id)'
     required: false
     default: ''
-  cargo-cache-key:
-    description: 'actions/cache `key` for the plain Cargo cache (required when cargo-cache-paths is set)'
-    required: false
-    default: ''
-  cargo-cache-restore-keys:
-    description: 'actions/cache `restore-keys` for the plain Cargo cache'
+  rust-cache-directories:
+    description: 'swatinem/rust-cache `cache-directories`: extra directories outside the workspaces, such as an absolute CARGO_TARGET_DIR'
     required: false
     default: ''
 runs:
@@ -65,16 +61,17 @@ runs:
           [ -n "$t" ] && rustup target add "$t"
         done
 
+    - name: Capture runner image version
+      if: inputs.rust-cache-workspaces != ''
+      shell: bash
+      run: echo "SETUP_TOOLCHAIN_IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
     - name: Rust cache
       if: inputs.rust-cache-workspaces != ''
       uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       with:
         workspaces: ${{ inputs.rust-cache-workspaces }}
-
-    - name: Cache Cargo
-      if: inputs.cargo-cache-paths != ''
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-      with:
-        path: ${{ inputs.cargo-cache-paths }}
-        key: ${{ inputs.cargo-cache-key }}
-        restore-keys: ${{ inputs.cargo-cache-restore-keys }}
+        shared-key: ${{ inputs.rust-cache-shared-key }}
+        cache-directories: ${{ inputs.rust-cache-directories }}
+        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}
+        save-if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}

@@ -17,14 +17,9 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           rust-components: clippy, rustfmt
-          cargo-cache-paths: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-            containers/proxy/target/
-          cargo-cache-key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock', 'containers/proxy/Cargo.lock') }}
-          cargo-cache-restore-keys: ${{ runner.os }}-cargo-lint-
+          rust-cache-workspaces: |
+            . -> target
+            containers/proxy -> target
           node-cache-dependency-path: |
             package-lock.json
             mcp-servers/package-lock.json

@@ -18,20 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: Capture runner image version
-        run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
-
       - name: Setup toolchain (Node + Rust + cache)
         uses: ./.github/actions/setup-toolchain
         with:
           node: 'false'
-          cargo-cache-paths: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            D:\st
-          cargo-cache-key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
-          cargo-cache-restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
+          rust-cache-workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+          rust-cache-directories: D:\st
 
       - name: Install Vulkan SDK
         shell: pwsh

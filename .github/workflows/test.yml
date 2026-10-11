@@ -3,13 +3,25 @@ name: Tests
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [dev]
+    paths:
+      - Cargo.lock
+      - desktop/src-tauri/Cargo.lock
+      - containers/proxy/Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/test.yml
+      - .github/workflows/lane-*.yml
+      - .github/actions/**
+  schedule:
+    - cron: '23 4 * * 1'
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
 
 jobs:
   lint:

@@ -109,22 +109,16 @@ jobs:
         shell: bash
         run: |
           echo 'CARGO_TARGET_DIR=D:\st' >> "$GITHUB_ENV"
-          # Cache key folds in the runner image: a VS bump invalidates CMakeCache generators.
-          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
-
-      - name: Cache the short cargo target dir (Windows)
-        if: matrix.platform == 'windows-latest'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: D:\st
-          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-
 
       - name: Setup toolchain (Node + Rust + cache)
         uses: ./.github/actions/setup-toolchain
         with:
           rust-targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
-          rust-cache-workspaces: "./desktop/src-tauri -> target"
+          rust-cache-workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+          rust-cache-shared-key: desktop-bundle
+          rust-cache-directories: ${{ matrix.platform == 'windows-latest' && 'D:\st' || '' }}
 
       - name: Install frontend dependencies
         run: npm ci
