@@ -105,11 +105,6 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     grep -qF "macOS_Apple_Silicon.app.tar.gz" "$VERIFY_SCRIPT"
 }
 
-@test "verify-release-assets.sh enumerates Windows updater assets" {
-    grep -qF "x64-setup.nsis.zip" "$VERIFY_SCRIPT"
-    grep -qF "x64_en-US.msi.zip" "$VERIFY_SCRIPT"
-}
-
 @test "verify-release-assets.sh verifies .sig non-emptiness" {
     grep -qF "signature file empty" "$VERIFY_SCRIPT"
 }
