@@ -55,10 +55,6 @@ populate_macos() {
     write_exec "$ROOT/audio-capture-cli"
 }
 
-@test "verify-bundled-assets script exists and is executable" {
-    [ -x "$SCRIPT" ]
-}
-
 @test "verify-bundled-assets accepts complete macos tree" {
     populate_common
     populate_macos

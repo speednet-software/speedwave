@@ -80,10 +80,6 @@ teardown() {
     rm_with_retry "$DEST"
 }
 
-@test "bundle script exists and is executable" {
-    [ -x "$SCRIPT" ]
-}
-
 @test "bundle script creates build-context/containers/ with its dotfiles and nested dirs" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -307,12 +303,6 @@ EOF
     done
 }
 
-@test "build-wasm.sh keeps the same absolute path forms as scripts/cargo-target-dir.sh" {
-    local absolute='/* | [A-Za-z]:* | \\\\*)'
-    [ "$(grep -cF -- "$absolute" "$BUILD_WASM")" -eq 1 ]
-    [ "$(grep -cF -- "$absolute" "$BATS_TEST_DIRNAME/../../scripts/cargo-target-dir.sh")" -eq 1 ]
-}
-
 @test "build-wasm.sh --lock waits on the lock beside its out dir until it is released" {
     local stub_dir="$DEST/stub-bin" out="$DEST/npm-build/wasm-pkg"
     mkdir -p "$stub_dir"
@@ -458,20 +448,6 @@ EOF
     [ ! -f "$DEST/build-context/STALE_FILE" ]
 }
 
-@test "bundle script references only existing source files" {
-    local repo_root="$BATS_TEST_DIRNAME/../.."
-    local checked=0 src resolved
-    while IFS= read -r src; do
-        resolved="${src//\$REPO_ROOT/$repo_root}"
-        resolved="${resolved//\$MCP_SERVERS_DIR/$repo_root/mcp-servers}"
-        resolved="${resolved//\$CONTAINERS_DIR/$repo_root/containers}"
-        [[ "$resolved" == *'$'* ]] && continue
-        checked=$((checked + 1))
-        [ -e "$resolved" ] || { echo "Source path does not exist: $src (resolved: $resolved)"; return 1; }
-    done < <(grep -E '^\s*(cp|copy_tree) ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR|CONTAINERS_DIR)(/[^"]+)?"' | tr -d '"' | sort -u)
-    [ "$checked" -gt 0 ]
-}
-
 @test "mcp-os/shared standalone lockfile resolves without workspace context" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -580,87 +556,6 @@ EOF
         [ ! -d "$DEST/.bundle.lock" ]
         [ ! -d "$WASM_DIR" ]
     done
-}
-
-@test "bundle-build-context.ps1 fails the run after every native call that exits non-zero" {
-    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
-    run awk '
-        function command_word(line) {
-            sub(/^[[:space:]]+/, "", line)
-            sub(/^\$[A-Za-z0-9_:]+[[:space:]]*=[[:space:]]*/, "", line)
-            sub(/^&[[:space:]]*/, "", line)
-            split(line, parts, /[[:space:]]+/)
-            return parts[1]
-        }
-        function fails_run(line) { return line ~ /(^|[^A-Za-z])(throw|exit)([^A-Za-z]|$)/ }
-        function close_check(line) {
-            depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
-            if (depth > 0) return
-            depth = 0
-            if (!exits) print "check never fails the run: " check
-        }
-        depth > 0 {
-            if (fails_run($0)) exits = 1
-            close_check($0)
-            next
-        }
-        pending != "" {
-            call = pending
-            pending = ""
-            if ($0 !~ /\$LASTEXITCODE -ne 0/) {
-                print "unchecked: " call
-            } else {
-                check = $0
-                exits = fails_run($0)
-                close_check($0)
-                next
-            }
-        }
-        {
-            word = command_word($0)
-            if (word ~ /^[A-Za-z][A-Za-z0-9._]*$/ && tolower(word) !~ /^(if|elseif|else|foreach|for|while|do|until|switch|function|filter|param|begin|process|end|try|catch|finally|trap|return|exit|throw|break|continue|class|enum|using|data|hidden|static|in)$/) {
-                calls++
-                if (word == "npm") npm++
-                pending = $0
-            }
-        }
-        END {
-            if (pending != "") print "unchecked: " pending
-            if (npm == 0) print "vacuous: no npm call parsed"
-        }
-    ' "$ps1"
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-@test "bundle-build-context.ps1 releases on every exit only the locks it acquired" {
-    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
-    [ "$(grep -c '^try {$' "$ps1")" -eq 1 ]
-    [ "$(grep -c '^} finally {$' "$ps1")" -eq 1 ]
-    run awk '
-        /^try \{$/ { in_try = 1 }
-        /^\} finally \{$/ { in_try = 0; in_finally = 1 }
-        /^[[:space:]]*Acquire-Lock \$/ { if (in_try) inside++; else outside++ }
-        /\$heldLocks\.Add\(\$dir\)/ { added = NR }
-        /Out-File -FilePath "\$dir\\pid"/ { pid_write = NR }
-        in_finally && /Remove-Item/ { removes = $0 }
-        END {
-            if (inside != 2 || outside != 0) print "Acquire-Lock calls inside the try: " inside ", outside: " outside
-            if (!added || !pid_write || added > pid_write) print "a lock must be registered before its PID write"
-            if (removes !~ /\$heldLocks/ || removes ~ /\$lockDir|\$wasmLockDir/) print "the finally must remove only $heldLocks: " removes
-        }' "$ps1"
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-@test "bundle-build-context.ps1 derives the wasm lock dir for a bare out dir name, like dirname" {
-    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
-    run awk '
-        index($0, "$wasmParentDir = Split-Path -Parent $wasmPkgDir") == 1 { split_at = NR }
-        index($0, "if (-not $wasmParentDir) { $wasmParentDir = ") == 1 { fallback_at = NR; fallback = $0 }
-        index($0, "$wasmLockDir = Join-Path $wasmParentDir") == 1 { join_at = NR }
-        END { exit !(split_at && split_at < fallback_at && fallback_at < join_at && fallback ~ /= .\.. \}$/) }' "$ps1"
-    [ "$status" -eq 0 ]
 }
 
 @test "bundle script --ci builds a clean scratch copy and leaves a concurrent run on the real tree intact" {

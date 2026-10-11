@@ -94,7 +94,7 @@ Sections 1-7 isolate a dev build from production, not two dev builds from each o
 | Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name            |
 | CLI command on PATH  | `speedwave-dev`                    | `speedwave-speed-533`            |
 
-The default instance overrides no port, so `angular.json` and `tauri.conf.json` remain its single source (the pair is pinned equal by `_tests/desktop/dev-server-port.bats`). Every other instance takes 24 bits of `sha256` over its own name folded into 20000-39999: the same worktree keeps the same URL across restarts, nobody tracks which port is free, and the window stays clear of the Angular defaults below it and the macOS ephemeral range (49152+) above it. `DEV_PORT` overrides that when the derived one is inconvenient or taken.
+The default instance overrides no port, so `angular.json` and `tauri.conf.json` remain its single source (manual alignment, see `.claude/rules/alignments.md`). Every other instance takes 24 bits of `sha256` over its own name folded into 20000-39999: the same worktree keeps the same URL across restarts, nobody tracks which port is free, and the window stays clear of the Angular defaults below it and the macOS ephemeral range (49152+) above it. `DEV_PORT` overrides that when the derived one is inconvenient or taken.
 
 `guard-dev-instance` refuses a `DEV_INSTANCE` that `derive_instance_name_from` would reject and a non-numeric `DEV_PORT`. `guard-dev-port` runs only on the way into `make dev`: it prints what the instance resolved to and binds the port once to fail now rather than after the build, in `ng serve`. Resolving the configuration (`make dev-config`) never binds anything.
 

@@ -314,7 +314,6 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
         if [ -n "${_retired_keep}" ]; then
             echo "${_retired_keep}" >> "${_new_marker}"
         fi
-        _mp_add_attempted=""
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
             if ! echo "${_plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
                 echo "WARNING: skipping invalid bundled-plugin name: ${_plugin}" >&2
@@ -331,15 +330,15 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                 _diag INFO SKIP "${_plugin}@${_mp} (already installed)"
                 continue
             fi
-            if [ "${_mp}" = "claude-plugins-official" ] && [ -z "${_mp_add_attempted}" ] \
-                && ! jq -e --arg mp "${_mp}" '.[$mp] | type == "object"' "${HOME}/.claude/plugins/known_marketplaces.json" >/dev/null 2>&1; then
-                _mp_add_attempted=1
-                if ! _err="$(timeout 150 claude plugin marketplace add "anthropics/${_mp}" 2>&1 >/dev/null)"; then
-                    echo "WARNING: failed to add plugin marketplace ${_mp}: ${_err} (continuing)" >&2
-                    _diag WARN CONFIG "marketplace add ${_mp}: ${_err}"
+            if [ "${_mp}" = "claude-plugins-official" ]; then
+                if _err="$(timeout 150 claude plugin install "${_plugin}" --marketplace "anthropics/${_mp}" 2>&1 >/dev/null)"; then
+                    echo "${_plugin}@${_mp}" >> "${_new_marker}"
+                    _diag INFO OK "${_plugin}@${_mp}"
+                else
+                    echo "WARNING: failed to install bundled plugin ${_plugin}@${_mp}: ${_err} (continuing)" >&2
+                    _diag ERROR FAIL "${_plugin}@${_mp}: ${_err}"
                 fi
-            fi
-            if _err="$(timeout 120 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
+            elif _err="$(timeout 120 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
                 _diag INFO OK "${_plugin}@${_mp}"
             else
@@ -353,7 +352,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             rm -f "${_new_marker}"
         fi
     fi
-    unset _mp _plugin _err _all_recorded _new_marker _match _mp_add_attempted
+    unset _mp _plugin _err _all_recorded _new_marker _match
 fi
 unset _bundled_marker _retired_keep
 

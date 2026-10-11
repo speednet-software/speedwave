@@ -10,7 +10,7 @@ Sign every Windows PE artifact with Azure Artifact Signing (formerly Trusted Sig
 - `bundle.windows.signCommand` (object form): Tauri calls the script with `%1` for the main executable, the NSIS installer and uninstaller, the NSIS plugin DLLs and the MSI.[^1][^2]
 - `build.beforeBundleCommand` (Windows override, cwd `../..`): runs the script with `-Bundled`, which signs the PE files we build ourselves that Tauri copies in as plain resources (`$SignTargets`, today `cli\speedwave.exe`) before the bundlers run, so the inventory of what must be signed is explicit and test-guarded instead of being left to the bundler. This is the Windows counterpart of ADR-037's `sign-bundled-binaries.sh`.
 
-The `cli` release job signs the standalone Windows CLI with the same script before zipping it.
+The standalone Windows CLI archive ships the same `desktop/src-tauri/cli/speedwave.exe` copy that `-Bundled` already signed before bundling; there is no separate `cli` job (SPEED-767).
 
 The script signs through Microsoft's `ArtifactSigning` PowerShell module (pinned by `$ModuleVersion`), which fetches the pinned SignTool and dlib packages itself and authenticates with `DefaultAzureCredential`.[^3][^4] Every signature carries an RFC 3161 timestamp from `http://timestamp.acs.microsoft.com`: Artifact Signing certificates are valid for three days, so an untimestamped signature would expire with them.[^3] After each call the script re-reads the file with `Get-AuthenticodeSignature` and fails unless the status is `Valid`, a timestamper certificate is present, and the signer certificate carries the EKU `1.3.6.1.4.1.311.97.1.0` that every Artifact Signing Public Trust certificate contains.[^13] The EKU check is what proves the signature is ours: a file that already carried another publisher's valid signature passed the first two checks in a live smoke run.
 
@@ -30,15 +30,15 @@ Without that env the script exits 0 with a notice, so PR builds, `test.yml`'s `b
 
 - **Signing script (SSOT)**: `scripts/sign-windows-binaries.ps1` holds `$ModuleVersion`, `$TimestampServer`, `$SignTargets`, the credential exclusions and the post-sign verification. `$SignTargets` ↔ `tauri.windows.conf.json` `bundle.resources` is an alignment pair (alignments rules).
 - **Hooks**: `desktop/src-tauri/tauri.windows.conf.json`, `build.beforeBundleCommand` and `bundle.windows.signCommand`.
-- **Login and env export**: `.github/actions/azure-signing-login/action.yml`, used by the `publish-tauri` and `cli` jobs in `.github/workflows/desktop-release.yml`.
-- **Guards**: `_tests/desktop/sign-windows-binaries.bats` and `_tests/desktop/release-workflow-signing.bats`.
+- **Login and env export**: `.github/actions/azure-signing-login/action.yml`, used by the `publish-tauri` job in `.github/workflows/build-publish.yml` (called from `beta.yml` and `release.yml`).
+- **Guards**: none. `$SignTargets` ↔ `tauri.windows.conf.json` `bundle.resources` is a manual alignment (`.claude/rules/alignments.md`).
 
 ## Rejected alternatives
 
 - **`certificateThumbprint` plus a base64 PFX secret.** The shape the old `WINDOWS_CERTIFICATE` secrets implied; unusable with any certificate issued after the hardware-key requirement.[^1]
 - **`artifact-signing-cli` with `AZURE_CLIENT_SECRET`.** Works, but stores a long-lived credential in GitHub for no gain over OIDC.[^7]
 - **`azure/artifact-signing-action` after `tauri build`.** Leaves the uninstaller and the embedded binary unsigned (see above).[^8]
-- **SignPath Foundation (free for open source).** Every release needs a manual approval in their portal and signing runs outside the build, which does not fit the automated release-please flow.[^10]
+- **SignPath Foundation (free for open source).** Every release needs a manual approval in their portal and signing runs outside the build, which does not fit the automated release pipeline (`beta.yml` / `release.yml`).[^10]
 - **A Polish CA cloud certificate (Certum SimplySign).** Needs a desktop signing session on a dedicated agent, so it is unusable on hosted runners.[^11]
 
 ## Notes

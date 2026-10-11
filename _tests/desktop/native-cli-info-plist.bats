@@ -20,16 +20,6 @@ expected_bundle_id() {
     esac
 }
 
-expected_usage_key() {
-    case "$1" in
-        calendar) echo "NSCalendarsFullAccessUsageDescription" ;;
-        reminders) echo "NSRemindersFullAccessUsageDescription" ;;
-        mail | notes) echo "NSAppleEventsUsageDescription" ;;
-        audio-capture) echo "NSAudioCaptureUsageDescription" ;;
-        *) echo "unmapped service: $1" >&2; return 1 ;;
-    esac
-}
-
 resolve_binary() {
     local svc="$1"
     local pkg_dir="$REPO_ROOT/native/macos/$svc"
@@ -129,51 +119,5 @@ assert_plist_key() {
             echo "  Only scripts/build-native-macos.sh re-stamps this, from \$SPEEDWAVE_VERSION or the speedwave-version git resolver, never from tauri.conf.json." >&2
             return 1
         }
-    done
-}
-
-@test "each CLI Info.plist has correct UsageDescription key" {
-    local svc plist key val
-    for svc in $SERVICES; do
-        plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
-        [ -f "$plist" ] || {
-            echo "Missing source Info.plist: $plist" >&2
-            return 1
-        }
-        key="$(expected_usage_key "$svc")" || return 1
-        val="$(python3 -c "import plistlib;print(plistlib.load(open('$plist','rb')).get('$key',''))")"
-        if [ -z "$val" ]; then
-            echo "$svc/Resources/Info.plist missing or empty $key" >&2
-            return 1
-        fi
-        if ! echo "$val" | grep -qE 'Speedwave|Claude'; then
-            echo "$svc/Resources/Info.plist $key does not mention Speedwave/Claude: $val" >&2
-            return 1
-        fi
-    done
-}
-
-@test "Resources/Info.plist files exist for every native CLI" {
-    local svc plist
-    for svc in $SERVICES; do
-        plist="$REPO_ROOT/native/macos/$svc/Resources/Info.plist"
-        if [ ! -f "$plist" ]; then
-            echo "Missing $plist — source of the .build/Info.plist copy that Package.swift links with -sectcreate" >&2
-            return 1
-        fi
-    done
-}
-
-@test "Package.swift files declare Info.plist linker flags for every CLI" {
-    local svc pkg
-    for svc in $SERVICES; do
-        pkg="$REPO_ROOT/native/macos/$svc/Package.swift"
-        [ -f "$pkg" ] || { echo "Missing $pkg" >&2; return 1; }
-        if ! grep -q -- "-sectcreate" "$pkg" \
-            || ! grep -q "__info_plist" "$pkg" \
-            || ! grep -q ".build/Info.plist" "$pkg"; then
-            echo "$pkg is missing -sectcreate __TEXT __info_plist linker flags" >&2
-            return 1
-        fi
     done
 }

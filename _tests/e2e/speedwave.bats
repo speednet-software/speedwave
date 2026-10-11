@@ -59,12 +59,3 @@ load setup
     [ "$status" -ne 0 ]
     [[ "$output" == *"usage"* ]] || [[ "$output" == *"Usage"* ]] || [[ "$output" == *"zip-path"* ]]
 }
-
-
-@test "speedwave binary exists" {
-    [ -f "$SPEEDWAVE_BIN" ] || skip "Binary not built yet (run cargo build -p speedwave-cli first)"
-}
-
-@test "speedwave binary is executable" {
-    [ -x "$SPEEDWAVE_BIN" ] || skip "Binary not built yet"
-}

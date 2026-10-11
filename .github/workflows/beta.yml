@@ -1,8 +1,9 @@
 name: Beta
 
 on:
-  push:
-    branches: [dev]
+  schedule:
+    - cron: '17 7,11,15 * * 1-5'
+  workflow_dispatch: {}
 
 concurrency:
   group: beta
@@ -22,7 +23,16 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       notes: ${{ steps.notes.outputs.body }}
+      skip: ${{ steps.range.outputs.skip }}
     steps:
+      - name: Refuse a dispatch from a branch other than dev
+        if: github.ref != 'refs/heads/dev'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::beta is published only from dev, not from $REF"
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -34,15 +44,22 @@ jobs:
           git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*' --no-tags
           git fetch origin --tags --force
 
+      - name: Skip when HEAD already has a beta, else find the previous beta
+        id: range
+        run: bash scripts/beta-release-range.sh >> "$GITHUB_OUTPUT"
+
       - name: Install Rust stable
+        if: steps.range.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
 
       - name: Rust cache
+        if: steps.range.outputs.skip != 'true'
         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: speedwave-version
 
       - name: Compute version and tag
+        if: steps.range.outputs.skip != 'true'
         id: version
         shell: bash
         run: |
@@ -52,20 +69,23 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Tag the release commit
+        if: steps.range.outputs.skip != 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
           GH_AUTOMATION_PAT: ${{ secrets.GH_AUTOMATION_PAT }}
         run: bash scripts/tag-release-commit.sh --allow-reuse-same-commit "$TAG"
 
       - name: Generate beta release notes
+        if: steps.range.outputs.skip != 'true'
         id: cliff
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff
         with:
           config: cliff.toml
-          args: --no-exec HEAD~1..HEAD
+          args: --no-exec ${{ steps.range.outputs.since }}..HEAD
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Capture release notes as a job output
+        if: steps.range.outputs.skip != 'true'
         id: notes
         env:
           BODY: ${{ steps.cliff.outputs.content }}
@@ -78,6 +98,7 @@ jobs:
 
   publish:
     needs: compute
+    if: needs.compute.outputs.skip != 'true'
     permissions:
       contents: read
       id-token: write

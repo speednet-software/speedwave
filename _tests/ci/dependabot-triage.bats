@@ -41,8 +41,9 @@ _refute_log() {
 
 _alert() {
   local number="$1" package="$2" manifest="$3" scope="$4" cvss="$5" epss="$6"
-  printf '{"number":%s,"html_url":"https://github.com/test/test/security/dependabot/%s","dependency":{"package":{"name":"%s"},"manifest_path":"%s","scope":"%s"},"security_advisory":{"ghsa_id":"GHSA-aaaa-bbbb-%04d","cve_id":"CVE-2026-%s","summary":"test advisory","cvss_severities":{"cvss_v3":{"score":%s},"cvss_v4":{"score":null}},"epss":{"percentage":0.1,"percentile":%s}}}\n' \
-    "$number" "$number" "$package" "$manifest" "$scope" "$number" "$number" "$cvss" "$epss" >>"$ALERTS_FILE"
+  local ghsa="${7:-$(printf 'GHSA-aaaa-bbbb-%04d' "$number")}"
+  printf '{"number":%s,"html_url":"https://github.com/test/test/security/dependabot/%s","dependency":{"package":{"name":"%s"},"manifest_path":"%s","scope":"%s"},"security_advisory":{"ghsa_id":"%s","cve_id":"CVE-2026-%s","summary":"test advisory","cvss_severities":{"cvss_v3":{"score":%s},"cvss_v4":{"score":null}},"epss":{"percentage":0.1,"percentile":%s}}}\n' \
+    "$number" "$number" "$package" "$manifest" "$scope" "$ghsa" "$number" "$cvss" "$epss" >>"$ALERTS_FILE"
 }
 
 @test "a version update with no open alert only reads the alerts" {
@@ -138,6 +139,27 @@ _alert() {
   run python3 "$TRIAGE"
   [ "$status" -eq 0 ]
   [ "$(grep -c "issue create" "$GH_LOG")" -eq 1 ]
+}
+
+@test "two alerts for one advisory in one manifest file one issue listing both" {
+  _alert 315 undici desktop/e2e/package-lock.json development 3.7 0.1 GHSA-r53p-7pc4-xj5r
+  _alert 319 undici desktop/e2e/package-lock.json development 3.7 0.1 GHSA-r53p-7pc4-xj5r
+  export UPDATED_DEPENDENCIES='[{"dependencyName":"undici","directory":"/desktop/e2e","updateType":"version-update:semver-minor"}]'
+  run python3 "$TRIAGE"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "issue create" "$GH_LOG")" -eq 1 ]
+  grep -q "security/dependabot/315 (scope: development)" "$GH_LOG"
+  grep -q "security/dependabot/319 (scope: development)" "$GH_LOG"
+}
+
+@test "the most severe alert of a shared advisory decides the verdict" {
+  _alert 315 undici desktop/e2e/package-lock.json development 9.8 0.1 GHSA-r53p-7pc4-xj5r
+  _alert 319 undici desktop/e2e/package-lock.json runtime 9.8 0.1 GHSA-r53p-7pc4-xj5r
+  export UPDATED_DEPENDENCIES='[{"dependencyName":"undici","directory":"/desktop/e2e","updateType":"version-update:semver-minor"}]'
+  run python3 "$TRIAGE"
+  [ "$status" -eq 0 ]
+  grep -q "Verdict: critical" "$GH_LOG"
+  grep -q "add-label security" "$GH_LOG"
 }
 
 @test "a critical fix is labelled but never merged" {

@@ -1335,7 +1335,7 @@ mod tests {
     #[test]
     fn a_model_pick_leaves_the_session_free_while_it_waits_for_the_answer() {
         assert_the_pick_leaves_the_session_free_while_it_waits(|session_arc| {
-            switch_model_inner(session_arc, "claude-haiku-4-5")
+            switch_model_inner(session_arc, "claude-haiku-5-5")
         });
     }
 
@@ -1500,7 +1500,7 @@ mod tests {
     fn a_model_pick_needs_a_live_session() {
         let session_arc = session_for("acme");
 
-        let idle = switch_model_inner(&session_arc, "claude-haiku-4-5");
+        let idle = switch_model_inner(&session_arc, "claude-haiku-5-5");
 
         assert!(idle.unwrap_err().contains("no active session"));
     }
@@ -1544,7 +1544,7 @@ mod tests {
         let session_arc = session_for("acme");
         let _held = session_arc.lock().unwrap();
 
-        let picked = switch_model_inner(&session_arc, "claude-haiku-4-5");
+        let picked = switch_model_inner(&session_arc, "claude-haiku-5-5");
 
         assert_eq!(picked, Err(MSG_SESSION_BUSY.to_string()));
     }
@@ -1759,7 +1759,7 @@ mod tests {
         let started = std::time::Instant::now();
 
         let result = tab_session_for_project(&reg, TAB_A, "project-a")
-            .and_then(|session_arc| switch_model_inner(&session_arc, "claude-haiku-4-5"));
+            .and_then(|session_arc| switch_model_inner(&session_arc, "claude-haiku-5-5"));
 
         assert_eq!(result.err(), Some(MSG_NO_SESSION_FOR_PROJECT.to_string()));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
@@ -1774,7 +1774,7 @@ mod tests {
             let session_arc = session_arc.clone();
             std::thread::spawn(move || {
                 ready_tx.send(()).unwrap();
-                switch_model_inner(&session_arc, "claude-haiku-4-5")
+                switch_model_inner(&session_arc, "claude-haiku-5-5")
             })
         };
         ready_rx.recv().unwrap();
@@ -1801,7 +1801,7 @@ mod tests {
             let session_arc = session_arc.clone();
             std::thread::spawn(move || {
                 ready_tx.send(()).unwrap();
-                switch_model_inner(&session_arc, "claude-haiku-4-5")
+                switch_model_inner(&session_arc, "claude-haiku-5-5")
             })
         };
         ready_rx.recv().unwrap();
@@ -1831,7 +1831,7 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let picker = std::thread::spawn(move || {
             ready_tx.send(()).unwrap();
-            switch_model_inner(&session_arc, "claude-haiku-4-5")
+            switch_model_inner(&session_arc, "claude-haiku-5-5")
         });
         ready_rx.recv().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
