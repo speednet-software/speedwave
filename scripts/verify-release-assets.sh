@@ -16,9 +16,7 @@ V="$VERSION"
 SIGNED_ASSETS=(
   "Speedwave_${V}_macOS_Apple_Silicon.app.tar.gz"
   "Speedwave_${V}_x64-setup.exe"
-  "Speedwave_${V}_x64-setup.nsis.zip"
   "Speedwave_${V}_x64_en-US.msi"
-  "Speedwave_${V}_x64_en-US.msi.zip"
 )
 
 UNSIGNED_ASSETS=(

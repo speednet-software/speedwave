@@ -556,8 +556,7 @@ test-native-cli-plist:
 
 test-desktop-config:
 	@$(REQUIRE_BATS)
-	bats _tests/desktop/updater-config.bats \
-	  _tests/desktop/e2e-invoke-helper.bats \
+	bats _tests/desktop/e2e-invoke-helper.bats \
 	  _tests/desktop/installer-reset.bats \
 	  _tests/desktop/installer-sweep.bats
 	@echo "✅ Desktop config tests passed"

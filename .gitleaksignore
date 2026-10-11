@@ -1,9 +1,4 @@
 desktop/src-tauri/tauri.conf.json:generic-api-key:38
-_tests/desktop/fixtures/tauri.conf.bad-pubkey.json:generic-api-key:27
-_tests/desktop/fixtures/tauri.conf.empty-endpoints.json:generic-api-key:25
-_tests/desktop/fixtures/tauri.conf.missing-dmg.json:generic-api-key:27
-_tests/desktop/fixtures/tauri.conf.missing-updater-artifacts.json:generic-api-key:27
-_tests/desktop/fixtures/tauri.conf.wrong-endpoint.json:generic-api-key:27
 
 crates/speedwave-runtime/src/log_sanitizer.rs:private-key:17
 crates/speedwave-runtime/src/log_sanitizer.rs:private-key:340

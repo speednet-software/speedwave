@@ -234,7 +234,7 @@ setup() {
 @test "empty sig file fails with 'signature file empty' message" {
   export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-happy.json"
-  export EMPTY_SIG_NAME="Speedwave_0.8.1_x64_en-US.msi.zip.sig"
+  export EMPTY_SIG_NAME="Speedwave_0.8.1_x64_en-US.msi.sig"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "signature file empty:" ]]

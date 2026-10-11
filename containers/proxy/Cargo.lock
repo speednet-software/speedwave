@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "proxy"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "speedwave-pii-engine"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "aes-siv",
  "base64 0.23.1",
