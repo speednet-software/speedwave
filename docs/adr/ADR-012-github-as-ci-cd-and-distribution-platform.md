@@ -12,7 +12,7 @@ Speedwave uses GitHub Actions for CI/CD and GitHub Releases for binary distribut
 - Free CI/CD minutes[^1] and free binary hosting[^2] for public repositories — no server to run, no CDN to pay for.
 - GitHub Releases doubles as the update server: the Tauri updater protocol is built around it[^3] (`latest.json` is generated during the release workflow and uploaded as a release artifact).
 - Native integration with the open-source workflow (Issues, Discussions, PRs, tags, changelogs).
-- Release versioning is automated by release-please; the desktop release workflow uploads platform artifacts to the release it manages.
+- Release versioning is computed from git by the `speedwave-version` crate, never hand-bumped or PR-based; the reusable `build-publish.yml` workflow (called from `beta.yml` on every merge to `dev` and from `release.yml` on promotion/hotfix) uploads platform artifacts to the release it manages.
 
 ## Release Artifacts
 
@@ -34,10 +34,10 @@ Bundled dependencies are verified by SHA256 before they go into a release artifa
 ## Where it lives in code
 
 - Bundle targets (`nsis`, `msi`, `app`, `dmg`) — `desktop/src-tauri/tauri.conf.json`
-- Release build matrix + per-arch asset naming — `.github/workflows/desktop-release.yml`
+- Release build matrix + per-arch asset naming — `.github/workflows/build-publish.yml`
 - macOS Lima bundling into `Contents/Resources/lima/` — `desktop/src-tauri/tauri.macos.conf.json`
 - Lima SHA256 download verification — `.github/actions/download-lima/action.yml` and the `download-lima` target in `Makefile`
-- Automated version bumps / release PRs — `.github/workflows/release-please.yml`, `release-please-config.json`
+- Version computation from git / release tagging — `crates/speedwave-version`, `.github/workflows/beta.yml`, `.github/workflows/release.yml`
 
 ## Rejected alternatives
 
