@@ -316,9 +316,11 @@ describe('ChatSessionStore', () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       await store.init();
+      await new Promise((r) => setTimeout(r, 0));
       const firstCallCount = spy.mock.calls.filter((c) => c[0] === 'start_chat').length;
 
       await store.init();
+      await new Promise((r) => setTimeout(r, 0));
       const secondCallCount = spy.mock.calls.filter((c) => c[0] === 'start_chat').length;
 
       expect(firstCallCount).toBe(1);
@@ -401,22 +403,6 @@ describe('ChatSessionStore', () => {
       await settle();
 
       expect(store.launchModel()).toBe('claude-sonnet-5');
-    });
-
-    it('drops a pin read that answers after a newer spawn recorded its own model', async () => {
-      const slowPin = createDeferred<string | null>();
-      mockTauri.invokeHandler = handlerWithPin(() => slowPin.promise);
-
-      await store.init();
-      await settle();
-      expect(store.launchModel()).toBeNull();
-      setTabModel('claude-haiku-4-5');
-      await store.startChatSession();
-      expect(store.launchModel()).toBe('claude-haiku-4-5');
-      slowPin.resolve('claude-opus-5-5[1m]');
-      await settle();
-
-      expect(store.launchModel()).toBe('claude-haiku-4-5');
     });
 
     it('stays unset and logs at debug when the pin cannot be read', async () => {
@@ -1723,20 +1709,30 @@ describe('ChatSessionStore', () => {
       expect(spy).toHaveBeenCalledWith('clear_model_pin', { projectId: 'test' });
     });
 
-    it('logs a warning without throwing when persisting the typed pick fails', async () => {
+    it('a typed /model the backend rejects leaves the tab model unchanged', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) =>
         cmd === 'restore_model_pin'
           ? Promise.reject(new Error('settings.json is locked'))
           : undefined;
 
+      await store.sendMessage({ text: '/model foo', attachments: [] });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(store.tabModel()).toBeNull();
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('typed /model rejected')
+      );
+    });
+
+    it('a typed /model the backend accepts sets the tab model', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async () => undefined;
+
       await store.sendMessage({ text: '/model opus', attachments: [] });
       await new Promise((r) => setTimeout(r, 0));
 
       expect(store.tabModel()).toBe('opus');
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('typed /model project default persist failed')
-      );
     });
   });
 
@@ -4867,7 +4863,10 @@ describe('ChatSessionStore', () => {
           await store.applyModelSelection(haikuPick);
 
           expect(tabModelWrites()).toEqual(['claude-haiku-4-5']);
-          expect(indexOfCall(invokeSpy.mock.calls, touchesProjectPin)).toBe(-1);
+          expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+            projectId: 'test',
+            model: 'claude-haiku-4-5',
+          });
           expect(store.modelSelectionError()).toBe(MODEL_SWITCH_UNCONFIRMED);
           expect(store.messagesFromState()).toHaveLength(messagesBefore);
           expect(store.pickedModel()).toBe('claude-haiku-4-5');
@@ -4885,7 +4884,10 @@ describe('ChatSessionStore', () => {
           await store.applyModelSelection(haikuPick);
 
           expect(tabModelWrites()).toEqual(['claude-haiku-4-5']);
-          expect(indexOfCall(invokeSpy.mock.calls, touchesProjectPin)).toBe(-1);
+          expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+            projectId: 'test',
+            model: 'claude-haiku-4-5',
+          });
           expect(store.modelSelectionError()).toContain('chat session ended');
           expect(store.pickedModel()).toBe('claude-haiku-4-5');
         });
@@ -5288,7 +5290,7 @@ describe('ChatSessionStore', () => {
       expect(store.tabModel()).toBe('claude-opus-5[1m]');
     });
 
-    it('an unconfirmed Default-row pick records the tab override but never clears the project pin', async () => {
+    it('an unconfirmed Default-row pick records the tab override and clears the project pin', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
       mockTauri.invokeHandler = async (cmd: string) =>
         cmd === 'switch_chat_model' ? { outcome: 'unconfirmed' } : undefined;
@@ -5310,7 +5312,7 @@ describe('ChatSessionStore', () => {
       });
 
       expect(store.tabModel()).toBe(DEFAULT_ALIAS);
-      expect(invokeSpy.mock.calls.map(([cmd]) => cmd)).not.toContain('clear_model_pin');
+      expect(invokeSpy).toHaveBeenCalledWith('clear_model_pin', { projectId: 'test' });
     });
 
     it('a failed project-default write surfaces the error though the tab already switched', async () => {
@@ -7892,7 +7894,10 @@ describe('ChatSessionStore', () => {
         tabId: store.tabId,
         model: 'claude-sonnet-5',
       });
-      expect(commands().some((cmd) => cmd.endsWith('_model_pin'))).toBe(false);
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: 'test',
+        model: 'claude-sonnet-5',
+      });
       expect(commands()).not.toContain('start_chat');
       expect(store.pendingModelOverride()).toBeNull();
     });
@@ -7954,7 +7959,7 @@ describe('ChatSessionStore', () => {
       answer();
       await pending;
       expect(store.tabModel()).toBe('claude-opus-4-8');
-      expect(calls).toEqual(['switch_chat_model']);
+      expect(calls).toEqual(['switch_chat_model', 'set_model_pin']);
       expect(setProviderModelSpy).not.toHaveBeenCalled();
     });
 

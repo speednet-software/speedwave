@@ -314,9 +314,10 @@ export class ChatSessionStore {
     if (!pick.routed) {
       let pin: string | null = null;
       try {
-        pin = await this.deps.tauri.invoke<string | null>('get_model_pin', {
-          projectId: pick.project ?? '',
-        });
+        pin =
+          (await this.deps.tauri.invoke<string | null>('get_model_pin', {
+            projectId: pick.project ?? '',
+          })) ?? null;
       } catch (e: unknown) {
         this.deps.log.warn(`[chat-state] reading the saved model pin failed: ${String(e)}`);
       }
@@ -608,12 +609,11 @@ export class ChatSessionStore {
 
   private async persistModelPick(
     pick: ModelPick,
-    beforeSave?: () => Promise<void>,
-    persistDefault = true
+    beforeSave?: () => Promise<void>
   ): Promise<boolean> {
     const outcome = await this.chainModelSave(async () => {
       await beforeSave?.();
-      return this.saveModelPick(pick, persistDefault);
+      return this.saveModelPick(pick);
     });
     if (outcome.saved) {
       this._savedModelRequest = Math.max(this._savedModelRequest, pick.request);
@@ -625,7 +625,7 @@ export class ChatSessionStore {
     return false;
   }
 
-  private async saveModelPick(pick: ModelPick, persistDefault: boolean): Promise<PinSave> {
+  private async saveModelPick(pick: ModelPick): Promise<PinSave> {
     const sel = pick.sel;
     try {
       if (pick.routed) {
@@ -637,7 +637,7 @@ export class ChatSessionStore {
         );
       } else {
         this._tabModel.set(pick.wireId);
-        if (persistDefault) await this.persistProjectDefault(pick);
+        await this.persistProjectDefault(pick);
       }
       this._modelSaves += 1;
       return { saved: true };
@@ -708,7 +708,7 @@ export class ChatSessionStore {
       });
     } catch (e: unknown) {
       if (!this.isNewestModelPick(pick)) return;
-      const saved = await this.persistModelPick(pick, undefined, false);
+      const saved = await this.persistModelPick(pick);
       if (saved && sameConversation() && this.isNewestModelPick(pick)) {
         this.reportSelectionFailure('model switch', e);
       }
@@ -719,7 +719,7 @@ export class ChatSessionStore {
       if (sameConversation()) this.takeBackRefusedPick(pick, answer.reason);
       return;
     }
-    const saved = await this.persistModelPick(pick, undefined, answer.outcome === 'confirmed');
+    const saved = await this.persistModelPick(pick);
     if (!sameConversation()) return;
     if (answer.outcome === 'confirmed') {
       this._confirmedModel = { catalogId: pick.sel.catalogId, generation };
@@ -1020,23 +1020,27 @@ export class ChatSessionStore {
   private recordTypedModelCommand(text: string): void {
     const match = /^\/model\s+(\S+)$/.exec(text.trim());
     if (!match) return;
-    const model = match[1];
-    this._tabModel.set(model);
-    void this.persistTypedModelDefault(model);
+    void this.persistTypedModelDefault(match[1]);
   }
 
   private async persistTypedModelDefault(model: string): Promise<void> {
     const projectId = this.deps.projectState.activeProject() ?? '';
-    try {
-      if (model === DEFAULT_ALIAS) {
+    if (model === DEFAULT_ALIAS) {
+      this._tabModel.set(DEFAULT_ALIAS);
+      try {
         await this.deps.tauri.invoke('clear_model_pin', { projectId });
-      } else {
-        await this.deps.tauri.invoke('restore_model_pin', { projectId, model });
+      } catch (err: unknown) {
+        this.deps.log.warn(
+          `[chat-state] typed /model project default persist failed: ${String(err)}`
+        );
       }
+      return;
+    }
+    try {
+      await this.deps.tauri.invoke('restore_model_pin', { projectId, model });
+      this._tabModel.set(model);
     } catch (err: unknown) {
-      this.deps.log.warn(
-        `[chat-state] typed /model project default persist failed: ${String(err)}`
-      );
+      this.deps.log.warn(`[chat-state] typed /model rejected: ${String(err)}`);
     }
   }
 
