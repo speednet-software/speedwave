@@ -145,6 +145,7 @@ impl AnthropicModelInfo {
     }
 }
 
+/// Suffix Claude Code appends to a model id to select its 1M context window.
 pub const ONE_MILLION_SUFFIX: &str = "[1m]";
 
 /// A catalog id, or its `[1m]` form where the model has a 1M window: every id
