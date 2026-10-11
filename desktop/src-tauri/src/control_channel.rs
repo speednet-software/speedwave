@@ -1201,11 +1201,11 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                Some("claude-opus-5-5[1m]"),
-                Some("claude-opus-5-5[1m]"),
+                Some("claude-opus-5-5"),
+                Some("claude-opus-5-5"),
                 Some("claude-fable-5-1[1m]"),
-                Some("claude-sonnet-5-5[1m]"),
-                Some("claude-haiku-5-5[1m]"),
+                Some("claude-sonnet-5-5"),
+                Some("claude-haiku-5-5"),
             ]
         );
         for model in &info.models {
@@ -1298,9 +1298,9 @@ mod tests {
             assert!(usage.rate_limits_available);
             let limits = usage.rate_limits.expect("rate limits");
             let five = limits.five_hour.expect("five_hour");
-            assert_eq!(five.utilization, Some(5.0), "{run}");
-            assert!(five.resets_at.unwrap().starts_with("2026-10-09T20:40:00"));
-            assert_eq!(limits.seven_day.unwrap().utilization, Some(74.0));
+            assert_eq!(five.utilization, Some(19.0), "{run}");
+            assert!(five.resets_at.unwrap().starts_with("2026-10-11T14:19:59"));
+            assert_eq!(limits.seven_day.unwrap().utilization, Some(82.0));
             assert_eq!(limits.seven_day_opus, None);
             assert_eq!(limits.seven_day_sonnet, None);
             assert_eq!(limits.model_scoped.len(), 1);
@@ -1684,7 +1684,7 @@ mod tests {
     #[test]
     fn context_usage_before_the_first_message_reports_the_baseline() {
         let usage = parse_context_usage(&fixture()["run_A"]["get_context_usage/initial"]).unwrap();
-        assert_eq!(usage.model, "claude-opus-5-5[1m]");
+        assert_eq!(usage.model, "claude-opus-5-5");
         assert_eq!(usage.total_tokens, 48_311);
         assert_eq!(usage.max_tokens, 1_000_000);
         assert!((usage.percentage - 5.0).abs() < f64::EPSILON);

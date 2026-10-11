@@ -501,10 +501,10 @@ mod tests {
         assert_eq!(
             wire,
             vec![
-                "claude-opus-5-5[1m]",
+                "claude-opus-5-5",
                 "claude-fable-5-1[1m]",
-                "claude-sonnet-5-5[1m]",
-                "claude-haiku-5-5[1m]"
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
             ]
         );
     }

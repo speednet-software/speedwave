@@ -1,6 +1,6 @@
 {
   "claude_code_version": "2.1.295",
-  "captured": "2026-10-09",
+  "captured": "2026-10-11",
   "account_plan": "team",
   "note": "Sanitized capture of stream-json control responses. Removed: account e-mail and org name, commands, agents, pid, output-styles dir, remote-control and session-state flags, session totals, and the context detail lists (agents, skills, slash commands, memory files, MCP tools, message breakdown, grid). run_A = container env as rendered by compose; run_B = ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL unset. Each get_context_usage/<id> follows set_model/<id>; get_context_usage/initial is the state before any set_model. A set_model Claude Code rejected is stored as {\"error\": <text>}.",
   "run_A": {
@@ -17,7 +17,7 @@
       "models": [
         {
           "value": "default",
-          "resolvedModel": "claude-opus-5-5[1m]",
+          "resolvedModel": "claude-opus-5-5",
           "displayName": "Default (recommended)",
           "description": "Opus 5.5 · Best for everyday, complex tasks",
           "supportsEffort": true,
@@ -34,7 +34,7 @@
         },
         {
           "value": "opus",
-          "resolvedModel": "claude-opus-5-5[1m]",
+          "resolvedModel": "claude-opus-5-5",
           "displayName": "Opus",
           "description": "Opus 5.5 · Best for everyday, complex tasks",
           "supportsEffort": true,
@@ -67,7 +67,7 @@
         },
         {
           "value": "sonnet",
-          "resolvedModel": "claude-sonnet-5-5[1m]",
+          "resolvedModel": "claude-sonnet-5-5",
           "displayName": "Sonnet",
           "description": "Sonnet 5.5 · Efficient for routine tasks",
           "supportsEffort": true,
@@ -83,7 +83,7 @@
         },
         {
           "value": "haiku",
-          "resolvedModel": "claude-haiku-5-5[1m]",
+          "resolvedModel": "claude-haiku-5-5",
           "displayName": "Haiku",
           "description": "Haiku 5.5 · Fastest for quick answers",
           "supportsEffort": true,
@@ -118,16 +118,16 @@
       "rate_limits_available": true,
       "rate_limits": {
         "five_hour": {
-          "utilization": 5,
-          "resets_at": "2026-10-09T20:40:00.430296+00:00",
+          "utilization": 19,
+          "resets_at": "2026-10-11T14:19:59.748398+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
           "locked_reason": null
         },
         "seven_day": {
-          "utilization": 74,
-          "resets_at": "2026-10-12T03:00:00.430323+00:00",
+          "utilization": 82,
+          "resets_at": "2026-10-12T02:59:59.748418+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
@@ -170,18 +170,18 @@
           {
             "kind": "session",
             "group": "session",
-            "percent": 5,
+            "percent": 19,
             "severity": "normal",
-            "resets_at": "2026-10-09T20:40:00.430296+00:00",
+            "resets_at": "2026-10-11T14:19:59.748398+00:00",
             "scope": null,
             "is_active": false
           },
           {
             "kind": "weekly_all",
             "group": "weekly",
-            "percent": 74,
-            "severity": "normal",
-            "resets_at": "2026-10-12T03:00:00.430323+00:00",
+            "percent": 82,
+            "severity": "warning",
+            "resets_at": "2026-10-12T02:59:59.748418+00:00",
             "scope": null,
             "is_active": true
           },
@@ -190,7 +190,7 @@
             "group": "weekly",
             "percent": 26,
             "severity": "normal",
-            "resets_at": "2026-10-12T03:00:00.430567+00:00",
+            "resets_at": "2026-10-12T02:59:59.748633+00:00",
             "scope": {
               "model": {
                 "id": null,
@@ -232,7 +232,7 @@
           {
             "display_name": "Fable",
             "utilization": 26,
-            "resets_at": "2026-10-12T03:00:00.430567+00:00"
+            "resets_at": "2026-10-12T02:59:59.748633+00:00"
           }
         ]
       },
@@ -288,7 +288,7 @@
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
       "percentage": 5,
-      "model": "claude-opus-5-5[1m]",
+      "model": "claude-opus-5-5",
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
@@ -296,7 +296,7 @@
       "models": [
         {
           "value": "default",
-          "resolvedModel": "claude-opus-5-5[1m]",
+          "resolvedModel": "claude-opus-5-5",
           "displayName": "Default (recommended)",
           "description": "Opus 5.5 · Best for everyday, complex tasks",
           "supportsEffort": true,
@@ -313,7 +313,7 @@
         },
         {
           "value": "opus",
-          "resolvedModel": "claude-opus-5-5[1m]",
+          "resolvedModel": "claude-opus-5-5",
           "displayName": "Opus",
           "description": "Opus 5.5 · Best for everyday, complex tasks",
           "supportsEffort": true,
@@ -346,7 +346,7 @@
         },
         {
           "value": "sonnet",
-          "resolvedModel": "claude-sonnet-5-5[1m]",
+          "resolvedModel": "claude-sonnet-5-5",
           "displayName": "Sonnet",
           "description": "Sonnet 5.5 · Efficient for routine tasks",
           "supportsEffort": true,
@@ -362,7 +362,7 @@
         },
         {
           "value": "haiku",
-          "resolvedModel": "claude-haiku-5-5[1m]",
+          "resolvedModel": "claude-haiku-5-5",
           "displayName": "Haiku",
           "description": "Haiku 5.5 · Fastest for quick answers",
           "supportsEffort": true,
@@ -1676,7 +1676,7 @@
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
       "percentage": 5,
-      "model": "claude-opus-5-5[1m]",
+      "model": "claude-opus-5-5",
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
@@ -1731,7 +1731,7 @@
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
       "percentage": 5,
-      "model": "claude-sonnet-5-5[1m]",
+      "model": "claude-sonnet-5-5",
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
@@ -1786,7 +1786,7 @@
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
       "percentage": 5,
-      "model": "claude-haiku-5-5[1m]",
+      "model": "claude-haiku-5-5",
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     },
@@ -1841,7 +1841,7 @@
       "rawMaxTokens": 1000000,
       "autocompactSource": "model-default",
       "percentage": 5,
-      "model": "claude-opus-5-5[1m]",
+      "model": "claude-opus-5-5",
       "autoCompactThreshold": 967000,
       "isAutoCompactEnabled": true
     }
@@ -1961,16 +1961,16 @@
       "rate_limits_available": true,
       "rate_limits": {
         "five_hour": {
-          "utilization": 5,
-          "resets_at": "2026-10-09T20:40:00.430296+00:00",
+          "utilization": 19,
+          "resets_at": "2026-10-11T14:19:59.748398+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
           "locked_reason": null
         },
         "seven_day": {
-          "utilization": 74,
-          "resets_at": "2026-10-12T03:00:00.430323+00:00",
+          "utilization": 82,
+          "resets_at": "2026-10-12T02:59:59.748418+00:00",
           "limit_dollars": null,
           "used_dollars": null,
           "remaining_dollars": null,
@@ -1999,8 +1999,8 @@
           {
             "kind": "session",
             "group": "session",
-            "percent": 5,
-            "resets_at": "2026-10-09T20:40:00.430296+00:00",
+            "percent": 19,
+            "resets_at": "2026-10-11T14:19:59.748398+00:00",
             "severity": "normal",
             "is_active": false,
             "scope": null
@@ -2008,9 +2008,9 @@
           {
             "kind": "weekly_all",
             "group": "weekly",
-            "percent": 74,
-            "resets_at": "2026-10-12T03:00:00.430323+00:00",
-            "severity": "normal",
+            "percent": 82,
+            "resets_at": "2026-10-12T02:59:59.748418+00:00",
+            "severity": "warning",
             "is_active": true,
             "scope": null
           },
@@ -2018,7 +2018,7 @@
             "kind": "weekly_scoped",
             "group": "weekly",
             "percent": 26,
-            "resets_at": "2026-10-12T03:00:00.430567+00:00",
+            "resets_at": "2026-10-12T02:59:59.748633+00:00",
             "severity": "normal",
             "is_active": false,
             "scope": {
@@ -2075,7 +2075,7 @@
           {
             "display_name": "Fable",
             "utilization": 26,
-            "resets_at": "2026-10-12T03:00:00.430567+00:00"
+            "resets_at": "2026-10-12T02:59:59.748633+00:00"
           }
         ]
       },
