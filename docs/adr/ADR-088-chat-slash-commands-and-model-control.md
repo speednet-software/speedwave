@@ -556,6 +556,37 @@ an error block when it does not start with`Set model to`
 turn stopped just before the command is not read as its answer. The chip stays,
 since it shows what the user typed.
 
+**Amendment (SPEED-773, 2026-10-09: the captures move to Claude Code 2.1.295).**
+The captures above, and the `apply_flag_settings`, safety-check and resume captures,
+were recorded again from the 2.1.295 linux-arm64 binary whose SHA256 matches its
+release manifest[^11], against the same stub `/v1/messages`, and are now named
+`cc-2.1.295-*`. A harness run of the 2.1.282 binary reproduced the committed
+`cc-2.1.282-*` files before the 2.1.295 runs were trusted. What 2.1.295 changes:
+
+- **The account default lost its `[1m]` suffix.** `set_model` with `default`
+  confirms `claude-opus-5-5`, and every `init` on the default reports it, where
+  2.1.282 confirmed `claude-opus-5-5[1m]` (`cc-2.1.295-model-picks.sanitized.ndjson`,
+  `chat.rs::set_model_switches_to_an_anthropic_id_and_back_to_the_account_default`).
+  Claude Code 2.1.285 "Changed sessions behind a custom `ANTHROPIC_BASE_URL` to use
+  the 1M context window of models that have one (Opus 4.7+, Sonnet 5+, Fable)"[^12],
+  and every Speedwave session runs behind the proxy's base URL, so the bare id
+  already gets the 1M window. In the routed runs `modelUsage.contextWindow` of
+  `openrouter/anthropic/claude-sonnet-5`, which carries a Claude id Claude Code
+  recognises, moved from 200000 to 1000000; `openrouter/openai/gpt-4o-mini` stays at
+  200000.
+- **Nothing else in the switch contract moved.** Event order, `num_turns`, the
+  one-token check (`max_tokens: 1`, not streamed) and the `set_model` errors of
+  `cc-2.1.295-set-model-check.sanitized.json` match 2.1.282; the answered checks took
+  under 0.9 s, far below Speedwave's 15 s `SET_MODEL_TIMEOUT`. A `/model`
+  or `/effort` written at the first `init` of a tool-using turn still runs after
+  that turn as an input of its own (`result_num_turns` `[2, 0, 1]`), and the first
+  `apply_flag_settings` still adds nothing to `.claude.json`.
+- **New fields, none read by Speedwave.** `stream_event` lines carry
+  `api_message_id` and `thinking_display`, the tool result `user` line carries
+  `tool_result_meta`, `result` lines carry `safety_stops`, usage blocks carry
+  `fallback_credit`, transcript user lines carry `turnPosition`, and transcript
+  assistant lines carry `requestedModel`. No parser of these lines denies unknown fields.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
@@ -1314,3 +1345,7 @@ stays selectable without typing its id.
 [^9]: `@anthropic-ai/claude-agent-sdk` 0.3.282, the SDK release for Claude Code 2.1.282: `SDKControlUpdateSettingsRequest` (`subtype: 'update_settings'`), which for `userSettings` "takes effortLevel only and saves it as the default for the session's current model, under modelSettings as /effort saves it ... the running session's level is not set here — send apply_flag_settings for that. Unlike apply_flag_settings, which only touches the session-scoped flag layer". https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.282/sdk.d.ts
 
 [^10]: Claude Code changelog, 2.1.280: "Changed the default model on Pro and Team Standard plans from Sonnet to Opus, matching Max, Team Premium, and Enterprise"; "Changed an effort level saved before `/effort` became per-model to no longer apply to newly released models such as Opus 5.5; they start at their default until you pick a level"; "Changed Opus 4.7, Opus 4.8 and Fable 5 to stop holding their launch-default effort over `/effort` in `-p` or the Agent SDK, a project, managed or `--settings` `effortLevel`, or a per-model level". https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
+
+[^11]: Claude Code 2.1.295 release manifest with the per-platform binary checksums. https://downloads.claude.ai/claude-code-releases/2.1.295/manifest.json
+
+[^12]: Claude Code changelog, 2.1.285. https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md

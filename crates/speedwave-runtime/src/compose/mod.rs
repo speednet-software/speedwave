@@ -1657,7 +1657,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn render_compose_quotes_bracketed_model_env_and_round_trips() {
+    fn render_compose_quotes_bracketed_env_values_and_round_trips() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("render-1m-suffix-{}", std::process::id());
         let tmp = tempfile::tempdir().unwrap();
@@ -1674,8 +1674,13 @@ mod tests {
             ..Default::default()
         };
         crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        let mut env = crate::defaults::base_env();
+        env.insert(
+            "SPEEDWAVE_TEST_BRACKETED_VALUE".to_string(),
+            "claude-opus-4-6[1m]".to_string(),
+        );
         let resolved = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
+            env,
             flags: default_flags(),
             llm,
             ..Default::default()
@@ -1697,14 +1702,14 @@ mod tests {
         let env = doc["services"]["claude"]["environment"]
             .as_sequence()
             .expect("claude.environment must be a sequence");
-        let sonnet = env
+        let bracketed = env
             .iter()
             .filter_map(|v| v.as_str())
-            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_SONNET_MODEL="))
-            .expect("ANTHROPIC_DEFAULT_SONNET_MODEL must be present");
+            .find(|s| s.starts_with("SPEEDWAVE_TEST_BRACKETED_VALUE="))
+            .expect("SPEEDWAVE_TEST_BRACKETED_VALUE must be present");
         assert!(
-            sonnet.ends_with("[1m]"),
-            "1M-context suffix must survive intact, got: {sonnet:?}"
+            bracketed.ends_with("[1m]"),
+            "a bracketed env value must survive intact, got: {bracketed:?}"
         );
 
         let services = doc["services"].as_mapping().expect("services mapping");
@@ -4324,8 +4329,8 @@ services:
         }
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]"),
-            "the opus alias must keep the 1M window every plan includes: {env:?}"
+                .any(|e| e == "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5"),
+            "the opus alias must run its native 1M window on the bare id: {env:?}"
         );
     }
 
