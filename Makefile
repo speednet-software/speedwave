@@ -565,7 +565,8 @@ test-release-gate:
 	@$(REQUIRE_BATS)
 	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
 	bats _tests/desktop/verify-release-assets.bats \
-	  _tests/desktop/tag-release-commit.bats _tests/desktop/prepend-changelog-entry.bats
+	  _tests/desktop/tag-release-commit.bats _tests/desktop/prepend-changelog-entry.bats \
+	  _tests/desktop/beta-release-range.bats
 	@echo "✅ Release-gate tests passed"
 
 test-e2e-desktop-build: build-cli build-mcp build-os-cli

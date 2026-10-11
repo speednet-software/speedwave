@@ -84,7 +84,7 @@ docs: update installation instructions
 chore(deps): bump tokio to 1.40
 ```
 
-**Release notes from commits:** every merge to `dev` becomes a beta release within the hour, and conventional commit types drive the changelog git-cliff generates for it (see [RELEASING.md](RELEASING.md)), not a version bump — the version always comes from git (commit count), never from the commit type:
+**Release notes from commits:** merges to `dev` ship in the next beta release (three times every working day, or at once via "Run workflow" on the `Beta` workflow), and conventional commit types drive the changelog git-cliff generates for it (see [RELEASING.md](RELEASING.md)), not a version bump — the version always comes from git (commit count), never from the commit type:
 
 - `feat:` → "Features" section
 - `fix:` → "Bug Fixes" section
