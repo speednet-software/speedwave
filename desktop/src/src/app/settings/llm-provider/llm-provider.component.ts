@@ -1385,7 +1385,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
           ''
         );
       }
-      void this.chatState.refreshLlmConfigCache();
+      void this.chatState.refreshLlmConfigCacheAll();
       if (!this.destroyRef.destroyed) this.providerChange.emit(provider);
       const activeKey = this.computeActiveKey(active.provider_id, active.model, update.providers);
       await this.applySavedConfig(project, forceRestart || activeKey !== this.loadedActiveKey);

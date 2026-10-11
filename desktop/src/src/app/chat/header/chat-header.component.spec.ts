@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { ChatHeaderComponent } from './chat-header.component';
+import { BetaService } from '../../services/beta.service';
 
 describe('ChatHeaderComponent', () => {
   let fixture: ComponentFixture<ChatHeaderComponent>;
+  let betaEnabled: ReturnType<typeof signal<boolean>>;
 
   beforeEach(async () => {
+    betaEnabled = signal(false);
     await TestBed.configureTestingModule({
       imports: [ChatHeaderComponent],
+      providers: [{ provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ChatHeaderComponent);
@@ -38,7 +43,7 @@ describe('ChatHeaderComponent', () => {
     expect(pill).not.toBeNull();
   });
 
-  it('shows conversation controls in full (default) mode', () => {
+  it('shows conversation controls in full (default) mode, the plus button included without beta', () => {
     fixture.detectChanges();
     expect(
       fixture.nativeElement.querySelector('[data-testid="chat-header-history"]')
@@ -47,6 +52,23 @@ describe('ChatHeaderComponent', () => {
       fixture.nativeElement.querySelector('[data-testid="chat-header-memory"]')
     ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-testid="chat-header-new"]')).not.toBeNull();
+  });
+
+  it('emits newConversation when the plus button is clicked', () => {
+    fixture.detectChanges();
+    let emitted = 0;
+    fixture.componentInstance.newConversation.subscribe(() => emitted++);
+    (
+      fixture.nativeElement.querySelector('[data-testid="chat-header-new"]') as HTMLButtonElement
+    ).click();
+    expect(emitted).toBe(1);
+  });
+
+  it('drops the plus button once beta is enabled (the tab strip carries its own)', () => {
+    betaEnabled.set(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="chat-header-new"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-chat-tabs')).not.toBeNull();
   });
 
   it('hides conversation controls in compact mode but keeps title + pill', () => {
@@ -82,18 +104,6 @@ describe('ChatHeaderComponent', () => {
     ) as HTMLButtonElement;
     btn.click();
 
-    expect(emitted).toBe(1);
-  });
-
-  it('emits newConversation when plus button is clicked', () => {
-    fixture.detectChanges();
-    let emitted = 0;
-    fixture.componentInstance.newConversation.subscribe(() => emitted++);
-
-    const btn = fixture.nativeElement.querySelector(
-      '[data-testid="chat-header-new"]'
-    ) as HTMLButtonElement;
-    btn.click();
     expect(emitted).toBe(1);
   });
 
@@ -138,5 +148,48 @@ describe('ChatHeaderComponent', () => {
       '[data-testid="chat-header-title"]'
     ) as HTMLElement;
     expect(titleEl.textContent?.trim()).toBe('Σφαῖρα — тест 漢字');
+  });
+
+  describe('inline tab strip', () => {
+    it('is hidden when beta is disabled, even in full mode', () => {
+      betaEnabled.set(false);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
+    });
+
+    it('is shown before the project pill when beta is enabled, with the title dropped', () => {
+      betaEnabled.set(true);
+      fixture.detectChanges();
+
+      const tabs = fixture.nativeElement.querySelector('app-chat-tabs');
+      expect(tabs).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).toBeNull();
+      const pillContainer = fixture.nativeElement.querySelector('app-project-pill')
+        ?.parentElement as HTMLElement;
+      expect(tabs.nextElementSibling).toBe(pillContainer);
+    });
+
+    it('stays hidden in compact mode even when beta is enabled (no live chat to show tabs for), title stays', () => {
+      betaEnabled.set(true);
+      fixture.componentRef.setInput('compact', true);
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('app-chat-tabs')).toBeNull();
+      expect(fixture.nativeElement.querySelector('app-project-pill')).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')
+      ).not.toBeNull();
+    });
+
+    it('hides the title in full mode once beta is enabled (tabs take its place)', () => {
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')
+      ).not.toBeNull();
+
+      betaEnabled.set(true);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="chat-header-title"]')).toBeNull();
+    });
   });
 });

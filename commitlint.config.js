@@ -1,5 +1,6 @@
 export default {
   extends: ['@commitlint/config-conventional'],
+  ignores: [(message) => /^chore\(deps(-dev)?\): bump /.test(message)],
   rules: {
     'header-max-length': [2, 'always', 100],
     'subject-empty': [2, 'never'],
@@ -37,6 +38,7 @@ export default {
         'docs',
         'e2e',
         'deps',
+        'deps-dev',
         'ide-bridge',
         'lint',
         'config',

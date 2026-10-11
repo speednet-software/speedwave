@@ -467,7 +467,7 @@ pub async fn add_project(
     name: String,
     dir: String,
     app: tauri::AppHandle,
-    chat_state: tauri::State<'_, crate::chat::SharedChatSession>,
+    chat_state: tauri::State<'_, crate::chat_registry::SharedChatSessions>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
@@ -555,16 +555,11 @@ pub async fn add_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    let rebind_name = name.clone();
-    let rebind_app = app.clone();
-    let rebind_state = chat_state.inner().clone();
-    let rebind_result = tokio::task::spawn_blocking(move || {
-        crate::rebind_chat(&rebind_name, &rebind_app, &rebind_state)
-    })
-    .await
-    .unwrap_or_else(|je| Err(format!("join error: {je}")));
-    if let Err(e) = rebind_result {
-        log::warn!("rebind_chat failed after adding project: {e}");
+    let registry = chat_state.inner().clone();
+    if let Err(je) =
+        tokio::task::spawn_blocking(move || crate::clear_chat_sessions(&registry)).await
+    {
+        log::warn!("clearing the chat sessions after adding the project did not finish: {je}");
     }
 
     if let Some(prev) = pending_teardown {
@@ -2298,21 +2293,21 @@ mod tests {
     }
 
     #[test]
-    fn add_project_rebinds_the_chat_on_a_blocking_thread() {
+    fn add_project_clears_the_chat_sessions_on_a_blocking_thread() {
         let source = include_str!("containers_cmd.rs");
         let body = &source[source
             .find("pub async fn add_project(")
             .expect("add_project must exist")..];
         let body = &body[..body.find("\n}\n").expect("function end")];
-        let rebind = body
-            .find("crate::rebind_chat(")
-            .expect("add_project must rebind the chat");
-        let spawn = body[..rebind]
+        let clear = body
+            .find("crate::clear_chat_sessions(")
+            .expect("add_project must clear the chat sessions");
+        let spawn = body[..clear]
             .rfind("spawn_blocking(")
-            .expect("the rebind must run on a blocking thread");
+            .expect("the clear must run on a blocking thread");
         assert!(
-            !body[spawn..rebind].contains(';'),
-            "the rebind must be the body of its spawn_blocking closure"
+            !body[spawn..clear].contains(';'),
+            "the clear must be the body of its spawn_blocking closure"
         );
     }
 
