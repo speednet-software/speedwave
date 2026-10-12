@@ -11,7 +11,8 @@ import {
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_STREAMING,
 } from '../../services/chat-state.service';
-import type { Segment, TranscriptSession } from '../../models/transcript';
+import type { Segment } from '../../models/transcript';
+import { makeTranscriptSession as session } from '../../testing/transcript-session';
 
 function seg(start: number, text: string): Segment {
   return {
@@ -20,25 +21,6 @@ function seg(start: number, text: string): Segment {
     text,
     words: [],
   };
-}
-
-function session(over: Partial<TranscriptSession> = {}): TranscriptSession {
-  return {
-    id: 'sess-1',
-    created_at: '2026-05-12T00:00:00Z',
-    language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
-    status: { state: 'recording' },
-    live_segments: [],
-    final_segments: null,
-    audio_path: '/t/sess-1/audio.wav',
-    models_used: {
-      live: null,
-      finalize: null,
-    },
-    last_seq: 0,
-    ...over,
-  } as TranscriptSession;
 }
 
 describe('LiveTranscriptComponent', () => {

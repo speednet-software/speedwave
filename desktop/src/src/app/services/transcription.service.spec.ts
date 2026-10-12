@@ -6,7 +6,13 @@ import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
-import type { CaptureWarning, Segment, TranscriptSession } from '../models/transcript';
+import { makeTranscriptSession as snapshot } from '../testing/transcript-session';
+import type {
+  CaptureWarning,
+  Segment,
+  TranscriptSession,
+  TranscriptStatus,
+} from '../models/transcript';
 
 /** Minimal ChatStateService stand-in — only the send path (plus tab tracking) is exercised here. */
 class MockChatState {
@@ -51,25 +57,6 @@ function seg(start: number, end: number, text: string): Segment {
     text,
     words: [],
   };
-}
-
-function snapshot(overrides: Partial<TranscriptSession> = {}): TranscriptSession {
-  return {
-    id: 'sess-1',
-    created_at: '2026-05-12T00:00:00Z',
-    language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
-    status: { state: 'recording' },
-    live_segments: [],
-    final_segments: null,
-    audio_path: '/tmp/sess-1/audio.wav',
-    models_used: {
-      live: null,
-      finalize: null,
-    },
-    last_seq: 0,
-    ...overrides,
-  } as TranscriptSession;
 }
 
 describe('TranscriptionService', () => {
@@ -210,6 +197,13 @@ describe('TranscriptionService', () => {
       expect(svc.recordingLive()).toBeNull();
     });
 
+    it('clears when the session ends on its own', async () => {
+      await startWithLiveModel('small');
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 1 });
+      expect(svc.recording()).toBe(false);
+      expect(svc.recordingLive()).toBeNull();
+    });
+
     it('clears when a failed start rolls back successfully', async () => {
       await startWithLiveModel('small');
       expect(svc.recordingLive()).toBe(true);
@@ -254,6 +248,29 @@ describe('TranscriptionService', () => {
       };
       await expect(svc.stopRecording('sess-1')).rejects.toThrow('already stopping');
       expect(svc.recordingSessionId()).toBeNull();
+    });
+
+    it('keeps the live stream needed after stopRecording until the offline pass ends', async () => {
+      await startWith('sess-1');
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.stopRecording('sess-1');
+      expect(svc.recording()).toBe(false);
+      expect(svc.liveStreamNeeded()).toBe(true);
+
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'finalizing', progress: 0 },
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 2,
+        progress: 0.47,
+      });
+      expect(svc.liveStreamNeeded()).toBe(true);
+
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 3 });
+      expect(svc.liveStreamNeeded()).toBe(false);
     });
 
     it('clears the tracked recording when the driver fails on its own', async () => {
@@ -782,6 +799,105 @@ describe('TranscriptionService', () => {
         segment: seg(0, 1, 'after-detach'),
       });
       expect(svc.active()?.live_segments.length).toBe(0);
+    });
+  });
+
+  describe('liveStreamNeeded', () => {
+    it('is false without an active session', () => {
+      expect(svc.liveStreamNeeded()).toBe(false);
+    });
+
+    it.each<[TranscriptStatus, boolean]>([
+      [{ state: 'recording' }, true],
+      [{ state: 'finalizing', progress: 0.4 }, true],
+      [{ state: 'done' }, false],
+      [{ state: 'failed', reason: 'decoder crashed' }, false],
+    ])('follows a %j snapshot (needed: %s)', async (status, needed) => {
+      await subscribeWith(snapshot({ status }));
+      expect(svc.recording()).toBe(false);
+      expect(svc.liveStreamNeeded()).toBe(needed);
+    });
+
+    it('stays needed through finalize_progress and ends with finished', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.1 } }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 1,
+        progress: 0.6,
+      });
+      expect(svc.liveStreamNeeded()).toBe(true);
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 2 });
+      expect(svc.liveStreamNeeded()).toBe(false);
+      expect(svc.active()?.status).toEqual({ state: 'done' });
+    });
+
+    it('ends when the offline pass fails', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.1 } }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'failed', reason: 'decoder crashed' },
+      });
+      expect(svc.liveStreamNeeded()).toBe(false);
+      expect(svc.active()?.status).toEqual({ state: 'failed', reason: 'decoder crashed' });
+    });
+
+    it('keeps applying the offline pass events while the stream stays attached', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.05 } }));
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 1,
+        progress: 0.9,
+      });
+      expect(svc.active()?.status).toEqual({ state: 'finalizing', progress: 0.9 });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'final_segments_ready',
+        seq: 2,
+        segments: [seg(0, 5, 'higher-quality')],
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 3 });
+      const s = svc.active()!;
+      expect(s.final_segments).toEqual([seg(0, 5, 'higher-quality')]);
+      expect(s.status).toEqual({ state: 'done' });
+      expect(s.last_seq).toBe(3);
+    });
+  });
+
+  describe('delete', () => {
+    it('clears the shown session and stops listening when it is the one deleted', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.47 } }));
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.delete('sess-1');
+      expect(svc.active()).toBeNull();
+      expect(svc.liveStreamNeeded()).toBe(false);
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 1,
+        progress: 0.6,
+      });
+      expect(svc.active()).toBeNull();
+    });
+
+    it('keeps the shown session when another one is deleted', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.47 } }));
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.delete('sess-2');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 1,
+        progress: 0.6,
+      });
+      expect(svc.active()?.status).toEqual({ state: 'finalizing', progress: 0.6 });
+    });
+
+    it('keeps the shown session when the backend refuses the delete', async () => {
+      await subscribeWith(snapshot());
+      mockTauri.invokeHandler = async () => {
+        throw new Error('stop the recording before deleting it');
+      };
+      await expect(svc.delete('sess-1')).rejects.toThrow('stop the recording before deleting it');
+      expect(svc.active()?.id).toBe('sess-1');
+      expect(svc.liveStreamNeeded()).toBe(true);
     });
   });
 

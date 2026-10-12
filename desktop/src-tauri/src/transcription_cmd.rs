@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, FinalizeConfig,
-    Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions, TranscriptDriver,
-    TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
+    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, DriverError,
+    FinalizeConfig, Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions,
+    TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore,
+    WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -457,8 +458,15 @@ pub async fn stop_transcription(
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
         };
-        if let Err(e) = speedwave_runtime::transcription::run_finalize(cfg) {
-            log::warn!("offline finalize for {} failed: {e}", short_id(id));
+        match speedwave_runtime::transcription::run_finalize(cfg) {
+            Ok(()) => {}
+            Err(DriverError::Deleted) => {
+                log::info!(
+                    "offline finalize for {} stopped: session deleted",
+                    short_id(id)
+                );
+            }
+            Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }
     });
     Ok(())

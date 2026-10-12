@@ -57,6 +57,21 @@ export type TranscriptStatus =
   | { state: 'done' }
   | { state: 'failed'; reason: string };
 
+/**
+ * Whether a session in this status can still change; `done` and `failed` are final.
+ * @param status - the session's lifecycle status.
+ */
+export function isSessionOngoing(status: TranscriptStatus): boolean {
+  switch (status.state) {
+    case 'recording':
+    case 'finalizing':
+      return true;
+    case 'done':
+    case 'failed':
+      return false;
+  }
+}
+
 /** One transcript session — the persisted artifact. */
 export interface TranscriptSession {
   id: string;

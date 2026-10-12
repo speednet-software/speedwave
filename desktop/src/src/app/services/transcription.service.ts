@@ -18,6 +18,7 @@ import type {
   TranscriptEvent,
   TranscriptSession,
 } from '../models/transcript';
+import { isSessionOngoing } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -84,6 +85,12 @@ export class TranscriptionService {
   readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
 
   readonly recording: Signal<boolean> = computed(() => this.recordingSessionIdSignal() !== null);
+
+  /** Whether the shown session can still change, so its event stream must stay attached. */
+  readonly liveStreamNeeded: Signal<boolean> = computed(() => {
+    const status = this.activeSignal()?.status;
+    return this.recording() || (status !== undefined && isSessionOngoing(status));
+  });
 
   /**
    * Source/language of the in-progress recording — service-level so a remounted
@@ -203,10 +210,7 @@ export class TranscriptionService {
     } catch (e) {
       try {
         await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
-        this.recordingSessionIdSignal.set(null);
-        this.recordingSourceSignal.set(null);
-        this.recordingLanguageSignal.set(null);
-        this.recordingLiveSignal.set(null);
+        this.resetInProgressRecording();
       } catch {
         this.recordingSessionIdSignal.set(ack.session_id);
       }
@@ -227,12 +231,7 @@ export class TranscriptionService {
     try {
       await this.tauri.invoke<void>('stop_transcription', { sessionId });
     } finally {
-      if (this.recordingSessionIdSignal() === sessionId) {
-        this.recordingSessionIdSignal.set(null);
-        this.recordingSourceSignal.set(null);
-        this.recordingLanguageSignal.set(null);
-        this.recordingLiveSignal.set(null);
-      }
+      this.clearInProgressRecording(sessionId);
     }
   }
 
@@ -287,11 +286,14 @@ export class TranscriptionService {
   }
 
   /**
-   * Deletes a session directory (audio + transcript).
+   * Deletes a session directory (audio + transcript); clears the shown session if it was this one.
    * @param sessionId - the session to delete.
    */
-  delete(sessionId: string): Promise<void> {
-    return this.tauri.invoke<void>('delete_transcript', { sessionId });
+  async delete(sessionId: string): Promise<void> {
+    await this.tauri.invoke<void>('delete_transcript', { sessionId });
+    if (this.activeSignal()?.id !== sessionId) return;
+    await this.detach();
+    this.activeSignal.set(null);
   }
 
   /**
@@ -487,9 +489,14 @@ export class TranscriptionService {
 
   private clearInProgressRecording(sessionId: string): void {
     if (this.recordingSessionIdSignal() !== sessionId) return;
+    this.resetInProgressRecording();
+  }
+
+  private resetInProgressRecording(): void {
     this.recordingSessionIdSignal.set(null);
     this.recordingSourceSignal.set(null);
     this.recordingLanguageSignal.set(null);
+    this.recordingLiveSignal.set(null);
   }
 
   /**

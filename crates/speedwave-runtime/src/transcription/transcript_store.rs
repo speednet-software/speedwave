@@ -236,10 +236,22 @@ impl TranscriptStore {
 
     /// Removes the session directory + drops the in-memory entry.
     pub fn delete(&self, id: Uuid) -> Result<(), StoreError> {
-        self.sessions.remove(&id);
+        use dashmap::mapref::entry::Entry as MapEntry;
         let dir = self.session_dir(id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
+        let remove_dir = || -> std::io::Result<()> {
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+            }
+            Ok(())
+        };
+        match self.sessions.entry(id) {
+            MapEntry::Occupied(e) => {
+                let session = e.get().session.clone();
+                let _locked = session.write();
+                remove_dir()?;
+                e.remove();
+            }
+            MapEntry::Vacant(_) => remove_dir()?,
         }
         Ok(())
     }
@@ -333,6 +345,9 @@ impl TranscriptStore {
         let events;
         {
             let mut s = h.session.write();
+            if save && !dir.is_dir() {
+                return Err(StoreError::NotFound(id));
+            }
             let next_seq = s.last_seq + 1;
             events = mutate(&mut s, next_seq);
             s.last_seq += events.len() as u64;
@@ -1056,6 +1071,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         store.delete(Uuid::new_v4()).unwrap();
+    }
+
+    #[test]
+    fn a_cached_session_whose_directory_is_gone_is_not_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        std::fs::remove_dir_all(store.session_dir(id)).unwrap();
+        assert!(matches!(
+            store.finalize_progress(id, 0.5).unwrap_err(),
+            StoreError::NotFound(_)
+        ));
+        assert!(!store.session_dir(id).exists());
+    }
+
+    #[test]
+    fn delete_waits_for_a_mutation_in_flight_and_leaves_no_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(dir.path()));
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let session = store.sessions.get(&id).unwrap().session.clone();
+        let in_flight = session.write();
+        let deleting = {
+            let store = store.clone();
+            std::thread::spawn(move || store.delete(id))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            store.session_dir(id).exists(),
+            "delete must wait for the session lock"
+        );
+        drop(in_flight);
+        deleting.join().unwrap().unwrap();
+        assert!(!store.session_dir(id).exists());
+        assert!(matches!(
+            store.finalize_progress(id, 0.5).unwrap_err(),
+            StoreError::NotFound(_)
+        ));
     }
 
     #[tokio::test]
