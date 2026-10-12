@@ -189,8 +189,11 @@ pub(crate) fn remove_network_with(
 #[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 pub(crate) mod tests {
     use super::*;
+    use crate::runtime::CommandRunner;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     pub(crate) const INTERNAL_INSPECT: &str = r#"[
     {
@@ -252,6 +255,61 @@ pub(crate) mod tests {
         level=error msg=\"no network found matching: speedwave_acme_network_office\"\n\
         time=\"2026-10-08T10:00:00Z\" level=fatal msg=\"unable to find any network matching \
         the provided request\"";
+
+    pub(crate) type ScriptedCalls = Arc<Mutex<Vec<(String, Duration)>>>;
+
+    pub(crate) struct ScriptedRunner {
+        answers: Mutex<VecDeque<Result<String, String>>>,
+        calls: ScriptedCalls,
+        auto: fn(&str) -> Option<String>,
+    }
+
+    impl ScriptedRunner {
+        pub(crate) fn new(
+            answers: &[Result<&str, &str>],
+            auto: fn(&str) -> Option<String>,
+        ) -> (Self, ScriptedCalls) {
+            let calls = ScriptedCalls::default();
+            let runner = Self {
+                answers: Mutex::new(
+                    answers
+                        .iter()
+                        .map(|a| a.map(str::to_string).map_err(str::to_string))
+                        .collect(),
+                ),
+                calls: Arc::clone(&calls),
+                auto,
+            };
+            (runner, calls)
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            anyhow::bail!(
+                "network commands must be bounded, got run: {cmd} {}",
+                args.join(" ")
+            )
+        }
+
+        fn run_bounded(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            timeout: Duration,
+        ) -> anyhow::Result<String> {
+            let key = format!("{cmd} {}", args.join(" "));
+            if let Some(answer) = (self.auto)(&key) {
+                return Ok(answer);
+            }
+            self.calls.lock().unwrap().push((key.clone(), timeout));
+            match self.answers.lock().unwrap().pop_front() {
+                Some(Ok(out)) => Ok(out),
+                Some(Err(e)) => Err(anyhow::anyhow!(e)),
+                None => anyhow::bail!("unexpected network command: {key}"),
+            }
+        }
+    }
 
     struct Script {
         calls: RefCell<Vec<String>>,

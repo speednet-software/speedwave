@@ -142,10 +142,11 @@ impl LimaRuntime {
     }
 
     fn require_running(&self) -> anyhow::Result<()> {
-        if self.is_available() {
-            Ok(())
-        } else {
-            anyhow::bail!("Lima VM '{}' is not running.", consts::lima_vm_name())
+        let vm = consts::lima_vm_name();
+        match self.read_vm_status() {
+            Ok(status) if status.trim() == "Running" => Ok(()),
+            Ok(_) => anyhow::bail!("Lima VM '{vm}' is not running."),
+            Err(e) => Err(unreadable_vm_status(vm, &e)),
         }
     }
 
@@ -2413,15 +2414,17 @@ mod tests {
 
     #[test]
     fn test_container_exec_piped_fails_when_limactl_missing() {
-        let runner = MockRunner::new().with_error("limactl --version", "command not found");
+        let runner = MockRunner::new().with_error(&vm_status_key(), "command not found");
         let rt = LimaRuntime::with_runner(Box::new(runner));
         let err = rt
             .container_exec_piped("test_container", &["claude", "-p"])
             .unwrap_err();
         assert!(
-            err.to_string().contains("not running"),
-            "should report VM not running when limactl missing, got: {err}"
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a limactl that cannot run must not read as a stopped VM, got: {err}"
         );
+        assert!(err.to_string().contains("command not found"), "{err}");
     }
 
     #[test]
@@ -2445,13 +2448,43 @@ mod tests {
 
     #[test]
     fn test_require_running_fails_when_limactl_missing() {
-        let runner = MockRunner::new().with_error("limactl --version", "command not found");
+        let runner = MockRunner::new().with_error(&vm_status_key(), "command not found");
         let rt = LimaRuntime::with_runner(Box::new(runner));
         let err = rt.compose_down("testproject").unwrap_err();
         assert!(
-            err.to_string().contains("not running"),
-            "should report VM not running when limactl missing, got: {err}"
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a limactl that cannot run must not read as a stopped VM, got: {err}"
         );
+        assert!(!err.to_string().contains("is not running"), "{err}");
+    }
+
+    #[test]
+    fn test_require_running_reports_a_deleted_vm_as_not_running() {
+        let runner = MockRunner::new()
+            .with_error(&vm_status_key(), "level=fatal msg=\"unmatched instances\"");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.compose_ps("testproject").unwrap_err();
+        assert!(err.to_string().contains("is not running"), "{err}");
+        assert!(err
+            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
+            .is_none());
+    }
+
+    #[test]
+    fn test_require_running_never_spawns_limactl_version() {
+        let runner = MockRunner::new()
+            .with_error("limactl --version", "must not be called")
+            .with_response(&vm_status_key(), "Running")
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo nerdctl network rm n",
+                    consts::lima_vm_name()
+                ),
+                "n",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        rt.remove_network("n").unwrap();
     }
 
     #[test]
@@ -3765,55 +3798,56 @@ mod tests {
         );
     }
 
-    type NetworkCalls = Arc<Mutex<Vec<(String, std::time::Duration)>>>;
-
-    struct NetworkScript {
-        answers: Mutex<std::collections::VecDeque<Result<String, String>>>,
-        calls: NetworkCalls,
-    }
-
-    impl CommandRunner for NetworkScript {
-        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-            if args.first() == Some(&"--version") {
-                return Ok("limactl version 2.1.2".to_string());
-            }
-            anyhow::bail!(
-                "network commands must be bounded, got run: {cmd} {}",
-                args.join(" ")
-            )
-        }
-
-        fn run_bounded(
-            &self,
-            cmd: &str,
-            args: &[&str],
-            timeout: std::time::Duration,
-        ) -> anyhow::Result<String> {
-            let key = format!("{cmd} {}", args.join(" "));
-            if key.contains("list --format") {
-                return Ok("Running".to_string());
-            }
-            self.calls.lock().unwrap().push((key.clone(), timeout));
-            match self.answers.lock().unwrap().pop_front() {
-                Some(Ok(out)) => Ok(out),
-                Some(Err(e)) => Err(anyhow::anyhow!(e)),
-                None => anyhow::bail!("unexpected network command: {key}"),
-            }
-        }
-    }
-
-    fn network_script(answers: &[Result<&str, &str>]) -> (LimaRuntime, NetworkCalls) {
-        let calls = NetworkCalls::default();
-        let runner = NetworkScript {
-            answers: Mutex::new(
-                answers
-                    .iter()
-                    .map(|a| a.map(str::to_string).map_err(str::to_string))
-                    .collect(),
-            ),
-            calls: Arc::clone(&calls),
-        };
+    fn network_script(
+        answers: &[Result<&str, &str>],
+    ) -> (LimaRuntime, crate::runtime::networks::tests::ScriptedCalls) {
+        let (runner, calls) =
+            crate::runtime::networks::tests::ScriptedRunner::new(answers, |key| {
+                key.contains("list --format").then(|| "Running".to_string())
+            });
         (LimaRuntime::with_runner(Box::new(runner)), calls)
+    }
+
+    #[test]
+    fn a_network_command_on_an_unreadable_vm_status_is_retryable_never_a_stopped_vm() {
+        let runner = MockRunner::new().with_error(
+            &vm_status_key(),
+            "limactl failed: open lima/speedwave/ha.pid: resource temporarily unavailable",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let errors = [
+            rt.ensure_internal_network("speedwave_acme_network_office", "acme")
+                .unwrap_err(),
+            rt.network_exists("acme_speedwave_acme_network_office")
+                .unwrap_err(),
+            rt.remove_network("speedwave_acme_network_office")
+                .unwrap_err(),
+        ];
+        for err in errors {
+            assert!(
+                err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                    .is_some(),
+                "{err}"
+            );
+            assert!(!err.to_string().contains("is not running"), "{err}");
+            assert!(
+                err.to_string().contains("resource temporarily unavailable"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_network_command_on_a_stopped_vm_reports_it_not_running() {
+        let runner = MockRunner::new().with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt
+            .remove_network("speedwave_acme_network_office")
+            .unwrap_err();
+        assert!(err.to_string().contains("is not running"), "{err}");
+        assert!(err
+            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
+            .is_none());
     }
 
     #[test]

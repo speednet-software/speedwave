@@ -3293,48 +3293,11 @@ mod tests {
         }
     }
 
-    struct NetworkScript {
-        answers: std::sync::Mutex<std::collections::VecDeque<Result<String, String>>>,
-        calls: NetworkCalls,
-    }
-
-    impl CommandRunner for NetworkScript {
-        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-            anyhow::bail!(
-                "network commands must be bounded, got run: {cmd} {}",
-                args.join(" ")
-            )
-        }
-
-        fn run_bounded(
-            &self,
-            cmd: &str,
-            args: &[&str],
-            timeout: std::time::Duration,
-        ) -> anyhow::Result<String> {
-            let key = format!("{cmd} {}", args.join(" "));
-            self.calls.lock().unwrap().push((key.clone(), timeout));
-            match self.answers.lock().unwrap().pop_front() {
-                Some(Ok(out)) => Ok(out),
-                Some(Err(e)) => Err(anyhow::anyhow!(e)),
-                None => anyhow::bail!("unexpected network command: {key}"),
-            }
-        }
-    }
-
-    type NetworkCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, std::time::Duration)>>>;
-
-    fn network_script(answers: &[Result<&str, &str>]) -> (WslRuntime, NetworkCalls) {
-        let calls = NetworkCalls::default();
-        let runner = NetworkScript {
-            answers: std::sync::Mutex::new(
-                answers
-                    .iter()
-                    .map(|a| a.map(str::to_string).map_err(str::to_string))
-                    .collect(),
-            ),
-            calls: std::sync::Arc::clone(&calls),
-        };
+    fn network_script(
+        answers: &[Result<&str, &str>],
+    ) -> (WslRuntime, crate::runtime::networks::tests::ScriptedCalls) {
+        let (runner, calls) =
+            crate::runtime::networks::tests::ScriptedRunner::new(answers, |_| None);
         (WslRuntime::with_runner(Box::new(runner)), calls)
     }
 
