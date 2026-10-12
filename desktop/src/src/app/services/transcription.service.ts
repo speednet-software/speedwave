@@ -18,6 +18,7 @@ import type {
   TranscriptEvent,
   TranscriptSession,
 } from '../models/transcript';
+import { isSessionOngoing } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -87,8 +88,8 @@ export class TranscriptionService {
 
   /** Whether the shown session can still change, so its event stream must stay attached. */
   readonly liveStreamNeeded: Signal<boolean> = computed(() => {
-    const state = this.activeSignal()?.status.state;
-    return this.recording() || state === 'recording' || state === 'finalizing';
+    const status = this.activeSignal()?.status;
+    return this.recording() || (status !== undefined && isSessionOngoing(status));
   });
 
   /**
@@ -209,10 +210,7 @@ export class TranscriptionService {
     } catch (e) {
       try {
         await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
-        this.recordingSessionIdSignal.set(null);
-        this.recordingSourceSignal.set(null);
-        this.recordingLanguageSignal.set(null);
-        this.recordingLiveSignal.set(null);
+        this.resetInProgressRecording();
       } catch {
         this.recordingSessionIdSignal.set(ack.session_id);
       }
@@ -233,12 +231,7 @@ export class TranscriptionService {
     try {
       await this.tauri.invoke<void>('stop_transcription', { sessionId });
     } finally {
-      if (this.recordingSessionIdSignal() === sessionId) {
-        this.recordingSessionIdSignal.set(null);
-        this.recordingSourceSignal.set(null);
-        this.recordingLanguageSignal.set(null);
-        this.recordingLiveSignal.set(null);
-      }
+      this.clearInProgressRecording(sessionId);
     }
   }
 
@@ -493,6 +486,10 @@ export class TranscriptionService {
 
   private clearInProgressRecording(sessionId: string): void {
     if (this.recordingSessionIdSignal() !== sessionId) return;
+    this.resetInProgressRecording();
+  }
+
+  private resetInProgressRecording(): void {
     this.recordingSessionIdSignal.set(null);
     this.recordingSourceSignal.set(null);
     this.recordingLanguageSignal.set(null);

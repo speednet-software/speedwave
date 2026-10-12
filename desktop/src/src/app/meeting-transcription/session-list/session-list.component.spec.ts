@@ -4,23 +4,15 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SessionListComponent } from './session-list.component';
 import { TranscriptionService } from '../../services/transcription.service';
 import type { TranscriptSession } from '../../models/transcript';
+import { makeTranscriptSession } from '../../testing/transcript-session';
 
 function session(id: string, createdAt: string, audioKept: boolean): TranscriptSession {
-  return {
+  return makeTranscriptSession({
     id,
     created_at: createdAt,
-    language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
     status: { state: 'done' },
-    live_segments: [],
-    final_segments: null,
     audio_path: audioKept ? `/t/${id}/audio.wav` : null,
-    models_used: {
-      live: null,
-      finalize: null,
-    },
-    last_seq: 0,
-  } as TranscriptSession;
+  });
 }
 
 describe('SessionListComponent', () => {

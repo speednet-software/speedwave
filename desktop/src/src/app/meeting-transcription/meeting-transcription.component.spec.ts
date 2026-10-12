@@ -4,6 +4,7 @@ import { provideRouter } from '@angular/router';
 import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
+import { makeTranscriptSession } from '../testing/transcript-session';
 import type {
   AudioSource,
   CaptureWarning,
@@ -11,6 +12,7 @@ import type {
   TranscriptSession,
   TranscriptStatus,
 } from '../models/transcript';
+import { isSessionOngoing } from '../models/transcript';
 
 describe('MeetingTranscriptionComponent', () => {
   let component: MeetingTranscriptionComponent;
@@ -44,18 +46,7 @@ describe('MeetingTranscriptionComponent', () => {
   const recordingLanguageSig = signal<Language | null>(null);
   const recordingLiveSig = signal<boolean | null>(null);
 
-  const session = (status: TranscriptStatus): TranscriptSession => ({
-    id: 'sess-1',
-    created_at: '2026-10-12T00:00:00Z',
-    language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
-    status,
-    live_segments: [],
-    final_segments: null,
-    audio_path: null,
-    models_used: { live: null, finalize: null },
-    last_seq: 0,
-  });
+  const session = (status: TranscriptStatus) => makeTranscriptSession({ status });
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -103,8 +94,10 @@ describe('MeetingTranscriptionComponent', () => {
       recordingSessionId: recordingSessionIdSig,
       recording: computed(() => recordingSessionIdSig() !== null),
       liveStreamNeeded: computed(() => {
-        const state = activeSig()?.status.state;
-        return recordingSessionIdSig() !== null || state === 'recording' || state === 'finalizing';
+        const status = activeSig()?.status;
+        return (
+          recordingSessionIdSig() !== null || (status !== undefined && isSessionOngoing(status))
+        );
       }),
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,

@@ -14,6 +14,7 @@ import { RouterLink } from '@angular/router';
 import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
 import type { CaptureWarning, TranscriptSession } from '../models/transcript';
+import { isSessionOngoing } from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
 import { SessionListComponent } from './session-list/session-list.component';
@@ -169,8 +170,9 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   constructor() {
     let last: string | undefined;
     effect(() => {
-      const state = this.transcription.active()?.status.state;
-      if (state && state !== last && (state === 'done' || state === 'failed')) {
+      const status = this.transcription.active()?.status;
+      const state = status?.state;
+      if (status && state !== last && !isSessionOngoing(status)) {
         void this.sessionList?.refresh();
       }
       last = state;

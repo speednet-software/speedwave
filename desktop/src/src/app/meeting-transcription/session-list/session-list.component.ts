@@ -11,6 +11,7 @@ import {
 
 import { TranscriptionService } from '../../services/transcription.service';
 import type { TranscriptSession, TranscriptStatus } from '../../models/transcript';
+import { isSessionOngoing } from '../../models/transcript';
 
 /**
  * Short human label for a session status.
@@ -135,9 +136,7 @@ export class SessionListComponent implements OnInit, OnDestroy {
       this.errorOccurred.emit(msg);
     }
     this.cdr.markForCheck();
-    const pending = this.sessions().some(
-      (s) => s.status.state === 'recording' || s.status.state === 'finalizing'
-    );
+    const pending = this.sessions().some((s) => isSessionOngoing(s.status));
     if (pending && this.poll === undefined) {
       this.poll = setInterval(() => void this.refresh(), 1500);
     } else if (!pending) {

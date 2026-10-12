@@ -6,6 +6,7 @@ import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
+import { makeTranscriptSession as snapshot } from '../testing/transcript-session';
 import type {
   CaptureWarning,
   Segment,
@@ -56,25 +57,6 @@ function seg(start: number, end: number, text: string): Segment {
     text,
     words: [],
   };
-}
-
-function snapshot(overrides: Partial<TranscriptSession> = {}): TranscriptSession {
-  return {
-    id: 'sess-1',
-    created_at: '2026-05-12T00:00:00Z',
-    language: 'pl',
-    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
-    status: { state: 'recording' },
-    live_segments: [],
-    final_segments: null,
-    audio_path: '/tmp/sess-1/audio.wav',
-    models_used: {
-      live: null,
-      finalize: null,
-    },
-    last_seq: 0,
-    ...overrides,
-  } as TranscriptSession;
 }
 
 describe('TranscriptionService', () => {
