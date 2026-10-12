@@ -2062,6 +2062,10 @@ networks:
     }
 
     fn attach_to_office_net(yaml: &str, service: &str) -> String {
+        attach_to_net(yaml, service, &test_office_net())
+    }
+
+    fn attach_to_net(yaml: &str, service: &str, network: &str) -> String {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         let nets = doc
             .get_mut("services")
@@ -2069,7 +2073,7 @@ networks:
             .and_then(|s| s.get_mut("networks"))
             .and_then(|n| n.as_sequence_mut())
             .unwrap();
-        nets.push(serde_yaml_ng::Value::String(test_office_net()));
+        nets.push(serde_yaml_ng::Value::String(network.to_string()));
         serde_yaml_ng::to_string(&doc).unwrap()
     }
 
@@ -2136,6 +2140,20 @@ networks:
             violations.iter().any(|v| v.container == "mcp-office"),
             "{violations:?}"
         );
+        assert!(
+            violations.iter().any(|v| v.container == "mcp-hub"),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_egress_less_network_external_flags_the_hub_on_another_projects_network() {
+        let other = egress_less_network_names("other-project").remove(0);
+        let yaml = attach_to_net(&valid_compose_yaml(), "mcp-hub", &other);
+        let violations = egress_less_violations(&yaml);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].container, "mcp-hub");
+        assert!(violations[0].message.contains(&other), "{violations:?}");
     }
 
     #[test]

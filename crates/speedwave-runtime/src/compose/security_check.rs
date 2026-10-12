@@ -1060,8 +1060,9 @@ impl SecurityCheck {
                     .iter()
                     .find(|(name, _)| *name == net)
                     .map(|(_, o)| *o);
-                if egress_less && service_name != "mcp-hub" && owner != Some(service_name.as_str())
-                {
+                let may_join = owner == Some(service_name.as_str())
+                    || (service_name == "mcp-hub" && is_own(&net));
+                if egress_less && !may_join {
                     violations.push(SecurityViolation::new(
                         service_name,
                         SecurityRule::EgressLessNetworkExternal,
