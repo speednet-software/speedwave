@@ -18,22 +18,23 @@ updates:
       - /containers/proxy
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
+    ignore:
+      - dependency-name: 'dirs'
+        versions: ['>=7']
+      - dependency-name: 'wasapi'
+        versions: ['>=0.25']
+      - dependency-name: 'jsonschema'
+        versions: ['>=0.53']
+      - dependency-name: 'rand'
+        versions: ['>=0.9']
 
   - package-ecosystem: npm
     directory: /
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -42,22 +43,19 @@ updates:
     directory: /mcp-servers
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
+    ignore:
+      - dependency-name: '@eslint/js'
+        versions: ['>=10']
+      - dependency-name: 'typescript'
+        versions: ['>=7']
 
   - package-ecosystem: npm
     directory: /mcp-servers/playwright
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
@@ -66,14 +64,14 @@ updates:
     directory: /desktop/src
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
     ignore:
+      - dependency-name: 'vitest'
+        versions: ['>=5']
+      - dependency-name: '@vitest/coverage-v8'
+        versions: ['>=5']
       - dependency-name: 'typescript'
         versions: ['>=6.1']
 
@@ -81,16 +79,12 @@ updates:
     directory: /desktop/e2e
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
       semver-major-days: 14
     ignore:
       - dependency-name: 'typescript'
-        versions: ['>=7']
+        versions: ['>=6']
 
   - package-ecosystem: github-actions
     directories:
@@ -98,10 +92,6 @@ updates:
       - '/.github/actions/*'
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
 
@@ -114,9 +104,8 @@ updates:
       - /mcp-servers/gitlab
     patterns: ['*']
     multi-ecosystem-group: dependencies
-    groups:
-      minor-patch:
-        patterns: ['*']
-        update-types: [minor, patch]
     cooldown:
       default-days: 3
+    ignore:
+      - dependency-name: 'node'
+        versions: ['>=25']
