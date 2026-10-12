@@ -863,6 +863,44 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('delete', () => {
+    it('clears the shown session and stops listening when it is the one deleted', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.47 } }));
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.delete('sess-1');
+      expect(svc.active()).toBeNull();
+      expect(svc.liveStreamNeeded()).toBe(false);
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 1,
+        progress: 0.6,
+      });
+      expect(svc.active()).toBeNull();
+    });
+
+    it('keeps the shown session when another one is deleted', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.47 } }));
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.delete('sess-2');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'finalize_progress',
+        seq: 1,
+        progress: 0.6,
+      });
+      expect(svc.active()?.status).toEqual({ state: 'finalizing', progress: 0.6 });
+    });
+
+    it('keeps the shown session when the backend refuses the delete', async () => {
+      await subscribeWith(snapshot());
+      mockTauri.invokeHandler = async () => {
+        throw new Error('stop the recording before deleting it');
+      };
+      await expect(svc.delete('sess-1')).rejects.toThrow('stop the recording before deleting it');
+      expect(svc.active()?.id).toBe('sess-1');
+      expect(svc.liveStreamNeeded()).toBe(true);
+    });
+  });
+
   describe('capture warnings', () => {
     /**
      * Dispatches a raise/clear event on the subscribed session.

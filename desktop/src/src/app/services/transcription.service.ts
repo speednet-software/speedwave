@@ -286,11 +286,14 @@ export class TranscriptionService {
   }
 
   /**
-   * Deletes a session directory (audio + transcript).
+   * Deletes a session directory (audio + transcript); clears the shown session if it was this one.
    * @param sessionId - the session to delete.
    */
-  delete(sessionId: string): Promise<void> {
-    return this.tauri.invoke<void>('delete_transcript', { sessionId });
+  async delete(sessionId: string): Promise<void> {
+    await this.tauri.invoke<void>('delete_transcript', { sessionId });
+    if (this.activeSignal()?.id !== sessionId) return;
+    await this.detach();
+    this.activeSignal.set(null);
   }
 
   /**
