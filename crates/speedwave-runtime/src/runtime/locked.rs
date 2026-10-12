@@ -18,6 +18,13 @@ pub(super) fn held_locks_snapshot() -> HashSet<String> {
 pub(super) static LOCK_ACQUISITIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+type SettledProjects = std::sync::Mutex<HashSet<(std::path::PathBuf, String)>>;
+
+fn legacy_networks_settled() -> &'static SettledProjects {
+    static SETTLED: std::sync::OnceLock<SettledProjects> = std::sync::OnceLock::new();
+    SETTLED.get_or_init(Default::default)
+}
+
 /// RAII: inserts the project into `HELD_LOCKS` on construction and removes it
 /// on drop (even on panic).
 struct HeldGuard {
@@ -104,14 +111,41 @@ impl LockedRuntime {
         Ok(())
     }
 
+    fn settled_key(&self, project: &str) -> (std::path::PathBuf, String) {
+        (self.data_dir().to_path_buf(), project.to_string())
+    }
+
+    fn legacy_networks_are_settled(&self, project: &str) -> bool {
+        legacy_networks_settled()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&self.settled_key(project))
+    }
+
+    fn settle_legacy_networks(&self, project: &str) {
+        legacy_networks_settled()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(self.settled_key(project));
+    }
+
     fn isolate_egress_less_networks(&self, project: &str) -> anyhow::Result<Vec<String>> {
+        let settled = self.legacy_networks_are_settled(project);
+        let mut probed = false;
         let mut legacy = Vec::new();
         for name in crate::compose::compose_egress_less_networks_in(self.data_dir(), project)? {
             self.inner.ensure_internal_network(&name, project)?;
+            if settled {
+                continue;
+            }
+            probed = true;
             let compose_created = crate::compose::legacy_compose_network_name(project, &name);
             if self.inner.network_exists(&compose_created)? {
                 legacy.push(compose_created);
             }
+        }
+        if probed && legacy.is_empty() {
+            self.settle_legacy_networks(project);
         }
         Ok(legacy)
     }
@@ -142,6 +176,7 @@ impl LockedRuntime {
                 ))
             })?;
         }
+        self.settle_legacy_networks(project);
         Ok(())
     }
 
@@ -626,10 +661,14 @@ mod tests {
 
     fn rendered(project: &str, yaml: &str) -> tempfile::TempDir {
         let data_dir = tempfile::tempdir().unwrap();
-        let path = crate::compose::compose_output_path_in(data_dir.path(), project).unwrap();
+        write_rendered(data_dir.path(), project, yaml);
+        data_dir
+    }
+
+    fn write_rendered(data_dir: &std::path::Path, project: &str, yaml: &str) {
+        let path = crate::compose::compose_output_path_in(data_dir, project).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, yaml).unwrap();
-        data_dir
     }
 
     fn compose_with_office(project: &str) -> String {
@@ -836,7 +875,83 @@ mod tests {
         );
         assert_eq!(handles.recreate_calls.lock().unwrap().len(), 1);
         assert_eq!(handles.removed_networks(), vec![legacy.clone()]);
-        assert_eq!(handles.probed_networks(), vec![legacy; 3]);
+        assert_eq!(handles.probed_networks(), vec![legacy; 2]);
+    }
+
+    #[test]
+    fn a_start_after_one_that_found_no_compose_created_network_probes_no_more() {
+        let project = "locked-net-settled";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .build();
+        for started in start_every_way(&rt, project) {
+            started.unwrap();
+        }
+        rt.compose_up(project).unwrap();
+        assert_eq!(handles.probed_networks(), vec![legacy_office(project)]);
+        assert_eq!(handles.ensured_networks().len(), 4);
+        assert!(handles.removed_networks().is_empty());
+    }
+
+    #[test]
+    fn a_start_after_a_migration_probes_no_more_and_keeps_its_own_up() {
+        let project = "locked-net-settled-after-migration";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let legacy = legacy_office(project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy)
+            .build();
+        rt.compose_up(project).unwrap();
+        rt.compose_up(project).unwrap();
+        assert_eq!(handles.probed_networks(), vec![legacy.clone()]);
+        assert_eq!(handles.recreate_calls.lock().unwrap().len(), 1);
+        assert_eq!(handles.up_projects(), vec![project.to_string()]);
+        assert_eq!(handles.removed_networks(), vec![legacy]);
+        assert_eq!(handles.ensured_networks().len(), 2);
+    }
+
+    #[test]
+    fn a_compose_created_network_left_in_place_is_probed_again_on_the_next_start() {
+        let project = "locked-net-unsettled-after-busy";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let legacy = legacy_office(project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy)
+            .with_remove_network_error("network is in use by container \"abc\"")
+            .build();
+        assert!(rt.compose_up(project).is_err());
+        assert!(rt.compose_up(project).is_err());
+        assert_eq!(handles.probed_networks(), vec![legacy; 2]);
+        assert_eq!(handles.recreate_calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_settled_probe_is_kept_per_data_dir_and_project() {
+        let project = "locked-net-settled-scope";
+        let first = rendered(project, &compose_with_office(project));
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_data_dir(first.path())
+            .build();
+        rt.compose_up(project).unwrap();
+        let second = rendered(project, &compose_with_office(project));
+        let other = "locked-net-settled-scope-other";
+        write_rendered(first.path(), other, &compose_with_office(other));
+        let (rt_second, handles_second) = MockRuntimeBuilder::new()
+            .with_data_dir(second.path())
+            .build();
+        rt_second.compose_up(project).unwrap();
+        assert_eq!(
+            handles_second.probed_networks(),
+            vec![legacy_office(project)]
+        );
+        let (rt_other, handles_other) = MockRuntimeBuilder::new()
+            .with_data_dir(first.path())
+            .build();
+        rt_other.compose_up(other).unwrap();
+        assert_eq!(handles_other.probed_networks(), vec![legacy_office(other)]);
     }
 
     #[test]
@@ -896,6 +1011,11 @@ mod tests {
             let err = started.unwrap_err();
             assert!(err.to_string().contains("timed out"), "{err}");
         }
+        assert_eq!(
+            handles.probed_networks().len(),
+            3,
+            "an unanswered probe is never settled"
+        );
         assert!(handles.up_projects().is_empty());
         assert!(!handles.was_recreated());
         assert!(handles.up_service_calls.lock().unwrap().is_empty());
