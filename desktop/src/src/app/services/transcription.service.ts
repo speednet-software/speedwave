@@ -3,9 +3,7 @@ import { type UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
   AudioSource,
-  CapabilitiesAck,
   AudioSourceInfo,
-  GpuClass,
   CaptureWarning,
   DownloadProgress,
   Language,
@@ -17,6 +15,7 @@ import type {
   SubscribeAck,
   TranscriptEvent,
   TranscriptSession,
+  TranscriptSummary,
 } from '../models/transcript';
 import { isSessionOngoing } from '../models/transcript';
 import { ChatStateService } from './chat-state.service';
@@ -29,8 +28,17 @@ const MODEL_PROGRESS_EVENT = 'transcription_model_status';
 /** Poll interval for detecting completion of a download this webview did not itself start. */
 const RESUMED_DOWNLOAD_POLL_MS = 2000;
 
-/** localStorage key for the live-transcript preference. Exported so tests assert the real key. */
-export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
+/**
+ * localStorage key for the live-transcript preference (only `'on'` turns it on). The `-v2` key
+ * resets every earlier choice once, since live text went from default-on to opt-in.
+ */
+export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript-v2';
+
+/** Pre-`-v2` key, removed on first use so a stale default-on pick does not linger. */
+const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
+
+/** App-wide event the backend emits when a recordings-list row changes (Rust `TRANSCRIPTS_CHANGED_EVENT`). */
+const TRANSCRIPTS_CHANGED_EVENT = 'transcripts_changed';
 
 /** Where a transcript send lands: a fresh conversation, or the one on screen. */
 export type SendTarget = 'new-chat' | 'current-chat';
@@ -69,11 +77,16 @@ export class TranscriptionService {
   private readonly recordingSourceSignal = signal<AudioSource | null>(null);
   private readonly recordingLanguageSignal = signal<Language | null>(null);
   private readonly recordingLiveSignal = signal<boolean | null>(null);
+  private readonly recordingStartedAtSignal = signal<number | null>(null);
   private readonly liveDraftSignal = signal<string>('');
   private readonly audioLevelsSignal = signal<number[] | null>(null);
-  private readonly gpuClassSignal = signal<GpuClass | null>(null);
   private readonly stagedTranscriptSignal = signal<string>('');
   private readonly chatPromptDraftSignal = signal<string>('');
+  private readonly recordingsSignal = signal<TranscriptSummary[]>([]);
+  private readonly recordingsErrorSignal = signal('');
+  private recordingsUnlisten: UnlistenFn | null = null;
+  private recordingsRefresh: Promise<void> | null = null;
+  private recordingsStale = false;
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
@@ -105,6 +118,15 @@ export class TranscriptionService {
    */
   readonly recordingLive: Signal<boolean | null> = this.recordingLiveSignal.asReadonly();
 
+  /** `Date.now()` when the in-flight recording (or its resumed part) started; null otherwise. */
+  readonly recordingStartedAt: Signal<number | null> = this.recordingStartedAtSignal.asReadonly();
+
+  /** Every recording on disk, newest first; kept current by the backend's change events. */
+  readonly recordings: Signal<TranscriptSummary[]> = this.recordingsSignal.asReadonly();
+
+  /** Why the last recordings-list read failed ('' after a good read). */
+  readonly recordingsError: Signal<string> = this.recordingsErrorSignal.asReadonly();
+
   /** Capture warnings currently raised for the active session, in arrival order. */
   readonly captureWarnings: Signal<readonly CaptureWarning[]> = computed(
     () => this.activeSignal()?.active_warnings ?? []
@@ -131,28 +153,20 @@ export class TranscriptionService {
   readonly downloadProgress: Signal<DownloadProgress | null> =
     this.downloadProgressSignal.asReadonly();
 
-  /**
-   * Capabilities, probed `gpu_class`, and the host-computed acceleration label. Side effect:
-   * caches `gpu_class`, which `liveTranscriptPreferred()` reads (before the first call it
-   * assumes 'discrete', i.e. live on).
-   */
-  async getCapabilities(): Promise<CapabilitiesAck> {
-    const ack = await this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
-    this.gpuClassSignal.set(ack.gpu_class);
-    return ack;
+  /** Drops the pre-`-v2` live-transcript key so its stored choice never applies again. */
+  constructor() {
+    try {
+      localStorage.removeItem(LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY);
+    } catch {}
   }
 
-  /**
-   * Whether the next recording should run the live pass: the user's stored choice, else on only
-   * where a discrete GPU makes live text worth its cost (ADR-056 Am. 13).
-   */
+  /** Whether the next recording should show live text while it records; off unless the user opted in. */
   liveTranscriptPreferred(): boolean {
     try {
-      const stored = localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY);
-      if (stored === 'on') return true;
-      if (stored === 'off') return false;
-    } catch {}
-    return (this.gpuClassSignal() ?? 'discrete') === 'discrete';
+      return localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY) === 'on';
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -220,6 +234,7 @@ export class TranscriptionService {
     this.recordingSourceSignal.set(source);
     this.recordingLanguageSignal.set(language);
     this.recordingLiveSignal.set(ack.snapshot.models_used.live != null);
+    this.recordingStartedAtSignal.set(Date.now());
     return ack;
   }
 
@@ -272,9 +287,86 @@ export class TranscriptionService {
     }
   }
 
-  /** All persisted sessions (newest first). */
-  list(): Promise<TranscriptSession[]> {
-    return this.tauri.invoke<TranscriptSession[]>('list_transcripts');
+  /**
+   * Starts following the backend's change events (once per app run) and reads the list now.
+   * The list is never polled: every create, rename, delete, status or progress change re-reads it.
+   */
+  async watchRecordings(): Promise<void> {
+    if (!this.recordingsUnlisten) {
+      this.recordingsUnlisten = await this.tauri.listen<string>(TRANSCRIPTS_CHANGED_EVENT, () => {
+        void this.refreshRecordings();
+      });
+    }
+    await this.refreshRecordings();
+  }
+
+  /** Re-reads the recordings list; calls during a read coalesce into one follow-up read. */
+  refreshRecordings(): Promise<void> {
+    if (this.recordingsRefresh) {
+      this.recordingsStale = true;
+      return this.recordingsRefresh;
+    }
+    this.recordingsRefresh = (async () => {
+      do {
+        this.recordingsStale = false;
+        try {
+          this.recordingsSignal.set(
+            await this.tauri.invoke<TranscriptSummary[]>('list_transcripts')
+          );
+          this.recordingsErrorSignal.set('');
+        } catch (e) {
+          this.recordingsErrorSignal.set(e instanceof Error ? e.message : String(e));
+        }
+      } while (this.recordingsStale);
+      this.recordingsRefresh = null;
+    })();
+    return this.recordingsRefresh;
+  }
+
+  /**
+   * Renames a recording; a blank title restores the default name.
+   * @param sessionId - the recording to rename.
+   * @param title - the new title as typed.
+   * @returns the title the backend stored (normalised), or null when cleared.
+   */
+  async rename(sessionId: string, title: string): Promise<string | null> {
+    const stored = await this.tauri.invoke<string | null>('rename_transcript', {
+      sessionId,
+      title,
+    });
+    const cur = this.activeSignal();
+    if (cur?.id === sessionId) this.activeSignal.set({ ...cur, title: stored });
+    this.recordingsSignal.update((list) =>
+      list.map((r) => (r.id === sessionId ? { ...r, title: stored } : r))
+    );
+    return stored;
+  }
+
+  /**
+   * Runs the transcription again over a failed recording's audio, then re-attaches the open
+   * pane to it so the progress shows.
+   * @param sessionId - the failed recording.
+   */
+  async transcribe(sessionId: string): Promise<void> {
+    await this.tauri.invoke<void>('transcribe_transcript', { sessionId });
+    if (this.activeSignal()?.id === sessionId) await this.subscribeToTranscript(sessionId);
+  }
+
+  /**
+   * Saves the transcript as Markdown where the user picks.
+   * @param sessionId - the recording to export.
+   * @returns false when the user cancelled the save dialog.
+   */
+  exportMarkdown(sessionId: string): Promise<boolean> {
+    return this.tauri.invoke<boolean>('export_transcript', { sessionId });
+  }
+
+  /**
+   * Shows the recording's audio file in Finder or Explorer.
+   * @param sessionId - the recording to reveal.
+   */
+  revealAudio(sessionId: string): Promise<void> {
+    return this.tauri.invoke<void>('reveal_transcript_audio', { sessionId });
   }
 
   /**
@@ -291,6 +383,7 @@ export class TranscriptionService {
    */
   async delete(sessionId: string): Promise<void> {
     await this.tauri.invoke<void>('delete_transcript', { sessionId });
+    this.recordingsSignal.update((list) => list.filter((r) => r.id !== sessionId));
     if (this.activeSignal()?.id !== sessionId) return;
     await this.detach();
     this.activeSignal.set(null);
@@ -497,6 +590,7 @@ export class TranscriptionService {
     this.recordingSourceSignal.set(null);
     this.recordingLanguageSignal.set(null);
     this.recordingLiveSignal.set(null);
+    this.recordingStartedAtSignal.set(null);
   }
 
   /**

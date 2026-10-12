@@ -9,7 +9,7 @@ use speedwave_runtime::transcription::{
     self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, DriverError,
     FinalizeConfig, Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions,
     TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore,
-    WhisperCppTranscriber,
+    TranscriptSummary, WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -36,6 +36,9 @@ pub fn transcript_event_name(id: Uuid) -> String {
 /// Per-model-download progress event name.
 pub const MODEL_PROGRESS_EVENT: &str = "transcription_model_status";
 
+/// App-wide event carrying the id of a session whose recordings-list row changed.
+pub const TRANSCRIPTS_CHANGED_EVENT: &str = "transcripts_changed";
+
 /// Validates a transcript id (UUID v4 string). Same shape as
 /// `history::validate_session_id` but parses to `Uuid`.
 fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
@@ -49,27 +52,6 @@ fn short_id(id: Uuid) -> String {
     let mut s = id.to_string();
     s.truncate(8);
     s
-}
-
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct CapabilitiesAck {
-    /// What the host's audio backend can do.
-    pub capabilities: CaptureCapabilities,
-    /// Probed host GPU class (ADR-085) — drives the live-transcript default in the UI.
-    pub gpu_class: transcription::GpuClass,
-    /// Acceleration label computed by `accel::accel_label()` — the UI renders it verbatim.
-    pub accel_label: String,
-}
-
-#[tauri::command]
-pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
-    tokio::task::spawn_blocking(|| CapabilitiesAck {
-        capabilities: transcription::detect_audio_capture().capabilities(),
-        gpu_class: transcription::gpu_class(),
-        accel_label: transcription::accel_label(),
-    })
-    .await
-    .map_err(|e| format!("capabilities task panicked: {e}"))
 }
 
 #[tauri::command]
@@ -409,9 +391,52 @@ pub async fn stop_transcription(
             tokio::time::timeout(std::time::Duration::from_secs(5), stop.await_finished()).await;
     }
 
-    let store_arc = store.inner().clone();
-    let models_arc = models.inner().clone();
     let audio_paths = offline_pass_parts(&store, id)?;
+    spawn_offline_pass(
+        store.inner().clone(),
+        models.inner().clone(),
+        id,
+        audio_paths,
+    );
+    Ok(())
+}
+
+/// Runs the offline pass again over a failed session's recorded parts (an interrupted recording,
+/// or a model missing at Stop); the session goes back to `Finalizing` and ends `Done` or `Failed`.
+#[tauri::command]
+pub async fn transcribe_transcript(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    if drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .contains_key(&id)
+    {
+        return Err("this recording is still capturing; stop it first".to_string());
+    }
+    let audio_paths = offline_pass_parts(&store, id)?;
+    store.begin_retranscribe(id).map_err(|e| e.to_string())?;
+    spawn_offline_pass(
+        store.inner().clone(),
+        models.inner().clone(),
+        id,
+        audio_paths,
+    );
+    Ok(())
+}
+
+/// Loads the offline-pass model and transcribes `audio_paths` on a blocking task; every failure
+/// lands on the session as `Failed`, so the UI always learns how the pass ended.
+fn spawn_offline_pass(
+    store_arc: TranscriptStoreHandle,
+    models_arc: ModelStoreHandle,
+    id: Uuid,
+    audio_paths: Vec<std::path::PathBuf>,
+) {
     tokio::task::spawn_blocking(move || {
         let offline_key = pick_offline_model(&models_arc);
         let Some(key) = offline_key else {
@@ -469,7 +494,6 @@ pub async fn stop_transcription(
             Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }
     });
-    Ok(())
 }
 
 /// Resolves every recorded part for the offline pass (resumed sessions have several); a store
@@ -723,8 +747,134 @@ async fn forward_events(
 #[tauri::command]
 pub async fn list_transcripts(
     store: tauri::State<'_, TranscriptStoreHandle>,
-) -> Result<Vec<TranscriptSession>, String> {
-    Ok(store.list())
+) -> Result<Vec<TranscriptSummary>, String> {
+    let store = store.inner().clone();
+    tokio::task::spawn_blocking(move || store.list())
+        .await
+        .map_err(|e| format!("list task panicked: {e}"))
+}
+
+/// Forwards the store's change channel as [`TRANSCRIPTS_CHANGED_EVENT`] for the whole app run,
+/// so the recordings list refreshes on change instead of polling.
+pub fn spawn_change_forwarder(app: AppHandle, store: TranscriptStoreHandle) {
+    let mut changes = store.watch();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(id) => {
+                    if let Err(e) = app.emit(TRANSCRIPTS_CHANGED_EVENT, id.to_string()) {
+                        log::warn!("failed to emit a transcripts change: {e}");
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = app.emit(TRANSCRIPTS_CHANGED_EVENT, String::new());
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Renames a session; a blank title restores the default name. Returns the stored title.
+#[tauri::command]
+pub async fn rename_transcript(
+    session_id: String,
+    title: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<Option<String>, String> {
+    let id = parse_transcript_id(&session_id)?;
+    store.rename(id, &title).map_err(|e| e.to_string())
+}
+
+/// Saves the session's markdown transcript where the user picks in a native save dialog.
+/// Returns `false` when the user cancels.
+#[tauri::command]
+pub async fn export_transcript(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    app: AppHandle,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let id = parse_transcript_id(&session_id)?;
+    let session = store.get(id).map_err(|e| e.to_string())?;
+    let markdown = session.to_markdown();
+    let file_name = export_file_name(&session);
+    tokio::task::spawn_blocking(move || {
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_file_name(file_name)
+            .add_filter("Markdown", &["md"])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = picked
+            .into_path()
+            .map_err(|e| format!("unsupported save location: {e}"))?;
+        std::fs::write(&path, markdown)
+            .map_err(|e| format!("could not save the transcript: {e}"))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
+}
+
+/// Default export file name: the title (or the start date) made safe for every filesystem.
+fn export_file_name(session: &TranscriptSession) -> String {
+    let base = session.title.clone().unwrap_or_else(|| {
+        let day = session.created_at.get(..10).unwrap_or(&session.created_at);
+        format!("Meeting {day}")
+    });
+    let safe: String = base
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let trimmed = safe.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        "Meeting transcript.md".to_string()
+    } else {
+        format!("{trimmed}.md")
+    }
+}
+
+/// Shows the session's audio in Finder (macOS) or Explorer (Windows).
+#[tauri::command]
+pub async fn reveal_transcript_audio(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    let session = store.get(id).map_err(|e| e.to_string())?;
+    let target = session
+        .audio_path
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| store.session_dir(id));
+    reveal_in_file_manager(&target)
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    speedwave_runtime::binary::system_command("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open Finder: {e}"))
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    speedwave_runtime::binary::system_command("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open Explorer: {e}"))
 }
 
 #[tauri::command]
@@ -938,49 +1088,6 @@ mod tests {
     use super::*;
     use speedwave_runtime::transcription::TranscriptSession;
     use std::path::PathBuf;
-
-    #[test]
-    fn capabilities_ack_field_set_matches_ts() {
-        let ack = CapabilitiesAck {
-            capabilities: CaptureCapabilities {
-                supports_system_audio: true,
-                supports_microphone: false,
-                note: None,
-            },
-            gpu_class: transcription::GpuClass::Discrete,
-            accel_label: "Metal (GPU)".to_string(),
-        };
-        let json = serde_json::to_value(&ack).unwrap();
-        let mut rust: Vec<&str> = json
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        rust.sort_unstable();
-        assert_eq!(rust, ["accel_label", "capabilities", "gpu_class"]);
-
-        let src = include_str!("../../src/src/app/models/transcript.ts");
-        let marker = "export interface CapabilitiesAck {";
-        let idx = src
-            .find(marker)
-            .expect("transcript.ts must declare `export interface CapabilitiesAck`");
-        let body = src[idx + marker.len()..]
-            .split('}')
-            .next()
-            .expect("the CapabilitiesAck interface must be closed");
-        let mut ts: Vec<&str> = body
-            .lines()
-            .filter_map(|l| l.split(':').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
-            .collect();
-        ts.sort_unstable();
-        assert_eq!(
-            rust, ts,
-            "TS CapabilitiesAck must mirror the Rust ack fields"
-        );
-    }
 
     fn mk_session_in(store: &TranscriptStore) -> Uuid {
         let s = TranscriptSession::new(
@@ -1238,6 +1345,85 @@ mod tests {
             store.get(id).unwrap().status,
             TranscriptStatus::Recording
         ));
+    }
+
+    fn titled(title: Option<&str>, created_at: &str) -> TranscriptSession {
+        let mut s = TranscriptSession::new(
+            Language::Pl,
+            AudioSourceInfo {
+                source: speedwave_runtime::transcription::AudioSource::SystemWide,
+                label: "Test".to_string(),
+            },
+            PathBuf::from("/tmp/a.wav"),
+        );
+        s.title = title.map(str::to_string);
+        s.created_at = created_at.to_string();
+        s
+    }
+
+    #[test]
+    fn export_file_name_uses_the_title_or_the_start_day() {
+        assert_eq!(
+            export_file_name(&titled(Some("Sprint review"), "2026-10-12T07:28:04Z")),
+            "Sprint review.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(None, "2026-10-12T07:28:04Z")),
+            "Meeting 2026-10-12.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(Some("Spotkanie zespołu"), "x")),
+            "Spotkanie zespołu.md"
+        );
+    }
+
+    #[test]
+    fn export_file_name_strips_characters_no_filesystem_accepts() {
+        assert_eq!(
+            export_file_name(&titled(Some("Q3: plan/budget <draft>?"), "2026-01-01")),
+            "Q3- plan-budget -draft--.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(Some("notes..."), "2026-01-01")),
+            "notes.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(Some(" ... "), "2026-01-01")),
+            "Meeting transcript.md"
+        );
+        assert_eq!(
+            export_file_name(&titled(None, "bad")),
+            "Meeting bad.md",
+            "a short created_at never panics on the slice"
+        );
+    }
+
+    #[test]
+    fn transcripts_changed_event_matches_ts() {
+        let src = include_str!("../../src/src/app/services/transcription.service.ts");
+        assert!(
+            src.contains(&format!(
+                "const TRANSCRIPTS_CHANGED_EVENT = '{TRANSCRIPTS_CHANGED_EVENT}';"
+            )),
+            "transcription.service.ts must listen on the event the backend emits"
+        );
+    }
+
+    #[test]
+    fn stop_and_transcribe_share_the_one_offline_pass_spawner() {
+        let src = include_str!("transcription_cmd.rs");
+        for name in ["stop_transcription", "transcribe_transcript"] {
+            assert_eq!(
+                count_calls(fn_body(src, name), "spawn_offline_pass"),
+                1,
+                "{name} must start the offline pass through spawn_offline_pass"
+            );
+        }
+        assert_eq!(
+            count_calls(src, "run_finalize"),
+            1,
+            "run_finalize has exactly one caller, spawn_offline_pass"
+        );
     }
 
     #[test]

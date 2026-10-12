@@ -10,11 +10,20 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::transcription::transcriber::Segment;
-use crate::transcription::transcript::{TranscriptSession, TranscriptStatus};
+use crate::transcription::transcript::{
+    normalize_title, TranscriptSession, TranscriptStatus, TranscriptSummary,
+};
 
 /// Capacity of each session's `broadcast` channel — generous enough that a slow subscriber
 /// falls behind only after thousands of events; if it does, it re-subscribes via the snapshot.
 const CHANNEL_CAPACITY: usize = 4096;
+
+/// Capacity of the store-wide change channel; a lagging listener just re-reads the list.
+const CHANGES_CAPACITY: usize = 256;
+
+/// Failure reason of a session the app closed while it was recording or transcribing.
+pub const INTERRUPTED_REASON: &str =
+    "interrupted: Speedwave closed before this recording was transcribed";
 
 /// Live events on a transcript stream. Every event carries a `seq` (1-indexed, monotonic per
 /// session). Consumers apply events idempotently: ignore `seq <= last_applied`.
@@ -139,6 +148,7 @@ struct Entry {
 pub struct TranscriptStore {
     root: PathBuf,
     sessions: Arc<DashMap<Uuid, Entry>>,
+    changes: broadcast::Sender<Uuid>,
 }
 
 /// Drains the raised capture warnings into one recovery event each, starting at `next_seq` —
@@ -162,10 +172,18 @@ impl TranscriptStore {
 
     /// A store rooted at an arbitrary directory.
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
+        let (changes, _) = broadcast::channel(CHANGES_CAPACITY);
         Self {
             root: root.into(),
             sessions: Arc::new(DashMap::new()),
+            changes,
         }
+    }
+
+    /// Ids of sessions whose recordings-list row changed (created, renamed, deleted, or a new
+    /// status or progress), so the list refreshes on change instead of polling.
+    pub fn watch(&self) -> broadcast::Receiver<Uuid> {
+        self.changes.subscribe()
     }
 
     /// Per-session directory `<root>/<id>/`.
@@ -189,6 +207,7 @@ impl TranscriptStore {
                 tx,
             },
         );
+        self.notify(id);
         Ok(id)
     }
 
@@ -204,9 +223,48 @@ impl TranscriptStore {
         Ok(TranscriptSession::load(&dir)?)
     }
 
-    /// Walks `<root>/` and returns one snapshot per session directory. Corrupt
-    /// `transcript.json` files are skipped (logged warn — runtime recovery, not panic).
-    pub fn list(&self) -> Vec<TranscriptSession> {
+    /// One summary per session directory, newest first. Corrupt `transcript.json` files are
+    /// skipped (logged warn — runtime recovery, not panic).
+    pub fn list(&self) -> Vec<TranscriptSummary> {
+        self.sessions_on_disk()
+            .iter()
+            .map(|s| s.summary(&self.session_dir(s.id)))
+            .collect()
+    }
+
+    /// Marks every session left `Recording` or `Finalizing` by an earlier run as failed with
+    /// [`INTERRUPTED_REASON`], after repairing the WAV headers its unfinished writer left at zero,
+    /// so the offline pass can transcribe it again. Run once at startup, before any recording.
+    pub fn reconcile_interrupted(&self) -> usize {
+        let mut reconciled = 0;
+        for session in self.sessions_on_disk() {
+            if !matches!(
+                session.status,
+                TranscriptStatus::Recording | TranscriptStatus::Finalizing { .. }
+            ) || self.sessions.contains_key(&session.id)
+            {
+                continue;
+            }
+            for part in session.all_audio_parts() {
+                if let Err(e) = crate::transcription::audio::repair_wav_header(&part) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        log::warn!("transcript {}: WAV header repair failed: {e}", session.id);
+                    }
+                }
+            }
+            let failed = TranscriptStatus::Failed {
+                reason: INTERRUPTED_REASON.to_string(),
+            };
+            match self.set_status(session.id, failed) {
+                Ok(_) => reconciled += 1,
+                Err(e) => log::warn!("transcript {}: reconcile failed: {e}", session.id),
+            }
+        }
+        reconciled
+    }
+
+    /// Every session on disk (in-memory copy for active ones), newest first.
+    fn sessions_on_disk(&self) -> Vec<TranscriptSession> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Vec::new();
         };
@@ -253,7 +311,48 @@ impl TranscriptStore {
             }
             MapEntry::Vacant(_) => remove_dir()?,
         }
+        self.notify(id);
         Ok(())
+    }
+
+    /// Renames a session; a blank title clears it. Returns the stored (normalised) title.
+    pub fn rename(&self, id: Uuid, title: &str) -> Result<Option<String>, StoreError> {
+        let title = normalize_title(title);
+        self.with_session_batch(id, |s, _| {
+            s.title = title.clone();
+            Vec::new()
+        })?;
+        self.notify(id);
+        Ok(title)
+    }
+
+    /// Moves a `Failed` session to `Finalizing` for another offline pass over its recorded parts,
+    /// retiring its warnings; refuses any other state so two runs never overlap.
+    pub fn begin_retranscribe(&self, id: Uuid) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        let mut allowed = false;
+        self.with_session_batch(id, |s, next_seq| {
+            if !matches!(s.status, TranscriptStatus::Failed { .. }) {
+                return Vec::new();
+            }
+            allowed = true;
+            let mut events = drain_capture_warnings(s, next_seq);
+            let status = TranscriptStatus::Finalizing { progress: 0.0 };
+            s.status = status.clone();
+            seq_out = next_seq + events.len() as u64;
+            events.push(TranscriptEvent::StatusChanged {
+                seq: seq_out,
+                status,
+            });
+            events
+        })?;
+        if !allowed {
+            return Err(StoreError::InvalidState(
+                "only a failed recording can be transcribed again".to_string(),
+            ));
+        }
+        self.notify(id);
+        Ok(seq_out)
     }
 
     /// Snapshot + future-event stream. Activates the session in cache if it
@@ -442,6 +541,7 @@ impl TranscriptStore {
             });
             events
         })?;
+        self.notify(id);
         Ok(seq_out)
     }
 
@@ -481,6 +581,7 @@ impl TranscriptStore {
                 "only a finished recording can be resumed".to_string(),
             ));
         }
+        self.notify(id);
         Ok(seq_out)
     }
 
@@ -522,6 +623,7 @@ impl TranscriptStore {
                 "session is not in a just-resumed state".to_string(),
             ));
         }
+        self.notify(id);
         Ok(seq_out)
     }
 
@@ -565,6 +667,7 @@ impl TranscriptStore {
             s.status = TranscriptStatus::Finalizing { progress };
             TranscriptEvent::FinalizeProgress { seq, progress }
         })?;
+        self.notify(id);
         Ok(seq_out)
     }
 
@@ -582,6 +685,7 @@ impl TranscriptStore {
             let segments = s.final_segments.clone().unwrap_or_default();
             TranscriptEvent::FinalSegmentsReady { seq, segments }
         })?;
+        self.notify(id);
         Ok(seq_out)
     }
 
@@ -593,7 +697,12 @@ impl TranscriptStore {
             s.status = TranscriptStatus::Done;
             TranscriptEvent::Finished { seq }
         })?;
+        self.notify(id);
         Ok(seq_out)
+    }
+
+    fn notify(&self, id: Uuid) {
+        let _ = self.changes.send(id);
     }
 }
 
@@ -1071,6 +1180,219 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         store.delete(Uuid::new_v4()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_persists_a_normalised_title_and_a_blank_one_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let seq_before = store.get(id).unwrap().last_seq;
+
+        assert_eq!(
+            store.rename(id, "  Planning\n call ").unwrap().as_deref(),
+            Some("Planning call")
+        );
+        assert_eq!(
+            TranscriptSession::load(&store.session_dir(id))
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Planning call")
+        );
+        assert_eq!(store.list()[0].title.as_deref(), Some("Planning call"));
+        assert_eq!(
+            store.get(id).unwrap().last_seq,
+            seq_before,
+            "a rename emits no stream event"
+        );
+
+        assert_eq!(store.rename(id, "   ").unwrap(), None);
+        assert_eq!(store.get(id).unwrap().title, None);
+    }
+
+    #[tokio::test]
+    async fn rename_of_an_unknown_session_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        assert!(matches!(
+            store.rename(Uuid::new_v4(), "x").unwrap_err(),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_returns_summaries_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let mut old = mk_session(&dir.path().join("old.wav"));
+        old.created_at = "2026-01-01T00:00:00Z".to_string();
+        old.set_final_segments(vec![seg(0.0, 1.0, "stare")]);
+        let old_id = store.create(old).unwrap();
+        let mut new = mk_session(&dir.path().join("new.wav"));
+        new.created_at = "2026-02-01T00:00:00Z".to_string();
+        let new_id = store.create(new).unwrap();
+
+        let listed = store.list();
+        assert_eq!(
+            listed.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![new_id, old_id]
+        );
+        assert_eq!(listed[1].segment_count, 1);
+        assert_eq!(listed[1].preview.as_deref(), Some("stare"));
+        assert!(listed[1].size_bytes > 0, "transcript.json is on disk");
+    }
+
+    #[tokio::test]
+    async fn watch_reports_list_changes_but_not_segments_or_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let mut changes = store.watch();
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        assert_eq!(changes.try_recv().unwrap(), id);
+
+        store.append_segment(id, seg(0.0, 1.0, "x")).unwrap();
+        store.audio_level(id, vec![0.1]).unwrap();
+        store.live_draft(id, "y".to_string()).unwrap();
+        store
+            .capture_warning(id, crate::transcription::CaptureWarning::AudioDropped)
+            .unwrap();
+        assert!(changes.try_recv().is_err(), "per-segment traffic stays off");
+
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        store.finalize_progress(id, 0.5).unwrap();
+        store.set_final_segments(id, vec![]).unwrap();
+        store.finish(id).unwrap();
+        store.rename(id, "t").unwrap();
+        store.delete(id).unwrap();
+        let mut seen = 0;
+        while let Ok(changed) = changes.try_recv() {
+            assert_eq!(changed, id);
+            seen += 1;
+        }
+        assert_eq!(seen, 6);
+    }
+
+    #[tokio::test]
+    async fn begin_retranscribe_moves_only_a_failed_session_to_finalizing() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        assert!(matches!(
+            store.begin_retranscribe(id).unwrap_err(),
+            StoreError::InvalidState(_)
+        ));
+
+        store
+            .set_status(
+                id,
+                TranscriptStatus::Failed {
+                    reason: "no model".to_string(),
+                },
+            )
+            .unwrap();
+        store
+            .capture_warning(id, CaptureWarning::RecordingPartMissing)
+            .unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+
+        let seq = store.begin_retranscribe(id).unwrap();
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Finalizing { progress: 0.0 });
+        assert!(snap.active_warnings.is_empty());
+        assert_eq!(snap.last_seq, seq);
+        assert!(matches!(
+            sub.events.try_recv().unwrap(),
+            TranscriptEvent::CaptureWarningCleared { .. }
+        ));
+        assert!(matches!(
+            sub.events.try_recv().unwrap(),
+            TranscriptEvent::StatusChanged {
+                status: TranscriptStatus::Finalizing { .. },
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                store.begin_retranscribe(id).unwrap_err(),
+                StoreError::InvalidState(_)
+            ),
+            "a second click while the first run is going is refused"
+        );
+    }
+
+    fn write_unfinalized_wav(path: &Path, frames: u32) {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&16_000u32.to_le_bytes());
+        b.extend_from_slice(&32_000u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.resize(b.len() + frames as usize * 2, 0);
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_fails_interrupted_sessions_and_repairs_their_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = TranscriptStore::with_root(dir.path());
+        let recording_id = Uuid::new_v4();
+        let wav = writer.session_dir(recording_id).join("audio.wav");
+        let mut recording = mk_session(&wav);
+        recording.id = recording_id;
+        writer.create(recording).unwrap();
+        write_unfinalized_wav(&wav, 16_000);
+        let finalizing = writer
+            .create(mk_session(&dir.path().join("gone.wav")))
+            .unwrap();
+        writer
+            .set_status(finalizing, TranscriptStatus::Finalizing { progress: 0.6 })
+            .unwrap();
+        let done = writer
+            .create(mk_session(&dir.path().join("d.wav")))
+            .unwrap();
+        writer.finish(done).unwrap();
+        drop(writer);
+
+        let store = TranscriptStore::with_root(dir.path());
+        assert_eq!(store.reconcile_interrupted(), 2);
+        for id in [recording_id, finalizing] {
+            assert_eq!(
+                TranscriptSession::load(&store.session_dir(id))
+                    .unwrap()
+                    .status,
+                TranscriptStatus::Failed {
+                    reason: INTERRUPTED_REASON.to_string()
+                }
+            );
+        }
+        assert_eq!(store.get(done).unwrap().status, TranscriptStatus::Done);
+        assert_eq!(
+            crate::transcription::audio::wav_duration(&wav),
+            Some(Duration::from_secs(1)),
+            "the offline pass can read the recovered audio"
+        );
+        assert_eq!(store.reconcile_interrupted(), 0, "idempotent");
+    }
+
+    #[tokio::test]
+    async fn reconcile_leaves_a_session_this_run_is_recording_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        assert_eq!(store.reconcile_interrupted(), 0);
+        assert_eq!(store.get(id).unwrap().status, TranscriptStatus::Recording);
     }
 
     #[test]

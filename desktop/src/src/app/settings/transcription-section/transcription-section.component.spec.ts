@@ -27,6 +27,8 @@ describe('TranscriptionSectionComponent', () => {
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     downloadingModelKey: typeof downloadingModelKey;
     downloadProgress: typeof downloadProgress;
   };
@@ -63,6 +65,8 @@ describe('TranscriptionSectionComponent', () => {
       requestMicrophonePermission: vi.fn(async () => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
+      liveTranscriptPreferred: vi.fn(() => false),
+      setLiveTranscriptPreferred: vi.fn(),
       downloadingModelKey,
       downloadProgress,
     };
@@ -81,6 +85,30 @@ describe('TranscriptionSectionComponent', () => {
     }).compileComponents();
     fixture = TestBed.createComponent(TranscriptionSectionComponent);
     component = fixture.componentInstance;
+  });
+
+  describe('live text toggle', () => {
+    it('is off by default, names its cost, and persists a change', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const box: HTMLInputElement = fixture.nativeElement.querySelector(
+        '[data-testid="live-transcript-toggle"]'
+      );
+      expect(box.checked).toBe(false);
+      expect(fixture.nativeElement.textContent).toContain('Uses more CPU and battery');
+      box.checked = true;
+      box.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
+      expect(component.liveTranscript()).toBe(true);
+    });
+
+    it('shows a stored opt-in as on', async () => {
+      svc.liveTranscriptPreferred.mockReturnValue(true);
+      fixture = TestBed.createComponent(TranscriptionSectionComponent);
+      component = fixture.componentInstance;
+      expect(component.liveTranscript()).toBe(true);
+    });
   });
 
   describe('model rows', () => {

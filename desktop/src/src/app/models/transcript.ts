@@ -1,16 +1,6 @@
 /** PL/EN (forced; never auto-detected). */
 export type Language = 'pl' | 'en';
 
-/** Probed host GPU class — mirrors Rust `GpuClass` (ADR-085). */
-export type GpuClass = 'none' | 'integrated' | 'discrete';
-
-/** What the host's capture backend can do. */
-export interface CaptureCapabilities {
-  supports_system_audio: boolean;
-  supports_microphone: boolean;
-  note: string | null;
-}
-
 /** What to capture. */
 export type AudioSource =
   | { kind: 'system_wide' }
@@ -77,6 +67,8 @@ export interface TranscriptSession {
   id: string;
   /** RFC 3339 (`YYYY-MM-DDTHH:MM:SSZ`). */
   created_at: string;
+  /** User-given name (absent until renamed; the UI then shows the local start time). */
+  title?: string | null;
   language: Language;
   audio_source: AudioSourceInfo;
   status: TranscriptStatus;
@@ -89,6 +81,24 @@ export interface TranscriptSession {
   active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
   last_seq: number;
+}
+
+/** One row of the recordings list (`list_transcripts`); mirrors Rust `TranscriptSummary`. */
+export interface TranscriptSummary {
+  id: string;
+  /** RFC 3339 UTC. */
+  created_at: string;
+  title: string | null;
+  language: Language;
+  source_label: string;
+  status: TranscriptStatus;
+  /** Recorded audio across every part (0 while a part is still being written). */
+  duration_secs: number;
+  segment_count: number;
+  /** First non-empty line of the transcript, shortened. */
+  preview: string | null;
+  /** Audio plus transcript on disk. */
+  size_bytes: number;
 }
 
 /** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */
@@ -120,14 +130,6 @@ export type TranscriptEvent =
     }
   | { kind: 'audio_level'; seq: number; levels: number[] }
   | { kind: 'finished'; seq: number };
-
-/** `transcription_capabilities` command return type. */
-export interface CapabilitiesAck {
-  capabilities: CaptureCapabilities;
-  gpu_class: GpuClass;
-  /** Acceleration label computed host-side (`accel::accel_label()`) — render verbatim. */
-  accel_label: string;
-}
 
 /** `start_transcription` command return type. */
 export interface StartAck {

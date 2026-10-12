@@ -22,9 +22,9 @@ pub use accel::{
 };
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
-    wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream,
-    CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture, CHUNK_DURATION,
-    DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
+    repair_wav_header, wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo,
+    AudioStream, CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture,
+    CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
 pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};
@@ -34,7 +34,7 @@ pub use model_store::{
 pub use transcriber::{
     Language, Segment, TranscribeError, TranscribeOptions, Transcriber, WhisperCppTranscriber, Word,
 };
-pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus};
+pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus, TranscriptSummary};
 pub use transcript_driver::{
     run_finalize, DriverConfig, DriverError, FinalizeConfig, StopSignal, TranscriptDriver,
 };

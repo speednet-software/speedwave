@@ -11,6 +11,7 @@ import type {
   Language,
   TranscriptSession,
   TranscriptStatus,
+  TranscriptSummary,
 } from '../models/transcript';
 import { isSessionOngoing } from '../models/transcript';
 
@@ -23,12 +24,15 @@ describe('MeetingTranscriptionComponent', () => {
     subscribeToTranscript: ReturnType<typeof vi.fn>;
     resumeActiveRecording: ReturnType<typeof vi.fn>;
     recommendedModel: ReturnType<typeof vi.fn>;
-    getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
-    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
-    list: ReturnType<typeof vi.fn>;
+    watchRecordings: ReturnType<typeof vi.fn>;
+    recordings: Signal<TranscriptSummary[]>;
+    recordingsError: Signal<string>;
+    recordingStartedAt: Signal<number | null>;
+    audioLevels: Signal<number[] | null>;
+    liveDraft: Signal<string>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     captureWarnings: typeof captureWarningsSig;
@@ -74,20 +78,15 @@ describe('MeetingTranscriptionComponent', () => {
       subscribeToTranscript: vi.fn(async () => ({ event_name: 'e', snapshot: {} as never })),
       resumeActiveRecording: vi.fn(async () => undefined),
       recommendedModel: vi.fn(async () => recommended(true)),
-      getCapabilities: vi.fn(async () => ({
-        capabilities: {
-          supports_system_audio: true,
-          supports_microphone: false,
-          note: null,
-        },
-        gpu_class: 'none' as const,
-        accel_label: 'CPU',
-      })),
       listAudioSources: vi.fn(async () => []),
-      liveTranscriptPreferred: vi.fn(() => true),
-      setLiveTranscriptPreferred: vi.fn(),
+      liveTranscriptPreferred: vi.fn(() => false),
       listModels: vi.fn(async () => models(true)),
-      list: vi.fn(async () => []),
+      watchRecordings: vi.fn(async () => undefined),
+      recordings: signal<TranscriptSummary[]>([]),
+      recordingsError: signal(''),
+      recordingStartedAt: signal<number | null>(null),
+      audioLevels: signal<number[] | null>(null),
+      liveDraft: signal(''),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       captureWarnings: captureWarningsSig,
@@ -181,14 +180,38 @@ describe('MeetingTranscriptionComponent', () => {
     expect(svc.listModels).not.toHaveBeenCalled();
   });
 
-  it('shows the "audio local, send uses network" banner text', () => {
-    expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain(
-      'transcribed locally'
+  it('says in one line that everything stays local until a transcript is sent', () => {
+    const header = (fixture.nativeElement.querySelector('header')?.textContent ?? '').toLowerCase();
+    expect(header).toContain('on this machine');
+    expect(header).toContain('nothing leaves your computer');
+  });
+
+  it('keeps the details in a collapsed "How it works" panel', () => {
+    const details: HTMLDetailsElement = fixture.nativeElement.querySelector(
+      '[data-testid="how-it-works"]'
     );
+    expect(details.open).toBe(false);
+    const text = details.textContent ?? '';
+    expect(text).toContain('Continue recording');
+    expect(text).toContain('cannot be undone');
+    expect(details.querySelector('[data-testid="quality-disclaimer"]')).not.toBeNull();
+  });
+
+  it('starts following the recordings list through the list component', () => {
+    expect(svc.watchRecordings).toHaveBeenCalled();
+  });
+
+  it('clears the banner when a recording starts or stops', () => {
+    component.onError('boom');
+    component.onStarted('sess-9');
+    expect(component.error()).toBe('');
+    component.onError('boom');
+    component.onStopped();
+    expect(component.error()).toBe('');
   });
 
   it('subscribes to a session when one is opened', async () => {
-    await component.onOpenSession({ id: 'sess-1' } as TranscriptSession);
+    await component.onOpenSession({ id: 'sess-1' } as TranscriptSummary);
     expect(svc.subscribeToTranscript).toHaveBeenCalledWith('sess-1');
   });
 

@@ -5,7 +5,6 @@ import {
   OnInit,
   ViewChild,
   computed,
-  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -13,8 +12,7 @@ import { RouterLink } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
-import type { CaptureWarning, TranscriptSession } from '../models/transcript';
-import { isSessionOngoing } from '../models/transcript';
+import type { CaptureWarning, TranscriptSession, TranscriptSummary } from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
 import { SessionListComponent } from './session-list/session-list.component';
@@ -51,18 +49,33 @@ import { SessionListComponent } from './session-list/session-list.component';
           </div>
         </section>
       } @else {
-        <header class="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
-          <div>
-            <h1 class="text-lg font-semibold">Meeting transcription</h1>
-            <p class="text-sm text-[var(--ink-mute)]">
-              Audio is transcribed locally on this machine. Sending the transcript to chat uses the
-              network.
-            </p>
-            <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
-              Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
-              spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
-            </p>
-          </div>
+        <header class="border-b border-[var(--line)] px-6 py-4">
+          <h1 class="text-lg font-semibold">Meeting transcription</h1>
+          <p class="text-sm text-[var(--ink-mute)]">
+            Records and transcribes on this machine. Nothing leaves your computer until you attach a
+            transcript to a chat and press Send.
+          </p>
+          <details class="mt-2 text-[12px] text-[var(--ink-mute)]" data-testid="how-it-works">
+            <summary class="cursor-pointer select-none text-[var(--ink-dim)]">How it works</summary>
+            <ul class="mt-2 list-disc space-y-1 pl-5">
+              <li>
+                Start records system audio and your microphone; the audio stays on this machine.
+              </li>
+              <li>Stop transcribes the recording here. A long meeting takes a few minutes.</li>
+              <li>
+                Continue recording adds a new part to a recording and transcribes all of it again.
+              </li>
+              <li>Delete removes the audio and the transcript. It cannot be undone.</li>
+              <li>
+                Summarize in new chat opens a chat with the transcript attached; nothing is sent
+                until you press Send.
+              </li>
+              <li data-testid="quality-disclaimer">
+                Recognition quality depends on the speech: dictation reaches about 5% word error
+                rate, spontaneous meeting speech about 25-30% with every open model.
+              </li>
+            </ul>
+          </details>
         </header>
 
         @if (error()) {
@@ -110,7 +123,7 @@ import { SessionListComponent } from './session-list/session-list.component';
           <main class="flex flex-1 flex-col gap-4 overflow-hidden">
             <app-recording-controls
               (started)="onStarted($event)"
-              (stopped)="onStopped($event)"
+              (stopped)="onStopped()"
               (errorOccurred)="onError($event)"
             />
             <div
@@ -126,7 +139,7 @@ import { SessionListComponent } from './session-list/session-list.component';
   host: { class: 'flex h-full flex-1' },
 })
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
-  /** Left pane's recordings list (refreshed after start/stop/delete). */
+  /** Left pane's recordings list (for the selection highlight). */
   @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
 
   /** Latest error string (rendered in a banner). */
@@ -164,19 +177,6 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
       case 'recording_part_missing':
         return 'A resumed part of this recording contributed no audio — the transcript may be missing that span.';
     }
-  }
-
-  /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */
-  constructor() {
-    let last: string | undefined;
-    effect(() => {
-      const status = this.transcription.active()?.status;
-      const state = status?.state;
-      if (status && state !== last && !isSessionOngoing(status)) {
-        void this.sessionList?.refresh();
-      }
-      last = state;
-    });
   }
 
   /** Re-checks model availability when the window/tab regains focus. */
@@ -227,10 +227,10 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Opens a session in the right pane (subscribes to its live stream).
-   * @param s - the session.
+   * Opens a recording in the right pane (subscribes to its live stream).
+   * @param s - the recording's list row.
    */
-  async onOpenSession(s: TranscriptSession): Promise<void> {
+  async onOpenSession(s: TranscriptSummary): Promise<void> {
     this.error.set('');
     try {
       await this.transcription.subscribeToTranscript(s.id);
@@ -240,20 +240,17 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * After recording starts: clear the banner and refresh the recordings list.
-   * @param _sessionId - the new session id (unused — the controls own the stream).
+   * After recording starts: clear the banner and highlight the new recording in the list.
+   * @param sessionId - the new recording.
    */
-  onStarted(_sessionId: string): void {
+  onStarted(sessionId: string): void {
     this.error.set('');
-    void this.sessionList?.refresh();
+    this.sessionList?.markSelected(sessionId);
   }
 
-  /**
-   * After recording stops: refresh the list (status moved to Finalizing/Done).
-   * @param _sessionId - the stopped session id (unused — the offline pass is server-side).
-   */
-  onStopped(_sessionId: string): void {
-    void this.sessionList?.refresh();
+  /** After recording stops: the list follows on its own (status events), so only the banner clears. */
+  onStopped(): void {
+    this.error.set('');
   }
 
   /** Deep-links to the macOS Microphone / Audio Recording privacy panes. */

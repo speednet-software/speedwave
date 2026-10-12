@@ -12,6 +12,7 @@ import type {
   Segment,
   TranscriptSession,
   TranscriptStatus,
+  TranscriptSummary,
 } from '../models/transcript';
 
 /** Minimal ChatStateService stand-in — only the send path (plus tab tracking) is exercised here. */
@@ -202,6 +203,16 @@ describe('TranscriptionService', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 1 });
       expect(svc.recording()).toBe(false);
       expect(svc.recordingLive()).toBeNull();
+    });
+
+    it('stamps when the recording started and clears the stamp when it stops', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_000);
+      await startWithLiveModel(null);
+      expect(svc.recordingStartedAt()).toBe(1_000);
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.stopRecording('sess-1');
+      expect(svc.recordingStartedAt()).toBeNull();
+      vi.restoreAllMocks();
     });
 
     it('clears when a failed start rolls back successfully', async () => {
@@ -594,35 +605,196 @@ describe('TranscriptionService', () => {
       localStorage.removeItem(LIVE_TRANSCRIPT_STORAGE_KEY);
     });
 
-    it('defaults from the probed GPU class when nothing is stored', async () => {
-      mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'transcription_capabilities'
-          ? { capabilities: {}, gpu_class: 'integrated' }
-          : undefined;
-      await svc.getCapabilities();
+    it('is off when nothing is stored', () => {
       expect(svc.liveTranscriptPreferred()).toBe(false);
-
-      mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'transcription_capabilities'
-          ? { capabilities: {}, gpu_class: 'discrete' }
-          : undefined;
-      await svc.getCapabilities();
-      expect(svc.liveTranscriptPreferred()).toBe(true);
     });
 
-    it('a stored choice beats the hardware default and round-trips', async () => {
-      mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'transcription_capabilities' ? { capabilities: {}, gpu_class: 'none' } : undefined;
-      await svc.getCapabilities();
+    it('a stored choice round-trips under the v2 key', () => {
       svc.setLiveTranscriptPreferred(true);
       expect(svc.liveTranscriptPreferred()).toBe(true);
       expect(localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY)).toBe('on');
       svc.setLiveTranscriptPreferred(false);
       expect(svc.liveTranscriptPreferred()).toBe(false);
+      expect(localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY)).toBe('off');
     });
 
-    it('assumes live before any capabilities read (discrete-like default)', () => {
-      expect(svc.liveTranscriptPreferred()).toBe(true);
+    it('drops the pre-v2 default-on choice once, so it never applies again', () => {
+      localStorage.setItem('speedwave-live-transcript', 'on');
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({
+        providers: [
+          TranscriptionService,
+          { provide: TauriService, useValue: mockTauri },
+          { provide: ChatStateService, useValue: mockChat },
+        ],
+      });
+      const fresh = TestBed.inject(TranscriptionService);
+      expect(localStorage.getItem('speedwave-live-transcript')).toBeNull();
+      expect(fresh.liveTranscriptPreferred()).toBe(false);
+    });
+
+    it('reads as off when storage throws', () => {
+      const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      expect(svc.liveTranscriptPreferred()).toBe(false);
+      spy.mockRestore();
+    });
+  });
+
+  describe('recordings list', () => {
+    function summary(id: string, overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
+      return {
+        id,
+        created_at: '2026-10-12T07:28:04Z',
+        title: null,
+        language: 'pl',
+        source_label: 'System',
+        status: { state: 'done' },
+        duration_secs: 60,
+        segment_count: 3,
+        preview: 'hej',
+        size_bytes: 1000,
+        ...overrides,
+      };
+    }
+
+    it('loads the list and re-reads it on every transcripts_changed event', async () => {
+      let rows = [summary('a')];
+      const invoked: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        invoked.push(cmd);
+        return cmd === 'list_transcripts' ? rows : undefined;
+      };
+      await svc.watchRecordings();
+      expect(svc.recordings().map((r) => r.id)).toEqual(['a']);
+
+      rows = [summary('b'), summary('a')];
+      mockTauri.dispatchEvent('transcripts_changed', 'b');
+      await svc.refreshRecordings();
+      expect(svc.recordings().map((r) => r.id)).toEqual(['b', 'a']);
+      expect(invoked.filter((c) => c === 'list_transcripts').length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('attaches the change listener once however often it is asked to watch', async () => {
+      mockTauri.invokeHandler = async () => [];
+      const listen = vi.spyOn(mockTauri, 'listen');
+      await svc.watchRecordings();
+      await svc.watchRecordings();
+      expect(listen).toHaveBeenCalledTimes(1);
+    });
+
+    it('coalesces refreshes requested while one is reading into a single follow-up read', async () => {
+      const gate = createDeferred<TranscriptSummary[]>();
+      let calls = 0;
+      mockTauri.invokeHandler = async () => {
+        calls += 1;
+        return calls === 1 ? gate.promise : [summary('late')];
+      };
+      const first = svc.refreshRecordings();
+      void svc.refreshRecordings();
+      void svc.refreshRecordings();
+      gate.resolve([summary('early')]);
+      await first;
+      expect(calls).toBe(2);
+      expect(svc.recordings().map((r) => r.id)).toEqual(['late']);
+    });
+
+    it('keeps the last good list and reports why a read failed', async () => {
+      mockTauri.invokeHandler = async () => [summary('a')];
+      await svc.refreshRecordings();
+      mockTauri.invokeHandler = async () => {
+        throw new Error('disk gone');
+      };
+      await svc.refreshRecordings();
+      expect(svc.recordings().map((r) => r.id)).toEqual(['a']);
+      expect(svc.recordingsError()).toBe('disk gone');
+    });
+
+    it('rename stores the backend title on the list row and the open session', async () => {
+      await subscribeWith(snapshot({ status: { state: 'done' } }));
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'list_transcripts' ? [summary('sess-1')] : undefined;
+      await svc.refreshRecordings();
+      mockTauri.invokeHandler = async (cmd, args) => {
+        expect(cmd).toBe('rename_transcript');
+        expect(args).toEqual({ sessionId: 'sess-1', title: '  Retro ' });
+        return 'Retro';
+      };
+      expect(await svc.rename('sess-1', '  Retro ')).toBe('Retro');
+      expect(svc.active()?.title).toBe('Retro');
+      expect(svc.recordings()[0].title).toBe('Retro');
+    });
+
+    it('rename leaves everything as it was when the backend refuses', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'list_transcripts' ? [summary('a')] : undefined;
+      await svc.refreshRecordings();
+      mockTauri.invokeHandler = async () => {
+        throw new Error('no such transcript session');
+      };
+      await expect(svc.rename('a', 'x')).rejects.toThrow('no such transcript session');
+      expect(svc.recordings()[0].title).toBeNull();
+    });
+
+    it('delete drops the row at once', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'list_transcripts' ? [summary('a'), summary('b')] : undefined;
+      await svc.refreshRecordings();
+      await svc.delete('a');
+      expect(svc.recordings().map((r) => r.id)).toEqual(['b']);
+    });
+  });
+
+  describe('transcribe, export and reveal', () => {
+    it('transcribe asks the backend, then re-attaches the open session to show progress', async () => {
+      await subscribeWith(snapshot({ status: { state: 'failed', reason: 'interrupted' } }));
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        calls.push(cmd);
+        if (cmd === 'subscribe_transcript') {
+          return {
+            event_name: 'transcript_event::sess-1',
+            snapshot: snapshot({ status: { state: 'finalizing', progress: 0 } }),
+          };
+        }
+        return undefined;
+      };
+      await svc.transcribe('sess-1');
+      expect(calls).toEqual(['transcribe_transcript', 'subscribe_transcript']);
+      expect(svc.active()?.status).toEqual({ state: 'finalizing', progress: 0 });
+    });
+
+    it('transcribe of a recording that is not open does not touch the pane', async () => {
+      const calls: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        calls.push(cmd);
+        return undefined;
+      };
+      await svc.transcribe('other');
+      expect(calls).toEqual(['transcribe_transcript']);
+      expect(svc.active()).toBeNull();
+    });
+
+    it('transcribe surfaces the backend refusal', async () => {
+      mockTauri.invokeHandler = async () => {
+        throw new Error('only a failed recording can be transcribed again');
+      };
+      await expect(svc.transcribe('x')).rejects.toThrow('only a failed recording');
+    });
+
+    it('export and reveal address the backend by session id', async () => {
+      const calls: [string, unknown][] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        calls.push([cmd, args]);
+        return cmd === 'export_transcript' ? false : undefined;
+      };
+      expect(await svc.exportMarkdown('s')).toBe(false);
+      await svc.revealAudio('s');
+      expect(calls).toEqual([
+        ['export_transcript', { sessionId: 's' }],
+        ['reveal_transcript_audio', { sessionId: 's' }],
+      ]);
     });
   });
 

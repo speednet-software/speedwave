@@ -850,6 +850,12 @@ fn main() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
             }
 
+            let interrupted = transcript_store.reconcile_interrupted();
+            if interrupted > 0 {
+                log::info!("{interrupted} interrupted recording(s) marked for transcription");
+            }
+            transcription_cmd::spawn_change_forwarder(app.handle().clone(), transcript_store);
+
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
                 log::error!("plugin audit failed:\n{}", body);
@@ -1196,7 +1202,6 @@ fn main() {
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
-            transcription_cmd::transcription_capabilities,
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
             transcription_cmd::stop_transcription,
@@ -1206,6 +1211,10 @@ fn main() {
             transcription_cmd::get_transcript,
             transcription_cmd::delete_transcript,
             transcription_cmd::get_transcript_markdown,
+            transcription_cmd::rename_transcript,
+            transcription_cmd::transcribe_transcript,
+            transcription_cmd::export_transcript,
+            transcription_cmd::reveal_transcript_audio,
             transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,

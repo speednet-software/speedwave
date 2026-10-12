@@ -11,7 +11,8 @@ import {
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_STREAMING,
 } from '../../services/chat-state.service';
-import type { Segment } from '../../models/transcript';
+import { Clipboard } from '@angular/cdk/clipboard';
+import type { Segment, TranscriptSummary } from '../../models/transcript';
 import { makeTranscriptSession as session } from '../../testing/transcript-session';
 
 function seg(start: number, text: string): Segment {
@@ -28,8 +29,13 @@ describe('LiveTranscriptComponent', () => {
   let fixture: ComponentFixture<LiveTranscriptComponent>;
   let svc: {
     stageForChat: ReturnType<typeof vi.fn>;
+    rename: ReturnType<typeof vi.fn>;
+    transcribe: ReturnType<typeof vi.fn>;
+    exportMarkdown: ReturnType<typeof vi.fn>;
+    revealAudio: ReturnType<typeof vi.fn>;
+    getMarkdown: ReturnType<typeof vi.fn>;
     liveDraft: WritableSignal<string>;
-    audioLevels: WritableSignal<number[] | null>;
+    recordings: WritableSignal<TranscriptSummary[]>;
   };
   let chat: {
     hasConversation: WritableSignal<boolean>;
@@ -40,8 +46,13 @@ describe('LiveTranscriptComponent', () => {
   beforeEach(async () => {
     svc = {
       stageForChat: vi.fn(async () => undefined),
+      rename: vi.fn(async (_id: string, title: string) => title.trim() || null),
+      transcribe: vi.fn(async () => undefined),
+      exportMarkdown: vi.fn(async () => true),
+      revealAudio: vi.fn(async () => undefined),
+      getMarkdown: vi.fn(async () => '# Meeting transcript'),
       liveDraft: signal(''),
-      audioLevels: signal<number[] | null>(null),
+      recordings: signal<TranscriptSummary[]>([]),
     };
     chat = {
       hasConversation: signal(false),
@@ -167,9 +178,11 @@ describe('LiveTranscriptComponent', () => {
     expect(navSpy).toHaveBeenCalledWith(['/chat']);
   });
 
-  it('stays on the tab (no navigation) if staging fails', async () => {
+  it('stays on the tab (no navigation) if staging fails, and reports why', async () => {
     svc.stageForChat.mockRejectedValueOnce(new Error('chat busy'));
     const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
+    const errSpy = vi.fn();
+    component.errorOccurred.subscribe(errSpy);
     fixture.componentRef.setInput(
       'session',
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -177,20 +190,32 @@ describe('LiveTranscriptComponent', () => {
     fixture.detectChanges();
     await component.stageForChat();
     expect(navSpy).not.toHaveBeenCalled();
-    expect(component.error()).toBe('chat busy');
+    expect(errSpy).toHaveBeenCalledWith('chat busy');
+    expect(component.sending()).toBe(false);
   });
 
-  it('labels the two send targets so neither needs an explanation', () => {
+  it('labels the chat actions by what they do and says nothing is sent yet', () => {
     fixture.componentRef.setInput(
       'session',
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
-    const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
-    expect(btn.textContent).toContain('Send to new chat');
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]').textContent
-    ).toContain('Add to current chat');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="send-to-chat-btn"]')!.textContent).toContain(
+      'Summarize in new chat'
+    );
+    expect(el.querySelector('[data-testid="append-to-chat-btn"]')!.textContent).toContain(
+      'Attach to current chat'
+    );
+    expect(el.querySelector('[data-testid="chat-privacy-note"]')!.textContent).toContain(
+      'Nothing is sent until you press Send.'
+    );
+    expect(el.textContent).not.toContain('Send to new chat');
+    const tooltip = fixture.debugElement
+      .query(By.css('[data-testid="send-to-chat-btn"]'))
+      .parent?.injector.get(TooltipDirective)
+      .label();
+    expect(tooltip).toContain('Nothing is sent until you press Send.');
   });
 
   describe('append to the current chat', () => {
@@ -235,14 +260,14 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
       expect(btn.disabled).toBe(true);
-      expect(component.appendBlockedReason()).toBe('No open chat to add to');
-      expect(btn.getAttribute('aria-label')).toContain('No open chat to add to');
+      expect(component.appendBlockedReason()).toBe('No open chat to attach to');
+      expect(btn.getAttribute('aria-label')).toContain('No open chat to attach to');
       expect(
         fixture.debugElement
           .query(By.css('[data-testid="append-to-chat-btn"]'))
           .parent?.injector.get(TooltipDirective)
           .label()
-      ).toBe('No open chat to add to');
+      ).toBe('No open chat to attach to');
       expect(component.sendBlockedReason()).toBe('');
       expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
         false
@@ -365,14 +390,34 @@ describe('LiveTranscriptComponent', () => {
   });
 
   describe('recording gate', () => {
-    it('disables the send button while recording', () => {
+    it('hides the chat actions and the header while recording', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] })
       );
       fixture.detectChanges();
-      const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
-      expect(btn.disabled).toBe(true);
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="transcript-header"]')).toBeNull();
+      expect(component.sendBlockedReason()).toBe('Stop the recording first');
+    });
+
+    it('blocks both chat actions while the transcript is still being made', () => {
+      chat.hasConversation.set(true);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.2 }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(component.sendBlockedReason()).toBe('Wait until the transcript is ready');
+      expect(component.appendBlockedReason()).toBe('Wait until the transcript is ready');
+    });
+
+    it('blocks both chat actions for a recording with no transcript text', () => {
+      chat.hasConversation.set(true);
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      expect(component.sendBlockedReason()).toBe('This recording has no transcript yet');
+      expect(component.appendBlockedReason()).toBe('This recording has no transcript yet');
     });
 
     it('stageForChat is a no-op while the session is still recording', async () => {
@@ -397,76 +442,257 @@ describe('LiveTranscriptComponent', () => {
       expect(btn.disabled).toBe(false);
     });
   });
-  describe('audio level meter + record-only hint', () => {
-    it('renders labeled bars for a paired capture, on a dB scale', () => {
-      fixture.componentRef.setInput('session', session());
-      svc.audioLevels.set([0.1, 0.001]);
-      fixture.detectChanges();
-      const meter = fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]');
-      expect(meter).not.toBeNull();
-      expect(meter.textContent).toContain('Meeting');
-      expect(meter.textContent).toContain('You');
-      const bars = component.meterBars();
-      expect(bars[0].pct).toBeGreaterThan(60);
-      expect(bars[0].pct).toBeLessThan(75);
-      expect(bars[1].pct).toBe(0);
-    });
-
-    it('labels a mono capture from the session source and shows a flat bar before the first level', () => {
+  describe('header', () => {
+    it('names the recording by its title and lists its length and source', () => {
+      svc.recordings.set([
+        {
+          id: 'sess-1',
+          created_at: '2026-05-12T00:00:00Z',
+          title: 'Retro',
+          language: 'pl',
+          source_label: 'System',
+          status: { state: 'done' },
+          duration_secs: 3900,
+          segment_count: 1,
+          preview: null,
+          size_bytes: 1,
+        },
+      ]);
       fixture.componentRef.setInput(
         'session',
-        session({ audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' } })
+        session({ title: 'Retro', status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
       );
-      svc.audioLevels.set([0.05]);
       fixture.detectChanges();
-      expect(component.meterBars()).toEqual([{ label: 'You', pct: expect.any(Number) }]);
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('[data-testid="transcript-title"]')!.textContent).toContain('Retro');
+      const meta = el.querySelector('[data-testid="transcript-meta"]')!.textContent!;
+      expect(meta).toContain('1 h 05 min');
+      expect(meta).toContain('System');
+    });
 
-      svc.audioLevels.set(null);
+    it('falls back to the local start time, never the raw UTC string', () => {
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
       fixture.detectChanges();
-      expect(component.meterBars()).toEqual([{ label: 'You', pct: 0 }]);
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')
-      ).not.toBeNull();
+      const title = fixture.nativeElement.querySelector('[data-testid="transcript-title"]');
+      expect(title.textContent).not.toContain('T00:00:00Z');
+    });
 
+    it('renames on Enter and keeps the old name on Escape', async () => {
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('[data-testid="rename-btn"]').click();
+      fixture.detectChanges();
+      const input: HTMLInputElement = fixture.nativeElement.querySelector(
+        '[data-testid="title-input"]'
+      );
+      input.value = 'Planning';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      await fixture.whenStable();
+      expect(svc.rename).toHaveBeenCalledWith('sess-1', 'Planning');
+      expect(component.renaming()).toBe(false);
+
+      component.startRename();
+      fixture.detectChanges();
+      fixture.nativeElement
+        .querySelector('[data-testid="title-input"]')
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      fixture.detectChanges();
+      expect(component.renaming()).toBe(false);
+      expect(svc.rename).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the backend when the title did not change, and reports a refused rename', async () => {
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      fixture.componentRef.setInput(
+        'session',
+        session({ title: 'Same', status: { state: 'done' } })
+      );
+      component.renaming.set(true);
+      await component.saveTitle('Same ');
+      expect(svc.rename).not.toHaveBeenCalled();
+
+      svc.rename.mockRejectedValueOnce(new Error('disk full'));
+      component.renaming.set(true);
+      await component.saveTitle('New');
+      expect(errSpy).toHaveBeenCalledWith('disk full');
+    });
+
+    it('offers Transcribe and the failure reason for a failed recording', async () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'failed', reason: 'interrupted: Speedwave closed' } })
+      );
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('[data-testid="failure-reason"]')!.textContent).toContain(
+        'interrupted: Speedwave closed'
+      );
+      expect(el.querySelector('[data-testid="export-btn"]')).toBeNull();
+      (el.querySelector('[data-testid="transcribe-btn"]') as HTMLButtonElement).click();
+      await fixture.whenStable();
+      expect(svc.transcribe).toHaveBeenCalledWith('sess-1');
+      expect(component.working()).toBe(false);
+    });
+
+    it('reports a refused transcribe', async () => {
+      svc.transcribe.mockRejectedValueOnce(new Error('no Whisper model'));
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'failed', reason: 'x' } })
+      );
+      await component.transcribe();
+      expect(errSpy).toHaveBeenCalledWith('no Whisper model');
+    });
+
+    it('exports, copies and reveals a finished transcript', async () => {
+      const copy = vi.spyOn(TestBed.inject(Clipboard), 'copy').mockReturnValue(true);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      await component.exportMarkdown();
+      expect(svc.exportMarkdown).toHaveBeenCalledWith('sess-1');
+      await component.copyMarkdown();
+      expect(copy).toHaveBeenCalledWith('# Meeting transcript');
+      expect(component.copied()).toBe(true);
+      await component.revealAudio();
+      expect(svc.revealAudio).toHaveBeenCalledWith('sess-1');
+    });
+
+    it('reports a clipboard that refuses the copy', async () => {
+      vi.spyOn(TestBed.inject(Clipboard), 'copy').mockReturnValue(false);
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      await component.copyMarkdown();
+      expect(errSpy).toHaveBeenCalledWith('could not copy the transcript to the clipboard');
+      expect(component.copied()).toBe(false);
+    });
+  });
+
+  describe('transcription progress', () => {
+    it('says it transcribes N min of audio for a recording made without live text', () => {
+      svc.recordings.set([
+        {
+          id: 'sess-1',
+          created_at: '2026-05-12T00:00:00Z',
+          title: null,
+          language: 'pl',
+          source_label: 'System',
+          status: { state: 'finalizing', progress: 0.1 },
+          duration_secs: 45 * 60,
+          segment_count: 0,
+          preview: null,
+          size_bytes: 1,
+        },
+      ]);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.1 } })
+      );
+      fixture.detectChanges();
+      const bar = fixture.nativeElement.querySelector('[data-testid="finalize-bar"]');
+      expect(bar.textContent).toContain('Transcribing 45 min of audio');
+      expect(bar.textContent).not.toContain('Re-transcribing');
+    });
+
+    it('says it re-transcribes when live text was shown', () => {
       fixture.componentRef.setInput(
         'session',
         session({
-          status: { state: 'done' },
-          audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' },
+          status: { state: 'finalizing', progress: 0.1 },
+          models_used: { live: 'small', finalize: null },
         })
       );
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')).toBeNull();
+      expect(component.finalizeLabel()).toBe('Re-transcribing with the higher-quality model');
     });
 
-    it('shows both channels at 0% for a mixed capture before the first level event', () => {
+    it('estimates the time left from the pace so far', () => {
+      const now = vi.spyOn(Date, 'now').mockReturnValue(0);
       fixture.componentRef.setInput(
         'session',
-        session({ audio_source: { source: { kind: 'mixed', mic: null }, label: 'Meeting' } })
+        session({ status: { state: 'finalizing', progress: 0.05 } })
       );
-      svc.audioLevels.set(null);
       fixture.detectChanges();
-      expect(component.meterBars()).toEqual([
-        { label: 'Meeting', pct: 0 },
-        { label: 'You', pct: 0 },
-      ]);
+      expect(component.eta()).toBe('');
+
+      now.mockReturnValue(60_000);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.15 } })
+      );
+      fixture.detectChanges();
+      expect(component.eta()).toBe('about 5 min left');
+
+      now.mockReturnValue(240_000);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.55 } })
+      );
+      fixture.detectChanges();
+      expect(component.eta()).toBe('less than a minute left');
+      now.mockRestore();
     });
 
-    it('shows the record-only hint only while recording without a live model', () => {
+    it('shows no estimate before the pass has moved enough to extrapolate', () => {
+      const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.05 } })
+      );
+      fixture.detectChanges();
+      now.mockReturnValue(2_000);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.3 } })
+      );
+      fixture.detectChanges();
+      expect(component.eta()).toBe('');
+      now.mockRestore();
+    });
+  });
+
+  describe('empty states and announcements', () => {
+    it('explains every empty transcript body in one line', () => {
+      fixture.detectChanges();
+      expect(component.emptyText()).toBe('Open a recording, or start a new one.');
       fixture.componentRef.setInput('session', session());
       fixture.detectChanges();
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')
-      ).not.toBeNull();
+      expect(component.emptyText()).toBe('');
       fixture.componentRef.setInput(
         'session',
         session({ models_used: { live: 'small', finalize: null } })
       );
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
+      expect(component.emptyText()).toBe('Listening…');
       fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
+      expect(component.emptyText()).toBe('No speech was recognized in this recording.');
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'failed', reason: 'x' } })
+      );
+      fixture.detectChanges();
+      expect(component.emptyText()).toContain('Transcribe runs it again');
+    });
+
+    it('announces state changes to screen readers through a polite live region', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.5 } })
+      );
+      fixture.detectChanges();
+      const region = fixture.nativeElement.querySelector('[data-testid="status-announcement"]');
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      expect(region.textContent).toContain('Transcribing');
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      expect(region.textContent).toContain('Transcript ready');
     });
   });
 });

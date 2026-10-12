@@ -17,6 +17,7 @@ import type {
   RecommendedModelEntry,
 } from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
+import { ToggleComponent } from '../../shared/toggle.component';
 
 /** One row of the model card: a model this host needs, with the copy that explains why. */
 interface ModelRow {
@@ -33,7 +34,7 @@ interface ModelRow {
  */
 @Component({
   selector: 'app-transcription-section',
-  imports: [],
+  imports: [ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'block' },
   template: `
@@ -99,6 +100,24 @@ interface ModelRow {
           }
         </div>
       }
+
+      <div
+        class="mt-4 flex items-center justify-between gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
+      >
+        <div>
+          <div class="text-[12px] text-[var(--ink)]">Show live text while recording</div>
+          <div class="text-[11px] text-[var(--ink-mute)]">
+            Uses more CPU and battery during the meeting, and live text is less accurate. The final
+            transcript is made after you stop either way.
+          </div>
+        </div>
+        <app-toggle
+          testId="live-transcript-toggle"
+          ariaLabel="Show live text while recording"
+          [checked]="liveTranscript()"
+          (changed)="onLiveToggle($event)"
+        />
+      </div>
 
       @if (isMacos()) {
         <div
@@ -199,6 +218,9 @@ export class TranscriptionSectionComponent implements OnInit {
   readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
+
+  /** Whether new recordings show live text (off unless the user turned it on). */
+  readonly liveTranscript = signal(this.transcription.liveTranscriptPreferred());
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
 
@@ -268,6 +290,16 @@ export class TranscriptionSectionComponent implements OnInit {
       this.errorOccurred.emit(msg);
     }
     await this.refreshPermissions();
+  }
+
+  /**
+   * Persists the live-text choice for the next recording.
+   * @param event - the toggle's change event.
+   */
+  onLiveToggle(event: Event): void {
+    const on = (event.target as HTMLInputElement).checked;
+    this.liveTranscript.set(on);
+    this.transcription.setLiveTranscriptPreferred(on);
   }
 
   /** Opens System Settings → Privacy → Microphone. */
