@@ -29,6 +29,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Diff known advisories between the target branch and the PR head
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: scripts/audit-diff.sh

@@ -17,14 +17,9 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           node: 'false'
-          cargo-cache-paths: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-            containers/proxy/target/
-          cargo-cache-key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock', 'containers/proxy/Cargo.lock') }}
-          cargo-cache-restore-keys: ${{ runner.os }}-cargo-test-
+          rust-cache-workspaces: |
+            . -> target
+            containers/proxy -> target
 
       - name: Install cmake
         run: brew install cmake

@@ -3,6 +3,8 @@ name: Tests
 on:
   pull_request:
   merge_group:
+  schedule:
+    - cron: '41 5 * * 1-5'
 
 permissions:
   contents: read

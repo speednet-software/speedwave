@@ -17,13 +17,9 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           rust-components: clippy
-          cargo-cache-paths: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            desktop/src-tauri/target/
-          cargo-cache-key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          cargo-cache-restore-keys: ${{ runner.os }}-cargo-desktop-
+          rust-cache-workspaces: |
+            . -> target
+            desktop/src-tauri -> target
           node-cache-dependency-path: desktop/src/package-lock.json
 
       - name: Install wasm toolchain (PII engine)

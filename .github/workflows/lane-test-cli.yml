@@ -17,13 +17,7 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           node-cache: 'false'
-          cargo-cache-paths: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          cargo-cache-key: ${{ runner.os }}-cargo-cli-${{ hashFiles('Cargo.lock') }}
-          cargo-cache-restore-keys: ${{ runner.os }}-cargo-cli-
+          rust-cache-workspaces: . -> target
 
       - name: Install bats
         run: brew install bats-core

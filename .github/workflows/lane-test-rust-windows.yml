@@ -20,13 +20,7 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           node: 'false'
-          cargo-cache-paths: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          cargo-cache-key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
-          cargo-cache-restore-keys: ${{ runner.os }}-cargo-runtime-
+          rust-cache-workspaces: . -> target
 
       - name: cargo test (full suite incl. test-support)
         run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
