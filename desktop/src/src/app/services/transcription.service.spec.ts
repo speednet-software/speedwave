@@ -215,6 +215,13 @@ describe('TranscriptionService', () => {
       expect(svc.recordingLive()).toBeNull();
     });
 
+    it('clears when the session ends on its own', async () => {
+      await startWithLiveModel('small');
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 1 });
+      expect(svc.recording()).toBe(false);
+      expect(svc.recordingLive()).toBeNull();
+    });
+
     it('clears when a failed start rolls back successfully', async () => {
       await startWithLiveModel('small');
       expect(svc.recordingLive()).toBe(true);

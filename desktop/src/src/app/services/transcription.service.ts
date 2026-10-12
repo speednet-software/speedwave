@@ -496,6 +496,7 @@ export class TranscriptionService {
     this.recordingSessionIdSignal.set(null);
     this.recordingSourceSignal.set(null);
     this.recordingLanguageSignal.set(null);
+    this.recordingLiveSignal.set(null);
   }
 
   /**
