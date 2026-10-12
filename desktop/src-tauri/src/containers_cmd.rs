@@ -5316,11 +5316,13 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(handles.ensure_ready_count(), 1);
         assert_eq!(handles.down_projects(), vec!["alpha"]);
-        let networks = handles.removed_networks();
-        assert_eq!(networks.len(), 1, "{networks:?}");
-        assert!(
-            networks[0].ends_with("_alpha_network_office"),
-            "{networks:?}"
+        let office = format!(
+            "{}_alpha_network_office",
+            speedwave_runtime::consts::compose_prefix()
+        );
+        assert_eq!(
+            handles.removed_networks(),
+            vec![office.clone(), format!("alpha_{office}")]
         );
         assert_eq!(*removed.borrow(), vec!["alpha"]);
     }

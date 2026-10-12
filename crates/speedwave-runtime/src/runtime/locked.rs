@@ -196,12 +196,14 @@ impl LockedRuntime {
         })
     }
 
-    /// Removes every egress-less network the project can have (under the per-project lock);
-    /// a missing network is skipped, any other failure is returned.
+    /// Removes every egress-less network the project can have, and the compose-created network of
+    /// an earlier release (project lock); a missing network is skipped, any other failure returned.
     pub fn remove_egress_less_networks(&self, project: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
             for name in crate::compose::egress_less_network_names(project) {
                 self.inner.remove_network(&name)?;
+                self.inner
+                    .remove_network(&crate::compose::legacy_compose_network_name(project, &name))?;
             }
             Ok(())
         })
@@ -941,10 +943,14 @@ mod tests {
     fn removing_egress_less_networks_removes_every_one_of_the_project() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         rt.remove_egress_less_networks("gone").unwrap();
-        assert_eq!(
-            handles.removed_networks(),
-            crate::compose::egress_less_network_names("gone")
-        );
+        let expected: Vec<String> = crate::compose::egress_less_network_names("gone")
+            .into_iter()
+            .flat_map(|name| {
+                let legacy = crate::compose::legacy_compose_network_name("gone", &name);
+                [name, legacy]
+            })
+            .collect();
+        assert_eq!(handles.removed_networks(), expected);
     }
 
     #[test]
