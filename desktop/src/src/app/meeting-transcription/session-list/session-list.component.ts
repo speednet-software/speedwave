@@ -240,7 +240,7 @@ interface RecordingRow {
               @if (!selecting()) {
                 <div class="mt-1 flex items-center gap-2 text-[10px]">
                   @if (rec.status.state === 'done' && !recordingInProgress()) {
-                    <span [appTooltip]="continueTooltip" placement="top">
+                    <span [appTooltip]="continueTooltip" placement="bottom">
                       <button
                         type="button"
                         class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink)] hover:bg-[var(--bg-2)]"
@@ -252,7 +252,7 @@ interface RecordingRow {
                     </span>
                   }
                   @if (rec.status.state === 'failed') {
-                    <span [appTooltip]="transcribeTooltip" placement="top">
+                    <span [appTooltip]="transcribeTooltip" placement="bottom">
                       <button
                         type="button"
                         class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink)] hover:bg-[var(--bg-2)] disabled:opacity-40"
@@ -265,7 +265,7 @@ interface RecordingRow {
                     </span>
                   }
                   @if (!ongoing) {
-                    <span class="ml-auto" [appTooltip]="deleteTooltip" placement="top">
+                    <span class="ml-auto" [appTooltip]="deleteTooltip" placement="bottom">
                       <button
                         type="button"
                         class="mono rounded px-2 py-0.5 text-[var(--ink-mute)] hover:bg-red-500/10 hover:text-red-300"
