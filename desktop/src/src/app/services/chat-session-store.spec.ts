@@ -239,6 +239,31 @@ describe('ChatSessionStore', () => {
 
       expect((store as unknown as { _resumeDecider: unknown })._resumeDecider).toBeNull();
     });
+
+    it('revokes a staged attachment preview URL (SPEED-785)', async () => {
+      await store.composerAttachments.add(
+        new File(['x'], 'a.png', { type: 'image/png' }),
+        async () => ({
+          attachment: {
+            filename: 'a.png',
+            mediaType: 'image/png',
+            containerPath: '/workspace/.speedwave/pastes/a.png',
+            hostPath: '/tmp/a.png',
+          },
+          previewUrl: 'blob:store-dispose',
+          width: 1,
+          height: 1,
+          sizeBytes: 1,
+        })
+      );
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+      store.dispose();
+
+      expect(revokeSpy).toHaveBeenCalledWith('blob:store-dispose');
+      expect(store.composerAttachments.records()).toHaveLength(0);
+      revokeSpy.mockRestore();
+    });
   });
 
   describe('init', () => {

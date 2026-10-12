@@ -4,6 +4,7 @@ import { signal } from '@angular/core';
 import { By } from '@angular/platform-browser';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { ComposerComponent } from './composer.component';
+import { ComposerAttachments } from './composer-attachments';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
@@ -45,6 +46,7 @@ describe('ComposerComponent', () => {
     fixture = TestBed.createComponent(ComposerComponent);
     component = fixture.componentInstance;
     rootEl = fixture.nativeElement as HTMLElement;
+    fixture.componentRef.setInput('attachmentDraft', new ComposerAttachments());
     fixture.detectChanges();
   });
 
@@ -190,27 +192,22 @@ describe('ComposerComponent', () => {
       expect(emitted).toEqual(['/code-review']);
     });
 
-    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', () => {
+    it('CAN submit a lone `/` when an image attachment is present (ADR-065)', async () => {
       component.text.setValue('/');
-      component.attachments.set([
-        {
-          id: 'a1',
-          filename: 'img.png',
-          previewUrl: 'blob:x',
-          preprocessed: {
-            attachment: {
-              filename: 'img.png',
-              mediaType: 'image/png',
-              containerPath: '/workspace/.speedwave/pastes/img.png',
-              hostPath: '/tmp/img.png',
-            },
-            previewUrl: 'blob:x',
-            width: 1,
-            height: 1,
-            sizeBytes: 1,
+      await component
+        .attachmentDraft()
+        .add(new File(['x'], 'img.png', { type: 'image/png' }), async () => ({
+          attachment: {
+            filename: 'img.png',
+            mediaType: 'image/png',
+            containerPath: '/workspace/.speedwave/pastes/img.png',
+            hostPath: '/tmp/img.png',
           },
-        },
-      ]);
+          previewUrl: 'blob:x',
+          width: 1,
+          height: 1,
+          sizeBytes: 1,
+        }));
       fixture.detectChanges();
       expect(component.canSubmit()).toBe(true);
     });
@@ -894,6 +891,71 @@ describe('ComposerComponent', () => {
       );
     });
   });
+
+  describe('attachmentDraft binding (SPEED-785)', () => {
+    function stripItems(): NodeListOf<HTMLLIElement> {
+      return rootEl.querySelectorAll<HTMLLIElement>('[data-testid="composer-attachment-strip"] li');
+    }
+
+    async function addReady(draft: ComposerAttachments, filename: string): Promise<void> {
+      await draft.add(new File(['x'], filename, { type: 'image/png' }), async () => ({
+        attachment: {
+          filename,
+          mediaType: 'image/png',
+          containerPath: `/workspace/.speedwave/pastes/${filename}`,
+          hostPath: `/tmp/${filename}`,
+        },
+        previewUrl: `blob:${filename}`,
+        width: 1,
+        height: 1,
+        sizeBytes: 1,
+      }));
+    }
+
+    it('renders only the bound draft, and swapping the input swaps the rendered strip', async () => {
+      const draftA = component.attachmentDraft();
+      await addReady(draftA, 'a.png');
+      fixture.detectChanges();
+      expect(stripItems()).toHaveLength(1);
+
+      const draftB = new ComposerAttachments();
+      fixture.componentRef.setInput('attachmentDraft', draftB);
+      fixture.detectChanges();
+      expect(stripItems()).toHaveLength(0);
+      expect(draftA.records()).toHaveLength(1);
+    });
+
+    it('removing via the strip updates the bound draft and announces it', async () => {
+      const draft = component.attachmentDraft();
+      await addReady(draft, 'a.png');
+      fixture.detectChanges();
+
+      rootEl
+        .querySelector<HTMLButtonElement>('[data-testid="composer-attachment-remove"]')!
+        .click();
+      fixture.detectChanges();
+
+      expect(draft.records()).toHaveLength(0);
+      expect(draft.announcement()).toBe('Image removed: a.png');
+    });
+
+    it('submit clears only the bound draft, not a previously bound one', async () => {
+      const draftA = component.attachmentDraft();
+      await addReady(draftA, 'a.png');
+      fixture.detectChanges();
+
+      const draftB = new ComposerAttachments();
+      fixture.componentRef.setInput('attachmentDraft', draftB);
+      await addReady(draftB, 'b.png');
+      component.text.setValue('go');
+      fixture.detectChanges();
+
+      component.submit();
+
+      expect(draftB.records()).toHaveLength(0);
+      expect(draftA.records()).toHaveLength(1);
+    });
+  });
 });
 
 describe('ComposerComponent slash discovery with the real project and slash services', () => {
@@ -931,6 +993,7 @@ describe('ComposerComponent slash discovery with the real project and slash serv
 
   function mountComposer(): ComponentFixture<ComposerComponent> {
     const created = TestBed.createComponent(ComposerComponent);
+    created.componentRef.setInput('attachmentDraft', new ComposerAttachments());
     created.detectChanges();
     return created;
   }

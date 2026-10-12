@@ -1705,6 +1705,83 @@ describe('ChatComponent', () => {
 
       expect(composer.text.value).toBe('typing');
     });
+
+    it('an attachment staged in one tab is not visible in another, and survives the round trip (SPEED-785)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      const tab1 = chatState.activeTabId();
+      const store1 = chatState.tabs().get(tab1)!;
+      await store1.composerAttachments.add(
+        new File(['x'], 'a.png', { type: 'image/png' }),
+        async () => ({
+          attachment: {
+            filename: 'a.png',
+            mediaType: 'image/png',
+            containerPath: '/workspace/.speedwave/pastes/a.png',
+            hostPath: '/tmp/a.png',
+          },
+          previewUrl: 'blob:a',
+          width: 1,
+          height: 1,
+          sizeBytes: 1,
+        })
+      );
+      fixture.detectChanges();
+      expect(composer.attachmentDraft().records()).toHaveLength(1);
+
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(composer.attachmentDraft().records()).toHaveLength(0);
+      expect(store1.composerAttachments.records()).toHaveLength(1);
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(composer.attachmentDraft().records()).toHaveLength(1);
+      expect(composer.attachmentDraft().records()[0].previewUrl).toBe('blob:a');
+    });
+
+    it('closing a tab with a staged attachment revokes its preview URL (SPEED-785)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      const store1 = chatState.tabs().get(tab1)!;
+      await store1.composerAttachments.add(
+        new File(['x'], 'a.png', { type: 'image/png' }),
+        async () => ({
+          attachment: {
+            filename: 'a.png',
+            mediaType: 'image/png',
+            containerPath: '/workspace/.speedwave/pastes/a.png',
+            hostPath: '/tmp/a.png',
+          },
+          previewUrl: 'blob:to-revoke',
+          width: 1,
+          height: 1,
+          sizeBytes: 1,
+        })
+      );
+
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+      await chatState.closeTab(tab1);
+
+      expect(revokeSpy).toHaveBeenCalledWith('blob:to-revoke');
+      revokeSpy.mockRestore();
+    });
   });
 
   describe('session-ended banner (SPEED-388 phase 3)', () => {
