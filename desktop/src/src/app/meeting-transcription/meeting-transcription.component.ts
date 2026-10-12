@@ -194,11 +194,11 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Detaches the live-stream listener unless a recording still needs it. */
+  /** Detaches the live-stream listener unless a recording or its offline pass still needs it. */
   async ngOnDestroy(): Promise<void> {
     window.removeEventListener('focus', this.onActivate);
     document.removeEventListener('visibilitychange', this.onActivate);
-    if (!this.transcription.recording()) await this.transcription.detach();
+    if (!this.transcription.liveStreamNeeded()) await this.transcription.detach();
   }
 
   /**

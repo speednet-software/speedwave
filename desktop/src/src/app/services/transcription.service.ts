@@ -85,6 +85,12 @@ export class TranscriptionService {
 
   readonly recording: Signal<boolean> = computed(() => this.recordingSessionIdSignal() !== null);
 
+  /** Whether the shown session can still change, so its event stream must stay attached. */
+  readonly liveStreamNeeded: Signal<boolean> = computed(() => {
+    const state = this.activeSignal()?.status.state;
+    return this.recording() || state === 'recording' || state === 'finalizing';
+  });
+
   /**
    * Source/language of the in-progress recording — service-level so a remounted
    * `RecordingControlsComponent` can restore its picker selection instead of showing defaults.

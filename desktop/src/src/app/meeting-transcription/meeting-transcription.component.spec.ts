@@ -9,6 +9,7 @@ import type {
   CaptureWarning,
   Language,
   TranscriptSession,
+  TranscriptStatus,
 } from '../models/transcript';
 
 describe('MeetingTranscriptionComponent', () => {
@@ -31,6 +32,7 @@ describe('MeetingTranscriptionComponent', () => {
     captureWarnings: typeof captureWarningsSig;
     recordingSessionId: typeof recordingSessionIdSig;
     recording: Signal<boolean>;
+    liveStreamNeeded: Signal<boolean>;
     recordingSource: typeof recordingSourceSig;
     recordingLanguage: typeof recordingLanguageSig;
     recordingLive: typeof recordingLiveSig;
@@ -41,6 +43,19 @@ describe('MeetingTranscriptionComponent', () => {
   const recordingSourceSig = signal<AudioSource | null>(null);
   const recordingLanguageSig = signal<Language | null>(null);
   const recordingLiveSig = signal<boolean | null>(null);
+
+  const session = (status: TranscriptStatus): TranscriptSession => ({
+    id: 'sess-1',
+    created_at: '2026-10-12T00:00:00Z',
+    language: 'pl',
+    audio_source: { source: { kind: 'system_wide' }, label: 'System' },
+    status,
+    live_segments: [],
+    final_segments: null,
+    audio_path: null,
+    models_used: { live: null, finalize: null },
+    last_seq: 0,
+  });
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -87,6 +102,10 @@ describe('MeetingTranscriptionComponent', () => {
       captureWarnings: captureWarningsSig,
       recordingSessionId: recordingSessionIdSig,
       recording: computed(() => recordingSessionIdSig() !== null),
+      liveStreamNeeded: computed(() => {
+        const state = activeSig()?.status.state;
+        return recordingSessionIdSig() !== null || state === 'recording' || state === 'finalizing';
+      }),
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,
       recordingLive: recordingLiveSig,
@@ -199,6 +218,30 @@ describe('MeetingTranscriptionComponent', () => {
     recordingSessionIdSig.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
     await component.ngOnDestroy();
     expect(svc.detach).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live stream attached on destroy while the offline pass runs', async () => {
+    activeSig.set(session({ state: 'finalizing', progress: 0.47 }));
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live stream attached on destroy right after Stop, before finalizing arrives', async () => {
+    activeSig.set(session({ state: 'recording' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
+  });
+
+  it('detaches the live stream on destroy once the session is done', async () => {
+    activeSig.set(session({ state: 'done' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).toHaveBeenCalled();
+  });
+
+  it('detaches the live stream on destroy once the session failed', async () => {
+    activeSig.set(session({ state: 'failed', reason: 'decoder crashed' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).toHaveBeenCalled();
   });
 
   it('renders no capture-warning banner without a warning', () => {
