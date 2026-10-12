@@ -461,7 +461,10 @@ pub async fn stop_transcription(
         match speedwave_runtime::transcription::run_finalize(cfg) {
             Ok(()) => {}
             Err(DriverError::Deleted) => {
-                log::info!("offline finalize for {} stopped: session deleted", short_id(id));
+                log::info!(
+                    "offline finalize for {} stopped: session deleted",
+                    short_id(id)
+                );
             }
             Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }

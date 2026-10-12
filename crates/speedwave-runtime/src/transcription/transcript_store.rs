@@ -1098,7 +1098,10 @@ mod tests {
             std::thread::spawn(move || store.delete(id))
         };
         std::thread::sleep(Duration::from_millis(50));
-        assert!(store.session_dir(id).exists(), "delete must wait for the session lock");
+        assert!(
+            store.session_dir(id).exists(),
+            "delete must wait for the session lock"
+        );
         drop(in_flight);
         deleting.join().unwrap().unwrap();
         assert!(!store.session_dir(id).exists());
