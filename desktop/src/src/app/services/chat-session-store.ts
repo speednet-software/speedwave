@@ -10,6 +10,7 @@ import { LoggerService } from './logger.service';
 import { DEFAULT_ALIAS } from './model-picker.service';
 import type { ClaudeContextUsage, ModelSwitchOutcome } from '../models/claude-control';
 import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
+import { ComposerAttachments } from '../chat/composer/composer-attachments';
 import {
   DEFAULT_CONTEXT_TOKENS,
   isAnthropicKind,
@@ -862,6 +863,8 @@ export class ChatSessionStore {
   readonly composerDraft = signal('');
   /** Per-tab scroll offset restored when a background tab is reactivated (phase 3). */
   scrollPosition: number | null = null;
+  /** Per-tab staged image attachments (SPEED-785) — a paste/drop resolves into this instance regardless of which tab's composer is active when it finishes. */
+  readonly composerAttachments = new ComposerAttachments();
 
   private readonly _sessionEnded = signal(false);
   /** Set for a background tab whose backend session ended without this store driving it (phase 3 surfaces this). */
@@ -2251,6 +2254,7 @@ export class ChatSessionStore {
     this._launchedFor = null;
     this.dropPendingPicks();
     this.setResumeDecider(null);
+    this.composerAttachments.dispose();
   }
 }
 

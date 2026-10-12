@@ -135,6 +135,7 @@
             [contextLabel]="composerContextLabel()"
             [transcriptAttached]="transcription.stagedTranscript() !== ''"
             [draftText]="transcription.chatPromptDraft()"
+            [attachmentDraft]="chat.activeStore().composerAttachments"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"
