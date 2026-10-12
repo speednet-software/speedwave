@@ -1189,22 +1189,24 @@ mod tests {
                 .filter(|v| v.rule == compose::SecurityRule::EgressLessNetworkExternal)
                 .collect()
         };
-        let snapshot = "networks:\n  speedwave_acme_network_office:\n    driver: bridge\n    \
-                        internal: true\n";
-        let fresh = "networks:\n  speedwave_acme_network_office:\n    \
-                     name: speedwave_acme_network_office\n    external: true\n";
-        let snapshot_violations = check(snapshot);
+        let office = compose::egress_less_network_names("acme").remove(0);
+        let snapshot = format!("networks:\n  {office}:\n    driver: bridge\n    internal: true\n");
+        let fresh = format!("networks:\n  {office}:\n    name: {office}\n    external: true\n");
+        let snapshot_violations = check(&snapshot);
         assert_eq!(snapshot_violations.len(), 1, "{snapshot_violations:?}");
-        let fresh_violations = check(fresh);
+        let fresh_violations = check(&fresh);
         assert!(fresh_violations.is_empty(), "{fresh_violations:?}");
         assert_eq!(
-            choose_rollback_compose(&snapshot_violations, Some((fresh, &fresh_violations))),
+            choose_rollback_compose(&snapshot_violations, Some((&fresh, &fresh_violations))),
             RollbackComposeChoice::UseFreshRender,
             "a pre-upgrade snapshot whose office network nerdctl compose created with a gateway \
              must give way to a fresh render"
         );
         assert_eq!(
-            choose_rollback_compose(&snapshot_violations, Some((snapshot, &snapshot_violations))),
+            choose_rollback_compose(
+                &snapshot_violations,
+                Some((&snapshot, &snapshot_violations))
+            ),
             RollbackComposeChoice::Abort
         );
     }

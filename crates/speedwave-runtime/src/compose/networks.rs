@@ -32,11 +32,26 @@ fn egress_less_config_keys() -> impl Iterator<Item = &'static str> {
         .map(|svc| svc.config_key)
 }
 
+/// Every egress-less network `project` can have, paired with the compose service it isolates.
+pub(crate) fn egress_less_network_owners(project: &str) -> Vec<(String, &'static str)> {
+    let network_name = project_network_name(project);
+    consts::TOGGLEABLE_MCP_SERVICES
+        .iter()
+        .filter(|svc| svc.egress_less)
+        .map(|svc| {
+            (
+                egress_less_network_name(&network_name, svc.config_key),
+                svc.compose_name,
+            )
+        })
+        .collect()
+}
+
 /// Every egress-less network `project` can have, one per `egress_less` service descriptor.
 pub(crate) fn egress_less_network_names(project: &str) -> Vec<String> {
-    let network_name = project_network_name(project);
-    egress_less_config_keys()
-        .map(|key| egress_less_network_name(&network_name, key))
+    egress_less_network_owners(project)
+        .into_iter()
+        .map(|(name, _)| name)
         .collect()
 }
 
@@ -129,6 +144,24 @@ mod tests {
         assert_eq!(names, expected);
         assert!(names.iter().any(|n| n.ends_with("_network_office")));
         assert!(names.iter().all(|n| is_egress_less_network(n)));
+    }
+
+    #[test]
+    fn egress_less_network_owners_pair_each_network_with_its_worker() {
+        let owners = egress_less_network_owners("acme");
+        assert_eq!(
+            owners.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            egress_less_network_names("acme")
+        );
+        let office = consts::TOGGLEABLE_MCP_SERVICES
+            .iter()
+            .find(|svc| svc.config_key == "office")
+            .unwrap();
+        assert!(owners.contains(&(
+            format!("{}_acme_network_office", consts::compose_prefix()),
+            office.compose_name
+        )));
+        assert_ne!(egress_less_network_owners("other"), owners);
     }
 
     #[test]

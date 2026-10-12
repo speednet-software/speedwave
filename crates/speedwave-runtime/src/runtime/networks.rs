@@ -116,8 +116,8 @@ pub(crate) fn network_exists_with(
     Ok(inspect_network(name, nerdctl)?.is_some())
 }
 
-/// Makes `name` exist as an isolated (`--internal`) network of `project`: a missing network is
-/// created, one with egress is removed and created again, and the result is inspected live.
+/// Makes `name` an isolated (`--internal`) network of `project`, checked by a live inspect: a missing
+/// one is created (a failed create stands only if a re-inspect finds it isolated), egress recreated.
 pub(crate) fn ensure_internal_network_with(
     name: &str,
     project: &str,
@@ -128,17 +128,18 @@ pub(crate) fn ensure_internal_network_with(
             return Ok(());
         };
         log::warn!("network {name} has egress ({problem}), recreating it with --internal");
-        nerdctl(&["network", "rm", name]).map_err(|e| {
+        remove_network_with(name, nerdctl).map_err(|e| {
             anyhow::anyhow!(
-                "network {name} has egress ({problem}) and could not be removed to recreate it \
-                 isolated; stop the project and start it again: {e:#}"
+                "network {name} exists with internet access ({problem}) and could not be \
+                 removed; stop the containers attached to it (or remove the network) and start \
+                 the project again: {e:#}"
             )
         })?;
     }
     log::info!("creating egress-less network {name} for project {project}");
     let project_label = format!("{COMPOSE_PROJECT_LABEL}={project}");
     let network_label = format!("{COMPOSE_NETWORK_LABEL}={name}");
-    nerdctl(&[
+    if let Err(create_err) = nerdctl(&[
         "network",
         "create",
         "--internal",
@@ -147,8 +148,18 @@ pub(crate) fn ensure_internal_network_with(
         "--label",
         &network_label,
         name,
-    ])
-    .map_err(|e| e.context(format!("failed to create egress-less network {name}")))?;
+    ]) {
+        return match inspect_network(name, nerdctl) {
+            Ok(Some(existing)) if isolation_problem(&existing).is_none() => {
+                log::warn!(
+                    "creating network {name} reported an error, but it exists isolated: \
+                     {create_err:#}"
+                );
+                Ok(())
+            }
+            _ => Err(create_err.context(format!("failed to create egress-less network {name}"))),
+        };
+    }
     match inspect_network(name, nerdctl)? {
         None => anyhow::bail!("network {name} is missing right after it was created"),
         Some(created) => match isolation_problem(&created) {
@@ -326,12 +337,77 @@ pub(crate) mod tests {
         let err = ensure_internal_network_with(NAME, "acme", &|a| script.run(a)).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("is in use by container"), "{msg}");
-        assert!(msg.contains("stop the project and start it again"), "{msg}");
+        assert!(
+            msg.contains(&format!("network {NAME} exists with internet access")),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("stop the containers attached to it (or remove the network) and start the project again"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stop the project"), "{msg}");
         assert_eq!(
             script.calls().len(),
             2,
             "never creates over a network it could not remove"
         );
+    }
+
+    #[test]
+    fn a_network_with_egress_gone_before_its_removal_is_still_created_internal() {
+        let script = Script::new(&[
+            Ok(BRIDGED_INSPECT),
+            Err(NOT_FOUND),
+            Ok(NAME),
+            Ok(INTERNAL_INSPECT),
+        ]);
+        ensure_internal_network_with(NAME, "acme", &|a| script.run(a)).unwrap();
+        assert_eq!(script.calls().len(), 4);
+        assert_eq!(script.calls()[2], CREATE);
+    }
+
+    #[test]
+    fn a_failed_create_of_a_network_that_exists_isolated_is_accepted() {
+        let script = Script::new(&[
+            Err(NOT_FOUND),
+            Err("time=\"2026-10-12T10:00:00Z\" level=fatal msg=EOF"),
+            Ok(INTERNAL_INSPECT),
+        ]);
+        ensure_internal_network_with(NAME, "acme", &|a| script.run(a)).unwrap();
+        assert_eq!(script.calls(), vec![INSPECT, CREATE, INSPECT]);
+    }
+
+    #[test]
+    fn a_failed_create_of_a_network_that_exists_with_egress_fails_the_start() {
+        let script = Script::new(&[
+            Err(NOT_FOUND),
+            Err("network with name speedwave_acme_network_office already exists"),
+            Ok(BRIDGED_INSPECT),
+        ]);
+        let err = ensure_internal_network_with(NAME, "acme", &|a| script.run(a)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("failed to create egress-less network"),
+            "{msg}"
+        );
+        assert!(msg.contains("already exists"), "{msg}");
+        assert_eq!(script.calls(), vec![INSPECT, CREATE, INSPECT]);
+    }
+
+    #[test]
+    fn a_failed_create_with_an_unreadable_reinspect_fails_with_the_create_error() {
+        let script = Script::new(&[
+            Err(NOT_FOUND),
+            Err("level=fatal msg=EOF"),
+            Err("command 'limactl' timed out after 60s"),
+        ]);
+        let err = ensure_internal_network_with(NAME, "acme", &|a| script.run(a)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("failed to create egress-less network"),
+            "{msg}"
+        );
+        assert!(msg.contains("EOF"), "{msg}");
     }
 
     #[test]
@@ -363,7 +439,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_create_fails_the_start() {
-        let script = Script::new(&[Err(NOT_FOUND), Err("needs CNI plugin \"firewall\"")]);
+        let script = Script::new(&[
+            Err(NOT_FOUND),
+            Err("needs CNI plugin \"firewall\""),
+            Err(NOT_FOUND),
+        ]);
         let err = ensure_internal_network_with(NAME, "acme", &|a| script.run(a)).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -371,6 +451,7 @@ pub(crate) mod tests {
             "{msg}"
         );
         assert!(msg.contains("needs CNI plugin"), "{msg}");
+        assert_eq!(script.calls(), vec![INSPECT, CREATE, INSPECT]);
     }
 
     #[test]

@@ -770,6 +770,22 @@ impl std::fmt::Display for EngineTearingDown {
 
 impl std::error::Error for EngineTearingDown {}
 
+/// A single-service up met a network an earlier release created with egress; only a full start
+/// moves every container off it, so the running stack is left as it is.
+#[derive(Debug)]
+pub(crate) struct NetworkMigrationPending;
+
+impl std::fmt::Display for NetworkMigrationPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The project network is being migrated to an isolated network; restart the project \
+             to finish it.",
+        )
+    }
+}
+
+impl std::error::Error for NetworkMigrationPending {}
+
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
 pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {

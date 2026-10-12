@@ -137,7 +137,8 @@ impl LockedRuntime {
             self.inner.remove_network(name).map_err(|e| {
                 e.context(format!(
                     "the containers of {project} were recreated, but the network {name} could \
-                     not be removed; stop the project and start it again"
+                     not be removed; stop the containers attached to it (or remove the network) \
+                     and start the project again"
                 ))
             })?;
         }
@@ -174,17 +175,24 @@ impl LockedRuntime {
         })
     }
 
-    /// Recreates one built-in compose service without touching the rest of the stack (under
-    /// the per-project lock, refused once the engine teardown began) — ADR-073 proxy hot-reload.
+    /// Recreates one built-in service alone (ADR-073 proxy hot-reload; project lock, no teardown);
+    /// a pre-isolation network left fails it with [`super::NetworkMigrationPending`], stack as is.
     pub fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         with_acquired(project, || {
-            self.start_isolated(project, || {
-                let result = self.inner.compose_up_service(project, service);
-                if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
-                    crate::slash::invalidate_cache(project);
-                }
-                result
-            })
+            self.refuse_during_engine_teardown()?;
+            let legacy = self.isolate_egress_less_networks(project)?;
+            if !legacy.is_empty() {
+                log::warn!(
+                    "project {project} still has the compose-created networks {legacy:?}; not \
+                     starting {service} alone, the next full start migrates them"
+                );
+                return Err(anyhow::Error::new(super::NetworkMigrationPending));
+            }
+            let result = self.inner.compose_up_service(project, service);
+            if service == crate::consts::CLAUDE_COMPOSE_SERVICE {
+                crate::slash::invalidate_cache(project);
+            }
+            result
         })
     }
 
@@ -761,21 +769,86 @@ mod tests {
     }
 
     #[test]
-    fn every_start_over_the_compose_created_network_recreates_the_whole_stack() {
-        let project = "locked-net-legacy-all";
+    fn every_full_start_over_the_compose_created_network_recreates_the_whole_stack() {
+        let full_starts: [fn(&LockedRuntime, &str) -> anyhow::Result<()>; 2] = [
+            LockedRuntime::compose_up,
+            LockedRuntime::compose_up_recreate,
+        ];
+        for full_start in full_starts {
+            let project = "locked-net-legacy-all";
+            let data_dir = rendered(project, &compose_with_office(project));
+            let legacy = legacy_office(project);
+            let (rt, handles) = MockRuntimeBuilder::new()
+                .with_data_dir(data_dir.path())
+                .with_existing_network(&legacy)
+                .build();
+            full_start(&rt, project).unwrap();
+            assert!(handles.up_projects().is_empty());
+            assert_eq!(handles.recreate_calls.lock().unwrap().len(), 1);
+            assert_eq!(handles.removed_networks(), vec![legacy]);
+        }
+    }
+
+    #[test]
+    fn a_service_start_over_the_compose_created_network_leaves_the_stack_running() {
+        let project = "locked-net-legacy-service";
         let data_dir = rendered(project, &compose_with_office(project));
         let legacy = legacy_office(project);
         let (rt, handles) = MockRuntimeBuilder::new()
             .with_data_dir(data_dir.path())
             .with_existing_network(&legacy)
             .build();
-        for started in start_every_way(&rt, project) {
-            started.unwrap();
-        }
-        assert!(handles.up_projects().is_empty());
+        let err = rt.compose_up_service(project, "proxy").unwrap_err();
+        assert!(err
+            .downcast_ref::<super::super::NetworkMigrationPending>()
+            .is_some());
+        assert_eq!(
+            err.to_string(),
+            "The project network is being migrated to an isolated network; restart the project \
+             to finish it."
+        );
         assert!(handles.up_service_calls.lock().unwrap().is_empty());
-        assert_eq!(handles.recreate_calls.lock().unwrap().len(), 3);
-        assert_eq!(handles.removed_networks(), vec![legacy; 3]);
+        assert!(!handles.was_recreated());
+        assert!(handles.up_projects().is_empty());
+        assert!(handles.down_projects().is_empty());
+        assert!(handles.removed_networks().is_empty());
+        assert_eq!(handles.probed_networks(), vec![legacy]);
+        assert_eq!(handles.ensured_networks().len(), 1);
+    }
+
+    #[test]
+    fn a_service_start_works_again_once_a_full_start_migrated_the_network() {
+        let project = "locked-net-legacy-then-service";
+        let data_dir = rendered(project, &compose_with_office(project));
+        let legacy = legacy_office(project);
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_data_dir(data_dir.path())
+            .with_existing_network(&legacy)
+            .build();
+        assert!(rt.compose_up_service(project, "proxy").is_err());
+        rt.compose_up(project).unwrap();
+        rt.compose_up_service(project, "proxy").unwrap();
+        assert_eq!(
+            *handles.up_service_calls.lock().unwrap(),
+            vec![(project.to_string(), "proxy".to_string())]
+        );
+        assert_eq!(handles.recreate_calls.lock().unwrap().len(), 1);
+        assert_eq!(handles.removed_networks(), vec![legacy.clone()]);
+        assert_eq!(handles.probed_networks(), vec![legacy; 3]);
+    }
+
+    #[test]
+    fn a_mock_without_a_data_dir_reads_an_empty_one_of_its_own() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let (other, _) = MockRuntimeBuilder::new().build();
+        let dir = rt.data_dir().to_path_buf();
+        assert!(dir.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_ne!(dir, other.data_dir());
+        rt.compose_up("locked-net-own-data-dir").unwrap();
+        assert!(handles.ensured_networks().is_empty());
+        drop(rt);
+        assert!(!dir.exists());
     }
 
     #[test]
@@ -841,7 +914,11 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("is in use"), "{msg}");
         assert!(msg.contains(&legacy), "{msg}");
-        assert!(msg.contains("stop the project and start it again"), "{msg}");
+        assert!(
+            msg.contains("stop the containers attached to it (or remove the network)"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stop the project"), "{msg}");
         assert!(handles.was_recreated());
         assert_eq!(handles.removed_networks(), vec![legacy]);
     }

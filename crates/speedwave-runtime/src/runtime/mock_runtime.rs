@@ -472,7 +472,8 @@ impl MockRuntimeBuilder {
         self.stop_vm_result = Err(msg.to_string());
         self
     }
-    /// Makes the runtime read project compose files under `data_dir` instead of the data dir.
+    /// Makes the runtime read project compose files under `data_dir` instead of the empty
+    /// temporary data dir the mock owns by default.
     pub fn with_data_dir(mut self, data_dir: &std::path::Path) -> Self {
         self.data_dir = Some(data_dir.to_path_buf());
         self
@@ -487,7 +488,7 @@ impl MockRuntimeBuilder {
         self.remove_network_error = Some(msg.to_string());
         self
     }
-    /// Makes `network_exists` report `name` present (every other network is absent).
+    /// Makes `network_exists` report `name` present until `remove_network` removes it.
     pub fn with_existing_network(mut self, name: &str) -> Self {
         self.existing_networks.insert(name.to_string());
         self
@@ -507,7 +508,15 @@ impl MockRuntimeBuilder {
     /// `handles` to inspect state after the runtime is consumed.
     pub fn build(self) -> (LockedRuntime, MockHandles) {
         let handles = self.handles.clone();
+        let owned_data_dir = self.data_dir.is_none().then(|| {
+            tempfile::tempdir()
+                .unwrap_or_else(|e| panic!("mock runtime could not create its data dir: {e}"))
+        });
+        let data_dir = self
+            .data_dir
+            .or_else(|| owned_data_dir.as_ref().map(|d| d.path().to_path_buf()));
         let mock = MockRuntime {
+            _owned_data_dir: owned_data_dir,
             handles: self.handles,
             is_available: self.is_available,
             ensure_ready_result: self.ensure_ready_result,
@@ -548,18 +557,19 @@ impl MockRuntimeBuilder {
             prepare_build_context_root: self.prepare_build_context_root,
             ensure_network_error: self.ensure_network_error,
             remove_network_error: self.remove_network_error,
-            existing_networks: self.existing_networks,
+            existing_networks: Mutex::new(self.existing_networks),
             network_exists_error: self.network_exists_error,
         };
         (
             LockedRuntime::new(Box::new(mock), self.engine_teardown_check)
-                .with_data_dir_override(self.data_dir),
+                .with_data_dir_override(data_dir),
             handles,
         )
     }
 }
 
 struct MockRuntime {
+    _owned_data_dir: Option<tempfile::TempDir>,
     handles: MockHandles,
     is_available: bool,
     ensure_ready_result: ResultCell,
@@ -600,7 +610,7 @@ struct MockRuntime {
     prepare_build_context_root: Option<std::path::PathBuf>,
     ensure_network_error: Option<String>,
     remove_network_error: Option<String>,
-    existing_networks: HashSet<String>,
+    existing_networks: Mutex<HashSet<String>>,
     network_exists_error: Option<String>,
 }
 
@@ -881,7 +891,10 @@ impl ContainerRuntime for MockRuntime {
             .push(name.to_string());
         match &self.remove_network_error {
             Some(msg) => anyhow::bail!("{msg}"),
-            None => Ok(()),
+            None => {
+                self.existing_networks.lock().unwrap().remove(name);
+                Ok(())
+            }
         }
     }
 
@@ -893,7 +906,7 @@ impl ContainerRuntime for MockRuntime {
             .push(name.to_string());
         match &self.network_exists_error {
             Some(msg) => anyhow::bail!("{msg}"),
-            None => Ok(self.existing_networks.contains(name)),
+            None => Ok(self.existing_networks.lock().unwrap().contains(name)),
         }
     }
 

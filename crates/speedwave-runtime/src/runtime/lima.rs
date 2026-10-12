@@ -130,10 +130,15 @@ impl LimaRuntime {
     fn network_command(&self, args: &[&str]) -> anyhow::Result<String> {
         let mut argv = vec!["shell", consts::lima_vm_name(), "--", "sudo", "nerdctl"];
         argv.extend_from_slice(args);
-        retry_on_eof("nerdctl network", || {
+        let run = || {
             self.runner
                 .run_bounded("limactl", &argv, consts::CONTAINER_EXEC_PROBE_TIMEOUT)
-        })
+        };
+        if network_command_is_retryable(args) {
+            retry_on_eof("nerdctl network", run)
+        } else {
+            run()
+        }
     }
 
     fn require_running(&self) -> anyhow::Result<()> {
@@ -293,6 +298,12 @@ fn retry_on_eof_with_delays<T>(
             Err(e) => return Err(e),
         }
     }
+}
+
+/// `true` for the network subcommands a transient EOF may repeat: the reads, and `rm`, whose
+/// repeat after a removal that landed answers not-found, which `remove_network_with` accepts.
+fn network_command_is_retryable(args: &[&str]) -> bool {
+    matches!(args, ["network", "inspect" | "ls" | "rm", ..])
 }
 
 /// Lima-flavoured `compose down + cleanup` with `retry_on_eof` on each step.
@@ -3886,5 +3897,78 @@ mod tests {
                 consts::lima_vm_name()
             )
         );
+    }
+
+    const NETWORK_EOF: &str = "time=\"2026-10-12T10:00:00Z\" level=fatal msg=EOF";
+
+    #[test]
+    fn network_command_retries_only_reads_and_rm() {
+        for args in [
+            &["network", "inspect", "--mode=native", "n"][..],
+            &["network", "ls"][..],
+            &["network", "rm", "n"][..],
+        ] {
+            assert!(network_command_is_retryable(args), "{args:?}");
+        }
+        for args in [
+            &["network", "create", "--internal", "n"][..],
+            &["network"][..],
+            &[][..],
+            &["inspect", "n"][..],
+        ] {
+            assert!(!network_command_is_retryable(args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_create_cut_by_eof_is_never_repeated_and_stands_once_inspected_isolated() {
+        use crate::runtime::networks::tests::{INTERNAL_INSPECT, NOT_FOUND};
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Err(NETWORK_EOF), Ok(INTERNAL_INSPECT)]);
+        rt.ensure_internal_network(name, "acme").unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(k, _)| k.contains("network create"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_create_cut_by_eof_without_the_network_fails_without_a_second_create() {
+        use crate::runtime::networks::tests::NOT_FOUND;
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Err(NETWORK_EOF), Err(NOT_FOUND)]);
+        let err = rt.ensure_internal_network(name, "acme").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("failed to create egress-less network"),
+            "{err:#}"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_inspect_cut_by_eof_is_retried() {
+        use crate::runtime::networks::tests::BRIDGED_INSPECT;
+        let name = "acme_speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NETWORK_EOF), Ok(BRIDGED_INSPECT)]);
+        assert!(rt.network_exists(name).unwrap());
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_rm_retried_after_eof_accepts_the_network_already_gone() {
+        use crate::runtime::networks::tests::NOT_FOUND;
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NETWORK_EOF), Err(NOT_FOUND)]);
+        rt.remove_network(name).unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|(k, _)| k.ends_with(&format!("network rm {name}"))));
     }
 }
