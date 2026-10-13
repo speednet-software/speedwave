@@ -2941,8 +2941,8 @@ fn spawn_test_child() -> Child {
     };
     #[cfg(windows)]
     let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        c.arg("/C").arg("pause");
+        let mut c = speedwave_runtime::binary::system_command("cmd");
+        c.arg("/C").arg("set /p line=");
         c
     };
     command
@@ -2961,6 +2961,41 @@ fn spawn_test_child() -> Child {
 )]
 mod tests {
     use super::*;
+
+    fn wait_for_exit(child: &mut Child, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn the_test_child_waits_for_a_line_on_stdin_and_exits_after_it() {
+        let mut child = spawn_test_child();
+        assert!(!wait_for_exit(
+            &mut child,
+            std::time::Duration::from_millis(500)
+        ));
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+        let exited = wait_for_exit(&mut child, std::time::Duration::from_secs(20));
+        child.kill().ok();
+        assert!(exited, "the test child must exit once it has read a line");
+    }
+
+    #[test]
+    fn the_test_child_exits_when_its_stdin_closes() {
+        let mut child = spawn_test_child();
+        drop(child.stdin.take());
+        let exited = wait_for_exit(&mut child, std::time::Duration::from_secs(20));
+        child.kill().ok();
+        assert!(exited, "the test child must exit at end of input");
+    }
 
     #[test]
     fn chat_stream_emits_go_through_helper() {
