@@ -70,8 +70,8 @@ jobs:
       - name: Desktop config tests (fast)
         run: make test-desktop-config
 
-      - name: Desktop bats tests
-        run: make test-desktop-build
+      - name: Desktop build bats tests (macOS-only suites)
+        run: make test-desktop-build-macos
 
       - name: CLI e2e trio (no VM)
         run: make test-e2e

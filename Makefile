@@ -96,7 +96,7 @@ dev-config: guard-dev-instance
 .PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
-        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
+        test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build test-desktop-build-portable test-desktop-build-macos \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
@@ -389,13 +389,15 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
-DESKTOP_BUILD_BATS := _tests/desktop/bundle-build-context.bats \
-  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+DESKTOP_BUILD_BATS_PORTABLE := _tests/desktop/bundle-build-context.bats \
+  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/vulkan-scripts.bats \
+  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+DESKTOP_BUILD_BATS_MACOS := _tests/desktop/verify-bundled-assets.bats \
   _tests/desktop/sign-bundled-binaries.bats \
   _tests/desktop/native-cli-info-plist.bats \
   _tests/desktop/build-native-macos.bats \
-  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
-  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+  _tests/desktop/bundle-native-assets.bats
+DESKTOP_BUILD_BATS := $(DESKTOP_BUILD_BATS_PORTABLE) $(DESKTOP_BUILD_BATS_MACOS)
 
 test-desktop-build-run:
 	@$(REQUIRE_BATS)
@@ -548,6 +550,16 @@ test-desktop-build: build-angular build-mcp
 	@$(REQUIRE_BATS)
 	bats --print-output-on-failure $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
+
+test-desktop-build-portable: build-mcp
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS_PORTABLE)
+	@echo "✅ Desktop build tests (portable) passed"
+
+test-desktop-build-macos:
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS_MACOS)
+	@echo "✅ Desktop build tests (macOS) passed"
 
 test-native-cli-plist:
 	@$(REQUIRE_BATS)
