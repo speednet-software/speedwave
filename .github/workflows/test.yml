@@ -21,8 +21,8 @@ jobs:
   test-rust:
     uses: ./.github/workflows/lane-test-rust.yml
 
-  test-mcp:
-    uses: ./.github/workflows/lane-test-mcp.yml
+  test-linux:
+    uses: ./.github/workflows/lane-test-linux.yml
 
   test-macos:
     uses: ./.github/workflows/lane-test-macos.yml
@@ -50,7 +50,7 @@ jobs:
     needs:
       - lint
       - test-rust
-      - test-mcp
+      - test-linux
       - test-macos
       - test-windows
       - ci-config
