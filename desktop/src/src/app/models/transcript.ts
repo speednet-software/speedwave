@@ -99,6 +99,10 @@ export interface TranscriptSummary {
   preview: string | null;
   /** Audio plus transcript on disk. */
   size_bytes: number;
+  /** Model of the offline pass that made (or is making) the transcript; null before one ran. */
+  finalize_model: string | null;
+  /** True while the offline pass waits for another recording's pass to finish. */
+  queued: boolean;
 }
 
 /** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */

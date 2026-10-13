@@ -401,8 +401,9 @@ pub async fn stop_transcription(
     Ok(())
 }
 
-/// Runs the offline pass again over a failed session's recorded parts (an interrupted recording,
-/// or a model missing at Stop); the session goes back to `Finalizing` and ends `Done` or `Failed`.
+/// Runs the offline pass again over a session's recorded parts: a failed one (an interrupted
+/// recording, or a model missing at Stop) or a finished one made with a smaller model. The session
+/// goes back to `Finalizing` and ends `Done` or `Failed`.
 #[tauri::command]
 pub async fn transcribe_transcript(
     session_id: String,
@@ -429,8 +430,28 @@ pub async fn transcribe_transcript(
     Ok(())
 }
 
-/// Loads the offline-pass model and transcribes `audio_paths` on a blocking task; every failure
-/// lands on the session as `Failed`, so the UI always learns how the pass ended.
+/// One offline pass at a time: two passes loading two large models side by side can exhaust the
+/// memory of a 16 GiB host, so a second Stop waits its turn (the list row says "queued").
+static OFFLINE_PASS_TURN: Mutex<()> = Mutex::new(());
+
+/// Waits for the offline-pass turn, marking the session queued while another pass holds it.
+fn take_offline_pass_turn(store: &TranscriptStore, id: Uuid) -> std::sync::MutexGuard<'static, ()> {
+    match OFFLINE_PASS_TURN.try_lock() {
+        Ok(turn) => turn,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            store.set_queued(id, true);
+            let turn = OFFLINE_PASS_TURN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            store.set_queued(id, false);
+            turn
+        }
+    }
+}
+
+/// Loads the offline-pass model and transcribes `audio_paths` on a blocking task, one pass at a
+/// time; every failure lands on the session as `Failed`, so the UI always learns how it ended.
 fn spawn_offline_pass(
     store_arc: TranscriptStoreHandle,
     models_arc: ModelStoreHandle,
@@ -438,6 +459,7 @@ fn spawn_offline_pass(
     audio_paths: Vec<std::path::PathBuf>,
 ) {
     tokio::task::spawn_blocking(move || {
+        let _turn = take_offline_pass_turn(&store_arc, id);
         let offline_key = pick_offline_model(&models_arc);
         let Some(key) = offline_key else {
             let _ = store_arc.set_status(
@@ -448,6 +470,9 @@ fn spawn_offline_pass(
             );
             return;
         };
+        if let Err(e) = store_arc.set_finalize_model(id, &key) {
+            log::warn!("cannot record the offline model of {}: {e}", short_id(id));
+        }
         let path = match models_arc.ensure_model(&key, &mut |_| {}) {
             Ok(p) => p,
             Err(e) => {
@@ -1345,6 +1370,37 @@ mod tests {
             store.get(id).unwrap().status,
             TranscriptStatus::Recording
         ));
+    }
+
+    #[test]
+    #[serial_test::serial(offline_pass_turn)]
+    fn a_second_offline_pass_waits_its_turn_and_shows_as_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(dir.path()));
+        let first = mk_session_in(&store);
+        let second = mk_session_in(&store);
+        let queued = |id: Uuid| store.list().iter().any(|r| r.id == id && r.queued);
+
+        let held = take_offline_pass_turn(&store, first);
+        assert!(!queued(first), "the first pass runs at once");
+        let waiter = std::thread::spawn({
+            let store = store.clone();
+            move || drop(take_offline_pass_turn(&store, second))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !queued(second) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second pass never queued"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(held);
+        waiter.join().unwrap();
+        assert!(
+            !queued(second),
+            "the mark clears once the pass gets its turn"
+        );
     }
 
     fn titled(title: Option<&str>, created_at: &str) -> TranscriptSession {

@@ -120,6 +120,10 @@ pub struct TranscriptSummary {
     pub preview: Option<String>,
     /// Bytes the session directory takes on disk (audio and transcript).
     pub size_bytes: u64,
+    /// Whisper catalogue key of the offline pass that made (or is making) the transcript.
+    pub finalize_model: Option<String>,
+    /// `true` while the offline pass waits for another recording's pass to finish.
+    pub queued: bool,
 }
 
 impl TranscriptSession {
@@ -215,6 +219,8 @@ impl TranscriptSession {
             segment_count: segments.len(),
             preview,
             size_bytes,
+            finalize_model: self.models_used.finalize.clone(),
+            queued: false,
         }
     }
 

@@ -149,6 +149,7 @@ pub struct TranscriptStore {
     root: PathBuf,
     sessions: Arc<DashMap<Uuid, Entry>>,
     changes: broadcast::Sender<Uuid>,
+    queued: parking_lot::Mutex<std::collections::HashSet<Uuid>>,
 }
 
 /// Drains the raised capture warnings into one recovery event each, starting at `next_seq` —
@@ -177,6 +178,7 @@ impl TranscriptStore {
             root: root.into(),
             sessions: Arc::new(DashMap::new()),
             changes,
+            queued: parking_lot::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -226,10 +228,40 @@ impl TranscriptStore {
     /// One summary per session directory, newest first. Corrupt `transcript.json` files are
     /// skipped (logged warn — runtime recovery, not panic).
     pub fn list(&self) -> Vec<TranscriptSummary> {
+        let queued = self.queued.lock().clone();
         self.sessions_on_disk()
             .iter()
-            .map(|s| s.summary(&self.session_dir(s.id)))
+            .map(|s| {
+                let mut row = s.summary(&self.session_dir(s.id));
+                row.queued = queued.contains(&s.id);
+                row
+            })
             .collect()
+    }
+
+    /// Marks whether a session's offline pass waits for another one; the list row shows it.
+    pub fn set_queued(&self, id: Uuid, queued: bool) {
+        let changed = {
+            let mut set = self.queued.lock();
+            if queued {
+                set.insert(id)
+            } else {
+                set.remove(&id)
+            }
+        };
+        if changed {
+            self.notify(id);
+        }
+    }
+
+    /// Records the model the offline pass runs with, before it starts, so the UI can say which.
+    pub fn set_finalize_model(&self, id: Uuid, model: &str) -> Result<(), StoreError> {
+        self.with_session_batch(id, |s, _| {
+            s.models_used.finalize = Some(model.to_string());
+            Vec::new()
+        })?;
+        self.notify(id);
+        Ok(())
     }
 
     /// Marks every session left `Recording` or `Finalizing` by an earlier run as failed with
@@ -326,13 +358,16 @@ impl TranscriptStore {
         Ok(title)
     }
 
-    /// Moves a `Failed` session to `Finalizing` for another offline pass over its recorded parts,
-    /// retiring its warnings; refuses any other state so two runs never overlap.
+    /// Moves a `Failed` or `Done` session to `Finalizing` for another offline pass over its
+    /// recorded parts, retiring its warnings; refuses any other state so two runs never overlap.
     pub fn begin_retranscribe(&self, id: Uuid) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         let mut allowed = false;
         self.with_session_batch(id, |s, next_seq| {
-            if !matches!(s.status, TranscriptStatus::Failed { .. }) {
+            if !matches!(
+                s.status,
+                TranscriptStatus::Failed { .. } | TranscriptStatus::Done
+            ) {
                 return Vec::new();
             }
             allowed = true;
@@ -348,7 +383,7 @@ impl TranscriptStore {
         })?;
         if !allowed {
             return Err(StoreError::InvalidState(
-                "only a failed recording can be transcribed again".to_string(),
+                "only a finished or failed recording can be transcribed again".to_string(),
             ));
         }
         self.notify(id);
@@ -1276,7 +1311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn begin_retranscribe_moves_only_a_failed_session_to_finalizing() {
+    async fn begin_retranscribe_moves_only_a_failed_or_finished_session_to_finalizing() {
         use crate::transcription::CaptureWarning;
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
@@ -1322,6 +1357,74 @@ mod tests {
             ),
             "a second click while the first run is going is refused"
         );
+    }
+
+    #[tokio::test]
+    async fn begin_retranscribe_keeps_a_finished_transcript_on_screen_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        store
+            .set_final_segments(id, vec![seg(0.0, 1.0, "gotowe")])
+            .unwrap();
+        store.finish(id).unwrap();
+
+        store.begin_retranscribe(id).unwrap();
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Finalizing { progress: 0.0 });
+        assert_eq!(snap.effective_segments()[0].text, "gotowe");
+    }
+
+    #[tokio::test]
+    async fn set_queued_shows_on_the_list_row_and_notifies_only_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut changes = store.watch();
+        assert!(!store.list()[0].queued);
+
+        store.set_queued(id, true);
+        store.set_queued(id, true);
+        assert!(store.list()[0].queued);
+        assert_eq!(changes.try_recv().unwrap(), id);
+        assert!(changes.try_recv().is_err(), "a repeated mark is no change");
+
+        store.set_queued(id, false);
+        assert!(!store.list()[0].queued);
+        assert_eq!(changes.try_recv().unwrap(), id);
+        store.set_queued(Uuid::new_v4(), false);
+        assert!(
+            changes.try_recv().is_err(),
+            "clearing an unmarked id is no change"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_finalize_model_persists_and_reaches_the_list_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let seq_before = store.get(id).unwrap().last_seq;
+
+        store.set_finalize_model(id, "large-v3-turbo").unwrap();
+
+        let on_disk = TranscriptSession::load(&store.session_dir(id)).unwrap();
+        assert_eq!(
+            on_disk.models_used.finalize.as_deref(),
+            Some("large-v3-turbo")
+        );
+        assert_eq!(on_disk.last_seq, seq_before, "no event is emitted");
+        assert_eq!(
+            store.list()[0].finalize_model.as_deref(),
+            Some("large-v3-turbo")
+        );
+        assert!(matches!(
+            store.set_finalize_model(Uuid::new_v4(), "x").unwrap_err(),
+            StoreError::NotFound(_)
+        ));
     }
 
     fn write_unfinalized_wav(path: &Path, frames: u32) {
