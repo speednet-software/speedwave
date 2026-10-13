@@ -580,8 +580,8 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Reopens a `Done` session for more recording (ADR-056 Am. 10): finals become the live
-    /// baseline, a new part registers, and `models_used.live` = `live_model` (UI keys on it).
+    /// Reopens a `Done` or `Paused` session for more recording (ADR-056 Am. 10): finals become the
+    /// live baseline, a new part registers, and `models_used.live` = `live_model` (UI keys on it).
     pub fn resume(
         &self,
         id: Uuid,
@@ -591,10 +591,11 @@ impl TranscriptStore {
         let mut seq_out = 0;
         let mut resumable = false;
         self.with_session_batch(id, |s, seq| {
-            if !matches!(s.status, TranscriptStatus::Done) {
+            if !matches!(s.status, TranscriptStatus::Done | TranscriptStatus::Paused) {
                 return Vec::new();
             }
             resumable = true;
+            s.resumed_from_pause = matches!(s.status, TranscriptStatus::Paused);
             s.prior_active_warnings = s.active_warnings.clone();
             let mut events = drain_capture_warnings(s, seq);
             if let Some(finals) = s.final_segments.take() {
@@ -613,15 +614,16 @@ impl TranscriptStore {
         })?;
         if !resumable {
             return Err(StoreError::InvalidState(
-                "only a finished recording can be resumed".to_string(),
+                "only a finished or paused recording can be resumed".to_string(),
             ));
         }
         self.notify(id);
         Ok(seq_out)
     }
 
-    /// Reverts a [`Self::resume`] whose capture never started: drops the just-registered
-    /// part, restores the finals baseline, live model and capture warnings, and returns to `Done`.
+    /// Reverts a [`Self::resume`] whose capture never started: drops the just-registered part,
+    /// restores the finals baseline, live model and capture warnings, and returns to `Done` (or to
+    /// `Paused`, keeping the live text as it was, when the resume reopened a paused session).
     pub fn rollback_resume(&self, id: Uuid, expected_part: &Path) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         let mut rolled_back = false;
@@ -633,10 +635,15 @@ impl TranscriptStore {
             }
             rolled_back = true;
             s.audio_parts.pop();
-            s.final_segments = Some(std::mem::take(&mut s.live_segments));
+            let restored = if std::mem::take(&mut s.resumed_from_pause) {
+                TranscriptStatus::Paused
+            } else {
+                s.final_segments = Some(std::mem::take(&mut s.live_segments));
+                TranscriptStatus::Done
+            };
             s.models_used.live = s.prior_live_model.take();
             s.active_warnings = std::mem::take(&mut s.prior_active_warnings);
-            s.status = TranscriptStatus::Done;
+            s.status = restored.clone();
             let mut events: Vec<TranscriptEvent> = s
                 .active_warnings
                 .iter()
@@ -649,7 +656,7 @@ impl TranscriptStore {
             seq_out = seq + events.len() as u64;
             events.push(TranscriptEvent::StatusChanged {
                 seq: seq_out,
-                status: TranscriptStatus::Done,
+                status: restored,
             });
             events
         })?;
@@ -1909,6 +1916,43 @@ mod tests {
             assert_eq!(snap.status, status, "a rejected resume must not mutate");
             assert!(snap.audio_parts.is_empty(), "no phantom part registered");
         }
+    }
+
+    #[test]
+    fn resume_reopens_a_paused_session_and_rollback_returns_it_to_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .append_segment(id, seg(0.0, 1.0, "przed pauzą"))
+            .unwrap();
+        store.set_status(id, TranscriptStatus::Paused).unwrap();
+        let part = dir.path().join("audio-2.wav");
+
+        store.resume(id, part.clone(), None).unwrap();
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Recording);
+        assert_eq!(snap.audio_parts, vec![part.clone()]);
+        assert_eq!(snap.live_segments[0].text, "przed pauzą");
+
+        store.rollback_resume(id, &part).unwrap();
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Paused);
+        assert!(snap.audio_parts.is_empty());
+        assert!(snap.final_segments.is_none(), "paused text stays live text");
+        assert_eq!(snap.live_segments[0].text, "przed pauzą");
+    }
+
+    #[test]
+    fn a_paused_session_survives_the_startup_reconcile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store.set_status(id, TranscriptStatus::Paused).unwrap();
+
+        let fresh = TranscriptStore::with_root(dir.path());
+        assert_eq!(fresh.reconcile_interrupted(), 0);
+        assert_eq!(fresh.get(id).unwrap().status, TranscriptStatus::Paused);
     }
 
     #[test]

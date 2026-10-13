@@ -294,8 +294,11 @@ pub async fn resume_transcription(
 ) -> Result<StartAck, String> {
     let id = parse_transcript_id(&session_id)?;
     let session = store.get(id).map_err(|e| e.to_string())?;
-    if !matches!(session.status, TranscriptStatus::Done) {
-        return Err("only a finished recording can be resumed".to_string());
+    if !matches!(
+        session.status,
+        TranscriptStatus::Done | TranscriptStatus::Paused
+    ) {
+        return Err("only a finished or paused recording can be resumed".to_string());
     }
     let lang = session.language;
     let audio_source = session.audio_source.source.clone();
@@ -365,6 +368,25 @@ pub async fn resume_transcription(
         event_name: transcript_event_name(id),
         snapshot,
     })
+}
+
+/// Pauses a running recording: the capture ends and its part is closed like on Stop, the
+/// microphone is released, and the session waits as `Paused` for Resume or Stop.
+#[tauri::command]
+pub async fn pause_transcription(
+    session_id: String,
+    drivers: tauri::State<'_, DriversHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    let stop = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "this recording is not capturing".to_string())?;
+    stop.pause();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop.await_finished()).await;
+    Ok(())
 }
 
 #[tauri::command]

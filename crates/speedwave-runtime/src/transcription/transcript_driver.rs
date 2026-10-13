@@ -47,6 +47,7 @@ const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     finished: Arc<tokio::sync::Notify>,
 }
 
@@ -55,6 +56,7 @@ impl StopSignal {
     pub fn new() -> Self {
         Self {
             stopped: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
             finished: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -67,6 +69,18 @@ impl StopSignal {
     /// `true` once `stop()` was called.
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Trip the signal as a pause: the driver ends the capture like a stop, but leaves the
+    /// session `Paused` instead of handing it to the offline pass.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        self.stop();
+    }
+
+    /// `true` once `pause()` was called.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 
     /// The driver host calls this once `run()` has exited, releasing any
@@ -546,9 +560,13 @@ impl TranscriptDriver {
                 if self.transcriber.is_some() {
                     let _ = self.decode_final_window();
                 }
-                let _ = self
-                    .store
-                    .set_status(self.id, TranscriptStatus::Finalizing { progress: 0.0 });
+                let next = if self.stop.is_paused() {
+                    let _ = self.store.live_draft(self.id, String::new());
+                    TranscriptStatus::Paused
+                } else {
+                    TranscriptStatus::Finalizing { progress: 0.0 }
+                };
+                let _ = self.store.set_status(self.id, next);
                 Ok(())
             }
             Err(e) => {
@@ -1261,6 +1279,42 @@ mod tests {
             "should have decoded *some* live segments"
         );
         assert!(snap.last_seq > 0);
+    }
+
+    #[test]
+    fn a_paused_capture_leaves_the_session_paused_not_finalizing() {
+        let (_fixture_guard, fixture) = make_fixture_wav(5.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        stop.pause();
+        assert!(stop.is_stopped(), "a pause ends the capture like a stop");
+        assert!(stop.is_paused());
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop,
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.status, TranscriptStatus::Paused);
+        assert!(snap.live_draft.is_empty());
+    }
+
+    #[test]
+    fn a_plain_stop_is_not_a_pause() {
+        let stop = StopSignal::new();
+        stop.stop();
+        assert!(stop.is_stopped());
+        assert!(!stop.is_paused());
     }
 
     /// A paired (system+mic) stream: `secs` seconds in 200 ms chunks; system

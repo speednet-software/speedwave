@@ -43,17 +43,20 @@ export interface ModelsUsed {
 /** Lifecycle of a recording. */
 export type TranscriptStatus =
   | { state: 'recording' }
+  | { state: 'paused' }
   | { state: 'finalizing'; progress: number }
   | { state: 'done' }
   | { state: 'failed'; reason: string };
 
 /**
- * Whether a session in this status can still change; `done` and `failed` are final.
+ * Whether a session in this status can still change; `done` and `failed` are final, a paused one
+ * waits for Resume or Stop.
  * @param status - the session's lifecycle status.
  */
 export function isSessionOngoing(status: TranscriptStatus): boolean {
   switch (status.state) {
     case 'recording':
+    case 'paused':
     case 'finalizing':
       return true;
     case 'done':

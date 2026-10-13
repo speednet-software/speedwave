@@ -1205,6 +1205,7 @@ fn main() {
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
             transcription_cmd::stop_transcription,
+            transcription_cmd::pause_transcription,
             transcription_cmd::resume_transcription,
             transcription_cmd::subscribe_transcript,
             transcription_cmd::list_transcripts,

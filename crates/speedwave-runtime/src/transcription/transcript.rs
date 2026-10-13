@@ -27,6 +27,9 @@ const PREVIEW_MAX_CHARS: usize = 140;
 pub enum TranscriptStatus {
     /// Capturing audio + live transcription.
     Recording,
+    /// Capture paused by the user: every part so far is closed, the microphone is released, and
+    /// nothing is transcribed until a resume adds a part or a stop starts the offline pass.
+    Paused,
     /// Stopped; running the higher-quality offline pass.
     Finalizing {
         /// 0.0 → 1.0 (driver-reported).
@@ -95,6 +98,9 @@ pub struct TranscriptSession {
     pub(crate) prior_live_model: Option<String>,
     #[serde(skip, default)]
     pub(crate) prior_active_warnings: Vec<CaptureWarning>,
+    /// Whether the in-flight resume reopened a paused session, so a rollback returns it there.
+    #[serde(skip, default)]
+    pub(crate) resumed_from_pause: bool,
 }
 
 /// One row of the recordings list: everything but the segments.
@@ -157,6 +163,7 @@ impl TranscriptSession {
             live_draft: String::new(),
             prior_live_model: None,
             prior_active_warnings: Vec::new(),
+            resumed_from_pause: false,
         }
     }
 
@@ -307,6 +314,7 @@ fn fmt_ts(d: std::time::Duration) -> String {
 fn status_label(s: &TranscriptStatus) -> &'static str {
     match s {
         TranscriptStatus::Recording => "recording",
+        TranscriptStatus::Paused => "paused",
         TranscriptStatus::Finalizing { .. } => "finalizing",
         TranscriptStatus::Done => "done",
         TranscriptStatus::Failed { .. } => "failed",
@@ -636,6 +644,17 @@ mod tests {
     }
 
     #[test]
+    fn paused_status_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let wire = serde_json::to_string(&TranscriptStatus::Paused).unwrap();
+        assert_eq!(wire, r#"{"state":"paused"}"#);
+        assert!(
+            src.contains("| { state: 'paused' }"),
+            "models/transcript.ts TranscriptStatus must carry the paused state"
+        );
+    }
+
+    #[test]
     fn audio_parts_field_matches_ts_mirror() {
         let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
         assert!(
@@ -786,6 +805,7 @@ mod tests {
     fn status_serde_round_trip() {
         for s in [
             TranscriptStatus::Recording,
+            TranscriptStatus::Paused,
             TranscriptStatus::Finalizing { progress: 0.42 },
             TranscriptStatus::Done,
             TranscriptStatus::Failed {
