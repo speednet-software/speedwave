@@ -454,7 +454,7 @@ mod tests {
     }
 
     /// Returns a PID that is alive and different from `std::process::id()`.
-    /// Unix: parent PID. Windows: spawns a sleeping process.
+    /// Unix: parent PID. Windows: spawns a long-running ping.
     fn external_alive_pid() -> (u32, Option<std::process::Child>) {
         #[cfg(unix)]
         {
@@ -462,10 +462,13 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            let child = speedwave_runtime::binary::system_command("cmd")
-                .args(["/C", "timeout /T 30 /NOBREAK >NUL"])
+            let child = speedwave_runtime::binary::system_command("ping")
+                .args(["-n", "60", "127.0.0.1"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
-                .expect("failed to spawn external process for test");
+                .unwrap();
             (child.id(), Some(child))
         }
     }
