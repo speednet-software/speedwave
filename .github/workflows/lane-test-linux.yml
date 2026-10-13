@@ -55,8 +55,5 @@ jobs:
       - name: Entrypoint tests
         run: make test-entrypoint
 
-      - name: Desktop config tests (fast)
-        run: make test-desktop-config
-
       - name: Release-gate tests (gh shim)
         run: make test-release-gate

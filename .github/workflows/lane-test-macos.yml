@@ -67,6 +67,9 @@ jobs:
       - name: mcp-os bundle upgrade-path test
         run: make test-mcp-os-bundle
 
+      - name: Desktop config tests (fast)
+        run: make test-desktop-config
+
       - name: Desktop bats tests
         run: make test-desktop-build
 
