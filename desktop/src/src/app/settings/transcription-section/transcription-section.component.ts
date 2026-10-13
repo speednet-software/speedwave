@@ -186,19 +186,6 @@ interface ModelRow {
         </div>
       }
 
-      <div
-        class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
-        data-testid="transcription-storage"
-      >
-        <div class="mono mb-2 text-[11px] uppercase tracking-wider text-[var(--ink-mute)]">
-          Storage
-        </div>
-        <div class="text-[12px] text-[var(--ink)]">Recordings use {{ recordingsSize() }}</div>
-        <div class="text-[11px] text-[var(--ink-mute)]">
-          {{ recordingsCount() }} with their audio. Delete old ones in the recordings list.
-        </div>
-      </div>
-
       @if (model(); as m) {
         <details
           class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
@@ -334,17 +321,6 @@ export class TranscriptionSectionComponent implements OnInit {
     return `Speech recognition needs one download (${this.size(best)}). After that it works offline.`;
   });
 
-  /** Disk the recordings take, from the recordings list. */
-  readonly recordingsSize = computed(() =>
-    formatBytes(this.transcription.recordings().reduce((sum, r) => sum + r.size_bytes, 0))
-  );
-
-  /** "45 recordings" / "1 recording". */
-  readonly recordingsCount = computed(() => {
-    const n = this.transcription.recordings().length;
-    return n === 1 ? '1 recording' : `${n} recordings`;
-  });
-
   private readonly transcription = inject(TranscriptionService);
 
   /** Whether new recordings show live text (off unless the user turned it on). */
@@ -389,13 +365,9 @@ export class TranscriptionSectionComponent implements OnInit {
     return `Downloading ${Math.round((p.downloaded_bytes / p.total_bytes) * 100)}%`;
   });
 
-  /** Reads the recommended model, permissions and the recordings' disk use on first paint. */
+  /** Reads the recommended model and permissions on first paint. */
   async ngOnInit(): Promise<void> {
-    await Promise.all([
-      this.refresh(),
-      this.refreshPermissions(),
-      this.transcription.refreshRecordings(),
-    ]);
+    await Promise.all([this.refresh(), this.refreshPermissions()]);
   }
 
   /** Reads the platform + mic-consent state; non-fatal on failure. */

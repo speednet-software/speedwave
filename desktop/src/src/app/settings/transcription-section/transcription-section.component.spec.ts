@@ -10,7 +10,6 @@ import type {
   MicPermissionStatus,
   RecommendedModelAck,
   RecommendedModelEntry,
-  TranscriptSummary,
 } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
@@ -32,7 +31,6 @@ describe('TranscriptionSectionComponent', () => {
     setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     downloadingModelKey: typeof downloadingModelKey;
     downloadProgress: typeof downloadProgress;
-    recordings: ReturnType<typeof signal<TranscriptSummary[]>>;
     refreshRecordings: ReturnType<typeof vi.fn>;
   };
   let platform: string;
@@ -72,7 +70,6 @@ describe('TranscriptionSectionComponent', () => {
       setLiveTranscriptPreferred: vi.fn(),
       downloadingModelKey,
       downloadProgress,
-      recordings: signal<TranscriptSummary[]>([]),
       refreshRecordings: vi.fn(async () => undefined),
     };
     await TestBed.configureTestingModule({
@@ -495,23 +492,11 @@ describe('TranscriptionSectionComponent', () => {
     });
   });
 
-  describe('storage', () => {
-    it('reads the recordings list and shows their disk use and count', async () => {
-      svc.recordings.set([
-        { size_bytes: 1024 * 1024 * 1024 } as TranscriptSummary,
-        { size_bytes: 512 * 1024 * 1024 } as TranscriptSummary,
-      ]);
-      await component.ngOnInit();
-      fixture.detectChanges();
-      expect(svc.refreshRecordings).toHaveBeenCalled();
-      const card = fixture.nativeElement.querySelector('[data-testid="transcription-storage"]');
-      expect(card.textContent).toContain('Recordings use 1.5 GB');
-      expect(card.textContent).toContain('2 recordings');
-    });
-
-    it('says "1 recording" for one', () => {
-      svc.recordings.set([{ size_bytes: 1 } as TranscriptSummary]);
-      expect(component.recordingsCount()).toBe('1 recording');
-    });
+  it('leaves the recordings and their disk use to the recordings view', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(svc.refreshRecordings).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-testid="transcription-storage"]')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('Recordings use');
   });
 });
