@@ -1,4 +1,4 @@
-name: lane-desktop-windows-check
+name: lane-test-windows
 
 on:
   workflow_call:
@@ -7,9 +7,9 @@ permissions:
   contents: read
 
 jobs:
-  desktop-windows-check:
+  test-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CARGO_TARGET_DIR: D:\st
     defaults:
@@ -26,6 +26,27 @@ jobs:
             . -> target
             desktop/src-tauri -> target
           rust-cache-directories: D:\st
+
+      - name: cargo test (full suite incl. test-support)
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-version --features speedwave-runtime/test-support,speedwave-version/cli
+
+      - name: Verify .gitattributes survives core.autocrlf=true checkout
+        env:
+          REPO_PATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/recheck"
+          rm -rf "$tmp"
+          git -c core.autocrlf=true clone "$REPO_PATH" "$tmp"
+          cd "$tmp"
+          fail=0
+          while IFS= read -r -d '' f; do
+            if ! cmp -s <(tr -d "$(printf '\r')" < "$f") "$f"; then
+              echo "::error file=$f::CRLF detected after autocrlf=true checkout — .gitattributes regression"
+              fail=1
+            fi
+          done < <(find containers -type f -name '*.sh' -print0)
+          exit "$fail"
 
       - name: Install Vulkan SDK
         shell: pwsh
