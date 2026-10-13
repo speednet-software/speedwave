@@ -1405,6 +1405,7 @@ where
 
 /// Shared `force_remove_project_containers` (the `rm` closure removes a batch;
 /// Lima wraps with retry). Works around the nerdctl ghost-name-store bug; best-effort.
+#[cfg(target_os = "macos")]
 pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
     runner: &dyn CommandRunner,
     cmd: &str,

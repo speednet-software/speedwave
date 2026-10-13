@@ -136,6 +136,7 @@ pub fn container_uid_gid() -> (u32, u32) {
         .unwrap_or((1000, 1000))
 }
 
+/// `automount` options for `/etc/wsl.conf`, mapping `/mnt/c` files to the container uid and gid.
 #[cfg(target_os = "windows")]
 pub fn wsl_automount_options() -> String {
     let (uid, gid) = container_uid_gid();
