@@ -147,7 +147,7 @@ mod tests {
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("skipping: attach_to_kill_on_close_job returned None (likely a non-breakaway parent job)");
+                log::warn!("skipping: attach_to_kill_on_close_job returned None (likely a non-breakaway parent job)");
                 return;
             }
         };

@@ -49,9 +49,12 @@ pub fn vm_path_join(vm_root: &str, child: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "test-only module: unwraps assert setup succeeded"
+#[cfg_attr(
+    not(target_os = "windows"),
+    expect(
+        clippy::unwrap_used,
+        reason = "test-only module: unwraps assert setup succeeded"
+    )
 )]
 mod tests {
     use super::*;
