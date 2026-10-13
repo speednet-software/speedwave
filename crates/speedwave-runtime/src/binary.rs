@@ -936,7 +936,7 @@ pub(crate) mod tests {
     #[serial_test::serial(system_root)]
     fn wait_with_output_timeout_kills_and_errors_on_expiry() {
         let child = if cfg!(windows) {
-            std::process::Command::new("ping")
+            system_command("ping")
                 .args(["-n", "30", "127.0.0.1"])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -952,7 +952,6 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(unix)]
-    #[serial_test::serial(system_root)]
     fn wait_with_output_timeout_returns_once_the_child_exits_while_a_grandchild_holds_the_pipes() {
         let child = spawn_shell("sleep 30 & exit 0");
         let start = std::time::Instant::now();

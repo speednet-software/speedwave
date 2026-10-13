@@ -2926,9 +2926,9 @@ fn test_stdin_pipe() -> (
     .encode_utf16()
     .chain(std::iter::once(0))
     .collect();
-    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives both calls; null security attributes and template handle are accepted by the API.
-    let (read, write) = unsafe {
-        let read = CreateNamedPipeW(
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; null security attributes are accepted by the API.
+    let read = unsafe {
+        CreateNamedPipeW(
             name.as_ptr(),
             PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
@@ -2937,9 +2937,14 @@ fn test_stdin_pipe() -> (
             4096,
             0,
             std::ptr::null(),
-        );
-        assert_ne!(read, INVALID_HANDLE_VALUE, "create test stdin pipe");
-        let write = CreateFileW(
+        )
+    };
+    assert_ne!(read, INVALID_HANDLE_VALUE, "create test stdin pipe");
+    // SAFETY: `read` was just created, is valid and is owned by nobody else.
+    let reader = unsafe { OwnedHandle::from_raw_handle(read) };
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; null security attributes and template handle are accepted by the API.
+    let write = unsafe {
+        CreateFileW(
             name.as_ptr(),
             GENERIC_WRITE,
             0,
@@ -2947,17 +2952,11 @@ fn test_stdin_pipe() -> (
             OPEN_EXISTING,
             FILE_FLAG_OVERLAPPED,
             std::ptr::null_mut(),
-        );
-        assert_ne!(write, INVALID_HANDLE_VALUE, "open test stdin pipe writer");
-        (read, write)
-    };
-    // SAFETY: both handles were just created, are valid and are owned by nobody else.
-    let (reader, writer) = unsafe {
-        (
-            OwnedHandle::from_raw_handle(read),
-            OwnedHandle::from_raw_handle(write),
         )
     };
+    assert_ne!(write, INVALID_HANDLE_VALUE, "open test stdin pipe writer");
+    // SAFETY: `write` was just created, is valid and is owned by nobody else.
+    let writer = unsafe { OwnedHandle::from_raw_handle(write) };
     (
         std::fs::File::from(reader),
         std::process::ChildStdin::from(writer),

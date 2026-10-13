@@ -455,6 +455,13 @@ mod tests {
 
     /// Returns a PID that is alive and different from `std::process::id()`.
     /// Unix: parent PID. Windows: spawns a long-running ping.
+    #[cfg_attr(
+        windows,
+        expect(
+            clippy::expect_used,
+            reason = "test helper: failing to spawn the external process aborts the test"
+        )
+    )]
     fn external_alive_pid() -> (u32, Option<std::process::Child>) {
         #[cfg(unix)]
         {
@@ -468,7 +475,7 @@ mod tests {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
-                .unwrap();
+                .expect("failed to spawn external process for test");
             (child.id(), Some(child))
         }
     }
