@@ -21,7 +21,7 @@ import type {
 } from '../../models/transcript';
 import { RECORD_SHORTCUT_HINT, recordingName } from '../recording-format';
 
-/** Tooltip on "Transcribe later" next to the still-transcribing note. */
+/** Tooltip on "Transcribe later" next to the transcription status. */
 const POSTPONE_TOOLTIP =
   'Stops these transcriptions so they do not slow this computer down during your next meeting. Open a recording and press Transcribe when you are ready.';
 /** Tooltip on Record. */
@@ -60,7 +60,7 @@ function micName(label: string): string {
 /**
  * Record (view header, idle): the Record button with its shortcut, a chooser showing the language
  * and source the next recording uses (remembered from the last one) that opens their pickers, and
- * a line saying a recording can start while an earlier one is still being transcribed. Emits
+ * a muted status of the transcriptions still running, with Transcribe later. Emits
  * `started`; errors go to the parent banner. ⌘⇧R / Ctrl+Shift+R starts.
  */
 @Component({
@@ -170,11 +170,11 @@ function micName(label: string): string {
         }
       </div>
 
-      @if (stillTranscribing(); as note) {
+      @if (transcribingNote(); as note) {
         <p
-          class="flex items-center gap-1.5 text-[12px] text-amber-300"
+          class="flex items-center gap-1.5 text-[12px] text-[var(--ink-mute)]"
           role="status"
-          data-testid="can-record-note"
+          data-testid="transcribing-note"
         >
           {{ note }}
           <button
@@ -264,18 +264,15 @@ export class RecordingControlsComponent implements OnInit {
     return kind ? `${lang} · ${SOURCE_SHORT_LABEL[kind]}` : lang;
   });
 
-  /**
-   * The answer to "can I record now?" while earlier recordings are still transcribed: yes, and
-   * which one is still running.
-   */
-  readonly stillTranscribing = computed(() => {
+  /** What is still being transcribed: one recording with its progress, or how many ('' when none). */
+  readonly transcribingNote = computed(() => {
     const busy = this.transcription.transcribing();
-    if (busy.length === 0) return '';
-    const what =
-      busy.length === 1
-        ? `"${recordingName(busy[0])}" is still being transcribed.`
-        : `${busy.length} recordings are still being transcribed.`;
-    return `${what} You can start recording now.`;
+    if (busy.length > 1) return `Transcribing ${busy.length} recordings`;
+    const [rec] = busy;
+    if (!rec || rec.status.state !== 'finalizing') return '';
+    return rec.queued
+      ? `Waiting to transcribe ${recordingName(rec)}`
+      : `Transcribing ${recordingName(rec)} · ${Math.round(rec.status.progress * 100)}%`;
   });
 
   /** Whether Record can be pressed now. */

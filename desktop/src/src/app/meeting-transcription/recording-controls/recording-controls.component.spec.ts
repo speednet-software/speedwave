@@ -401,21 +401,27 @@ describe('RecordingControlsComponent', () => {
       queued: false,
     });
 
-    it('says a recording can start while an earlier one is still transcribed', async () => {
+    it('shows a running transcription as a muted status and keeps Record enabled', async () => {
       svc.transcribing.set([busy('a', 'Daily Speednet')]);
       await component.ngOnInit();
       fixture.detectChanges();
-      const note = fixture.nativeElement.querySelector('[data-testid="can-record-note"]');
-      expect(note.textContent).toContain('"Daily Speednet" is still being transcribed.');
-      expect(note.textContent).toContain('You can start recording now.');
+      const note: HTMLElement = fixture.nativeElement.querySelector(
+        '[data-testid="transcribing-note"]'
+      );
+      expect(note.textContent).toContain('Transcribing Daily Speednet · 40%');
+      expect(note.textContent).not.toContain('"');
+      expect(note.className).toContain('text-[var(--ink-mute)]');
+      expect(note.className).not.toContain('amber');
       expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
     });
 
-    it('counts several recordings in transcription, and says nothing when none is', async () => {
+    it('says a lone queued transcription waits, counts several, and says nothing for none', async () => {
       await component.ngOnInit();
-      expect(component.stillTranscribing()).toBe('');
+      expect(component.transcribingNote()).toBe('');
+      svc.transcribing.set([{ ...busy('a', 'Retro'), queued: true }]);
+      expect(component.transcribingNote()).toBe('Waiting to transcribe Retro');
       svc.transcribing.set([busy('a', null), busy('b', null)]);
-      expect(component.stillTranscribing()).toContain('2 recordings are still being transcribed.');
+      expect(component.transcribingNote()).toBe('Transcribing 2 recordings');
     });
 
     it('puts every running or queued transcription off from the note', async () => {
