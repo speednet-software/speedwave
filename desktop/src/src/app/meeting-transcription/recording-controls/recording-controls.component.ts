@@ -404,18 +404,24 @@ export class RecordingControlsComponent implements OnInit {
     if (this.canStart()) void this.start();
   }
 
-  /** Puts off every transcription still running or queued, so the next meeting has the processor. */
+  /**
+   * Puts off every transcription still running or queued, so the next meeting has the processor.
+   * A refusal for a recording that finished meanwhile is no error; any other names its recording.
+   */
   async postponeAll(): Promise<void> {
     this.postponing.set(true);
-    const results = await Promise.allSettled(
-      this.transcription.transcribing().map((r) => this.transcription.postpone(r.id))
-    );
+    const busy = this.transcription.transcribing();
+    const results = await Promise.allSettled(busy.map((r) => this.transcription.postpone(r.id)));
     this.postponing.set(false);
-    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-    if (failed) {
-      const e: unknown = failed.reason;
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    }
+    const stillBusy = new Set(this.transcription.transcribing().map((r) => r.id));
+    const failed = busy.filter((r, i) => results[i].status === 'rejected' && stillBusy.has(r.id));
+    if (failed.length === 0) return;
+    const first = results[busy.indexOf(failed[0])] as PromiseRejectedResult;
+    const reason: unknown = first.reason;
+    const names = failed.map((r) => `"${recordingName(r)}"`).join(', ');
+    this.errorOccurred.emit(
+      `Could not put off ${names}: ${reason instanceof Error ? reason.message : String(reason)}`
+    );
   }
 
   /** Starts recording the chosen source in the chosen language. */

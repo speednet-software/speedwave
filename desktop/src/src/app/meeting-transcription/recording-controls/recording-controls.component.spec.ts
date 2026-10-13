@@ -398,6 +398,7 @@ describe('RecordingControlsComponent', () => {
       preview: null,
       size_bytes: 1,
       finalize_model: 'large',
+      finalize_model_label: null,
       queued: false,
     });
 
@@ -430,15 +431,28 @@ describe('RecordingControlsComponent', () => {
       expect(component.postponing()).toBe(false);
     });
 
-    it('still puts the rest off when one refuses, and reports the refusal', async () => {
-      svc.postpone.mockRejectedValueOnce(new Error('already done'));
+    it('still puts the rest off when one refuses, and names the recording it could not', async () => {
+      svc.postpone.mockRejectedValueOnce(new Error('disk full'));
       const errSpy = vi.fn();
       component.errorOccurred.subscribe(errSpy);
-      svc.transcribing.set([busy('a', null), busy('b', null)]);
+      svc.transcribing.set([busy('a', 'Daily'), busy('b', null)]);
       await component.postponeAll();
       expect(svc.postpone).toHaveBeenCalledTimes(2);
-      expect(errSpy).toHaveBeenCalledWith('already done');
+      expect(errSpy).toHaveBeenCalledWith('Could not put off "Daily": disk full');
       expect(component.postponing()).toBe(false);
+    });
+
+    it('says nothing when the refused recording finished transcribing meanwhile', async () => {
+      svc.postpone.mockImplementationOnce(async () => {
+        svc.transcribing.set([busy('b', null)]);
+        throw new Error('only a recording that is being transcribed can be put off');
+      });
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      svc.transcribing.set([busy('a', 'Daily'), busy('b', null)]);
+      await component.postponeAll();
+      expect(svc.postpone).toHaveBeenCalledTimes(2);
+      expect(errSpy).not.toHaveBeenCalled();
     });
   });
 

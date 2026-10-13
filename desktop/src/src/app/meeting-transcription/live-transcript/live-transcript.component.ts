@@ -20,12 +20,12 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import { IconComponent } from '../../shared/icon.component';
 import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
 import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
-import type { Segment, TranscriptSession } from '../../models/transcript';
+import type { Segment, TranscriptSession, TranscriptStatus } from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 import {
   formatDuration,
   formatRecordingDate,
-  modelLabel,
+  STATE_LABEL,
   recordingName,
   transcriptQuality,
 } from '../recording-format';
@@ -103,9 +103,8 @@ interface ProgressAnchor {
 /**
  * Transcript pane (right): the open recording's name (renamable), how and with which model its
  * transcript was made, the progress with a time estimate and Later (puts the transcription off),
- * one row of actions (attach to a chat,
- * Copy, Export, and a menu with Transcribe again, Show audio file, Continue recording and Delete),
- * and the transcript itself. Errors go to the parent.
+ * one row of actions (attach to a chat, Copy, Export, and a menu with Transcribe again, Show audio
+ * file, Continue recording and Delete), and the transcript itself. Errors go to the parent.
  */
 @Component({
   selector: 'app-live-transcript',
@@ -558,7 +557,9 @@ export class LiveTranscriptComponent {
   });
 
   /** Lifecycle state of the active session ('' if none). */
-  readonly status = computed(() => this.session()?.status.state ?? '');
+  readonly status = computed<TranscriptStatus['state'] | ''>(
+    () => this.session()?.status.state ?? ''
+  );
 
   /** The open recording's list row (duration, size), once the list has it. */
   private readonly summary = computed(() => {
@@ -587,12 +588,11 @@ export class LiveTranscriptComponent {
   readonly meta = computed(() => {
     const s = this.session();
     if (!s) return '';
-    const model = this.finalizeModel();
     const parts = [
       s.title ? formatRecordingDate(s.created_at) : '',
       formatDuration(this.summary()?.duration_secs ?? 0),
       s.audio_source.label,
-      this.status() === 'done' && model ? modelLabel(model) : '',
+      this.status() === 'done' ? (this.summary()?.finalize_model_label ?? '') : '',
     ];
     return parts.filter(Boolean).join(' · ');
   });
@@ -610,9 +610,9 @@ export class LiveTranscriptComponent {
     const amber = 'text-amber-300';
     switch (this.status()) {
       case 'recording':
-        return { text: 'Recording', cls: 'text-red-300' };
+        return { text: STATE_LABEL.recording, cls: 'text-red-300' };
       case 'paused':
-        return { text: 'Paused', cls: amber };
+        return { text: STATE_LABEL.paused, cls: amber };
       case 'finalizing':
         if (this.summary()?.queued) {
           return { text: 'Waiting for another transcription to finish', cls: amber };
@@ -630,9 +630,9 @@ export class LiveTranscriptComponent {
           ? { text: 'Made with the smaller model', cls: amber }
           : null;
       case 'postponed':
-        return { text: 'Not transcribed yet', cls: 'text-[var(--ink-dim)]' };
+        return { text: STATE_LABEL.postponed, cls: 'text-[var(--ink-dim)]' };
       case 'failed':
-        return { text: 'Not transcribed', cls: 'text-red-300' };
+        return { text: STATE_LABEL.failed, cls: 'text-red-300' };
       default:
         return null;
     }
@@ -883,17 +883,10 @@ export class LiveTranscriptComponent {
 
   /** Deletes the open recording (audio and transcript) after its confirmation. */
   async remove(): Promise<void> {
-    const s = this.session();
-    if (!s) return;
-    this.working.set(true);
-    try {
-      await this.transcription.delete(s.id);
+    await this.runWorking(async (id) => {
+      await this.transcription.delete(id);
       this.confirmingDelete.set(false);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.working.set(false);
-    }
+    });
   }
 
   /** Records a new part onto the open finished recording. */
@@ -967,45 +960,18 @@ export class LiveTranscriptComponent {
 
   /** Puts the running or queued transcription off; the audio waits for Transcribe. */
   async postpone(): Promise<void> {
-    const s = this.session();
-    if (!s) return;
-    this.working.set(true);
-    try {
-      await this.transcription.postpone(s.id);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.working.set(false);
-    }
+    await this.runWorking((id) => this.transcription.postpone(id));
   }
 
   /** Runs the transcription over the recording's audio (failed, put off, or finished). */
   async transcribe(): Promise<void> {
-    const s = this.session();
     this.closeMenus();
-    if (!s) return;
-    this.working.set(true);
-    try {
-      await this.transcription.transcribe(s.id);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.working.set(false);
-    }
+    await this.runWorking((id) => this.transcription.transcribe(id));
   }
 
   /** Saves the transcript as Markdown where the user picks. */
   async exportMarkdown(): Promise<void> {
-    const s = this.session();
-    if (!s) return;
-    this.working.set(true);
-    try {
-      await this.transcription.exportMarkdown(s.id);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.working.set(false);
-    }
+    await this.runWorking((id) => this.transcription.exportMarkdown(id));
   }
 
   /** Copies the Markdown transcript to the clipboard. */
@@ -1056,6 +1022,24 @@ export class LiveTranscriptComponent {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.sending.set(false);
+  }
+
+  /**
+   * Runs one backend action on the open recording with `working` set, sending a failure to the
+   * parent banner.
+   * @param action - the call to make with the open recording's id.
+   */
+  private async runWorking(action: (id: string) => Promise<unknown>): Promise<void> {
+    const s = this.session();
+    if (!s) return;
+    this.working.set(true);
+    try {
+      await action(s.id);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.working.set(false);
+    }
   }
 
   /** "Transcribing 45 min of audio" when the model of the pass is not known. */

@@ -37,6 +37,7 @@ function row(overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
     preview: null,
     size_bytes: 12 * 1024 * 1024,
     finalize_model: 'large',
+    finalize_model_label: null,
     queued: false,
     ...overrides,
   };
@@ -708,6 +709,7 @@ describe('LiveTranscriptComponent', () => {
           status: { state: 'finalizing', progress: 0.1 },
           duration_secs: 45 * 60,
           finalize_model: null,
+          finalize_model_label: null,
         }),
       ]);
       fixture.componentRef.setInput(
@@ -911,7 +913,7 @@ describe('LiveTranscriptComponent', () => {
   describe('transcript quality', () => {
     it('names the model of a good transcript in the meta line and adds no label', () => {
       svc.highQualityModel.set({ ...best(), key: 'large-v3' });
-      svc.recordings.set([row({ finalize_model: 'large-v3' })]);
+      svc.recordings.set([row({ finalize_model: 'large-v3', finalize_model_label: 'Large v3' })]);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })

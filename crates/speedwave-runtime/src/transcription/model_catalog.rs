@@ -54,6 +54,8 @@ pub struct WhisperModelInfo {
     pub file: &'static str,
     /// Human-readable label for the UI (e.g. `"Small (multilingual)"`).
     pub display_name: &'static str,
+    /// Bare model name for one-line UI text, such as a recording's meta line (`"Large v3 Turbo"`).
+    pub short_name: &'static str,
     /// Approximate download size in bytes (from the HF API; the SHA256 check
     /// is authoritative — this is for "do I have room?" UI).
     pub approx_bytes: u64,
@@ -89,6 +91,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "small",
         file: "ggml-small.bin",
         display_name: "Small (multilingual) — fast, OK for live",
+        short_name: "Small",
         approx_bytes: 487_601_967,
         sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
         role: ModelRole::CpuLive,
@@ -100,6 +103,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "small-q5_1",
         file: "ggml-small-q5_1.bin",
         display_name: "Small (quantised) — smallest live-capable",
+        short_name: "Small (quantised)",
         approx_bytes: 190_085_487,
         sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
         role: ModelRole::CpuLive,
@@ -111,6 +115,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "medium",
         file: "ggml-medium.bin",
         display_name: "Medium (multilingual) — better Polish",
+        short_name: "Medium",
         approx_bytes: 1_533_774_781,
         sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
         role: ModelRole::Mid,
@@ -122,6 +127,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "medium-q5_0",
         file: "ggml-medium-q5_0.bin",
         display_name: "Medium (quantised)",
+        short_name: "Medium (quantised)",
         approx_bytes: 539_212_467,
         sha256: "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",
         role: ModelRole::Mid,
@@ -133,6 +139,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "large-v3-turbo",
         file: "ggml-large-v3-turbo.bin",
         display_name: "Large v3 Turbo — live on GPU/Metal",
+        short_name: "Large v3 Turbo",
         approx_bytes: 1_624_555_275,
         sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         role: ModelRole::GpuLive,
@@ -144,6 +151,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "large-v3-turbo-q5_0",
         file: "ggml-large-v3-turbo-q5_0.bin",
         display_name: "Large v3 Turbo (quantised) — live on GPU/Metal, smaller",
+        short_name: "Large v3 Turbo (quantised)",
         approx_bytes: 574_041_195,
         sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         role: ModelRole::GpuLive,
@@ -155,6 +163,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "large-v3",
         file: "ggml-large-v3.bin",
         display_name: "Large v3 — best Polish (offline pass)",
+        short_name: "Large v3",
         approx_bytes: 3_094_623_691,
         sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
         role: ModelRole::Finalize,
@@ -166,6 +175,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "large-v3-q5_0",
         file: "ggml-large-v3-q5_0.bin",
         display_name: "Large v3 (quantised) — offline pass, smaller",
+        short_name: "Large v3 (quantised)",
         approx_bytes: 1_081_073_115,
         sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
         role: ModelRole::Finalize,
@@ -177,6 +187,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "base",
         file: "ggml-base.bin",
         display_name: "Base (multilingual) — smallest, low accuracy",
+        short_name: "Base",
         approx_bytes: 147_951_465,
         sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         role: ModelRole::SmallestUsable,
@@ -188,6 +199,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         key: "tiny",
         file: "ggml-tiny.bin",
         display_name: "Tiny — dev/test only",
+        short_name: "Tiny",
         approx_bytes: 77_691_713,
         sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         role: ModelRole::DevTest,
@@ -281,6 +293,11 @@ mod tests {
             assert!(
                 !m.display_name.is_empty(),
                 "Whisper {} display_name empty",
+                m.key
+            );
+            assert!(
+                !m.short_name.is_empty() && m.display_name.starts_with(m.short_name),
+                "Whisper {} short_name must start its display_name",
                 m.key
             );
             assert!(!m.license.is_empty(), "Whisper {} license empty", m.key);

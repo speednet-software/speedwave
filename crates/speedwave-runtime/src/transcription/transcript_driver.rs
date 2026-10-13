@@ -121,7 +121,7 @@ pub enum DriverError {
     #[error("transcript session was deleted")]
     Deleted,
     /// The user put the offline pass off, or a newer pass replaced it.
-    #[error("the offline pass was put off")]
+    #[error("the offline pass was put off or replaced")]
     Superseded,
 }
 
@@ -861,7 +861,8 @@ const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
 /// Runs the offline pass: load the recorded WAV, transcribe with the higher-quality model,
 /// install `final_segments`, mark `Done`. On failure flips to `Failed`; live transcript untouched.
-/// Once `pass` is cancelled it writes nothing more and returns [`DriverError::Superseded`].
+/// Once `pass` is cancelled it writes nothing more and returns [`DriverError::Superseded`], or
+/// [`DriverError::Deleted`] when a delete cancelled it.
 pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,
@@ -873,18 +874,12 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     } = cfg;
     transcribe_opts.cancel = Some(pass.decode_cancel());
 
-    let ended = |e: StoreError| -> Option<DriverError> {
-        match e {
-            StoreError::NotFound(_) => Some(DriverError::Deleted),
-            StoreError::PassEnded(_) => Some(DriverError::Superseded),
-            _ => None,
-        }
-    };
     let fail = |store: &TranscriptStore, reason: String| -> DriverError {
-        match store.fail_pass(id, &pass, reason.clone()) {
-            Err(e) => ended(e).unwrap_or(DriverError::Transcribe(reason)),
-            Ok(_) => DriverError::Transcribe(reason),
-        }
+        store
+            .fail_pass(id, &pass, reason.clone())
+            .err()
+            .and_then(|e| pass_stopped(&e))
+            .unwrap_or(DriverError::Transcribe(reason))
     };
     if let Err(StoreError::NotFound(_)) = store.get(id) {
         return Err(DriverError::Deleted);
@@ -959,7 +954,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     }
 
     let report = |progress: f32| match store.finalize_progress(id, &pass, progress) {
-        Err(e) => ended(e).map_or(Ok(()), Err),
+        Err(e) => pass_stopped(&e).map_or(Ok(()), Err),
         Ok(_) => Ok(()),
     };
     report(0.05)?;
@@ -1004,8 +999,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                 Err(e @ (DriverError::Deleted | DriverError::Superseded)) => return Err(e),
                 Err(_) if pass.cancelled() => {
                     return Err(match store.get(id) {
-                        Err(StoreError::NotFound(_)) => DriverError::Deleted,
-                        _ => DriverError::Superseded,
+                        Err(e) => pass_stopped(&e).unwrap_or(DriverError::Superseded),
+                        Ok(_) => DriverError::Superseded,
                     })
                 }
                 Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
@@ -1029,15 +1024,24 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     report(0.9)?;
 
     if let Err(e) = store.set_final_segments(id, &pass, final_segs) {
-        let reason = format!("install final segments: {e}");
-        return Err(ended(e).unwrap_or_else(|| fail(&store, reason)));
+        return Err(pass_stopped(&e)
+            .unwrap_or_else(|| fail(&store, format!("install final segments: {e}"))));
     }
 
-    store.finish(id, &pass).map_err(|e| {
-        let reason = e.to_string();
-        ended(e).unwrap_or(DriverError::Store(reason))
-    })?;
+    store
+        .finish(id, &pass)
+        .map_err(|e| pass_stopped(&e).unwrap_or_else(|| DriverError::Store(e.to_string())))?;
     Ok(())
+}
+
+/// How a refused offline-pass write ends the pass: `Deleted` for a deleted session, `Superseded`
+/// for a claim that was put off or replaced; `None` for a real store failure.
+fn pass_stopped(e: &StoreError) -> Option<DriverError> {
+    match e {
+        StoreError::NotFound(_) => Some(DriverError::Deleted),
+        StoreError::PassEnded(_) => Some(DriverError::Superseded),
+        _ => None,
+    }
 }
 
 /// Transcribes `pcm` in `FINALIZE_WINDOW_SECS` windows with `FINALIZE_WINDOW_OVERLAP_SECS`
@@ -1176,25 +1180,12 @@ impl WavWriter {
 )]
 mod tests {
     use super::*;
-    use crate::transcription::transcriber::DecodeCancel;
-    use crate::transcription::transcript::TranscriptSession;
-
-    /// Moves the session to `Finalizing` when it is elsewhere and claims it for an offline pass.
-    fn pass_for(store: &TranscriptStore, id: Uuid) -> OfflinePass {
-        if !matches!(
-            store.get(id).unwrap().status,
-            TranscriptStatus::Finalizing { .. }
-        ) {
-            store
-                .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
-                .unwrap();
-        }
-        store.begin_offline_pass(id).unwrap()
-    }
     use crate::transcription::audio::{
         AudioCapture, AudioSource, AudioSourceInfo, CaptureError, FileAudioCapture,
     };
+    use crate::transcription::transcriber::DecodeCancel;
     use crate::transcription::transcriber::{Language, MockTranscriber};
+    use crate::transcription::transcript::TranscriptSession;
     use std::path::PathBuf;
 
     fn mk_session(store: &TranscriptStore, audio_path: &Path) -> Uuid {
@@ -1844,7 +1835,7 @@ mod tests {
         let (_g2, part2) = make_fixture_wav(2.0);
         let mut sub = store.subscribe(id).unwrap();
         run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![part1, store_dir.path().join("never-recorded.wav"), part2],
@@ -1883,7 +1874,7 @@ mod tests {
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("a.wav"));
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![store_dir.path().join("missing.wav")],
@@ -1926,7 +1917,7 @@ mod tests {
         w.finalize().unwrap();
 
         run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -1984,7 +1975,7 @@ mod tests {
         let undecodable = make_24bit_wav(store_dir.path(), 2.0);
         let mut sub = store.subscribe(id).unwrap();
         run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![good, undecodable],
@@ -2028,7 +2019,7 @@ mod tests {
 
         let undecodable = make_24bit_wav(store_dir.path(), 2.0);
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![undecodable],
@@ -2682,7 +2673,7 @@ mod tests {
         let (id, wav) = seed_finalizing_session(&store, 12.0);
 
         run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2710,7 +2701,7 @@ mod tests {
         let _ = std::fs::remove_file(store.session_dir(id).join("audio.wav"));
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![store.session_dir(id).join("audio.wav")],
@@ -2732,7 +2723,7 @@ mod tests {
         std::fs::write(&wav, b"").unwrap();
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2758,7 +2749,7 @@ mod tests {
         std::fs::write(&wav, vec![0xAAu8; 200]).unwrap();
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2803,7 +2794,7 @@ mod tests {
         let (id, wav) = seed_finalizing_session(&store, 8.0);
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2853,7 +2844,7 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -2913,7 +2904,7 @@ mod tests {
         let (id, wav) = seed_finalizing_session(&store, 70.0);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cancel_seen = Arc::new(Mutex::new(None));
-        let pass = pass_for(&store, id);
+        let pass = store.claim_finalizing(id);
         let err = run_finalize(FinalizeConfig {
             pass: pass.clone(),
             id,
@@ -2965,7 +2956,7 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let (id, wav) = seed_finalizing_session(&store, 8.0);
-        let pass = pass_for(&store, id);
+        let pass = store.claim_finalizing(id);
         store.postpone(id).unwrap();
         let seq = store.get(id).unwrap().last_seq;
 
@@ -2985,27 +2976,41 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_pass_leaves_the_newer_pass_its_session() {
+    fn a_replaced_pass_writes_nothing_and_leaves_the_newer_pass_its_session() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
-        let (id, _wav) = seed_finalizing_session(&store, 8.0);
-        let old = pass_for(&store, id);
-        store.begin_offline_pass(id).unwrap();
+        let (id, wav) = seed_finalizing_session(&store, 8.0);
+        let old = store.claim_finalizing(id);
+        let new = store.begin_offline_pass(id).unwrap();
+        let seq = store.get(id).unwrap().last_seq;
 
         let err = run_finalize(FinalizeConfig {
             pass: old,
             id,
             store: store.clone(),
-            audio_paths: vec![store_dir.path().join("missing.wav")],
+            audio_paths: vec![wav],
             transcriber: Box::new(FailingTranscriber),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
         .unwrap_err();
         assert!(matches!(err, DriverError::Superseded), "got {err:?}");
+        assert_eq!(store.get(id).unwrap().last_seq, seq);
+        store.finish(id, &new).unwrap();
+    }
+
+    #[test]
+    fn a_refused_pass_write_ends_the_pass_quietly_and_a_store_fault_does_not() {
+        let id = Uuid::new_v4();
         assert!(matches!(
-            store.get(id).unwrap().status,
-            TranscriptStatus::Finalizing { .. }
+            pass_stopped(&StoreError::PassEnded(id)),
+            Some(DriverError::Superseded)
         ));
+        assert!(matches!(
+            pass_stopped(&StoreError::NotFound(id)),
+            Some(DriverError::Deleted)
+        ));
+        assert!(pass_stopped(&StoreError::InvalidState("x".to_string())).is_none());
+        assert!(pass_stopped(&StoreError::Io(std::io::Error::other("disk full"))).is_none());
     }
 
     #[test]
@@ -3015,7 +3020,7 @@ mod tests {
         let (id, wav) = seed_finalizing_session(&store, 8.0);
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],
@@ -3037,7 +3042,7 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let (id, wav) = seed_finalizing_session(&store, 8.0);
-        let pass = pass_for(&store, id);
+        let pass = store.claim_finalizing(id);
         store.delete(id).unwrap();
 
         let err = run_finalize(FinalizeConfig {
@@ -3078,7 +3083,7 @@ mod tests {
             .unwrap();
 
         let err = run_finalize(FinalizeConfig {
-            pass: pass_for(&store, id),
+            pass: store.claim_finalizing(id),
             id,
             store: store.clone(),
             audio_paths: vec![wav],

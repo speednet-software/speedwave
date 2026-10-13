@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use speedwave_runtime::transcription::{
     self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, DriverError,
-    FinalizeConfig, Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions,
-    TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore,
-    TranscriptSummary, WhisperCppTranscriber,
+    FinalizeConfig, Language, ModelStatusEntry, ModelStore, StopSignal, StoreError,
+    TranscribeOptions, TranscriptDriver, TranscriptEvent, TranscriptSession, TranscriptStatus,
+    TranscriptStore, TranscriptSummary, WhisperCppTranscriber,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
@@ -405,7 +405,9 @@ pub async fn stop_transcription(
     if let Some(stop) = stop_handle.as_ref() {
         stop.stop();
     } else {
-        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .map_err(|e| e.to_string())?;
     }
 
     if let Some(stop) = stop_handle {
@@ -425,7 +427,8 @@ pub async fn stop_transcription(
 
 /// Runs the offline pass again over a session's recorded parts: a failed one (an interrupted
 /// recording, or a model missing at Stop), a finished one made with a smaller model, or one the
-/// user put off. The session goes back to `Finalizing` and ends `Done` or `Failed`.
+/// user put off. The session goes back to `Finalizing` and ends `Done`, `Failed`, or `Postponed`
+/// when it is put off again.
 #[tauri::command]
 pub async fn transcribe_transcript(
     session_id: String,
@@ -484,8 +487,9 @@ fn take_offline_pass_turn(store: &TranscriptStore, id: Uuid) -> std::sync::Mutex
 }
 
 /// Loads the offline-pass model and transcribes `audio_paths` on a blocking task, one pass at a
-/// time; every failure lands on the session as `Failed`, so the UI always learns how it ended. A
-/// pass whose session was put off while it waited for its turn ends without touching it.
+/// time; every failure lands on the session as `Failed`, so the UI always learns how it ended. It
+/// first waits for a capture driver still winding down after Stop, and a pass whose recording was
+/// put off or deleted meanwhile ends without touching it.
 fn spawn_offline_pass(
     store_arc: TranscriptStoreHandle,
     models_arc: ModelStoreHandle,
@@ -493,17 +497,31 @@ fn spawn_offline_pass(
     audio_paths: Vec<std::path::PathBuf>,
 ) {
     tokio::task::spawn_blocking(move || {
+        match store_arc.wait_while_recording(id) {
+            Ok(TranscriptStatus::Finalizing { .. }) => {}
+            Ok(status) => {
+                log::info!(
+                    "offline pass for {} not started: the recording ended as {status:?}",
+                    short_id(id)
+                );
+                return;
+            }
+            Err(e) => {
+                log_pass_store_error(id, "not started", &e);
+                return;
+            }
+        }
         let _turn = take_offline_pass_turn(&store_arc, id);
         let pass = match store_arc.begin_offline_pass(id) {
             Ok(pass) => pass,
             Err(e) => {
-                log::info!("offline pass for {} not started: {e}", short_id(id));
+                log_pass_store_error(id, "not started", &e);
                 return;
             }
         };
         let fail = |reason: String| {
             if let Err(e) = store_arc.fail_pass(id, &pass, reason) {
-                log::info!("offline pass for {} ended: {e}", short_id(id));
+                log_pass_store_error(id, "could not record its failure", &e);
             }
         };
         let offline_key = pick_offline_model(&models_arc);
@@ -511,8 +529,11 @@ fn spawn_offline_pass(
             fail("no Whisper model available for the offline pass".to_string());
             return;
         };
-        if let Err(e) = store_arc.set_finalize_model(id, &key) {
-            log::warn!("cannot record the offline model of {}: {e}", short_id(id));
+        if let Err(e) = store_arc.set_finalize_model(id, &pass, &key) {
+            log_pass_store_error(id, "stopped before loading its model", &e);
+            if pass.cancelled() {
+                return;
+            }
         }
         let path = match models_arc.ensure_model(&key, &mut |_| {}) {
             Ok(p) => p,
@@ -521,6 +542,13 @@ fn spawn_offline_pass(
                 return;
             }
         };
+        if pass.cancelled() {
+            log::info!(
+                "offline pass for {} stopped before loading its model: put off or replaced",
+                short_id(id)
+            );
+            return;
+        }
         let transcriber =
             match WhisperCppTranscriber::load(&path, key.clone(), transcription::gpu_class()) {
                 Ok(mut t) => {
@@ -549,11 +577,25 @@ fn spawn_offline_pass(
                 );
             }
             Err(DriverError::Superseded) => {
-                log::info!("offline finalize for {} stopped: put off", short_id(id));
+                log::info!(
+                    "offline finalize for {} stopped: put off or replaced",
+                    short_id(id)
+                );
             }
             Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }
     });
+}
+
+/// Logs a store refusal of an offline pass: a recording the user put off, replaced or deleted is
+/// expected and logged at info; any other store failure is a fault and logged at warn.
+fn log_pass_store_error(id: Uuid, what: &str, e: &StoreError) {
+    match e {
+        StoreError::PassEnded(_) | StoreError::InvalidState(_) | StoreError::NotFound(_) => {
+            log::info!("offline pass for {} {what}: {e}", short_id(id));
+        }
+        _ => log::warn!("offline pass for {} {what}: {e}", short_id(id)),
+    }
 }
 
 /// Resolves every recorded part for the offline pass (resumed sessions have several); a store
@@ -1524,13 +1566,37 @@ mod tests {
         let claim = body
             .find("begin_offline_pass")
             .expect("the pass must claim its session");
-        assert!(claim > body.find("take_offline_pass_turn").expect("turn"));
+        let turn = body.find("take_offline_pass_turn").expect("turn");
+        assert!(
+            body.find("wait_while_recording")
+                .expect("driver wind-down wait")
+                < turn,
+            "the pass must wait for a driver still winding down after Stop, outside the turn"
+        );
+        assert!(claim > turn);
         assert!(claim < body.find("pick_offline_model").expect("model pick"));
+        assert!(
+            body.contains("set_finalize_model(id, &pass,"),
+            "recording the model is a pass write"
+        );
+        assert!(
+            body.find("pass.cancelled()").expect("cancel check")
+                < body
+                    .find("WhisperCppTranscriber::load")
+                    .expect("model load"),
+            "a put-off pass must not load the model"
+        );
         assert!(
             !body.contains("set_status("),
             "a put-off pass must never overwrite the session's status"
         );
         assert_eq!(count_calls(body, "fail_pass"), 1);
+    }
+
+    #[test]
+    fn stop_reports_a_session_it_cannot_hand_to_the_offline_pass() {
+        let src = include_str!("transcription_cmd.rs");
+        assert!(!fn_body(src, "stop_transcription").contains("let _ = store.set_status"));
     }
 
     #[test]

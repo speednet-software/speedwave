@@ -125,6 +125,14 @@ export function formatStartTime(createdAt: string): string {
   return Number.isNaN(at.getTime()) ? '' : TIME.format(at);
 }
 
+/** The words for a recording's state, shared by the list chip and the open recording's pane. */
+export const STATE_LABEL = {
+  recording: 'Recording',
+  paused: 'Paused',
+  postponed: 'Not transcribed yet',
+  failed: 'Not transcribed',
+} as const satisfies Partial<Record<TranscriptStatus['state'], string>>;
+
 /**
  * The list chip of a recording, only for a state worth a look: recording, paused, transcribing or
  * queued, put off, failed, or made with the smaller model. A good finished transcript gets none.
@@ -141,10 +149,10 @@ export function statusChip(
   const status = rec.status;
   switch (status.state) {
     case 'recording':
-      return { label: 'Recording', tooltip: 'Capture in progress.', tone: 'live' };
+      return { label: STATE_LABEL.recording, tooltip: 'Capture in progress.', tone: 'live' };
     case 'paused':
       return {
-        label: 'Paused',
+        label: STATE_LABEL.paused,
         tooltip: 'Nothing is being recorded. Resume or stop it in the bar above.',
         tone: 'busy',
       };
@@ -171,26 +179,11 @@ export function statusChip(
         : null;
     case 'postponed':
       return {
-        label: 'Not transcribed yet',
+        label: STATE_LABEL.postponed,
         tooltip: 'Transcription was put off. Open the recording and press Transcribe.',
         tone: 'muted',
       };
     case 'failed':
-      return { label: 'Not transcribed', tooltip: status.reason, tone: 'error' };
+      return { label: STATE_LABEL.failed, tooltip: status.reason, tone: 'error' };
   }
-}
-
-/**
- * Short name of a Whisper model built from its catalog key ("large-v3" reads "Large v3"); a
- * quantised variant ("-q5_0") adds "(quantised)".
- * @param key - the model's catalog key.
- */
-export function modelLabel(key: string): string {
-  const words = key.split('-').filter(Boolean);
-  const quantised = words.some((w) => /^q\d/.test(w));
-  const name = words
-    .filter((w) => !/^q\d/.test(w))
-    .map((w) => (/^v\d/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
-    .join(' ');
-  return quantised ? `${name} (quantised)` : name;
 }

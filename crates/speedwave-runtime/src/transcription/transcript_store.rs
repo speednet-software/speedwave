@@ -142,10 +142,14 @@ pub enum StoreError {
 
 /// One offline pass's claim on its session. The store accepts the pass's writes only while the
 /// session still holds this claim; putting the pass off or starting another one cancels it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfflinePass(DecodeCancel);
 
 impl OfflinePass {
+    fn new() -> Self {
+        Self(DecodeCancel::default())
+    }
+
     /// Whether the pass was put off, replaced or its session deleted.
     pub fn cancelled(&self) -> bool {
         self.0.is_cancelled()
@@ -278,14 +282,18 @@ impl TranscriptStore {
         }
     }
 
-    /// Records the model the offline pass runs with, before it starts, so the UI can say which.
-    pub fn set_finalize_model(&self, id: Uuid, model: &str) -> Result<(), StoreError> {
-        self.with_session_batch(id, |s, _| {
+    /// Records the model `pass` runs with, before it starts, so the UI can say which.
+    pub fn set_finalize_model(
+        &self,
+        id: Uuid,
+        pass: &OfflinePass,
+        model: &str,
+    ) -> Result<(), StoreError> {
+        self.pass_write(id, pass, |s, _| {
             s.models_used.finalize = Some(model.to_string());
             Vec::new()
-        })?;
-        self.notify(id);
-        Ok(())
+        })
+        .map(|_| ())
     }
 
     /// Marks every session left `Recording` or `Finalizing` by an earlier run as failed with
@@ -362,10 +370,10 @@ impl TranscriptStore {
             MapEntry::Occupied(e) => {
                 let session = e.get().session.clone();
                 let mut locked = session.write();
+                remove_dir()?;
                 if let Some(pass) = locked.offline_pass.take() {
                     pass.cancel();
                 }
-                remove_dir()?;
                 e.remove();
             }
             MapEntry::Vacant(_) => remove_dir()?,
@@ -388,35 +396,33 @@ impl TranscriptStore {
     /// Moves a `Failed`, `Done` or `Postponed` session to `Finalizing` for another offline pass over
     /// its recorded parts, retiring its warnings; refuses any other state so two runs never overlap.
     pub fn begin_retranscribe(&self, id: Uuid) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        let mut allowed = false;
-        self.with_session_batch(id, |s, next_seq| {
-            if !matches!(
-                s.status,
-                TranscriptStatus::Failed { .. }
-                    | TranscriptStatus::Done
-                    | TranscriptStatus::Postponed
-            ) {
-                return Vec::new();
-            }
-            allowed = true;
-            let mut events = drain_capture_warnings(s, next_seq);
-            let status = TranscriptStatus::Finalizing { progress: 0.0 };
-            s.status = status.clone();
-            seq_out = next_seq + events.len() as u64;
-            events.push(TranscriptEvent::StatusChanged {
-                seq: seq_out,
-                status,
-            });
-            events
-        })?;
-        if !allowed {
-            return Err(StoreError::InvalidState(
-                "only a finished, failed or put-off recording can be transcribed again".to_string(),
-            ));
-        }
-        self.notify(id);
-        Ok(seq_out)
+        self.guarded_batch(
+            id,
+            |s| {
+                matches!(
+                    s.status,
+                    TranscriptStatus::Failed { .. }
+                        | TranscriptStatus::Done
+                        | TranscriptStatus::Postponed
+                )
+            },
+            || {
+                StoreError::InvalidState(
+                    "only a finished, failed or put-off recording can be transcribed again"
+                        .to_string(),
+                )
+            },
+            |s, next_seq| {
+                let mut events = drain_capture_warnings(s, next_seq);
+                let status = TranscriptStatus::Finalizing { progress: 0.0 };
+                s.status = status.clone();
+                events.push(TranscriptEvent::StatusChanged {
+                    seq: next_seq + events.len() as u64,
+                    status,
+                });
+                events
+            },
+        )
     }
 
     /// Claims a `Finalizing` session for a new offline pass, cancelling any earlier claim, so only
@@ -425,7 +431,7 @@ impl TranscriptStore {
         let mut claimed = None;
         self.with_session_inner(id, false, |s, _| {
             if matches!(s.status, TranscriptStatus::Finalizing { .. }) {
-                let pass = OfflinePass::default();
+                let pass = OfflinePass::new();
                 if let Some(old) = s.offline_pass.replace(pass.clone()) {
                     old.cancel();
                 }
@@ -433,37 +439,66 @@ impl TranscriptStore {
             }
             Vec::new()
         })?;
-        claimed.ok_or(StoreError::PassEnded(id))
+        claimed.ok_or_else(|| {
+            StoreError::InvalidState(
+                "the recording is no longer waiting for its transcription".to_string(),
+            )
+        })
+    }
+
+    /// Blocks until the session leaves `Recording`, as its capture driver winds down after Stop,
+    /// and returns the status it moved to. Call it from a blocking thread.
+    pub fn wait_while_recording(&self, id: Uuid) -> Result<TranscriptStatus, StoreError> {
+        let Subscription {
+            snapshot,
+            mut events,
+        } = self.subscribe(id)?;
+        if !matches!(snapshot.status, TranscriptStatus::Recording) {
+            return Ok(snapshot.status);
+        }
+        loop {
+            match events.blocking_recv() {
+                Ok(TranscriptEvent::StatusChanged { status, .. })
+                    if !matches!(status, TranscriptStatus::Recording) =>
+                {
+                    return Ok(status);
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let status = self.get(id)?.status;
+                    if !matches!(status, TranscriptStatus::Recording) {
+                        return Ok(status);
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return self.get(id).map(|s| s.status),
+            }
+        }
     }
 
     /// Puts off a running or queued offline pass ("Later"): cancels its claim, which also aborts
     /// the decode, and leaves the session `Postponed` until the user transcribes it.
     pub fn postpone(&self, id: Uuid) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        let mut allowed = false;
-        self.with_session_batch(id, |s, seq| {
-            if !matches!(s.status, TranscriptStatus::Finalizing { .. }) {
-                return Vec::new();
-            }
-            allowed = true;
-            if let Some(pass) = s.offline_pass.take() {
-                pass.cancel();
-            }
-            s.status = TranscriptStatus::Postponed;
-            seq_out = seq;
-            vec![TranscriptEvent::StatusChanged {
-                seq,
-                status: TranscriptStatus::Postponed,
-            }]
-        })?;
-        if !allowed {
-            return Err(StoreError::InvalidState(
-                "only a recording that is being transcribed can be put off".to_string(),
-            ));
-        }
-        self.queued.lock().remove(&id);
-        self.notify(id);
-        Ok(seq_out)
+        let seq = self.guarded_batch(
+            id,
+            |s| matches!(s.status, TranscriptStatus::Finalizing { .. }),
+            || {
+                StoreError::InvalidState(
+                    "only a recording that is being transcribed can be put off".to_string(),
+                )
+            },
+            |s, seq| {
+                if let Some(pass) = s.offline_pass.take() {
+                    pass.cancel();
+                }
+                s.status = TranscriptStatus::Postponed;
+                vec![TranscriptEvent::StatusChanged {
+                    seq,
+                    status: TranscriptStatus::Postponed,
+                }]
+            },
+        )?;
+        self.set_queued(id, false);
+        Ok(seq)
     }
 
     /// Snapshot + future-event stream. Activates the session in cache if it
@@ -473,6 +508,19 @@ impl TranscriptStore {
         let snapshot = entry.session.read().clone();
         let events = entry.tx.subscribe();
         Ok(Subscription { snapshot, events })
+    }
+
+    /// Test fixture: moves the session to `Finalizing` when it is elsewhere and claims it.
+    #[cfg(test)]
+    pub(crate) fn claim_finalizing(&self, id: Uuid) -> OfflinePass {
+        if !matches!(
+            self.get(id).map(|s| s.status),
+            Ok(TranscriptStatus::Finalizing { .. })
+        ) {
+            let _ = self.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+        }
+        self.begin_offline_pass(id)
+            .unwrap_or_else(|e| panic!("cannot claim transcript {id}: {e}"))
     }
 
     /// Number of in-memory active sessions (for tests).
@@ -637,6 +685,11 @@ impl TranscriptStore {
     pub fn set_status(&self, id: Uuid, status: TranscriptStatus) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         self.with_session_batch(id, |s, next_seq| {
+            if !matches!(status, TranscriptStatus::Finalizing { .. }) {
+                if let Some(pass) = s.offline_pass.take() {
+                    pass.cancel();
+                }
+            }
             let leaving_capture = matches!(s.status, TranscriptStatus::Recording)
                 && !matches!(status, TranscriptStatus::Recording);
             let mut events = if leaving_capture {
@@ -664,85 +717,72 @@ impl TranscriptStore {
         next_part: std::path::PathBuf,
         live_model: Option<String>,
     ) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        let mut resumable = false;
-        self.with_session_batch(id, |s, seq| {
-            if !matches!(s.status, TranscriptStatus::Done | TranscriptStatus::Paused) {
-                return Vec::new();
-            }
-            resumable = true;
-            s.resumed_from_pause = matches!(s.status, TranscriptStatus::Paused);
-            s.prior_active_warnings = s.active_warnings.clone();
-            let mut events = drain_capture_warnings(s, seq);
-            if let Some(finals) = s.final_segments.take() {
-                s.live_segments = finals;
-            }
-            s.audio_parts.push(next_part.clone());
-            s.prior_live_model = s.models_used.live.take();
-            s.models_used.live = live_model.clone();
-            s.status = TranscriptStatus::Recording;
-            seq_out = seq + events.len() as u64;
-            events.push(TranscriptEvent::StatusChanged {
-                seq: seq_out,
-                status: TranscriptStatus::Recording,
-            });
-            events
-        })?;
-        if !resumable {
-            return Err(StoreError::InvalidState(
-                "only a finished or paused recording can be resumed".to_string(),
-            ));
-        }
-        self.notify(id);
-        Ok(seq_out)
+        self.guarded_batch(
+            id,
+            |s| matches!(s.status, TranscriptStatus::Done | TranscriptStatus::Paused),
+            || {
+                StoreError::InvalidState(
+                    "only a finished or paused recording can be resumed".to_string(),
+                )
+            },
+            |s, seq| {
+                s.resumed_from_pause = matches!(s.status, TranscriptStatus::Paused);
+                s.prior_active_warnings = s.active_warnings.clone();
+                let mut events = drain_capture_warnings(s, seq);
+                if let Some(finals) = s.final_segments.take() {
+                    s.live_segments = finals;
+                }
+                s.audio_parts.push(next_part.clone());
+                s.prior_live_model = s.models_used.live.take();
+                s.models_used.live = live_model.clone();
+                s.status = TranscriptStatus::Recording;
+                events.push(TranscriptEvent::StatusChanged {
+                    seq: seq + events.len() as u64,
+                    status: TranscriptStatus::Recording,
+                });
+                events
+            },
+        )
     }
 
     /// Reverts a [`Self::resume`] whose capture never started: drops the just-registered part,
     /// restores the finals baseline, live model and capture warnings, and returns to `Done` (or to
     /// `Paused`, keeping the live text as it was, when the resume reopened a paused session).
     pub fn rollback_resume(&self, id: Uuid, expected_part: &Path) -> Result<u64, StoreError> {
-        let mut seq_out = 0;
-        let mut rolled_back = false;
-        self.with_session_batch(id, |s, seq| {
-            if !matches!(s.status, TranscriptStatus::Recording)
-                || s.audio_parts.last().map(PathBuf::as_path) != Some(expected_part)
-            {
-                return Vec::new();
-            }
-            rolled_back = true;
-            s.audio_parts.pop();
-            let restored = if std::mem::take(&mut s.resumed_from_pause) {
-                TranscriptStatus::Paused
-            } else {
-                s.final_segments = Some(std::mem::take(&mut s.live_segments));
-                TranscriptStatus::Done
-            };
-            s.models_used.live = s.prior_live_model.take();
-            s.active_warnings = std::mem::take(&mut s.prior_active_warnings);
-            s.status = restored.clone();
-            let mut events: Vec<TranscriptEvent> = s
-                .active_warnings
-                .iter()
-                .enumerate()
-                .map(|(i, warning)| TranscriptEvent::CaptureWarning {
-                    seq: seq + i as u64,
-                    warning: *warning,
-                })
-                .collect();
-            seq_out = seq + events.len() as u64;
-            events.push(TranscriptEvent::StatusChanged {
-                seq: seq_out,
-                status: restored,
-            });
-            events
-        })?;
-        if !rolled_back {
-            return Err(StoreError::InvalidState(
-                "session is not in a just-resumed state".to_string(),
-            ));
-        }
-        self.notify(id);
-        Ok(seq_out)
+        self.guarded_batch(
+            id,
+            |s| {
+                matches!(s.status, TranscriptStatus::Recording)
+                    && s.audio_parts.last().map(PathBuf::as_path) == Some(expected_part)
+            },
+            || StoreError::InvalidState("session is not in a just-resumed state".to_string()),
+            |s, seq| {
+                s.audio_parts.pop();
+                let restored = if std::mem::take(&mut s.resumed_from_pause) {
+                    TranscriptStatus::Paused
+                } else {
+                    s.final_segments = Some(std::mem::take(&mut s.live_segments));
+                    TranscriptStatus::Done
+                };
+                s.models_used.live = s.prior_live_model.take();
+                s.active_warnings = std::mem::take(&mut s.prior_active_warnings);
+                s.status = restored.clone();
+                let mut events: Vec<TranscriptEvent> = s
+                    .active_warnings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, warning)| TranscriptEvent::CaptureWarning {
+                        seq: seq + i as u64,
+                        warning: *warning,
+                    })
+                    .collect();
+                events.push(TranscriptEvent::StatusChanged {
+                    seq: seq + events.len() as u64,
+                    status: restored,
+                });
+                events
+            },
+        )
     }
 
     /// Records a raised capture-health warning on the session and emits its event.
@@ -786,7 +826,7 @@ impl TranscriptStore {
     ) -> Result<u64, StoreError> {
         self.pass_write(id, pass, |s, seq| {
             s.status = TranscriptStatus::Finalizing { progress };
-            TranscriptEvent::FinalizeProgress { seq, progress }
+            vec![TranscriptEvent::FinalizeProgress { seq, progress }]
         })
     }
 
@@ -801,7 +841,7 @@ impl TranscriptStore {
         self.pass_write(id, pass, |s, seq| {
             s.set_final_segments(final_segs);
             let segments = s.final_segments.clone().unwrap_or_default();
-            TranscriptEvent::FinalSegmentsReady { seq, segments }
+            vec![TranscriptEvent::FinalSegmentsReady { seq, segments }]
         })
     }
 
@@ -810,7 +850,7 @@ impl TranscriptStore {
         self.pass_write(id, pass, |s, seq| {
             s.offline_pass = None;
             s.status = TranscriptStatus::Done;
-            TranscriptEvent::Finished { seq }
+            vec![TranscriptEvent::Finished { seq }]
         })
     }
 
@@ -825,27 +865,54 @@ impl TranscriptStore {
             s.offline_pass = None;
             let status = TranscriptStatus::Failed { reason };
             s.status = status.clone();
-            TranscriptEvent::StatusChanged { seq, status }
+            vec![TranscriptEvent::StatusChanged { seq, status }]
         })
     }
 
-    /// Applies one offline-pass write only while the session still holds `pass`'s claim, checked
-    /// under the session lock, so a put-off or replaced pass never overwrites the newer state.
+    /// Applies one offline-pass write only while the session is `Finalizing` and still holds
+    /// `pass`'s claim, checked under the session lock, so a put-off or replaced pass writes nothing.
     fn pass_write<F>(&self, id: Uuid, pass: &OfflinePass, mutate: F) -> Result<u64, StoreError>
     where
-        F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
+        F: FnOnce(&mut TranscriptSession, u64) -> Vec<TranscriptEvent>,
     {
-        let mut seq_out = None;
-        self.with_session_batch(id, |s, seq| {
-            if s.offline_pass.as_ref() != Some(pass) {
+        self.guarded_batch(
+            id,
+            |s| {
+                matches!(s.status, TranscriptStatus::Finalizing { .. })
+                    && s.offline_pass.as_ref() == Some(pass)
+            },
+            || StoreError::PassEnded(id),
+            mutate,
+        )
+    }
+
+    /// Runs `mutate` under the session lock when `allowed` accepts the session, then persists,
+    /// emits its events and notifies the list. Returns the last event's seq (0 when it emits none);
+    /// a refused session gets `refused()` and is left unchanged.
+    fn guarded_batch<A, M>(
+        &self,
+        id: Uuid,
+        allowed: A,
+        refused: impl FnOnce() -> StoreError,
+        mutate: M,
+    ) -> Result<u64, StoreError>
+    where
+        A: FnOnce(&TranscriptSession) -> bool,
+        M: FnOnce(&mut TranscriptSession, u64) -> Vec<TranscriptEvent>,
+    {
+        let mut accepted = false;
+        let events = self.with_session_batch(id, |s, next_seq| {
+            if !allowed(s) {
                 return Vec::new();
             }
-            seq_out = Some(seq);
-            vec![mutate(s, seq)]
+            accepted = true;
+            mutate(s, next_seq)
         })?;
-        let seq = seq_out.ok_or(StoreError::PassEnded(id))?;
+        if !accepted {
+            return Err(refused());
+        }
         self.notify(id);
-        Ok(seq)
+        Ok(events.last().map_or(0, TranscriptEvent::seq))
     }
 
     fn notify(&self, id: Uuid) {
@@ -899,19 +966,6 @@ mod tests {
             words: vec![],
             source: None,
         }
-    }
-
-    /// Moves the session to `Finalizing` when it is elsewhere and claims it for an offline pass.
-    fn claim(store: &TranscriptStore, id: Uuid) -> OfflinePass {
-        if !matches!(
-            store.get(id).unwrap().status,
-            TranscriptStatus::Finalizing { .. }
-        ) {
-            store
-                .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
-                .unwrap();
-        }
-        store.begin_offline_pass(id).unwrap()
     }
 
     #[tokio::test]
@@ -1491,7 +1545,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         store
             .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "gotowe")])
             .unwrap();
@@ -1534,15 +1588,18 @@ mod tests {
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
         assert!(matches!(
             store.begin_offline_pass(id).unwrap_err(),
-            StoreError::PassEnded(_)
+            StoreError::InvalidState(_)
         ));
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
         let seq = store.get(id).unwrap().last_seq;
-        let pass = claim(&store, id);
+        let pass = store.begin_offline_pass(id).unwrap();
         assert!(!pass.cancelled());
         assert_eq!(
             store.get(id).unwrap().last_seq,
-            seq + 1,
-            "the claim itself emits nothing"
+            seq,
+            "the claim emits nothing"
         );
         assert!(matches!(
             store.begin_offline_pass(Uuid::new_v4()).unwrap_err(),
@@ -1555,7 +1612,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let old = claim(&store, id);
+        let old = store.claim_finalizing(id);
         let new = store.begin_offline_pass(id).unwrap();
         assert!(old.cancelled());
         assert!(old.decode_cancel().is_cancelled());
@@ -1583,7 +1640,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         let mut sub = store.subscribe(id).unwrap();
         store.fail_pass(id, &pass, "boom".to_string()).unwrap();
         let failed = TranscriptStatus::Failed {
@@ -1602,7 +1659,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         store.set_queued(id, true);
         let mut changes = store.watch();
         let mut sub = store.subscribe(id).unwrap();
@@ -1645,7 +1702,7 @@ mod tests {
         store.postpone(id).unwrap();
         assert!(matches!(
             store.begin_offline_pass(id).unwrap_err(),
-            StoreError::PassEnded(_)
+            StoreError::InvalidState(_)
         ));
     }
 
@@ -1678,7 +1735,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        claim(&store, id);
+        store.claim_finalizing(id);
         store.postpone(id).unwrap();
 
         let restarted = TranscriptStore::with_root(dir.path());
@@ -1696,9 +1753,136 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         store.delete(id).unwrap();
         assert!(pass.cancelled());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_that_cannot_remove_the_recording_leaves_its_pass_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let pass = store.claim_finalizing(id);
+        std::fs::write(store.session_dir(id).join("audio.wav"), b"x").unwrap();
+        std::fs::set_permissions(
+            store.session_dir(id),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        let refused = store.delete(id);
+        std::fs::set_permissions(
+            store.session_dir(id),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(matches!(refused.unwrap_err(), StoreError::Io(_)));
+        assert!(!pass.cancelled(), "a failed delete must not stop the pass");
+        store.finish(id, &pass).unwrap();
+    }
+
+    #[test]
+    fn moving_the_status_off_finalizing_ends_the_running_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let pass = store.claim_finalizing(id);
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.3 })
+            .unwrap();
+        assert!(!pass.cancelled(), "staying in Finalizing keeps the claim");
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+        assert!(pass.cancelled());
+        assert!(matches!(
+            store.finalize_progress(id, &pass, 0.5).unwrap_err(),
+            StoreError::PassEnded(_)
+        ));
+        assert_eq!(store.get(id).unwrap().status, TranscriptStatus::Done);
+    }
+
+    #[test]
+    fn a_put_off_pass_cannot_record_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let pass = store.claim_finalizing(id);
+        store.set_finalize_model(id, &pass, "large-v3").unwrap();
+        assert_eq!(
+            store.get(id).unwrap().models_used.finalize.as_deref(),
+            Some("large-v3")
+        );
+        let next = store.claim_finalizing(id);
+        store.postpone(id).unwrap();
+        assert!(matches!(
+            store.set_finalize_model(id, &next, "small").unwrap_err(),
+            StoreError::PassEnded(_)
+        ));
+        assert_eq!(
+            store.get(id).unwrap().models_used.finalize.as_deref(),
+            Some("large-v3")
+        );
+    }
+
+    #[test]
+    fn wait_while_recording_returns_at_once_for_a_session_past_its_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store.set_status(id, TranscriptStatus::Paused).unwrap();
+        assert_eq!(
+            store.wait_while_recording(id).unwrap(),
+            TranscriptStatus::Paused
+        );
+        assert!(matches!(
+            store.wait_while_recording(Uuid::new_v4()).unwrap_err(),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn wait_while_recording_waits_for_a_driver_still_winding_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(dir.path()));
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let driver = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                store
+                    .append_segment(id, seg(0.0, 1.0, "last window"))
+                    .unwrap();
+                store
+                    .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+                    .unwrap();
+            })
+        };
+        assert_eq!(
+            store.wait_while_recording(id).unwrap(),
+            TranscriptStatus::Finalizing { progress: 0.0 }
+        );
+        driver.join().unwrap();
+        assert!(store.begin_offline_pass(id).is_ok());
+    }
+
+    #[test]
+    fn wait_while_recording_ends_when_the_recording_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(dir.path()));
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let deleting = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                store.delete(id).unwrap();
+            })
+        };
+        assert!(matches!(
+            store.wait_while_recording(id).unwrap_err(),
+            StoreError::NotFound(_)
+        ));
+        deleting.join().unwrap();
     }
 
     #[tokio::test]
@@ -1706,9 +1890,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let pass = store.claim_finalizing(id);
         let seq_before = store.get(id).unwrap().last_seq;
 
-        store.set_finalize_model(id, "large-v3-turbo").unwrap();
+        store
+            .set_finalize_model(id, &pass, "large-v3-turbo")
+            .unwrap();
 
         let on_disk = TranscriptSession::load(&store.session_dir(id)).unwrap();
         assert_eq!(
@@ -1721,7 +1908,9 @@ mod tests {
             Some("large-v3-turbo")
         );
         assert!(matches!(
-            store.set_finalize_model(Uuid::new_v4(), "x").unwrap_err(),
+            store
+                .set_finalize_model(Uuid::new_v4(), &pass, "x")
+                .unwrap_err(),
             StoreError::NotFound(_)
         ));
     }
@@ -1805,7 +1994,7 @@ mod tests {
         std::fs::remove_dir_all(store.session_dir(id)).unwrap();
         assert!(matches!(
             store
-                .finalize_progress(id, &OfflinePass::default(), 0.5)
+                .finalize_progress(id, &OfflinePass::new(), 0.5)
                 .unwrap_err(),
             StoreError::NotFound(_)
         ));
@@ -1833,7 +2022,7 @@ mod tests {
         assert!(!store.session_dir(id).exists());
         assert!(matches!(
             store
-                .finalize_progress(id, &OfflinePass::default(), 0.5)
+                .finalize_progress(id, &OfflinePass::new(), 0.5)
                 .unwrap_err(),
             StoreError::NotFound(_)
         ));
@@ -1845,7 +2034,7 @@ mod tests {
         let store = TranscriptStore::with_root(dir.path());
         assert!(matches!(
             store
-                .finish(Uuid::new_v4(), &OfflinePass::default())
+                .finish(Uuid::new_v4(), &OfflinePass::new())
                 .unwrap_err(),
             StoreError::NotFound(_)
         ));
@@ -1861,7 +2050,7 @@ mod tests {
             s1.create(mk_session(&dir.path().join("a.wav"))).unwrap()
         };
         let s2 = TranscriptStore::with_root(dir.path());
-        let pass = claim(&s2, id);
+        let pass = s2.claim_finalizing(id);
         assert!(
             s2.finish(id, &pass).is_ok(),
             "disk-only session must be mutable"
@@ -1976,7 +2165,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         let mut sub = store.subscribe(id).unwrap();
 
         store.finalize_progress(id, &pass, 0.5).unwrap();
@@ -2001,7 +2190,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         let mut sub = store.subscribe(id).unwrap();
 
         store
@@ -2028,7 +2217,7 @@ mod tests {
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
         store.append_segment(id, seg(0.0, 1.0, "live v1")).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         store
             .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "final v1")])
             .unwrap();
@@ -2067,7 +2256,7 @@ mod tests {
         let mut session = mk_session(&dir.path().join("a.wav"));
         session.models_used.live = Some("small".to_string());
         let id = store.create(session).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         store.finish(id, &pass).unwrap();
 
         let part2 = dir.path().join("audio-2.wav");
@@ -2113,7 +2302,7 @@ mod tests {
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
         store.append_segment(id, seg(0.0, 1.0, "live v1")).unwrap();
-        let pass = claim(&store, id);
+        let pass = store.claim_finalizing(id);
         store
             .set_final_segments(id, &pass, vec![seg(0.0, 1.0, "final v1")])
             .unwrap();

@@ -109,6 +109,8 @@ export interface TranscriptSummary {
   size_bytes: number;
   /** Model of the offline pass that made (or is making) the transcript; null before one ran. */
   finalize_model: string | null;
+  /** The catalogue's short name of that model ("Large v3 Turbo"); null for an unknown key. */
+  finalize_model_label: string | null;
   /** True while the offline pass waits for another recording's pass to finish. */
   queued: boolean;
 }

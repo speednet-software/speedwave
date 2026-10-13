@@ -532,11 +532,8 @@ fn is_hallucinated(no_speech: f32, seg_rms: f32) -> bool {
     no_speech > NO_SPEECH_MAX || (no_speech > NO_SPEECH_SUSPECT && seg_rms < SPEECH_RMS_FLOOR)
 }
 
-/// Deterministic fake transcriber for orchestration tests — one segment per
-/// `seg_secs` of audio with placeholder text. `#[cfg(test)]` only.
-/// Runs `whisper_full` with `cancel` as whisper.cpp's abort hook, so raising it stops the decode
-/// after the current encoder or decoder step. whisper-rs 0.16's `set_abort_callback_safe` is not
-/// used: its trampoline reads the boxed closure as the bare closure type and aborts at random.
+/// Runs `whisper_full` with `cancel` as whisper.cpp's abort hook (not whisper-rs 0.16's broken
+/// `set_abort_callback_safe`, ADR-056 Am. 21), so raising it stops the decode within one step.
 #[expect(
     unsafe_code,
     reason = "whisper.cpp abort-callback FFI boundary; every block has a SAFETY comment"
@@ -572,6 +569,8 @@ unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
     unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Acquire)
 }
 
+/// Deterministic fake transcriber for orchestration tests — one segment per
+/// `seg_secs` of audio with placeholder text. `#[cfg(test)]` only.
 #[cfg(test)]
 pub struct MockTranscriber {
     /// Seconds of audio per emitted segment.
@@ -626,6 +625,32 @@ impl Transcriber for MockTranscriber {
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    /// Gated like `transcription_pipeline_e2e`: set `STT_E2E_MODEL_FILE` to a downloaded GGML
+    /// model (the catalog's `tiny` is enough) to run a real whisper.cpp decode.
+    #[test]
+    fn a_real_decode_finishes_with_an_unraised_cancel_and_stops_with_a_raised_one() {
+        let Some(model) = std::env::var_os("STT_E2E_MODEL_FILE") else {
+            return;
+        };
+        let mut t = WhisperCppTranscriber::load(Path::new(&model), "e2e", GpuClass::None).unwrap();
+        let tone: Vec<f32> = (0..SAMPLE_RATE_HZ as usize * 5)
+            .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let cancel = DecodeCancel::default();
+        let mut opts = TranscribeOptions::for_language(Language::En);
+        opts.cancel = Some(cancel.clone());
+        let decoded = t.transcribe(&tone, &opts);
+        assert!(
+            decoded.is_ok(),
+            "an unraised cancel must not abort the decode: {decoded:?}"
+        );
+        cancel.cancel();
+        assert!(matches!(
+            t.transcribe(&tone, &opts),
+            Err(TranscribeError::Inference(_))
+        ));
+    }
 
     #[test]
     #[expect(

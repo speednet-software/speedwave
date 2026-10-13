@@ -134,6 +134,8 @@ pub struct TranscriptSummary {
     pub size_bytes: u64,
     /// Whisper catalogue key of the offline pass that made (or is making) the transcript.
     pub finalize_model: Option<String>,
+    /// The catalogue's short name of that model, for the UI; `None` for a key it no longer has.
+    pub finalize_model_label: Option<String>,
     /// `true` while the offline pass waits for another recording's pass to finish.
     pub queued: bool,
 }
@@ -234,6 +236,12 @@ impl TranscriptSession {
             preview,
             size_bytes,
             finalize_model: self.models_used.finalize.clone(),
+            finalize_model_label: self
+                .models_used
+                .finalize
+                .as_deref()
+                .and_then(crate::transcription::model_catalog::whisper_model)
+                .map(|m| m.short_name.to_string()),
             queued: false,
         }
     }
@@ -649,6 +657,20 @@ mod tests {
                 "models/transcript.ts TranscriptSummary is missing `{key}`"
             );
         }
+    }
+
+    #[test]
+    fn the_summary_names_the_offline_model_from_the_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = TranscriptSession::new(Language::En, mk_source(), dir.path().join("a.wav"));
+        assert_eq!(s.summary(dir.path()).finalize_model_label, None);
+        s.models_used.finalize = Some("large-v3-turbo-q5_0".to_string());
+        assert_eq!(
+            s.summary(dir.path()).finalize_model_label.as_deref(),
+            Some("Large v3 Turbo (quantised)")
+        );
+        s.models_used.finalize = Some("retired-model".to_string());
+        assert_eq!(s.summary(dir.path()).finalize_model_label, None);
     }
 
     #[test]
