@@ -35,12 +35,14 @@ describe('SessionListComponent', () => {
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     recordingSessionId: WritableSignal<string | null>;
     recording: Signal<boolean>;
+    active: WritableSignal<{ id: string } | null>;
   };
 
   const q = (testId: string): HTMLElement | null => el.querySelector(`[data-testid="${testId}"]`);
 
   beforeEach(async () => {
     const recordingSessionId = signal<string | null>(null);
+    const active = signal<{ id: string } | null>(null);
     const recordings = signal<TranscriptSummary[]>([
       summary('b', { title: 'Sprint review', created_at: '2026-05-12T09:00:00Z' }),
       summary('a'),
@@ -51,12 +53,16 @@ describe('SessionListComponent', () => {
       watchRecordings: vi.fn(async () => undefined),
       delete: vi.fn(async (id: string) => {
         recordings.update((list) => list.filter((r) => r.id !== id));
+        if (active()?.id === id) active.set(null);
       }),
       transcribe: vi.fn(async () => undefined),
-      resumeRecording: vi.fn(async () => undefined),
+      resumeRecording: vi.fn(async (id: string) => {
+        active.set({ id });
+      }),
       liveTranscriptPreferred: vi.fn(() => false),
       recordingSessionId,
       recording: computed(() => recordingSessionId() !== null),
+      active,
     };
     await TestBed.configureTestingModule({
       imports: [SessionListComponent],
@@ -108,17 +114,29 @@ describe('SessionListComponent', () => {
     expect(empty).toContain('Attach it to a chat');
   });
 
-  it('emits the opened recording and highlights it', () => {
+  it('emits the opened recording and highlights whatever the service has open', () => {
     const spy = vi.fn();
     component.opened.subscribe(spy);
     const rec = svc.recordings()[0];
     component.open(rec);
     expect(spy).toHaveBeenCalledWith(rec);
+    svc.active.set({ id: 'b' });
     expect(component.selectedId()).toBe('b');
   });
 
+  it('a freshly mounted list highlights the recording still open in the pane', () => {
+    svc.active.set({ id: 'a' });
+    const remounted = TestBed.createComponent(SessionListComponent);
+    remounted.detectChanges();
+    const row = remounted.nativeElement.querySelector('[data-testid="row-a"]');
+    expect(row.getAttribute('data-active')).toBe('true');
+    expect(
+      remounted.nativeElement.querySelector('[data-testid="row-b"]').getAttribute('data-active')
+    ).toBeNull();
+  });
+
   it('marks the open recording with the accent edge and aria-current, and only that one', () => {
-    component.markSelected('b');
+    svc.active.set({ id: 'b' });
     fixture.detectChanges();
     const open = q('row-b')!;
     expect(open.getAttribute('data-active')).toBe('true');
@@ -157,7 +175,7 @@ describe('SessionListComponent', () => {
     });
 
     it('deletes on confirm and clears the highlight of the deleted row', async () => {
-      component.markSelected('b');
+      svc.active.set({ id: 'b' });
       component.pendingDeleteId.set('b');
       fixture.detectChanges();
       q('delete-yes-b')!.click();

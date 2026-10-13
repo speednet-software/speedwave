@@ -298,8 +298,6 @@ export class SessionListComponent implements OnInit {
   /** Forwards errors to the parent banner, the one place errors render. */
   readonly errorOccurred = output<string>();
 
-  /** Id of the recording open in the right pane (for the highlight). */
-  readonly selectedId = signal<string | null>(null);
   /** Recording whose inline delete confirmation is showing. */
   readonly pendingDeleteId = signal<string | null>(null);
   /** Whether the list is in multi-select mode. */
@@ -317,6 +315,11 @@ export class SessionListComponent implements OnInit {
   protected readonly rowLockedTooltip = ROW_LOCKED_TOOLTIP;
 
   private readonly transcription = inject(TranscriptionService);
+  /**
+   * Id of the recording open in the right pane, read from the service so the highlight survives
+   * the list being destroyed and rebuilt on navigation, as the pane does.
+   */
+  readonly selectedId = computed(() => this.transcription.active()?.id ?? null);
   /** True while any recording captures; done rows hide Continue then. */
   readonly recordingInProgress = this.transcription.recording;
 
@@ -391,20 +394,11 @@ export class SessionListComponent implements OnInit {
   }
 
   /**
-   * Marks a recording as the open one (for the row highlight).
-   * @param id - recording id, or `null` to clear.
-   */
-  markSelected(id: string | null): void {
-    this.selectedId.set(id);
-  }
-
-  /**
    * Opens a recording in the right pane.
    * @param rec - the recording.
    */
   open(rec: TranscriptSummary): void {
     if (this.rowLocked(rec)) return;
-    this.selectedId.set(rec.id);
     this.opened.emit(rec);
   }
 
@@ -420,9 +414,7 @@ export class SessionListComponent implements OnInit {
       );
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-      return;
     }
-    this.selectedId.set(rec.id);
   }
 
   /**
@@ -450,7 +442,6 @@ export class SessionListComponent implements OnInit {
     this.busy.set(true);
     try {
       await this.transcription.delete(id);
-      if (this.selectedId() === id) this.selectedId.set(null);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     } finally {
@@ -485,7 +476,6 @@ export class SessionListComponent implements OnInit {
     for (const id of ids) {
       try {
         await this.transcription.delete(id);
-        if (this.selectedId() === id) this.selectedId.set(null);
       } catch (e: unknown) {
         failures.push(e instanceof Error ? e.message : String(e));
       }

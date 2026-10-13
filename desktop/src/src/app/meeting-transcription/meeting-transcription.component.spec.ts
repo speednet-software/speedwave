@@ -203,7 +203,7 @@ describe('MeetingTranscriptionComponent', () => {
 
   it('clears the banner when a recording starts or stops', () => {
     component.onError('boom');
-    component.onStarted('sess-9');
+    component.onStarted();
     expect(component.error()).toBe('');
     component.onError('boom');
     component.onStopped();

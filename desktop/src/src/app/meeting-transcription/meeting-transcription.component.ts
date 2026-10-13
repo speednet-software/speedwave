@@ -3,7 +3,6 @@ import {
   Component,
   OnDestroy,
   OnInit,
-  ViewChild,
   computed,
   inject,
   signal,
@@ -122,7 +121,7 @@ import { SessionListComponent } from './session-list/session-list.component';
           </aside>
           <main class="flex flex-1 flex-col gap-4 overflow-hidden">
             <app-recording-controls
-              (started)="onStarted($event)"
+              (started)="onStarted()"
               (stopped)="onStopped()"
               (errorOccurred)="onError($event)"
             />
@@ -139,9 +138,6 @@ import { SessionListComponent } from './session-list/session-list.component';
   host: { class: 'flex h-full flex-1' },
 })
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
-  /** Left pane's recordings list (for the selection highlight). */
-  @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
-
   /** Latest error string (rendered in a banner). */
   readonly error = signal('');
   /** `null` while loading, `true` if the model is downloaded, `false` shows the gate. */
@@ -239,13 +235,9 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     }
   }
 
-  /**
-   * After recording starts: clear the banner and highlight the new recording in the list.
-   * @param sessionId - the new recording.
-   */
-  onStarted(sessionId: string): void {
+  /** After recording starts: clear the banner (the list highlights the new recording on its own). */
+  onStarted(): void {
     this.error.set('');
-    this.sessionList?.markSelected(sessionId);
   }
 
   /** After recording stops: the list follows on its own (status events), so only the banner clears. */
