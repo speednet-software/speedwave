@@ -20,29 +20,20 @@ jobs:
   test-rust:
     uses: ./.github/workflows/lane-test-rust.yml
 
-  test-rust-windows:
-    uses: ./.github/workflows/lane-test-rust-windows.yml
-
   test-mcp:
     uses: ./.github/workflows/lane-test-mcp.yml
 
-  test-desktop:
-    uses: ./.github/workflows/lane-test-desktop.yml
+  test-macos:
+    uses: ./.github/workflows/lane-test-macos.yml
 
-  test-cli:
-    uses: ./.github/workflows/lane-test-cli.yml
+  test-windows:
+    uses: ./.github/workflows/lane-test-windows.yml
 
   ci-config:
     uses: ./.github/workflows/lane-ci-config.yml
 
   audit:
     uses: ./.github/workflows/lane-audit.yml
-
-  swift:
-    uses: ./.github/workflows/lane-swift.yml
-
-  desktop-windows-check:
-    uses: ./.github/workflows/lane-desktop-windows-check.yml
 
   build:
     uses: ./.github/workflows/lane-build.yml
@@ -58,14 +49,11 @@ jobs:
     needs:
       - lint
       - test-rust
-      - test-rust-windows
       - test-mcp
-      - test-desktop
-      - test-cli
+      - test-macos
+      - test-windows
       - ci-config
       - audit
-      - swift
-      - desktop-windows-check
       - build
       - architecture
       - security

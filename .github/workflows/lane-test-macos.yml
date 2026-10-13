@@ -1,4 +1,4 @@
-name: lane-test-desktop
+name: lane-test-macos
 
 on:
   workflow_call:
@@ -7,11 +7,16 @@ permissions:
   contents: read
 
 jobs:
-  test-desktop:
+  test-macos:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
 
       - name: Setup toolchain (Node + Rust + cache)
         uses: ./.github/actions/setup-toolchain
@@ -21,6 +26,9 @@ jobs:
             . -> target
             desktop/src-tauri -> target
           node-cache-dependency-path: desktop/src/package-lock.json
+
+      - name: Install bats
+        run: brew install bats-core
 
       - name: Install wasm toolchain (PII engine)
         run: |
@@ -64,9 +72,6 @@ jobs:
         working-directory: desktop/src
         run: npx ng test --no-watch --coverage
 
-      - name: Install bats
-        run: brew install bats-core
-
       - name: Desktop config tests (fast)
         run: make test-desktop-config
 
@@ -75,3 +80,32 @@ jobs:
 
       - name: Desktop bats tests
         run: make test-desktop-build
+
+      - name: CLI e2e trio (no VM)
+        run: make test-e2e
+
+      - name: Entrypoint tests
+        run: make test-entrypoint
+
+      - name: Compute app version
+        id: version
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          echo "version=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")" >> "$GITHUB_OUTPUT"
+
+      - name: Build native macOS CLI binaries (universal)
+        env:
+          SPEEDWAVE_VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/build-native-macos.sh
+
+      - name: Run Swift tests
+        run: make test-swift
+
+      - name: Native CLI embedded-plist guards
+        env:
+          SPEEDWAVE_VERSION: ${{ steps.version.outputs.version }}
+        run: make test-native-cli-plist
+
+      - name: Check the build did not modify a tracked file
+        run: git diff --exit-code
