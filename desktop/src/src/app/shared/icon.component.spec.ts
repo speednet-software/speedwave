@@ -22,6 +22,8 @@ const ICON_NAMES: readonly IconName[] = [
   'document',
   'microphone',
   'refresh',
+  'trash',
+  'pencil',
 ];
 
 const SHAPE_SELECTORS = ['path', 'line', 'polygon', 'polyline', 'circle'];

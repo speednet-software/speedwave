@@ -477,6 +477,65 @@ describe('LiveTranscriptComponent', () => {
       expect(title.textContent).not.toContain('T00:00:00Z');
     });
 
+    it('makes the title itself the rename control, with a pencil and an accessible name', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ title: 'Retro', status: { state: 'done' } })
+      );
+      fixture.detectChanges();
+      const btn: HTMLButtonElement = fixture.nativeElement.querySelector(
+        '[data-testid="rename-btn"]'
+      );
+      expect(btn.querySelector('[data-testid="transcript-title"]')!.textContent).toContain('Retro');
+      expect(btn.querySelector('app-icon')).not.toBeNull();
+      expect(btn.getAttribute('aria-label')).toBe('Rename recording: Retro');
+      expect(btn.textContent).not.toContain('Rename');
+    });
+
+    it('edits in a field with the save and cancel keys spelled out, and returns focus on Escape', async () => {
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      component.startRename();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      const input: HTMLInputElement = fixture.nativeElement.querySelector(
+        '[data-testid="title-input"]'
+      );
+      expect(document.activeElement).toBe(input);
+      const hint = fixture.nativeElement.querySelector('#title-input-hint');
+      expect(hint.textContent).toContain('Enter to save');
+      expect(hint.textContent).toContain('Esc to cancel');
+      expect(input.getAttribute('aria-describedby')).toBe('title-input-hint');
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(component.renaming()).toBe(false);
+      expect(document.activeElement).toBe(
+        fixture.nativeElement.querySelector('[data-testid="rename-btn"]')
+      );
+      expect(svc.rename).not.toHaveBeenCalled();
+    });
+
+    it('saves on blur without pulling focus back to the title', async () => {
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      component.startRename();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      const input: HTMLInputElement = fixture.nativeElement.querySelector(
+        '[data-testid="title-input"]'
+      );
+      input.value = 'Planning';
+      outside.focus();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(svc.rename).toHaveBeenCalledWith('sess-1', 'Planning');
+      expect(document.activeElement).toBe(outside);
+      outside.remove();
+    });
+
     it('renames on Enter and keeps the old name on Escape', async () => {
       fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
       fixture.detectChanges();

@@ -17,6 +17,7 @@ import { Router } from '@angular/router';
 import { Clipboard } from '@angular/cdk/clipboard';
 
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { IconComponent } from '../../shared/icon.component';
 import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
 import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
@@ -81,7 +82,7 @@ interface ProgressAnchor {
 @Component({
   selector: 'app-live-transcript',
   standalone: true,
-  imports: [TooltipDirective],
+  imports: [TooltipDirective, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-col" data-testid="live-transcript">
@@ -93,36 +94,48 @@ interface ProgressAnchor {
         @if (status() !== 'recording') {
           <header class="mb-2 border-b border-[var(--line)] pb-2" data-testid="transcript-header">
             @if (renaming()) {
-              <input
-                #titleInput
-                type="text"
-                maxlength="120"
-                class="w-full rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5 text-[14px] text-[var(--ink)]"
-                aria-label="Recording name"
-                data-testid="title-input"
-                [value]="s.title ?? ''"
-                [placeholder]="defaultName()"
-                (keydown.enter)="saveTitle($any($event.target).value)"
-                (keydown.escape)="renaming.set(false)"
-                (blur)="saveTitle($any($event.target).value)"
-              />
+              <div class="-mx-1.5">
+                <input
+                  #titleInput
+                  type="text"
+                  maxlength="120"
+                  class="h-7 w-full rounded border border-[var(--accent)] bg-[var(--bg-2)] px-1.5 text-[14px] font-medium leading-7 text-[var(--ink)] outline-none placeholder:font-normal placeholder:text-[var(--ink-mute)]"
+                  aria-label="Recording name"
+                  aria-describedby="title-input-hint"
+                  data-testid="title-input"
+                  [value]="s.title ?? ''"
+                  [placeholder]="defaultName()"
+                  (keydown.enter)="saveTitle($any($event.target).value, true)"
+                  (keydown.escape)="cancelRename()"
+                  (blur)="saveTitle($any($event.target).value)"
+                />
+                <p id="title-input-hint" class="mt-0.5 px-1.5 text-[10px] text-[var(--ink-mute)]">
+                  Enter to save · Esc to cancel · leave empty to use the start time
+                </p>
+              </div>
             } @else {
-              <div class="flex items-center gap-2">
-                <h2
-                  class="truncate text-[14px] font-medium text-[var(--ink)]"
-                  data-testid="transcript-title"
-                >
-                  {{ name() }}
-                </h2>
+              <h2 class="-mx-1.5 min-w-0">
                 <button
+                  #renameBtn
                   type="button"
-                  class="mono shrink-0 text-[10px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                  class="group flex h-7 max-w-full items-center gap-1.5 rounded px-1.5 text-left hover:bg-[var(--bg-2)] focus-visible:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
                   data-testid="rename-btn"
+                  [attr.aria-label]="'Rename recording: ' + name()"
+                  [appTooltip]="'Rename'"
+                  placement="bottom"
                   (click)="startRename()"
                 >
-                  Rename
+                  <span
+                    class="truncate text-[14px] font-medium text-[var(--ink)]"
+                    data-testid="transcript-title"
+                    >{{ name() }}</span
+                  >
+                  <app-icon
+                    name="pencil"
+                    class="h-3.5 w-3.5 text-[var(--ink-mute)] opacity-60 group-hover:text-[var(--ink)] group-hover:opacity-100 group-focus-visible:opacity-100"
+                  />
                 </button>
-              </div>
+              </h2>
             }
             <div class="mt-0.5 text-[10px] text-[var(--ink-mute)]" data-testid="transcript-meta">
               {{ meta() }}
@@ -439,6 +452,8 @@ export class LiveTranscriptComponent {
 
   /** The scrollable transcript body. */
   private readonly body = viewChild<ElementRef<HTMLDivElement>>('body');
+  /** The title button that opens renaming (focus returns to it afterwards). */
+  private readonly renameBtn = viewChild<ElementRef<HTMLButtonElement>>('renameBtn');
   /** The title field while renaming. */
   private readonly titleInput = viewChild<ElementRef<HTMLInputElement>>('titleInput');
   /** False once the user scrolls up; re-arms when they return to the bottom. */
@@ -508,14 +523,22 @@ export class LiveTranscriptComponent {
     );
   }
 
+  /** Closes the title field without saving and puts focus back on the title. */
+  cancelRename(): void {
+    this.renaming.set(false);
+    this.focusTitle();
+  }
+
   /**
    * Stores the typed title (blank restores the default name) and closes the field.
    * @param value - the field's text.
+   * @param refocus - put focus back on the title (Enter); a blur leaves it where the user clicked.
    */
-  async saveTitle(value: string): Promise<void> {
+  async saveTitle(value: string, refocus = false): Promise<void> {
     const s = this.session();
     if (!this.renaming() || !s) return;
     this.renaming.set(false);
+    if (refocus) this.focusTitle();
     if (value.trim() === (s.title ?? '').trim()) return;
     try {
       await this.transcription.rename(s.id, value);
@@ -599,6 +622,14 @@ export class LiveTranscriptComponent {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.sending.set(false);
+  }
+
+  /** Moves focus back to the title button once it is rendered again. */
+  private focusTitle(): void {
+    afterNextRender(
+      { write: () => this.renameBtn()?.nativeElement.focus() },
+      { injector: this.injector }
+    );
   }
 
   /** Why the transcript itself cannot go to a chat yet ('' when it can). */
