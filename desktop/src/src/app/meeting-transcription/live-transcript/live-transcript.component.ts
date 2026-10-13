@@ -25,6 +25,7 @@ import { formatBytes } from '../../shared/format-bytes';
 import {
   formatDuration,
   formatRecordingDate,
+  modelLabel,
   recordingName,
   transcriptQuality,
 } from '../recording-format';
@@ -35,7 +36,13 @@ const NEW_CHAT_TOOLTIP =
 /** Hint under "Attach to current chat" in the attach menu. */
 const CURRENT_CHAT_HINT = 'Keeps the open conversation. Nothing is sent until you press Send.';
 /** Tooltip on Transcribe. */
-const TRANSCRIBE_TOOLTIP = 'Runs the transcription on the recorded audio again.';
+const TRANSCRIBE_TOOLTIP = 'Runs the transcription on the recorded audio.';
+/** Tooltip on Later while the transcription runs. */
+const LATER_RUNNING_TOOLTIP =
+  'Stops the transcription so it does not slow this computer down. The audio is kept; Transcribe starts it again from the beginning.';
+/** Tooltip on Later while the transcription waits in the queue. */
+const LATER_QUEUED_TOOLTIP =
+  'Takes this recording out of the queue. The audio is kept; Transcribe it when you are ready.';
 /** Classes of the accent (primary) half of the attach button. */
 const PRIMARY_BTN = 'bg-[var(--accent)] text-[var(--bg)] hover:opacity-90';
 /** Classes of the attach button when Transcribe is the primary action. */
@@ -95,7 +102,8 @@ interface ProgressAnchor {
 
 /**
  * Transcript pane (right): the open recording's name (renamable), how and with which model its
- * transcript was made, the progress with a time estimate, one row of actions (attach to a chat,
+ * transcript was made, the progress with a time estimate and Later (puts the transcription off),
+ * one row of actions (attach to a chat,
  * Copy, Export, and a menu with Transcribe again, Show audio file, Continue recording and Delete),
  * and the transcript itself. Errors go to the parent.
  */
@@ -186,16 +194,30 @@ interface ProgressAnchor {
           </div>
 
           @if (status() === 'finalizing') {
-            <div
-              class="mt-2.5 h-1 w-full max-w-xl overflow-hidden rounded bg-[var(--bg-2)]"
-              data-testid="finalize-bar"
-              role="progressbar"
-              [attr.aria-label]="quality()?.text ?? 'Transcribing'"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              [attr.aria-valuenow]="finalizePct()"
-            >
-              <div class="h-full bg-amber-400" [style.width.%]="finalizePct()"></div>
+            <div class="mt-2 flex max-w-xl items-center gap-3">
+              <div
+                class="h-1 min-w-0 flex-1 overflow-hidden rounded bg-[var(--bg-2)]"
+                data-testid="finalize-bar"
+                role="progressbar"
+                [attr.aria-label]="quality()?.text ?? 'Transcribing'"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                [attr.aria-valuenow]="finalizePct()"
+              >
+                <div class="h-full bg-amber-400" [style.width.%]="finalizePct()"></div>
+              </div>
+              <span [appTooltip]="laterTooltip()" placement="bottom">
+                <button
+                  type="button"
+                  class="mono shrink-0 whitespace-nowrap rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                  data-testid="later-btn"
+                  [attr.aria-label]="'Transcribe later. ' + laterTooltip()"
+                  [disabled]="working()"
+                  (click)="postpone()"
+                >
+                  Later
+                </button>
+              </span>
             </div>
           }
 
@@ -240,7 +262,7 @@ interface ProgressAnchor {
 
           @if (showActions()) {
             <div class="mt-3 flex flex-wrap items-center gap-2 text-[12px]" data-menu-root>
-              @if (status() === 'failed') {
+              @if (needsTranscription()) {
                 <span [appTooltip]="transcribeTooltip" placement="bottom">
                   <button
                     type="button"
@@ -258,7 +280,7 @@ interface ProgressAnchor {
                   <button
                     type="button"
                     class="mono rounded-l px-3 py-1.5 font-semibold disabled:pointer-events-none disabled:opacity-40"
-                    [class]="status() === 'failed' ? secondaryBtn : primaryBtn"
+                    [class]="needsTranscription() ? secondaryBtn : primaryBtn"
                     data-testid="send-to-chat-btn"
                     [attr.aria-label]="ariaLabel('Attach to new chat', sendBlockedReason())"
                     [disabled]="sending() || sendBlockedReason() !== ''"
@@ -270,7 +292,7 @@ interface ProgressAnchor {
                 <button
                   type="button"
                   class="rounded-r border-l border-black/25 px-1.5 py-1.5"
-                  [class]="status() === 'failed' ? secondaryBtn : primaryBtn"
+                  [class]="needsTranscription() ? secondaryBtn : primaryBtn"
                   aria-label="More ways to attach"
                   aria-haspopup="menu"
                   data-testid="chat-menu-btn"
@@ -556,29 +578,34 @@ export class LiveTranscriptComponent {
     return s ? formatRecordingDate(s.created_at) : '';
   });
 
-  /** Start time (under a title), length and source. */
-  readonly meta = computed(() => {
-    const s = this.session();
-    if (!s) return '';
-    const parts = [
-      s.title ? formatRecordingDate(s.created_at) : '',
-      formatDuration(this.summary()?.duration_secs ?? 0),
-      s.audio_source.label,
-    ];
-    return parts.filter(Boolean).join(' · ');
-  });
-
   /** The model the offline pass ran (or runs) with, from the list row or the snapshot. */
   private readonly finalizeModel = computed(
     () => this.summary()?.finalize_model ?? this.session()?.models_used.finalize ?? null
   );
+
+  /** Start time (under a title), length, source and, once transcribed, the model that did it. */
+  readonly meta = computed(() => {
+    const s = this.session();
+    if (!s) return '';
+    const model = this.finalizeModel();
+    const parts = [
+      s.title ? formatRecordingDate(s.created_at) : '',
+      formatDuration(this.summary()?.duration_secs ?? 0),
+      s.audio_source.label,
+      this.status() === 'done' && model ? modelLabel(model) : '',
+    ];
+    return parts.filter(Boolean).join(' · ');
+  });
 
   /** High-quality or smaller-model transcript; null when not known. */
   private readonly qualityKind = computed(() =>
     transcriptQuality(this.finalizeModel(), this.transcription.highQualityModel()?.key)
   );
 
-  /** The quality line: what state the transcript is in and which model made it. */
+  /**
+   * The state line: only what needs a look (recording, transcribing, put off, failed, the smaller
+   * model). A good finished transcript gets none; its model is in the meta line.
+   */
   readonly quality = computed<QualityLine | null>(() => {
     const amber = 'text-amber-300';
     switch (this.status()) {
@@ -599,14 +626,11 @@ export class LiveTranscriptComponent {
             return { text: this.transcribingLabel(), cls: amber };
         }
       case 'done':
-        switch (this.qualityKind()) {
-          case 'high':
-            return { text: 'High-quality transcript', cls: 'text-emerald-400' };
-          case 'smaller':
-            return { text: 'Made with the smaller model', cls: amber };
-          default:
-            return null;
-        }
+        return this.qualityKind() === 'smaller'
+          ? { text: 'Made with the smaller model', cls: amber }
+          : null;
+      case 'postponed':
+        return { text: 'Not transcribed yet', cls: 'text-[var(--ink-dim)]' };
       case 'failed':
         return { text: 'Not transcribed', cls: 'text-red-300' };
       default:
@@ -641,8 +665,18 @@ export class LiveTranscriptComponent {
       : 'Download high-quality model';
   });
 
-  /** Actions show once the capture is over: transcribing, finished or failed. */
-  readonly showActions = computed(() => ['finalizing', 'done', 'failed'].includes(this.status()));
+  /** Actions show once the capture is over: transcribing, finished, put off or failed. */
+  readonly showActions = computed(() =>
+    ['finalizing', 'done', 'postponed', 'failed'].includes(this.status())
+  );
+
+  /** A recording without its transcription yet (failed or put off): Transcribe is the main action. */
+  readonly needsTranscription = computed(() => ['failed', 'postponed'].includes(this.status()));
+
+  /** What Later does: drop out of the queue, or stop the running transcription. */
+  readonly laterTooltip = computed(() =>
+    this.summary()?.queued ? LATER_QUEUED_TOOLTIP : LATER_RUNNING_TOOLTIP
+  );
 
   /** Whether there is a finished transcript to copy or export. */
   readonly hasTranscript = computed(() => this.status() === 'done' && this.lines().length > 0);
@@ -696,6 +730,8 @@ export class LiveTranscriptComponent {
         return 'The transcript appears here when transcription finishes. You can start another recording meanwhile.';
       case 'failed':
         return 'No transcript yet. Transcribe runs it again on the recorded audio.';
+      case 'postponed':
+        return 'Transcription was put off, so it does not slow this computer down. Press Transcribe when you are ready.';
       default:
         return 'No speech was recognized in this recording.';
     }
@@ -712,6 +748,8 @@ export class LiveTranscriptComponent {
         return 'Transcribing';
       case 'done':
         return 'Transcript ready';
+      case 'postponed':
+        return 'Transcription put off';
       case 'failed':
         return 'Transcription failed';
       default:
@@ -927,7 +965,21 @@ export class LiveTranscriptComponent {
     }
   }
 
-  /** Runs the transcription again over the recording's audio (failed, or finished). */
+  /** Puts the running or queued transcription off; the audio waits for Transcribe. */
+  async postpone(): Promise<void> {
+    const s = this.session();
+    if (!s) return;
+    this.working.set(true);
+    try {
+      await this.transcription.postpone(s.id);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.working.set(false);
+    }
+  }
+
+  /** Runs the transcription over the recording's audio (failed, put off, or finished). */
   async transcribe(): Promise<void> {
     const s = this.session();
     this.closeMenus();

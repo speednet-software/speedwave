@@ -5,6 +5,7 @@ import {
   formatDuration,
   formatRecordingDate,
   formatStartTime,
+  modelLabel,
   recordingName,
   statusChip,
   transcriptQuality,
@@ -135,5 +136,25 @@ describe('statusChip', () => {
       tooltip: 'no model',
       tone: 'error',
     });
+  });
+
+  it('marks a put-off transcription as muted, not as an error', () => {
+    expect(statusChip({ status: { state: 'postponed' } })).toMatchObject({
+      label: 'Not transcribed yet',
+      tone: 'muted',
+    });
+  });
+});
+
+describe('modelLabel', () => {
+  it.each([
+    ['large-v3-turbo', 'Large v3 Turbo'],
+    ['large-v3', 'Large v3'],
+    ['small', 'Small'],
+    ['medium-q5_0', 'Medium (quantised)'],
+    ['large-v3-turbo-q5_0', 'Large v3 Turbo (quantised)'],
+    ['', ''],
+  ])('names %j as %j', (key, label) => {
+    expect(modelLabel(key)).toBe(label);
   });
 });

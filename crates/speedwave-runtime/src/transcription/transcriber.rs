@@ -2,6 +2,8 @@
 //! (whisper.cpp via `whisper-rs`). Language is always forced, never auto-detected.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::accel::GpuClass;
@@ -36,6 +38,8 @@ pub struct TranscribeOptions {
     pub word_timestamps: bool,
     /// Translate to English instead of transcribing. Always `false` in v1.
     pub translate: bool,
+    /// Stops a running decode once raised; Whisper polls it between its internal steps.
+    pub cancel: Option<DecodeCancel>,
 }
 
 impl TranscribeOptions {
@@ -45,9 +49,34 @@ impl TranscribeOptions {
             language,
             word_timestamps: false,
             translate: false,
+            cancel: None,
         }
     }
 }
+
+/// A shared flag that stops a decode; clones share it, and two flags are equal only when shared.
+#[derive(Debug, Clone, Default)]
+pub struct DecodeCancel(Arc<AtomicBool>);
+
+impl DecodeCancel {
+    /// Raises the flag for every clone.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether the flag was raised.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl PartialEq for DecodeCancel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DecodeCancel {}
 
 /// A word with its time span (populated only when `word_timestamps` is set).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -383,6 +412,9 @@ impl WhisperCppTranscriber {
         if opts.word_timestamps {
             params.set_token_timestamps(true);
             params.set_max_len(1);
+        }
+        if let Some(cancel) = opts.cancel.clone() {
+            params.set_abort_callback_safe(move || cancel.is_cancelled());
         }
         let started = std::time::Instant::now();
         state

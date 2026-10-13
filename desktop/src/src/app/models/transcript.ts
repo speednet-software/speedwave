@@ -49,11 +49,12 @@ export type TranscriptStatus =
   | { state: 'paused' }
   | { state: 'finalizing'; progress: number }
   | { state: 'done' }
+  | { state: 'postponed' }
   | { state: 'failed'; reason: string };
 
 /**
- * Whether a session in this status can still change; `done` and `failed` are final, a paused one
- * waits for Resume or Stop.
+ * Whether a session in this status can still change; `done`, `postponed` and `failed` wait for the
+ * user, a paused one waits for Resume or Stop.
  * @param status - the session's lifecycle status.
  */
 export function isSessionOngoing(status: TranscriptStatus): boolean {
@@ -63,6 +64,7 @@ export function isSessionOngoing(status: TranscriptStatus): boolean {
     case 'finalizing':
       return true;
     case 'done':
+    case 'postponed':
     case 'failed':
       return false;
   }

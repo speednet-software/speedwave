@@ -21,6 +21,9 @@ import type {
 } from '../../models/transcript';
 import { RECORD_SHORTCUT_HINT, recordingName } from '../recording-format';
 
+/** Tooltip on "Transcribe later" next to the still-transcribing note. */
+const POSTPONE_TOOLTIP =
+  'Stops these transcriptions so they do not slow this computer down during your next meeting. Open a recording and press Transcribe when you are ready.';
 /** Tooltip on Record. */
 const START_TOOLTIP =
   'Records system audio and your microphone on this machine. Nothing leaves your computer.';
@@ -174,6 +177,16 @@ function micName(label: string): string {
           data-testid="can-record-note"
         >
           {{ note }}
+          <button
+            type="button"
+            class="mono shrink-0 whitespace-nowrap rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+            data-testid="postpone-all"
+            [appTooltip]="postponeTooltip"
+            [disabled]="postponing()"
+            (click)="postponeAll()"
+          >
+            Transcribe later
+          </button>
         </p>
       }
       @if (modelsKnown() && !hasModel()) {
@@ -275,6 +288,10 @@ export class RecordingControlsComponent implements OnInit {
   );
 
   protected readonly startTooltip = START_TOOLTIP;
+  protected readonly postponeTooltip = POSTPONE_TOOLTIP;
+
+  /** `true` while "Transcribe later" puts the running transcriptions off. */
+  readonly postponing = signal(false);
   protected readonly shortcutHint = RECORD_SHORTCUT_HINT;
 
   /** Loads the source list and model availability, and restores the last recording's choice. */
@@ -385,6 +402,20 @@ export class RecordingControlsComponent implements OnInit {
     }
     event.preventDefault();
     if (this.canStart()) void this.start();
+  }
+
+  /** Puts off every transcription still running or queued, so the next meeting has the processor. */
+  async postponeAll(): Promise<void> {
+    this.postponing.set(true);
+    const results = await Promise.allSettled(
+      this.transcription.transcribing().map((r) => this.transcription.postpone(r.id))
+    );
+    this.postponing.set(false);
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed) {
+      const e: unknown = failed.reason;
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
   }
 
   /** Starts recording the chosen source in the chosen language. */

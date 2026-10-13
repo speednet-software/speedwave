@@ -191,7 +191,7 @@ import { SessionListComponent } from './session-list/session-list.component';
           </div>
         }
         <div class="flex min-h-0 flex-1 overflow-hidden">
-          <aside class="flex w-80 shrink-0 flex-col border-r border-[var(--line)]">
+          <aside class="flex w-80 shrink-0 flex-col border-r border-[var(--line)] xl:w-96">
             <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
           </aside>
           <main class="flex min-w-0 flex-1 flex-col overflow-hidden">

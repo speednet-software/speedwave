@@ -38,7 +38,9 @@ pub use transcript::{ModelsUsed, TranscriptSession, TranscriptStatus, Transcript
 pub use transcript_driver::{
     run_finalize, DriverConfig, DriverError, FinalizeConfig, StopSignal, TranscriptDriver,
 };
-pub use transcript_store::{StoreError, Subscription, TranscriptEvent, TranscriptStore};
+pub use transcript_store::{
+    OfflinePass, StoreError, Subscription, TranscriptEvent, TranscriptStore,
+};
 
 use std::path::PathBuf;
 

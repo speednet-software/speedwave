@@ -72,6 +72,7 @@ describe('RecordingControlsComponent', () => {
     recordingChoice: ReturnType<typeof vi.fn>;
     setRecordingChoice: ReturnType<typeof vi.fn>;
     transcribing: ReturnType<typeof signal<TranscriptSummary[]>>;
+    postpone: ReturnType<typeof vi.fn>;
     recordingSessionId: typeof recordingSessionId;
     recording: Signal<boolean>;
     captureOpen: Signal<boolean>;
@@ -157,6 +158,7 @@ describe('RecordingControlsComponent', () => {
       recordingChoice: vi.fn((): RecordingChoice | null => null),
       setRecordingChoice: vi.fn(),
       transcribing: signal<TranscriptSummary[]>([]),
+      postpone: vi.fn(async () => undefined),
       recordingSessionId,
       recording: computed(() => recordingSessionId() !== null),
       captureOpen: computed(() => recordingSessionId() !== null),
@@ -414,6 +416,29 @@ describe('RecordingControlsComponent', () => {
       expect(component.stillTranscribing()).toBe('');
       svc.transcribing.set([busy('a', null), busy('b', null)]);
       expect(component.stillTranscribing()).toContain('2 recordings are still being transcribed.');
+    });
+
+    it('puts every running or queued transcription off from the note', async () => {
+      svc.transcribing.set([busy('a', null), { ...busy('b', null), queued: true }]);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      (
+        fixture.nativeElement.querySelector('[data-testid="postpone-all"]') as HTMLButtonElement
+      ).click();
+      await fixture.whenStable();
+      expect(svc.postpone.mock.calls).toEqual([['a'], ['b']]);
+      expect(component.postponing()).toBe(false);
+    });
+
+    it('still puts the rest off when one refuses, and reports the refusal', async () => {
+      svc.postpone.mockRejectedValueOnce(new Error('already done'));
+      const errSpy = vi.fn();
+      component.errorOccurred.subscribe(errSpy);
+      svc.transcribing.set([busy('a', null), busy('b', null)]);
+      await component.postponeAll();
+      expect(svc.postpone).toHaveBeenCalledTimes(2);
+      expect(errSpy).toHaveBeenCalledWith('already done');
+      expect(component.postponing()).toBe(false);
     });
   });
 

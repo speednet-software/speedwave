@@ -37,6 +37,9 @@ pub enum TranscriptStatus {
     },
     /// Done — `effective_segments()` returns the final pass if it ran.
     Done,
+    /// The user put the offline pass off ("Later"): the audio is kept untranscribed until they
+    /// start the pass again, so it does not load the machine during their next meeting.
+    Postponed,
     /// Failed at some stage.
     Failed {
         /// Human-readable reason.
@@ -101,6 +104,9 @@ pub struct TranscriptSession {
     /// Whether the in-flight resume reopened a paused session, so a rollback returns it there.
     #[serde(skip, default)]
     pub(crate) resumed_from_pause: bool,
+    /// The offline pass allowed to write this session; a postponed or replaced one writes nothing.
+    #[serde(skip, default)]
+    pub(crate) offline_pass: Option<super::transcript_store::OfflinePass>,
 }
 
 /// One row of the recordings list: everything but the segments.
@@ -164,6 +170,7 @@ impl TranscriptSession {
             prior_live_model: None,
             prior_active_warnings: Vec::new(),
             resumed_from_pause: false,
+            offline_pass: None,
         }
     }
 
@@ -317,6 +324,7 @@ fn status_label(s: &TranscriptStatus) -> &'static str {
         TranscriptStatus::Paused => "paused",
         TranscriptStatus::Finalizing { .. } => "finalizing",
         TranscriptStatus::Done => "done",
+        TranscriptStatus::Postponed => "postponed",
         TranscriptStatus::Failed { .. } => "failed",
     }
 }
@@ -655,6 +663,17 @@ mod tests {
     }
 
     #[test]
+    fn postponed_status_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let wire = serde_json::to_string(&TranscriptStatus::Postponed).unwrap();
+        assert_eq!(wire, r#"{"state":"postponed"}"#);
+        assert!(
+            src.contains("| { state: 'postponed' }"),
+            "models/transcript.ts TranscriptStatus must carry the postponed state"
+        );
+    }
+
+    #[test]
     fn audio_parts_field_matches_ts_mirror() {
         let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
         assert!(
@@ -808,6 +827,7 @@ mod tests {
             TranscriptStatus::Paused,
             TranscriptStatus::Finalizing { progress: 0.42 },
             TranscriptStatus::Done,
+            TranscriptStatus::Postponed,
             TranscriptStatus::Failed {
                 reason: "oops".to_string(),
             },

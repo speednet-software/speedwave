@@ -131,6 +131,7 @@ describe('SessionListComponent', () => {
       summary('busy', { status: { state: 'finalizing', progress: 0.42 } }),
       summary('queued', { status: { state: 'finalizing', progress: 0 }, queued: true }),
       summary('failed', { status: { state: 'failed', reason: 'interrupted' } }),
+      summary('later', { status: { state: 'postponed' } }),
     ]);
     fixture.detectChanges();
     expect(q('status-ok')).toBeNull();
@@ -140,6 +141,7 @@ describe('SessionListComponent', () => {
     expect(q('status-busy')!.textContent).toBe('Transcribing 42%');
     expect(q('status-queued')!.textContent).toBe('Queued');
     expect(q('status-failed')!.textContent).toBe('Not transcribed');
+    expect(q('status-later')!.textContent).toBe('Not transcribed yet');
   });
 
   it('shows no smaller-model chip while the best model is not known', () => {

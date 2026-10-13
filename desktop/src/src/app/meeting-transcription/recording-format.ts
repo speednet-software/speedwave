@@ -127,7 +127,7 @@ export function formatStartTime(createdAt: string): string {
 
 /**
  * The list chip of a recording, only for a state worth a look: recording, paused, transcribing or
- * queued, failed, or made with the smaller model. A good finished transcript gets none.
+ * queued, put off, failed, or made with the smaller model. A good finished transcript gets none.
  * @param rec - the list row.
  * @param rec.status - its lifecycle status.
  * @param rec.queued - whether its offline pass waits for another one.
@@ -169,7 +169,28 @@ export function statusChip(
             tone: 'busy',
           }
         : null;
+    case 'postponed':
+      return {
+        label: 'Not transcribed yet',
+        tooltip: 'Transcription was put off. Open the recording and press Transcribe.',
+        tone: 'muted',
+      };
     case 'failed':
       return { label: 'Not transcribed', tooltip: status.reason, tone: 'error' };
   }
+}
+
+/**
+ * Short name of a Whisper model built from its catalog key ("large-v3" reads "Large v3"); a
+ * quantised variant ("-q5_0") adds "(quantised)".
+ * @param key - the model's catalog key.
+ */
+export function modelLabel(key: string): string {
+  const words = key.split('-').filter(Boolean);
+  const quantised = words.some((w) => /^q\d/.test(w));
+  const name = words
+    .filter((w) => !/^q\d/.test(w))
+    .map((w) => (/^v\d/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+  return quantised ? `${name} (quantised)` : name;
 }

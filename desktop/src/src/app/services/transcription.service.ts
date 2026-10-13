@@ -450,8 +450,17 @@ export class TranscriptionService {
   }
 
   /**
-   * Runs the transcription again over a failed or finished recording's audio, then re-attaches
-   * the open pane to it so the progress shows.
+   * Puts off a running or queued transcription so it stops using the processor; the recording
+   * waits as `postponed` until {@link transcribe}. A running pass loses its progress.
+   * @param sessionId - the recording whose transcription to put off.
+   */
+  postpone(sessionId: string): Promise<void> {
+    return this.tauri.invoke<void>('postpone_transcription', { sessionId });
+  }
+
+  /**
+   * Runs the transcription again over a failed, put-off or finished recording's audio, then
+   * re-attaches the open pane to it so the progress shows.
    * @param sessionId - the recording to transcribe.
    */
   async transcribe(sessionId: string): Promise<void> {

@@ -72,6 +72,7 @@ describe('LiveTranscriptComponent', () => {
     stageForChat: ReturnType<typeof vi.fn>;
     rename: ReturnType<typeof vi.fn>;
     transcribe: ReturnType<typeof vi.fn>;
+    postpone: ReturnType<typeof vi.fn>;
     exportMarkdown: ReturnType<typeof vi.fn>;
     revealAudio: ReturnType<typeof vi.fn>;
     getMarkdown: ReturnType<typeof vi.fn>;
@@ -98,6 +99,7 @@ describe('LiveTranscriptComponent', () => {
       stageForChat: vi.fn(async () => undefined),
       rename: vi.fn(async (_id: string, title: string) => title.trim() || null),
       transcribe: vi.fn(async () => undefined),
+      postpone: vi.fn(async () => undefined),
       exportMarkdown: vi.fn(async () => true),
       revealAudio: vi.fn(async () => undefined),
       getMarkdown: vi.fn(async () => '# Meeting transcript'),
@@ -834,20 +836,105 @@ describe('LiveTranscriptComponent', () => {
     });
   });
 
+  describe('transcribe later', () => {
+    const q = (id: string): HTMLElement | null =>
+      fixture.nativeElement.querySelector(`[data-testid="${id}"]`);
+
+    it('offers Later on a running transcription and puts it off', async () => {
+      svc.recordings.set([row({ status: { state: 'finalizing', progress: 0.4 } })]);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.4 } })
+      );
+      fixture.detectChanges();
+      expect(component.laterTooltip()).toContain('starts it again from the beginning');
+      (q('later-btn') as HTMLButtonElement).click();
+      await fixture.whenStable();
+      expect(svc.postpone).toHaveBeenCalledWith('sess-1');
+      expect(component.working()).toBe(false);
+    });
+
+    it('says a queued transcription only leaves the queue', () => {
+      svc.recordings.set([row({ status: { state: 'finalizing', progress: 0 }, queued: true })]);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0 } })
+      );
+      fixture.detectChanges();
+      expect(q('later-btn')).not.toBeNull();
+      expect(component.laterTooltip()).toContain('out of the queue');
+    });
+
+    it('reports a refused Later to the parent', async () => {
+      svc.postpone.mockRejectedValueOnce(
+        new Error('only a recording that is being transcribed can be put off')
+      );
+      const errors: string[] = [];
+      component.errorOccurred.subscribe((e) => errors.push(e));
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.4 } })
+      );
+      fixture.detectChanges();
+      await component.postpone();
+      expect(errors).toEqual(['only a recording that is being transcribed can be put off']);
+      expect(component.working()).toBe(false);
+    });
+
+    it('shows no Later once the transcript is done', () => {
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      expect(q('later-btn')).toBeNull();
+    });
+
+    it('makes Transcribe the main action of a put-off recording', async () => {
+      svc.recordings.set([row({ status: { state: 'postponed' } })]);
+      fixture.componentRef.setInput('session', session({ status: { state: 'postponed' } }));
+      fixture.detectChanges();
+      expect(q('transcript-quality')!.textContent).toContain('Not transcribed yet');
+      expect(q('transcript-empty')!.textContent).toContain('put off');
+      expect(q('status-announcement')!.textContent).toContain('Transcription put off');
+      expect(q('later-btn')).toBeNull();
+      expect(q('finalize-bar')).toBeNull();
+      expect(q('send-to-chat-btn')!.className).toContain('bg-[var(--bg-2)]');
+      (q('transcribe-btn') as HTMLButtonElement).click();
+      await fixture.whenStable();
+      expect(svc.transcribe).toHaveBeenCalledWith('sess-1');
+      (q('more-btn') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      expect(q('delete-item')).not.toBeNull();
+      expect(q('retranscribe-item')).toBeNull();
+      expect(q('resume-item')).toBeNull();
+    });
+  });
+
   describe('transcript quality', () => {
-    it('marks a transcript made with the best model as high quality', () => {
-      svc.recordings.set([row()]);
+    it('names the model of a good transcript in the meta line and adds no label', () => {
+      svc.highQualityModel.set({ ...best(), key: 'large-v3' });
+      svc.recordings.set([row({ finalize_model: 'large-v3' })]);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
       );
       fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('[data-testid="transcript-meta"]')!.textContent).toContain(
+        '13 min · System · Large v3'
+      );
+      expect(el.querySelector('[data-testid="transcript-quality"]')).toBeNull();
+      expect(el.querySelector('[data-testid="smaller-model-banner"]')).toBeNull();
+    });
+
+    it('names no model while the transcript is still being made', () => {
+      svc.recordings.set([row({ status: { state: 'finalizing', progress: 0.3 } })]);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'finalizing', progress: 0.3 } })
+      );
+      fixture.detectChanges();
       expect(
-        fixture.nativeElement.querySelector('[data-testid="transcript-quality"]').textContent
-      ).toContain('High-quality transcript');
-      expect(
-        fixture.nativeElement.querySelector('[data-testid="smaller-model-banner"]')
-      ).toBeNull();
+        fixture.nativeElement.querySelector('[data-testid="transcript-meta"]').textContent
+      ).not.toContain('Large');
     });
 
     it('says nothing about quality for a recording made before the model was recorded', () => {

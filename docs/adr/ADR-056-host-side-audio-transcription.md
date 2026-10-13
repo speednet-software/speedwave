@@ -127,6 +127,18 @@
 > - **Model recorded:** the pass stores the key of the model it runs (`TranscriptStore::set_finalize_model`, `models_used.finalize`), and `TranscriptSummary.finalize_model` carries it to the list, which compares it with the recommended offline-pass model to mark a transcript made with the smaller one.
 > - **Transcribe again:** `begin_retranscribe` also accepts a `Done` session, so a transcript made with the smaller model can be redone once the high-quality model is downloaded.
 > - **UI:** the list shows a status chip only for a recording that needs a look (recording, paused, queued, transcribing, smaller model, not transcribed), groups rows by day and has a search; the open recording names the model that made its transcript; recording, pause and stop live in a bar above the list and pane, and a new recording can start while earlier ones are still being transcribed. The language and source picked for a recording are remembered for the next one (localStorage `speedwave-recording-choice`).
+>
+> **Amendment 21 (transcribe later):**
+>
+> **Problem:**
+> Every Stop starts the offline pass at once with the large model, which keeps the processor busy for minutes. A user going straight into another meeting had no way to keep that load off the machine, and the green "High-quality transcript" label told them nothing, since every transcript made after Stop with the model downloaded is high quality.
+>
+> **Decision:**
+>
+> - **Postponed:** `TranscriptStatus::Postponed` is a new, persisted state. `postpone_transcription` (`TranscriptStore::postpone`) moves a `Finalizing` session, running or queued, to `Postponed` and drops it from the queue. `begin_retranscribe` accepts it, so Transcribe runs the pass from the start; `reconcile_interrupted` leaves it alone. Transcription after Stop stays automatic; there is no setting to turn it off.
+> - **The pass claims its session:** after it gets its turn, `spawn_offline_pass` claims the session (`TranscriptStore::begin_offline_pass`, an `OfflinePass`), and every write of the pass (`finalize_progress`, `set_final_segments`, `finish`, `fail_pass`) applies only while the session still holds that claim, checked under the session lock. Postponing, a newer pass and a delete cancel the claim, so a pass that was put off writes nothing more and ends with `DriverError::Superseded`, which is not a failure. A pass that was queued when it was put off finds nothing to claim and does not load a model.
+> - **The decode stops mid-window:** the claim carries a `DecodeCancel` flag that `run_finalize` hands to Whisper through `TranscribeOptions.cancel` and `FullParams::set_abort_callback_safe`[^32]. whisper.cpp checks it after every encoder and decoder step and then fails `whisper_full`[^33], so Later frees the processor within one step rather than at the end of the 30 s window. The progress of a pass that was put off is lost.
+> - **UI:** the pane offers Later next to the progress bar of a running or queued transcription, and the bar above the list offers "Transcribe later" for every transcription still running. A put-off recording shows "Not transcribed yet" in the list and Transcribe as its main action. A good finished transcript gets no quality label; the meta line names the model that made it, and only the smaller-model case keeps its warning. The recordings list is 384 px wide from the `xl` breakpoint (320 px below it).
 
 ## Decision
 
@@ -247,3 +259,7 @@ The supporting sub-decisions:
 [^30]: `hound`'s `WavWriter::write_headers` writes the RIFF size and the `data` length as 0 ("The 0 will be overwritten later"), and `update_header`, called from `flush` and `finalize`, writes the real sizes: <https://docs.rs/hound/3.5.1/src/hound/write.rs.html>.
 
 [^31]: `FileDialogBuilder::blocking_save_file`: "This is a blocking operation, and should _NOT_ be used when running on the main thread": <https://docs.rs/tauri-plugin-dialog/2.8.1/tauri_plugin_dialog/struct.FileDialogBuilder.html>.
+
+[^32]: `whisper-rs` 0.16 `FullParams::set_abort_callback_safe` takes a closure returning whether to abort and installs it as whisper.cpp's `abort_callback`: <https://docs.rs/whisper-rs/0.16.0/whisper_rs/struct.FullParams.html#method.set_abort_callback_safe>.
+
+[^33]: ggml's `ggml_abort_callback` aborts the computation when it returns true; whisper.cpp passes it to the backend and checks it after each encode and decode step, and `whisper_full_with_state` returns an error ("failed to encode", "failed to decode") when a step reports the abort: <https://github.com/ggml-org/whisper.cpp/blob/master/src/whisper.cpp>, <https://github.com/ggml-org/whisper.cpp/blob/master/ggml/include/ggml.h>. Verified against the copy `whisper-rs-sys` 0.15 vendors.

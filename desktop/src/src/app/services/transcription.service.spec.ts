@@ -992,6 +992,35 @@ describe('TranscriptionService', () => {
       expect(svc.active()).toBeNull();
     });
 
+    it('postpone puts the transcription off through the backend', async () => {
+      const calls: [string, unknown][] = [];
+      mockTauri.invokeHandler = async (cmd, args) => {
+        calls.push([cmd, args]);
+        return undefined;
+      };
+      await svc.postpone('sess-1');
+      expect(calls).toEqual([['postpone_transcription', { sessionId: 'sess-1' }]]);
+    });
+
+    it('postpone surfaces the backend refusal', async () => {
+      mockTauri.invokeHandler = async () => {
+        throw new Error('only a recording that is being transcribed can be put off');
+      };
+      await expect(svc.postpone('x')).rejects.toThrow('being transcribed');
+    });
+
+    it('stops following a session once its transcription is put off', async () => {
+      await subscribeWith(snapshot({ status: { state: 'finalizing', progress: 0.3 } }));
+      expect(svc.liveStreamNeeded()).toBe(true);
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'postponed' },
+      });
+      expect(svc.active()?.status).toEqual({ state: 'postponed' });
+      expect(svc.liveStreamNeeded()).toBe(false);
+    });
+
     it('transcribe surfaces the backend refusal', async () => {
       mockTauri.invokeHandler = async () => {
         throw new Error('only a failed recording can be transcribed again');

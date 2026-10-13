@@ -424,8 +424,8 @@ pub async fn stop_transcription(
 }
 
 /// Runs the offline pass again over a session's recorded parts: a failed one (an interrupted
-/// recording, or a model missing at Stop) or a finished one made with a smaller model. The session
-/// goes back to `Finalizing` and ends `Done` or `Failed`.
+/// recording, or a model missing at Stop), a finished one made with a smaller model, or one the
+/// user put off. The session goes back to `Finalizing` and ends `Done` or `Failed`.
 #[tauri::command]
 pub async fn transcribe_transcript(
     session_id: String,
@@ -452,6 +452,17 @@ pub async fn transcribe_transcript(
     Ok(())
 }
 
+/// Puts off a running or queued offline pass ("Later"): a running decode is aborted and its
+/// progress is lost, and the session waits as `Postponed` until `transcribe_transcript`.
+#[tauri::command]
+pub async fn postpone_transcription(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+) -> Result<(), String> {
+    let id = parse_transcript_id(&session_id)?;
+    store.postpone(id).map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// One offline pass at a time: two passes loading two large models side by side can exhaust the
 /// memory of a 16 GiB host, so a second Stop waits its turn (the list row says "queued").
 static OFFLINE_PASS_TURN: Mutex<()> = Mutex::new(());
@@ -473,7 +484,8 @@ fn take_offline_pass_turn(store: &TranscriptStore, id: Uuid) -> std::sync::Mutex
 }
 
 /// Loads the offline-pass model and transcribes `audio_paths` on a blocking task, one pass at a
-/// time; every failure lands on the session as `Failed`, so the UI always learns how it ended.
+/// time; every failure lands on the session as `Failed`, so the UI always learns how it ended. A
+/// pass whose session was put off while it waited for its turn ends without touching it.
 fn spawn_offline_pass(
     store_arc: TranscriptStoreHandle,
     models_arc: ModelStoreHandle,
@@ -482,14 +494,21 @@ fn spawn_offline_pass(
 ) {
     tokio::task::spawn_blocking(move || {
         let _turn = take_offline_pass_turn(&store_arc, id);
+        let pass = match store_arc.begin_offline_pass(id) {
+            Ok(pass) => pass,
+            Err(e) => {
+                log::info!("offline pass for {} not started: {e}", short_id(id));
+                return;
+            }
+        };
+        let fail = |reason: String| {
+            if let Err(e) = store_arc.fail_pass(id, &pass, reason) {
+                log::info!("offline pass for {} ended: {e}", short_id(id));
+            }
+        };
         let offline_key = pick_offline_model(&models_arc);
         let Some(key) = offline_key else {
-            let _ = store_arc.set_status(
-                id,
-                TranscriptStatus::Failed {
-                    reason: "no Whisper model available for the offline pass".to_string(),
-                },
-            );
+            fail("no Whisper model available for the offline pass".to_string());
             return;
         };
         if let Err(e) = store_arc.set_finalize_model(id, &key) {
@@ -498,12 +517,7 @@ fn spawn_offline_pass(
         let path = match models_arc.ensure_model(&key, &mut |_| {}) {
             Ok(p) => p,
             Err(e) => {
-                let _ = store_arc.set_status(
-                    id,
-                    TranscriptStatus::Failed {
-                        reason: format!("model: {e}"),
-                    },
-                );
+                fail(format!("model: {e}"));
                 return;
             }
         };
@@ -514,12 +528,7 @@ fn spawn_offline_pass(
                     Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
                 }
                 Err(e) => {
-                    let _ = store_arc.set_status(
-                        id,
-                        TranscriptStatus::Failed {
-                            reason: format!("transcriber: {e}"),
-                        },
-                    );
+                    fail(format!("transcriber: {e}"));
                     return;
                 }
             };
@@ -529,6 +538,7 @@ fn spawn_offline_pass(
             audio_paths,
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
+            pass,
         };
         match speedwave_runtime::transcription::run_finalize(cfg) {
             Ok(()) => {}
@@ -537,6 +547,9 @@ fn spawn_offline_pass(
                     "offline finalize for {} stopped: session deleted",
                     short_id(id)
                 );
+            }
+            Err(DriverError::Superseded) => {
+                log::info!("offline finalize for {} stopped: put off", short_id(id));
             }
             Err(e) => log::warn!("offline finalize for {} failed: {e}", short_id(id)),
         }
@@ -1501,6 +1514,31 @@ mod tests {
             count_calls(src, "run_finalize"),
             1,
             "run_finalize has exactly one caller, spawn_offline_pass"
+        );
+    }
+
+    #[test]
+    fn the_offline_pass_claims_its_session_before_it_loads_a_model_and_writes_only_through_it() {
+        let src = include_str!("transcription_cmd.rs");
+        let body = fn_body(src, "spawn_offline_pass");
+        let claim = body
+            .find("begin_offline_pass")
+            .expect("the pass must claim its session");
+        assert!(claim > body.find("take_offline_pass_turn").expect("turn"));
+        assert!(claim < body.find("pick_offline_model").expect("model pick"));
+        assert!(
+            !body.contains("set_status("),
+            "a put-off pass must never overwrite the session's status"
+        );
+        assert_eq!(count_calls(body, "fail_pass"), 1);
+    }
+
+    #[test]
+    fn later_puts_the_pass_off_through_the_store() {
+        let src = include_str!("transcription_cmd.rs");
+        assert_eq!(
+            count_calls(fn_body(src, "postpone_transcription"), "postpone"),
+            1
         );
     }
 
