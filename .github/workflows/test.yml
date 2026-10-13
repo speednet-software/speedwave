@@ -5,6 +5,7 @@ on:
   merge_group:
   schedule:
     - cron: '41 5 * * 1-5'
+  workflow_dispatch:
 
 permissions:
   contents: read
