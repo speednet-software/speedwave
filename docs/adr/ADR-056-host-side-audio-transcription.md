@@ -114,6 +114,19 @@
 > - **UI:** errors render once, in the view's banner; the recording view shows the elapsed time, a meter per channel and Stop (⌘⇧R / Ctrl+Shift+R toggles recording); delete asks first, alone or for a selection, with the length and size; actions say what they do ("Continue recording", "Attach to new chat", "Attach to current chat") and their tooltips state the cost and whether they can be undone.
 >
 > **Not changed:** removing the live pass altogether (driver decode loop, live model, `SegmentAppended`/`LiveDraft`) is a separate decision; this amendment only makes it opt-in.
+>
+> **Amendment 20 (pause, one offline pass at a time, transcript quality shown):**
+>
+> **Problem:**
+> User feedback on the recordings screen (SPEED-793): nothing said which model made a transcript, so a transcript made with the smaller model because the high-quality one was not downloaded looked the same as a good one; a recording could only be stopped, not paused between two meetings; and stopping one recording while another was still being transcribed ran two offline passes at once, both slower, with no sign that the second was waiting.
+>
+> **Decision:**
+>
+> - **Pause:** `TranscriptStatus::Paused` is a new state. `pause_transcription` sets `StopSignal::pause`, the driver ends the capture like a stop, clears the live draft and leaves the session `Paused` instead of starting the offline pass. `resume_transcription` accepts a `Paused` session as it accepts a `Done` one and records a new audio part; a resume that fails returns it to `Paused` with its live segments kept. `reconcile_interrupted` leaves a `Paused` session alone, since no capture is running. The microphone is off while paused.
+> - **One offline pass at a time:** `spawn_offline_pass` takes a process-wide turn (`transcription_cmd::OFFLINE_PASS_TURN`) before it loads a model. A pass that has to wait marks its session queued (`TranscriptStore::set_queued`, not persisted, shown as `TranscriptSummary.queued`) until its turn comes. Recording is not blocked by a running pass.
+> - **Model recorded:** the pass stores the key of the model it runs (`TranscriptStore::set_finalize_model`, `models_used.finalize`), and `TranscriptSummary.finalize_model` carries it to the list, which compares it with the recommended offline-pass model to mark a transcript made with the smaller one.
+> - **Transcribe again:** `begin_retranscribe` also accepts a `Done` session, so a transcript made with the smaller model can be redone once the high-quality model is downloaded.
+> - **UI:** the list shows a status chip only for a recording that needs a look (recording, paused, queued, transcribing, smaller model, not transcribed), groups rows by day and has a search; the open recording names the model that made its transcript; recording, pause and stop live in a bar above the list and pane, and a new recording can start while earlier ones are still being transcribed. The language and source picked for a recording are remembered for the next one (localStorage `speedwave-recording-choice`).
 
 ## Decision
 
