@@ -1016,6 +1016,11 @@ fn link_cli_from(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use speedwave_runtime::config::{
@@ -1852,6 +1857,10 @@ mod tests {
                 let mut perms = std::fs::metadata(&file_path)
                     .expect("stat file")
                     .permissions();
+                #[expect(
+                    clippy::permissions_set_readonly_false,
+                    reason = "Windows has no world-writable bit; the flag only clears FILE_ATTRIBUTE_READONLY"
+                )]
                 perms.set_readonly(false);
                 std::fs::set_permissions(&file_path, perms).expect("clear readonly");
             }

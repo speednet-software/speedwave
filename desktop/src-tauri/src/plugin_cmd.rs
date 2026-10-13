@@ -1598,10 +1598,8 @@ mod tests {
         let auth_fields: Vec<String> = vec![];
         let svc_dir = tmp.path().join("tokens/proj-a/example-plugin");
 
-        if svc_dir.exists() {
-            if auth_fields.is_empty() {
-                std::fs::remove_dir_all(&svc_dir).unwrap();
-            }
+        if svc_dir.exists() && auth_fields.is_empty() {
+            std::fs::remove_dir_all(&svc_dir).unwrap();
         }
 
         assert!(!dir.exists());

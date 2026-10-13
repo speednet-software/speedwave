@@ -48,7 +48,7 @@ pub fn has_api_key(project: &str) -> bool {
     api_key_path(project).map(|p| p.exists()).unwrap_or(false)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[expect(
     clippy::unwrap_used,
     reason = "test module uses unwrap() only, never expect()"

@@ -1346,7 +1346,11 @@ fn main() {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test-only assertions")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -1704,10 +1708,10 @@ mod tests {
                 let before = &source[..*idx];
                 let last_mod_tests = before.rfind("mod tests");
                 let last_cfg_test = before.rfind("#[cfg(test)]");
-                match (last_mod_tests, last_cfg_test) {
-                    (Some(mt), Some(ct)) if ct < mt && *idx > mt => false,
-                    _ => true,
-                }
+                !matches!(
+                    (last_mod_tests, last_cfg_test),
+                    (Some(mt), Some(ct)) if ct < mt && *idx > mt
+                )
             })
             .count();
         assert!(

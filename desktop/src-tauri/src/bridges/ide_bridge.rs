@@ -904,7 +904,11 @@ async fn handle_test_connection<S>(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test module")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::{
         dispatch_method, find_available_port, handle_jsonrpc_message, jsonrpc_error,

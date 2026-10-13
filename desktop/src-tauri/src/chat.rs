@@ -2887,6 +2887,7 @@ fn write_and_emit_drained_message(
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test helper may expect freely")]
 fn test_stdin_pipe() -> (std::io::PipeReader, std::process::ChildStdin) {
     let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
     #[cfg(unix)]
@@ -2930,6 +2931,7 @@ fn test_broken_pipe_stdin() -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test helper may expect freely")]
 fn spawn_test_child() -> Child {
     #[cfg(unix)]
     let mut command = {

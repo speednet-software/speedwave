@@ -1048,7 +1048,11 @@ fn resume_snapshot_from_end(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -2870,8 +2874,7 @@ mod tests {
     fn last_cost_state(transcript: &str) -> serde_json::Value {
         transcript
             .lines()
-            .filter(|l| is_cost_state(l))
-            .last()
+            .rfind(|l| is_cost_state(l))
             .map(|l| serde_json::from_str(l).unwrap())
             .expect("the capture holds a cost-state line")
     }
@@ -2882,7 +2885,7 @@ mod tests {
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter(|l| l["type"] == "assistant")
             .filter_map(|l| l["message"]["model"].as_str().map(str::to_string))
-            .last()
+            .next_back()
             .expect("the capture holds an assistant model")
     }
 
