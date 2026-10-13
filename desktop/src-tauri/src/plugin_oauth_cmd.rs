@@ -487,9 +487,10 @@ mod tests {
     #[test]
     fn access_token_path_is_under_tokens() {
         let p = access_token_path("proj", "my-plugin").unwrap();
-        assert!(p
-            .to_string_lossy()
-            .contains("/tokens/proj/my-plugin/access_token"));
+        let tail: std::path::PathBuf = ["tokens", "proj", "my-plugin", "access_token"]
+            .iter()
+            .collect();
+        assert!(p.ends_with(tail));
     }
 
     #[test]
