@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { LIVE_TRANSCRIPT_STORAGE_KEY, TranscriptionService } from './transcription.service';
+import {
+  LIVE_TRANSCRIPT_STORAGE_KEY,
+  RECORDING_CHOICE_STORAGE_KEY,
+  TranscriptionService,
+} from './transcription.service';
 import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -370,11 +374,55 @@ describe('TranscriptionService', () => {
       expect(seen).toEqual([]);
     });
 
-    it('subscribeToTranscript refuses to switch away from the in-progress recording', async () => {
+    it('opens another recording while one records, and keeps following the recording', async () => {
       await startWith('sess-1');
-      await expect(svc.subscribeToTranscript('sess-2')).rejects.toThrow('recording is in progress');
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'subscribe_transcript'
+          ? {
+              event_name: 'transcript_event::sess-2',
+              snapshot: snapshot({ id: 'sess-2', status: { state: 'done' } }),
+            }
+          : undefined;
+      await svc.subscribeToTranscript('sess-2');
+      expect(svc.active()?.id).toBe('sess-2');
       expect(svc.recordingSessionId()).toBe('sess-1');
-      expect(svc.active()?.id).toBe('sess-1');
+
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 1,
+        levels: [0.2],
+      });
+      expect(svc.audioLevels()).toEqual([0.2]);
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'capture_warning',
+        seq: 2,
+        warning: 'microphone_stalled',
+      });
+      expect(svc.captureWarnings()).toEqual(['microphone_stalled']);
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 3,
+        status: { state: 'finalizing', progress: 0 },
+      });
+      expect(svc.recording()).toBe(false);
+      expect(svc.audioLevels()).toBeNull();
+      expect(svc.captureWarnings()).toEqual([]);
+      expect(svc.active()?.id).toBe('sess-2');
+    });
+
+    it('ignores recording events it has already applied', async () => {
+      await startWith('sess-1');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 2,
+        levels: [0.5],
+      });
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 2,
+        levels: [0.9],
+      });
+      expect(svc.audioLevels()).toEqual([0.5]);
     });
 
     it('subscribeToTranscript still works for the recording own session while recording', async () => {
@@ -578,25 +626,191 @@ describe('TranscriptionService', () => {
       expect(s.live_segments[0].text).toBe('live-text');
     });
 
-    it('applies audio_level and clears it when the status leaves recording', () => {
+    it('leaves loudness to the running recording, so an opened session sets none', () => {
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'audio_level',
         seq: 1,
         levels: [0.12, 0.03],
       });
-      expect(svc.audioLevels()).toEqual([0.12, 0.03]);
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'audio_level',
-        seq: 1,
-        levels: [0.9],
-      });
-      expect(svc.audioLevels()).toEqual([0.12, 0.03]);
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'status_changed',
-        seq: 2,
-        status: { state: 'finalizing', progress: 0 },
-      });
       expect(svc.audioLevels()).toBeNull();
+      expect(svc.active()?.last_seq).toBe(1);
+    });
+  });
+
+  describe('pause and resume', () => {
+    function row(id: string, overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
+      return {
+        id,
+        created_at: '2026-10-13T08:30:00Z',
+        title: null,
+        language: 'pl',
+        source_label: 'System',
+        status: { state: 'done' },
+        duration_secs: 754,
+        segment_count: 0,
+        preview: null,
+        size_bytes: 1,
+        finalize_model: null,
+        queued: false,
+        ...overrides,
+      };
+    }
+
+    it('pauses through pause_transcription, ends the capture and finds the paused row', async () => {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot(),
+      };
+      let rows: TranscriptSummary[] = [];
+      const seen: string[] = [];
+      mockTauri.invokeHandler = async (cmd) => {
+        seen.push(cmd);
+        if (cmd === 'start_transcription') return ack;
+        if (cmd === 'pause_transcription') rows = [row('sess-1', { status: { state: 'paused' } })];
+        if (cmd === 'list_transcripts') return rows;
+        return undefined;
+      };
+      await svc.startRecording({ kind: 'system_wide' }, 'pl', false);
+      expect(svc.captureOpen()).toBe(true);
+      await svc.pauseRecording('sess-1');
+      expect(seen).toContain('pause_transcription');
+      expect(svc.recording()).toBe(false);
+      expect(svc.pausedRecording()?.id).toBe('sess-1');
+      expect(svc.captureOpen()).toBe(true);
+    });
+
+    it('clears the capture even when the pause call fails', async () => {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot(),
+      };
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'start_transcription') return ack;
+        if (cmd === 'pause_transcription') throw new Error('not capturing');
+        return undefined;
+      };
+      await svc.startRecording({ kind: 'system_wide' }, 'pl', false);
+      await expect(svc.pauseRecording('sess-1')).rejects.toThrow('not capturing');
+      expect(svc.recording()).toBe(false);
+    });
+
+    it('resumes with the clock going on from the length already recorded', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'list_transcripts') return [row('sess-1', { status: { state: 'paused' } })];
+        if (cmd === 'resume_transcription') {
+          return {
+            session_id: 'sess-1',
+            event_name: 'transcript_event::sess-1',
+            snapshot: snapshot({ id: 'sess-1' }),
+          };
+        }
+        return undefined;
+      };
+      await svc.refreshRecordings();
+      await svc.resumeRecording('sess-1', false);
+      expect(svc.recordingStartedAt()).toBe(1_000_000 - 754_000);
+      vi.restoreAllMocks();
+    });
+
+    it('lists the recordings still being transcribed', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'list_transcripts'
+          ? [
+              row('a', { status: { state: 'finalizing', progress: 0.2 } }),
+              row('b'),
+              row('c', { status: { state: 'finalizing', progress: 0 }, queued: true }),
+            ]
+          : undefined;
+      await svc.refreshRecordings();
+      expect(svc.transcribing().map((r) => r.id)).toEqual(['a', 'c']);
+      expect(svc.pausedRecording()).toBeNull();
+      expect(svc.captureOpen()).toBe(false);
+    });
+  });
+
+  describe('remembered recording choice', () => {
+    beforeEach(() => localStorage.removeItem(RECORDING_CHOICE_STORAGE_KEY));
+
+    it('round-trips language, source and microphone', () => {
+      expect(svc.recordingChoice()).toBeNull();
+      svc.setRecordingChoice({ language: 'en', source: 'mixed', mic: 'usb' });
+      expect(svc.recordingChoice()).toEqual({ language: 'en', source: 'mixed', mic: 'usb' });
+    });
+
+    it('ignores a stored value it does not recognise', () => {
+      localStorage.setItem(RECORDING_CHOICE_STORAGE_KEY, '{"language":"de","source":"mixed"}');
+      expect(svc.recordingChoice()).toBeNull();
+      localStorage.setItem(RECORDING_CHOICE_STORAGE_KEY, '{"language":"pl","source":"tv"}');
+      expect(svc.recordingChoice()).toBeNull();
+      localStorage.setItem(RECORDING_CHOICE_STORAGE_KEY, 'not json');
+      expect(svc.recordingChoice()).toBeNull();
+      localStorage.setItem(
+        RECORDING_CHOICE_STORAGE_KEY,
+        '{"language":"pl","source":"mixed","mic":7}'
+      );
+      expect(svc.recordingChoice()).toEqual({ language: 'pl', source: 'mixed', mic: null });
+    });
+  });
+
+  describe('high-quality model', () => {
+    const entry = (key: string, downloaded: boolean) => ({
+      key,
+      display_name: key,
+      size_bytes: 1,
+      downloaded,
+      downloading: false,
+    });
+
+    it('is the offline-pass model when the host has one, else the live model', async () => {
+      expect(svc.highQualityModel()).toBeNull();
+      mockTauri.invokeHandler = async () => ({
+        live: entry('small', true),
+        finalize: entry('large', false),
+        accel_label: 'CPU',
+      });
+      await svc.loadRecommendedModel();
+      expect(svc.highQualityModel()?.key).toBe('large');
+      mockTauri.invokeHandler = async () => ({
+        live: entry('turbo', true),
+        finalize: null,
+        accel_label: 'Metal',
+      });
+      await svc.loadRecommendedModel();
+      expect(svc.highQualityModel()?.key).toBe('turbo');
+    });
+
+    it('keeps the last read when a re-read fails', async () => {
+      mockTauri.invokeHandler = async () => ({
+        live: entry('small', true),
+        finalize: entry('large', true),
+        accel_label: 'CPU',
+      });
+      await svc.loadRecommendedModel();
+      mockTauri.invokeHandler = async () => {
+        throw new Error('ipc down');
+      };
+      await svc.loadRecommendedModel();
+      expect(svc.highQualityModel()?.key).toBe('large');
+    });
+
+    it('re-reads it after a download finishes', async () => {
+      let downloaded = false;
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'download_transcription_model') downloaded = true;
+        if (cmd === 'recommended_transcription_model') {
+          return {
+            live: entry('small', true),
+            finalize: entry('large', downloaded),
+            accel_label: 'CPU',
+          };
+        }
+        return undefined;
+      };
+      await svc.downloadModel('large');
+      expect(svc.highQualityModel()?.downloaded).toBe(true);
     });
   });
 
@@ -655,6 +869,8 @@ describe('TranscriptionService', () => {
         segment_count: 3,
         preview: 'hej',
         size_bytes: 1000,
+        finalize_model: null,
+        queued: false,
         ...overrides,
       };
     }

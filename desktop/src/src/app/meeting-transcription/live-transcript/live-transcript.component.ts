@@ -21,16 +21,26 @@ import { IconComponent } from '../../shared/icon.component';
 import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
 import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
-import { formatDuration, formatRecordingDate, recordingName } from '../recording-format';
+import { formatBytes } from '../../shared/format-bytes';
+import {
+  formatDuration,
+  formatRecordingDate,
+  recordingName,
+  transcriptQuality,
+} from '../recording-format';
 
 /** Tooltip on "Attach to new chat". */
 const NEW_CHAT_TOOLTIP =
   'Opens a new chat with the transcript attached and a prompt you can edit. Nothing is sent until you press Send.';
-/** Tooltip on "Attach to current chat". */
-const CURRENT_CHAT_TOOLTIP =
-  'Attaches the transcript to the open conversation. Nothing is sent until you press Send.';
+/** Hint under "Attach to current chat" in the attach menu. */
+const CURRENT_CHAT_HINT = 'Keeps the open conversation. Nothing is sent until you press Send.';
 /** Tooltip on Transcribe. */
 const TRANSCRIBE_TOOLTIP = 'Runs the transcription on the recorded audio again.';
+/** Classes of the accent (primary) half of the attach button. */
+const PRIMARY_BTN = 'bg-[var(--accent)] text-[var(--bg)] hover:opacity-90';
+/** Classes of the attach button when Transcribe is the primary action. */
+const SECONDARY_BTN =
+  'bg-[var(--bg-2)] text-[var(--ink)] ring-1 ring-inset ring-[var(--line-strong)] hover:bg-[var(--bg-3)]';
 /** Tooltip on Export. */
 const EXPORT_TOOLTIP = 'Saves the transcript as Markdown.';
 /** How long the "Copied" confirmation stays. */
@@ -67,6 +77,15 @@ interface TranscriptLine {
   text: string;
 }
 
+/** The quality line under the title: its words and colour. */
+interface QualityLine {
+  text: string;
+  cls: string;
+}
+
+/** Which of the pane's menus is open. */
+type OpenMenu = 'chat' | 'more' | null;
+
 /** Where the transcription progress stood when this pane first saw it, for the time estimate. */
 interface ProgressAnchor {
   sessionId: string;
@@ -75,77 +94,157 @@ interface ProgressAnchor {
 }
 
 /**
- * Transcript pane (right): the open recording's name (renamable), its transcript, the
- * transcription progress with a time estimate, Transcribe for a failed recording, Export / Copy /
- * Show audio file, and the actions that attach the transcript to a chat. Errors go to the parent.
+ * Transcript pane (right): the open recording's name (renamable), how and with which model its
+ * transcript was made, the progress with a time estimate, one row of actions (attach to a chat,
+ * Copy, Export, and a menu with Transcribe again, Show audio file, Continue recording and Delete),
+ * and the transcript itself. Errors go to the parent.
  */
 @Component({
   selector: 'app-live-transcript',
   standalone: true,
   imports: [TooltipDirective, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: {
+    class: 'flex min-h-0 flex-1 flex-col',
+    '(document:click)': 'onDocumentClick($event)',
+    '(document:keydown.escape)': 'closeMenus()',
+  },
   template: `
-    <section class="flex h-full flex-col" data-testid="live-transcript">
+    <section class="flex h-full min-h-0 flex-col" data-testid="live-transcript">
       <p class="sr-only" aria-live="polite" data-testid="status-announcement">
         {{ announcement() }}
       </p>
 
       @if (session(); as s) {
-        @if (status() !== 'recording') {
-          <header class="mb-2 border-b border-[var(--line)] pb-2" data-testid="transcript-header">
-            @if (renaming()) {
-              <div class="-mx-1.5">
-                <input
-                  #titleInput
-                  type="text"
-                  maxlength="120"
-                  class="h-7 w-full rounded border border-[var(--accent)] bg-[var(--bg-2)] px-1.5 text-[14px] font-medium leading-7 text-[var(--ink)] outline-none placeholder:font-normal placeholder:text-[var(--ink-mute)]"
-                  aria-label="Recording name"
-                  aria-describedby="title-input-hint"
-                  data-testid="title-input"
-                  [value]="s.title ?? ''"
-                  [placeholder]="defaultName()"
-                  (keydown.enter)="saveTitle($any($event.target).value, true)"
-                  (keydown.escape)="cancelRename()"
-                  (blur)="saveTitle($any($event.target).value)"
-                />
-                <p id="title-input-hint" class="mt-0.5 px-1.5 text-[10px] text-[var(--ink-mute)]">
-                  Enter to save · Esc to cancel · leave empty to use the start time
-                </p>
-              </div>
-            } @else {
-              <h2 class="-mx-1.5 min-w-0">
-                <button
-                  #renameBtn
-                  type="button"
-                  class="group flex h-7 max-w-full items-center gap-1.5 rounded px-1.5 text-left hover:bg-[var(--bg-2)] focus-visible:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
-                  data-testid="rename-btn"
-                  [attr.aria-label]="'Rename recording: ' + name()"
-                  [appTooltip]="'Rename'"
-                  placement="bottom"
-                  (click)="startRename()"
-                >
-                  <span
-                    class="truncate text-[14px] font-medium text-[var(--ink)]"
-                    data-testid="transcript-title"
-                    >{{ name() }}</span
-                  >
-                  <app-icon
-                    name="pencil"
-                    class="h-3.5 w-3.5 text-[var(--ink-mute)] opacity-60 group-hover:text-[var(--ink)] group-hover:opacity-100 group-focus-visible:opacity-100"
-                  />
-                </button>
-              </h2>
-            }
-            <div class="mt-0.5 text-[10px] text-[var(--ink-mute)]" data-testid="transcript-meta">
-              {{ meta() }}
+        <header
+          class="border-b border-[var(--line)] px-8 pb-3.5 pt-4"
+          data-testid="transcript-header"
+        >
+          @if (renaming()) {
+            <div class="-mx-1.5">
+              <input
+                #titleInput
+                type="text"
+                maxlength="120"
+                class="h-8 w-full max-w-xl rounded border border-[var(--accent)] bg-[var(--bg-2)] px-1.5 text-[17px] font-semibold leading-8 text-[var(--ink)] outline-none placeholder:font-normal placeholder:text-[var(--ink-mute)]"
+                aria-label="Recording name"
+                aria-describedby="title-input-hint"
+                data-testid="title-input"
+                [value]="s.title ?? ''"
+                [placeholder]="defaultName()"
+                (keydown.enter)="saveTitle($any($event.target).value, true)"
+                (keydown.escape)="cancelRename()"
+                (blur)="saveTitle($any($event.target).value)"
+              />
+              <p id="title-input-hint" class="mt-0.5 px-1.5 text-[10px] text-[var(--ink-mute)]">
+                Enter to save · Esc to cancel · leave empty to use the start time
+              </p>
             </div>
-            <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+          } @else {
+            <h2 class="-mx-1.5 min-w-0">
+              <button
+                #renameBtn
+                type="button"
+                class="group flex h-8 max-w-full items-center gap-2 rounded px-1.5 text-left hover:bg-[var(--bg-2)] focus-visible:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
+                data-testid="rename-btn"
+                [attr.aria-label]="'Rename recording: ' + name()"
+                [appTooltip]="'Rename'"
+                placement="bottom"
+                (click)="startRename()"
+              >
+                <span
+                  class="truncate text-[17px] font-semibold text-[var(--ink)]"
+                  data-testid="transcript-title"
+                  >{{ name() }}</span
+                >
+                <app-icon
+                  name="pencil"
+                  class="h-3.5 w-3.5 text-[var(--ink-mute)] opacity-60 group-hover:text-[var(--ink)] group-hover:opacity-100 group-focus-visible:opacity-100"
+                />
+              </button>
+            </h2>
+          }
+          <div
+            class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-[var(--ink-mute)]"
+            data-testid="transcript-meta"
+          >
+            <span>{{ meta() }}</span>
+            @if (quality(); as q) {
+              <span aria-hidden="true">·</span>
+              <span
+                class="inline-flex items-center gap-1.5"
+                [class]="q.cls"
+                data-testid="transcript-quality"
+              >
+                <span class="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true"></span>
+                {{ q.text }}
+                @if (eta()) {
+                  <span data-testid="finalize-eta">· {{ eta() }}</span>
+                }
+              </span>
+            }
+          </div>
+
+          @if (status() === 'finalizing') {
+            <div
+              class="mt-2.5 h-1 w-full max-w-xl overflow-hidden rounded bg-[var(--bg-2)]"
+              data-testid="finalize-bar"
+              role="progressbar"
+              [attr.aria-label]="quality()?.text ?? 'Transcribing'"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              [attr.aria-valuenow]="finalizePct()"
+            >
+              <div class="h-full bg-amber-400" [style.width.%]="finalizePct()"></div>
+            </div>
+          }
+
+          @if (smallerModel()) {
+            <div
+              class="mt-3 flex max-w-3xl items-center justify-between gap-3 rounded-md border border-amber-500/35 bg-amber-500/[0.07] px-3 py-2 text-[12.5px] leading-relaxed text-amber-200"
+              data-testid="smaller-model-banner"
+            >
+              <span>
+                This transcript was made with the smaller model because the high-quality one was not
+                downloaded. Expect more mistakes.
+              </span>
+              @if (bestModelReady()) {
+                <button
+                  type="button"
+                  class="mono shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                  data-testid="banner-transcribe"
+                  [disabled]="working()"
+                  (click)="transcribe()"
+                >
+                  Transcribe again
+                </button>
+              } @else {
+                <button
+                  type="button"
+                  class="mono shrink-0 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                  data-testid="download-best-model"
+                  [disabled]="downloadBusy()"
+                  (click)="downloadBestModel()"
+                >
+                  {{ downloadLabel() }}
+                </button>
+              }
+            </div>
+          }
+
+          @if (failureReason(); as reason) {
+            <p class="mt-2 text-[12px] text-red-300" data-testid="failure-reason">
+              Transcription failed: {{ reason }}
+            </p>
+          }
+
+          @if (showActions()) {
+            <div class="mt-3 flex flex-wrap items-center gap-2 text-[12px]" data-menu-root>
               @if (status() === 'failed') {
-                <span [appTooltip]="transcribeTooltip" placement="top">
+                <span [appTooltip]="transcribeTooltip" placement="bottom">
                   <button
                     type="button"
-                    class="mono rounded bg-[var(--accent)] px-2 py-0.5 font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+                    class="mono rounded bg-[var(--accent)] px-3 py-1.5 font-semibold text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
                     data-testid="transcribe-btn"
                     [disabled]="working()"
                     (click)="transcribe()"
@@ -154,127 +253,233 @@ interface ProgressAnchor {
                   </button>
                 </span>
               }
-              @if (status() === 'done' && lines().length > 0) {
-                <span [appTooltip]="exportTooltip" placement="top">
+              <span class="relative inline-flex">
+                <span [appTooltip]="sendBlockedReason() || newChatTooltip" placement="bottom">
                   <button
                     type="button"
-                    class="mono rounded px-2 py-0.5 text-[var(--ink)] ring-1 ring-[var(--line)] hover:bg-[var(--bg-2)] disabled:opacity-40"
-                    data-testid="export-btn"
-                    [disabled]="working()"
-                    (click)="exportMarkdown()"
+                    class="mono rounded-l px-3 py-1.5 font-semibold disabled:pointer-events-none disabled:opacity-40"
+                    [class]="status() === 'failed' ? secondaryBtn : primaryBtn"
+                    data-testid="send-to-chat-btn"
+                    [attr.aria-label]="ariaLabel('Attach to new chat', sendBlockedReason())"
+                    [disabled]="sending() || sendBlockedReason() !== ''"
+                    (click)="stageForChat()"
                   >
-                    Export
+                    {{ sending() ? 'Opening…' : 'Attach to new chat' }}
                   </button>
                 </span>
                 <button
                   type="button"
-                  class="mono rounded px-2 py-0.5 text-[var(--ink)] ring-1 ring-[var(--line)] hover:bg-[var(--bg-2)]"
-                  data-testid="copy-btn"
-                  [attr.aria-label]="copied() ? 'Copied to clipboard' : 'Copy transcript'"
-                  (click)="copyMarkdown()"
+                  class="rounded-r border-l border-black/25 px-1.5 py-1.5"
+                  [class]="status() === 'failed' ? secondaryBtn : primaryBtn"
+                  aria-label="More ways to attach"
+                  aria-haspopup="menu"
+                  data-testid="chat-menu-btn"
+                  [attr.aria-expanded]="openMenu() === 'chat'"
+                  (click)="toggleMenu('chat')"
                 >
-                  {{ copied() ? 'Copied' : 'Copy' }}
+                  <app-icon name="chevron-down" class="h-3 w-3" />
                 </button>
-              }
+                @if (openMenu() === 'chat') {
+                  <div
+                    class="absolute left-0 top-full z-20 mt-1 min-w-[15rem] rounded-lg border border-[var(--line-strong)] bg-[var(--bg-2)] p-1 shadow-xl"
+                    role="menu"
+                    data-testid="chat-menu"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="flex w-full flex-col items-start rounded px-2.5 py-1.5 text-left text-[12.5px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                      data-testid="append-to-chat-btn"
+                      [attr.aria-label]="ariaLabel('Attach to current chat', appendBlockedReason())"
+                      [disabled]="sending() || appendBlockedReason() !== ''"
+                      (click)="stageForChat('current-chat')"
+                    >
+                      Attach to current chat
+                      <span class="text-[11px] text-[var(--ink-mute)]">{{
+                        appendBlockedReason() || currentChatHint
+                      }}</span>
+                    </button>
+                  </div>
+                }
+              </span>
               <button
                 type="button"
-                class="mono rounded px-2 py-0.5 text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                data-testid="reveal-btn"
-                (click)="revealAudio()"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1.5 text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                data-testid="copy-btn"
+                [attr.aria-label]="copied() ? 'Copied to clipboard' : 'Copy transcript'"
+                [disabled]="!hasTranscript()"
+                (click)="copyMarkdown()"
               >
-                Show audio file
+                {{ copied() ? 'Copied' : 'Copy' }}
               </button>
+              <span [appTooltip]="exportTooltip" placement="bottom">
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1.5 text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                  data-testid="export-btn"
+                  [disabled]="working() || !hasTranscript()"
+                  (click)="exportMarkdown()"
+                >
+                  Export
+                </button>
+              </span>
+              <span class="relative inline-flex">
+                <button
+                  type="button"
+                  class="rounded px-2 py-1.5 text-[var(--ink-dim)] hover:bg-[var(--bg-2)] hover:text-[var(--ink)]"
+                  [class.ring-1]="openMenu() === 'more'"
+                  [class.ring-[var(--accent)]]="openMenu() === 'more'"
+                  aria-label="More actions"
+                  aria-haspopup="menu"
+                  data-testid="more-btn"
+                  [attr.aria-expanded]="openMenu() === 'more'"
+                  (click)="toggleMenu('more')"
+                >
+                  <app-icon name="more-horizontal" class="h-4 w-4" />
+                </button>
+                @if (openMenu() === 'more') {
+                  <div
+                    class="absolute left-0 top-full z-20 mt-1 w-64 rounded-lg border border-[var(--line-strong)] bg-[var(--bg-2)] p-1 text-[12.5px] shadow-xl"
+                    role="menu"
+                    data-testid="more-menu"
+                  >
+                    @if (status() === 'done') {
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="flex w-full flex-col rounded px-2.5 py-1.5 text-left text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40"
+                        data-testid="retranscribe-item"
+                        [disabled]="working()"
+                        (click)="transcribe()"
+                      >
+                        Transcribe again
+                        <span class="text-[11px] text-[var(--ink-mute)]">{{
+                          retranscribeHint()
+                        }}</span>
+                      </button>
+                    }
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="flex w-full items-center rounded px-2.5 py-1.5 text-left text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                      data-testid="reveal-btn"
+                      (click)="revealAudio()"
+                    >
+                      Show audio file
+                    </button>
+                    @if (canContinue()) {
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="flex w-full flex-col rounded px-2.5 py-1.5 text-left text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                        data-testid="resume-item"
+                        (click)="continueRecording()"
+                      >
+                        Continue recording
+                        <span class="text-[11px] text-[var(--ink-mute)]"
+                          >Adds a new part to this recording</span
+                        >
+                      </button>
+                    }
+                    @if (status() !== 'finalizing') {
+                      <div class="my-1 h-px bg-[var(--line)]" role="separator"></div>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="flex w-full items-center justify-between gap-4 rounded px-2.5 py-1.5 text-left text-red-300 hover:bg-red-500/10"
+                        data-testid="delete-item"
+                        (click)="askDelete()"
+                      >
+                        Delete recording…
+                        <span class="text-[11px] text-[var(--ink-mute)]">{{ sizeLine() }}</span>
+                      </button>
+                    }
+                  </div>
+                }
+              </span>
+              <span class="text-[11.5px] text-[var(--ink-mute)]" data-testid="chat-privacy-note">{{
+                sendBlockedReason() || 'Nothing is sent until you press Send.'
+              }}</span>
             </div>
-            @if (failureReason(); as reason) {
-              <p class="mt-2 text-[11px] text-red-300" data-testid="failure-reason">
-                Transcription failed: {{ reason }}
-              </p>
-            }
-          </header>
-        }
-      }
-
-      @if (status() === 'finalizing') {
-        <div class="mb-2 text-[12px] text-[var(--ink-mute)]" data-testid="finalize-bar">
-          {{ finalizeLabel() }}… {{ finalizePct() }}%
-          @if (eta()) {
-            <span data-testid="finalize-eta">· {{ eta() }}</span>
           }
-          <div class="mt-1 h-1 w-full overflow-hidden rounded bg-[var(--bg-2)]">
-            <div class="h-full bg-[var(--accent)]" [style.width.%]="finalizePct()"></div>
-          </div>
-        </div>
+
+          @if (confirmingDelete()) {
+            <div
+              class="mt-3 max-w-xl rounded-md border border-red-500/40 bg-red-500/[0.06] p-3 text-[12.5px]"
+              role="alertdialog"
+              aria-label="Confirm deleting the recording"
+              data-testid="delete-confirm"
+            >
+              <p class="text-[var(--ink)]">
+                Delete "{{ name() }}"{{ sizeLine() ? ' (' + sizeLine() + ')' : '' }}?
+              </p>
+              <p class="mt-1 text-[11.5px] text-[var(--ink-mute)]">
+                The audio and the transcript are removed from this machine. This cannot be undone.
+              </p>
+              <div class="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  class="mono rounded border border-red-500/40 px-2.5 py-1 text-[11.5px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                  data-testid="delete-yes"
+                  [disabled]="working()"
+                  (click)="remove()"
+                >
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line)] px-2.5 py-1 text-[11.5px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                  data-testid="delete-no"
+                  (click)="confirmingDelete.set(false)"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          }
+        </header>
       }
 
       <div
         #body
-        class="flex-1 overflow-y-auto"
+        class="min-h-0 flex-1 overflow-y-auto px-8 py-5"
         data-testid="transcript-body"
         (scroll)="onBodyScroll()"
       >
-        @if (emptyText(); as empty) {
-          <p class="text-[12px] text-[var(--ink-mute)]" data-testid="transcript-empty">
-            {{ empty }}
-          </p>
-        }
-        @for (line of lines(); track $index) {
-          <div class="mb-2">
-            <div class="mb-0.5 flex items-center gap-1 text-[11px]">
-              <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
-              @if (line.speaker) {
-                <span
-                  class="rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-mute)]"
-                  data-testid="line-speaker"
-                  >{{ line.speaker }}</span
-                >
-              }
+        <div class="max-w-[72ch]">
+          @if (emptyText(); as empty) {
+            <p
+              class="text-[13px] leading-relaxed text-[var(--ink-mute)]"
+              data-testid="transcript-empty"
+            >
+              {{ empty }}
+            </p>
+          }
+          @for (line of lines(); track $index) {
+            <div class="mb-3.5">
+              <div class="mb-0.5 flex items-center gap-1.5 text-[11px] tabular-nums">
+                <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
+                @if (line.speaker) {
+                  <span
+                    class="rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-dim)]"
+                    data-testid="line-speaker"
+                    >{{ line.speaker }}</span
+                  >
+                }
+              </div>
+              <p class="text-[14px] leading-relaxed text-[var(--ink)]">{{ line.text }}</p>
             </div>
-            <p class="text-[13px] leading-relaxed text-[var(--ink)]">{{ line.text }}</p>
-          </div>
-        }
-        @if (draft()) {
-          <p
-            class="mb-2 whitespace-pre-line text-[13px] italic leading-relaxed text-[var(--ink-mute)]"
-            data-testid="live-draft"
-          >
-            {{ draft() }}
-          </p>
-        }
-      </div>
-
-      @if (session() && status() !== 'recording') {
-        <div class="mt-2 border-t border-[var(--line)] pt-2">
-          <div class="flex flex-wrap items-center gap-2">
-            <span [appTooltip]="sendBlockedReason() || newChatTooltip" placement="top">
-              <button
-                type="button"
-                class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
-                data-testid="send-to-chat-btn"
-                [attr.aria-label]="ariaLabel('Attach to new chat', sendBlockedReason())"
-                [disabled]="sending() || sendBlockedReason() !== ''"
-                (click)="stageForChat()"
-              >
-                {{ sending() ? 'opening…' : 'Attach to new chat' }}
-              </button>
-            </span>
-            <span [appTooltip]="appendBlockedReason() || currentChatTooltip" placement="top">
-              <button
-                type="button"
-                class="mono rounded px-3 py-1 text-[12px] font-medium text-[var(--ink)] ring-1 ring-[var(--line)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-40"
-                data-testid="append-to-chat-btn"
-                [attr.aria-label]="ariaLabel('Attach to current chat', appendBlockedReason())"
-                [disabled]="sending() || appendBlockedReason() !== ''"
-                (click)="stageForChat('current-chat')"
-              >
-                Attach to current chat
-              </button>
-            </span>
-          </div>
-          <p class="mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="chat-privacy-note">
-            Opens the chat with the transcript attached. Nothing is sent until you press Send.
-          </p>
+          }
+          @if (draft()) {
+            <p
+              class="mb-2 whitespace-pre-line text-[14px] italic leading-relaxed text-[var(--ink-mute)]"
+              data-testid="live-draft"
+            >
+              {{ draft() }}
+            </p>
+          }
         </div>
-      }
+      </div>
     </section>
   `,
 })
@@ -292,11 +497,17 @@ export class LiveTranscriptComponent {
   readonly renaming = signal(false);
   /** Shows "Copied" for a moment after a copy. */
   readonly copied = signal(false);
+  /** The menu that is open, if any. */
+  readonly openMenu = signal<OpenMenu>(null);
+  /** Whether the delete confirmation is showing. */
+  readonly confirmingDelete = signal(false);
 
   protected readonly newChatTooltip = NEW_CHAT_TOOLTIP;
-  protected readonly currentChatTooltip = CURRENT_CHAT_TOOLTIP;
+  protected readonly currentChatHint = CURRENT_CHAT_HINT;
   protected readonly transcribeTooltip = TRANSCRIBE_TOOLTIP;
   protected readonly exportTooltip = EXPORT_TOOLTIP;
+  protected readonly primaryBtn = PRIMARY_BTN;
+  protected readonly secondaryBtn = SECONDARY_BTN;
 
   private readonly transcription = inject(TranscriptionService);
   private readonly chat = inject(ChatStateService);
@@ -357,6 +568,107 @@ export class LiveTranscriptComponent {
     return parts.filter(Boolean).join(' · ');
   });
 
+  /** The model the offline pass ran (or runs) with, from the list row or the snapshot. */
+  private readonly finalizeModel = computed(
+    () => this.summary()?.finalize_model ?? this.session()?.models_used.finalize ?? null
+  );
+
+  /** High-quality or smaller-model transcript; null when not known. */
+  private readonly qualityKind = computed(() =>
+    transcriptQuality(this.finalizeModel(), this.transcription.highQualityModel()?.key)
+  );
+
+  /** The quality line: what state the transcript is in and which model made it. */
+  readonly quality = computed<QualityLine | null>(() => {
+    const amber = 'text-amber-300';
+    switch (this.status()) {
+      case 'recording':
+        return { text: 'Recording', cls: 'text-red-300' };
+      case 'paused':
+        return { text: 'Paused', cls: amber };
+      case 'finalizing':
+        if (this.summary()?.queued) {
+          return { text: 'Waiting for another transcription to finish', cls: amber };
+        }
+        switch (this.qualityKind()) {
+          case 'high':
+            return { text: 'Transcribing with the high-quality model', cls: amber };
+          case 'smaller':
+            return { text: 'Transcribing with the smaller model', cls: amber };
+          default:
+            return { text: this.transcribingLabel(), cls: amber };
+        }
+      case 'done':
+        switch (this.qualityKind()) {
+          case 'high':
+            return { text: 'High-quality transcript', cls: 'text-emerald-400' };
+          case 'smaller':
+            return { text: 'Made with the smaller model', cls: amber };
+          default:
+            return null;
+        }
+      case 'failed':
+        return { text: 'Not transcribed', cls: 'text-red-300' };
+      default:
+        return null;
+    }
+  });
+
+  /** A finished transcript made with the smaller model (the banner offers the fix). */
+  readonly smallerModel = computed(
+    () => this.status() === 'done' && this.qualityKind() === 'smaller'
+  );
+
+  /** Whether the high-quality model is on disk, so Transcribe again would use it. */
+  readonly bestModelReady = computed(
+    () => this.transcription.highQualityModel()?.downloaded === true
+  );
+
+  /** A model download is running (this one or another). */
+  readonly downloadBusy = computed(() => this.transcription.downloadingModelKey() !== null);
+
+  /** Download button text, with progress while it runs. */
+  readonly downloadLabel = computed(() => {
+    const best = this.transcription.highQualityModel();
+    if (best && this.transcription.downloadingModelKey() === best.key) {
+      const p = this.transcription.downloadProgress();
+      return p?.total_bytes
+        ? `Downloading ${Math.round((p.downloaded_bytes / p.total_bytes) * 100)}%`
+        : 'Downloading…';
+    }
+    return best
+      ? `Download high-quality model (${formatBytes(best.size_bytes)})`
+      : 'Download high-quality model';
+  });
+
+  /** Actions show once the capture is over: transcribing, finished or failed. */
+  readonly showActions = computed(() => ['finalizing', 'done', 'failed'].includes(this.status()));
+
+  /** Whether there is a finished transcript to copy or export. */
+  readonly hasTranscript = computed(() => this.status() === 'done' && this.lines().length > 0);
+
+  /** Continue recording is offered on a finished recording while nothing else records. */
+  readonly canContinue = computed(
+    () =>
+      this.status() === 'done' &&
+      !this.transcription.recording() &&
+      this.transcription.pausedRecording() === null
+  );
+
+  /** "13 min · 12 MB" for the delete item and its confirmation. */
+  readonly sizeLine = computed(() => {
+    const row = this.summary();
+    if (!row) return '';
+    return [formatDuration(row.duration_secs), formatBytes(row.size_bytes)]
+      .filter(Boolean)
+      .join(' · ');
+  });
+
+  /** Which model Transcribe again would use. */
+  readonly retranscribeHint = computed(() =>
+    this.bestModelReady() ? 'with the high-quality model' : 'with the model on this machine'
+  );
+
   /** Why the last transcription failed, while the session is failed. */
   readonly failureReason = computed(() => {
     const st = this.session()?.status;
@@ -373,11 +685,15 @@ export class LiveTranscriptComponent {
     if (this.lines().length > 0 || this.draft()) return '';
     switch (this.status()) {
       case '':
-        return 'Open a recording, or start a new one.';
+        return 'Open a recording, or press Record to start one.';
       case 'recording':
-        return this.session()?.models_used.live ? 'Listening…' : '';
+        return this.session()?.models_used.live
+          ? 'Listening…'
+          : 'Recording. The transcript appears after you stop.';
+      case 'paused':
+        return 'Paused. Nothing is being recorded. Resume to add more, or stop to transcribe.';
       case 'finalizing':
-        return '';
+        return 'The transcript appears here when transcription finishes. You can start another recording meanwhile.';
       case 'failed':
         return 'No transcript yet. Transcribe runs it again on the recorded audio.';
       default:
@@ -390,6 +706,8 @@ export class LiveTranscriptComponent {
     switch (this.status()) {
       case 'recording':
         return 'Recording';
+      case 'paused':
+        return 'Recording paused';
       case 'finalizing':
         return 'Transcribing';
       case 'done':
@@ -424,13 +742,6 @@ export class LiveTranscriptComponent {
   readonly finalizePct = computed(() => {
     const st = this.session()?.status;
     return st?.state === 'finalizing' ? Math.round(st.progress * 100) : 0;
-  });
-
-  /** What the transcription pass is doing, in words. */
-  readonly finalizeLabel = computed(() => {
-    if (this.session()?.models_used.live) return 'Re-transcribing with the higher-quality model';
-    const length = formatDuration(this.summary()?.duration_secs ?? 0);
-    return length ? `Transcribing ${length} of audio` : 'Transcribing the recording';
   });
 
   /** Where the progress stood when this pane first saw the pass running. */
@@ -468,6 +779,8 @@ export class LiveTranscriptComponent {
       this.sessionId();
       this.stickToBottom.set(true);
       this.renaming.set(false);
+      this.confirmingDelete.set(false);
+      this.openMenu.set(null);
       if (untracked(() => this.status()) === 'recording') {
         this.scrollToBottom();
       } else {
@@ -499,6 +812,73 @@ export class LiveTranscriptComponent {
    */
   ariaLabel(label: string, reason: string): string {
     return reason ? `${label} (unavailable: ${reason})` : label;
+  }
+
+  /**
+   * Opens one menu, or closes it when it is already open.
+   * @param menu - the menu to toggle.
+   */
+  toggleMenu(menu: Exclude<OpenMenu, null>): void {
+    this.openMenu.set(this.openMenu() === menu ? null : menu);
+  }
+
+  /** Closes any open menu. */
+  closeMenus(): void {
+    this.openMenu.set(null);
+  }
+
+  /**
+   * Closes the open menu on a click outside the actions row.
+   * @param event - any click in the document.
+   */
+  onDocumentClick(event: MouseEvent): void {
+    if (this.openMenu() === null) return;
+    const target = event.target as Element | null;
+    if (!target?.closest?.('[data-menu-root]')) this.closeMenus();
+  }
+
+  /** Shows the delete confirmation. */
+  askDelete(): void {
+    this.closeMenus();
+    this.confirmingDelete.set(true);
+  }
+
+  /** Deletes the open recording (audio and transcript) after its confirmation. */
+  async remove(): Promise<void> {
+    const s = this.session();
+    if (!s) return;
+    this.working.set(true);
+    try {
+      await this.transcription.delete(s.id);
+      this.confirmingDelete.set(false);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.working.set(false);
+    }
+  }
+
+  /** Records a new part onto the open finished recording. */
+  async continueRecording(): Promise<void> {
+    const s = this.session();
+    this.closeMenus();
+    if (!s || !this.canContinue()) return;
+    try {
+      await this.transcription.resumeRecording(s.id, this.transcription.liveTranscriptPreferred());
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Downloads the high-quality model, for a later Transcribe again. */
+  async downloadBestModel(): Promise<void> {
+    const best = this.transcription.highQualityModel();
+    if (!best) return;
+    try {
+      await this.transcription.downloadModel(best.key);
+    } catch (e: unknown) {
+      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+    }
   }
 
   /** Tracks whether the user sits at (within 50 px of) the bottom. */
@@ -547,9 +927,10 @@ export class LiveTranscriptComponent {
     }
   }
 
-  /** Runs the transcription again over the failed recording's audio. */
+  /** Runs the transcription again over the recording's audio (failed, or finished). */
   async transcribe(): Promise<void> {
     const s = this.session();
+    this.closeMenus();
     if (!s) return;
     this.working.set(true);
     try {
@@ -613,6 +994,7 @@ export class LiveTranscriptComponent {
   async stageForChat(target: SendTarget = 'new-chat'): Promise<void> {
     const s = this.session();
     const blocked = target === 'new-chat' ? this.sendBlockedReason() : this.appendBlockedReason();
+    this.closeMenus();
     if (!s || blocked) return;
     this.sending.set(true);
     try {
@@ -622,6 +1004,12 @@ export class LiveTranscriptComponent {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
     this.sending.set(false);
+  }
+
+  /** "Transcribing 45 min of audio" when the model of the pass is not known. */
+  private transcribingLabel(): string {
+    const length = formatDuration(this.summary()?.duration_secs ?? 0);
+    return length ? `Transcribing ${length} of audio` : 'Transcribing';
   }
 
   /** Moves focus back to the title button once it is rendered again. */
@@ -636,9 +1024,10 @@ export class LiveTranscriptComponent {
   private transcriptBlockedReason(): string {
     switch (this.status()) {
       case 'recording':
+      case 'paused':
         return 'Stop the recording first';
       case 'finalizing':
-        return 'Wait until the transcript is ready';
+        return 'Available when the transcript is ready.';
       default:
         return this.lines().length === 0 ? 'This recording has no transcript yet' : '';
     }

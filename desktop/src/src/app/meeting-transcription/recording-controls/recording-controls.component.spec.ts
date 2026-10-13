@@ -10,7 +10,9 @@ import type {
   Language,
   MicPermission,
   StartAck,
+  TranscriptSummary,
 } from '../../models/transcript';
+import type { RecordingChoice } from '../../services/transcription.service';
 
 const SOURCES: AudioSourceInfo[] = [
   { source: { kind: 'system_wide' }, label: 'System (everything)' },
@@ -67,8 +69,12 @@ describe('RecordingControlsComponent', () => {
     stopRecording: ReturnType<typeof vi.fn>;
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
+    recordingChoice: ReturnType<typeof vi.fn>;
+    setRecordingChoice: ReturnType<typeof vi.fn>;
+    transcribing: ReturnType<typeof signal<TranscriptSummary[]>>;
     recordingSessionId: typeof recordingSessionId;
     recording: Signal<boolean>;
+    captureOpen: Signal<boolean>;
     recordingSource: typeof recordingSource;
     recordingLanguage: typeof recordingLanguage;
     recordingLive: typeof recordingLive;
@@ -148,8 +154,12 @@ describe('RecordingControlsComponent', () => {
       }),
       requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
+      recordingChoice: vi.fn((): RecordingChoice | null => null),
+      setRecordingChoice: vi.fn(),
+      transcribing: signal<TranscriptSummary[]>([]),
       recordingSessionId,
       recording: computed(() => recordingSessionId() !== null),
+      captureOpen: computed(() => recordingSessionId() !== null),
       recordingSource,
       recordingLanguage,
       recordingLive,
@@ -217,6 +227,7 @@ describe('RecordingControlsComponent', () => {
   it('shows the mixed-source permission note only when the mixed source is selected', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();
+    component.optionsOpen.set(true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="mixed-source-note"]')).not.toBeNull();
     component.onSource(1);
@@ -245,6 +256,7 @@ describe('RecordingControlsComponent', () => {
   it('shows the mic picker only when the source uses a mic', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
+    component.optionsOpen.set(true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="mic-select"]')).not.toBeNull();
     expect(component.micSelectable()).toBe(true);
@@ -285,10 +297,131 @@ describe('RecordingControlsComponent', () => {
     expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl', true);
   });
 
-  it('shows the language toggle while idle', async () => {
+  it('keeps the pickers behind the chooser until it is opened', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="language-select"]')).not.toBeNull();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="language-select"]')).toBeNull();
+    (el.querySelector('[data-testid="recording-options"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(el.querySelector('[data-testid="language-select"]')).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="recording-options"]')!.getAttribute('aria-expanded')
+    ).toBe('true');
+  });
+
+  it('names the language and source of the next recording on the chooser', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
+    await component.ngOnInit();
+    expect(component.choiceLabel()).toBe('Polish · Whole meeting');
+    component.onLanguage('en');
+    component.onSource(1);
+    expect(component.choiceLabel()).toBe('English · Other people only');
+  });
+
+  it('closes the pickers on a click outside them and on Escape', async () => {
+    await component.ngOnInit();
+    component.optionsOpen.set(true);
+    fixture.detectChanges();
+    const inside = fixture.nativeElement.querySelector('[data-testid="language-select"]');
+    component.onDocumentClick({ target: inside } as unknown as MouseEvent);
+    expect(component.optionsOpen()).toBe(true);
+    component.onDocumentClick({ target: document.body } as unknown as MouseEvent);
+    expect(component.optionsOpen()).toBe(false);
+    component.optionsOpen.set(true);
+    component.onKeydown(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(component.optionsOpen()).toBe(false);
+  });
+
+  describe('remembered choice', () => {
+    it('restores the last language, source and microphone', async () => {
+      svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+      svc.recordingChoice.mockReturnValue({
+        language: 'en',
+        source: 'microphone',
+        mic: 'AppleUSBAudioEngine:USB MIC:1',
+      });
+      await component.ngOnInit();
+      expect(component.language()).toBe('en');
+      expect(component.sources()[component.sourceIndex()].source.kind).toBe('microphone');
+      expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
+    });
+
+    it('falls back to the system default for a microphone that is gone', async () => {
+      svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+      svc.recordingChoice.mockReturnValue({ language: 'pl', source: 'mixed', mic: 'unplugged' });
+      await component.ngOnInit();
+      expect(component.micDevice()).toBeNull();
+    });
+
+    it('keeps the language but picks the default source when the saved one is not offered', async () => {
+      svc.recordingChoice.mockReturnValue({ language: 'en', source: 'mixed', mic: null });
+      await component.ngOnInit();
+      expect(component.language()).toBe('en');
+      expect(component.sources()[component.sourceIndex()].source.kind).toBe('system_wide');
+    });
+
+    it('remembers every change and the choice a recording starts with', async () => {
+      svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+      await component.ngOnInit();
+      component.onLanguage('en');
+      expect(svc.setRecordingChoice).toHaveBeenLastCalledWith({
+        language: 'en',
+        source: 'mixed',
+        mic: null,
+      });
+      component.onMic('AppleUSBAudioEngine:USB MIC:1');
+      component.onSource(1);
+      expect(svc.setRecordingChoice).toHaveBeenLastCalledWith({
+        language: 'en',
+        source: 'microphone',
+        mic: 'AppleUSBAudioEngine:USB MIC:1',
+      });
+      svc.setRecordingChoice.mockClear();
+      await component.start();
+      expect(svc.setRecordingChoice).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('between meetings', () => {
+    const busy = (id: string, title: string | null): TranscriptSummary => ({
+      id,
+      created_at: '2026-10-13T07:03:00Z',
+      title,
+      language: 'pl',
+      source_label: 'System',
+      status: { state: 'finalizing', progress: 0.4 },
+      duration_secs: 780,
+      segment_count: 0,
+      preview: null,
+      size_bytes: 1,
+      finalize_model: 'large',
+      queued: false,
+    });
+
+    it('says a recording can start while an earlier one is still transcribed', async () => {
+      svc.transcribing.set([busy('a', 'Daily Speednet')]);
+      await component.ngOnInit();
+      fixture.detectChanges();
+      const note = fixture.nativeElement.querySelector('[data-testid="can-record-note"]');
+      expect(note.textContent).toContain('"Daily Speednet" is still being transcribed.');
+      expect(note.textContent).toContain('You can start recording now.');
+      expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
+    });
+
+    it('counts several recordings in transcription, and says nothing when none is', async () => {
+      await component.ngOnInit();
+      expect(component.stillTranscribing()).toBe('');
+      svc.transcribing.set([busy('a', null), busy('b', null)]);
+      expect(component.stillTranscribing()).toContain('2 recordings are still being transcribed.');
+    });
+  });
+
+  it('cannot start while a recording captures or waits paused', async () => {
+    await component.ngOnInit();
+    expect(component.canStart()).toBe(true);
+    recordingSessionId.set('sess-live');
+    expect(component.canStart()).toBe(false);
   });
 
   it('starts recording the chosen source + language and emits started', async () => {
@@ -299,105 +432,8 @@ describe('RecordingControlsComponent', () => {
     component.started.subscribe(spy);
     await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en', true);
-    expect(component.recording()).toBe(true);
+    expect(svc.captureOpen()).toBe(true);
     expect(spy).toHaveBeenCalledWith('sess-1');
-  });
-
-  it('stops the in-progress recording and emits stopped', async () => {
-    await component.ngOnInit();
-    await component.start();
-    const spy = vi.fn();
-    component.stopped.subscribe(spy);
-    await component.stop();
-    expect(svc.stopRecording).toHaveBeenCalledWith('sess-1');
-    expect(component.recording()).toBe(false);
-    expect(spy).toHaveBeenCalledWith('sess-1');
-  });
-
-  it('a freshly-mounted control reflects a recording already in progress', async () => {
-    recordingSessionId.set('sess-live');
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(component.recording()).toBe(true);
-    const stopBtn = fixture.nativeElement.querySelector('[data-testid="stop-btn"]');
-    expect(stopBtn).not.toBeNull();
-    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]')).toBeNull();
-    await component.stop();
-    expect(svc.stopRecording).toHaveBeenCalledWith('sess-live');
-  });
-
-  it('a freshly-mounted control restores source/mic/language of a recording in progress', async () => {
-    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
-    recordingSessionId.set('sess-live');
-    recordingSource.set({ kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' });
-    recordingLanguage.set('en');
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(component.sources()[component.sourceIndex()].source.kind).toBe('microphone');
-    expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
-    expect(component.language()).toBe('en');
-  });
-
-  it('a freshly-mounted control restores a mixed-source recording mic', async () => {
-    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
-    recordingSessionId.set('sess-live');
-    recordingSource.set({ kind: 'mixed', mic: 'AppleUSBAudioEngine:USB MIC:1' });
-    recordingLanguage.set('pl');
-    await component.ngOnInit();
-    fixture.detectChanges();
-    expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
-    expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
-  });
-
-  describe('recording view', () => {
-    it('replaces the pickers with the elapsed time, a meter per channel and Stop', async () => {
-      vi.spyOn(Date, 'now').mockReturnValue(10_000 + 247_000);
-      svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
-      recordingSessionId.set('sess-live');
-      recordingSource.set({ kind: 'mixed', mic: null });
-      recordingStartedAt.set(10_000);
-      audioLevels.set([0.1, 0.001]);
-      recordingLive.set(false);
-      await component.ngOnInit();
-      fixture.detectChanges();
-      const el: HTMLElement = fixture.nativeElement;
-      expect(el.querySelector('[data-testid="source-select"]')).toBeNull();
-      expect(el.querySelector('[data-testid="recording-clock"]')!.textContent).toContain('04:07');
-      const meter = el.querySelector('[data-testid="audio-level-meter"]')!;
-      expect(meter.textContent).toContain('Meeting');
-      expect(meter.textContent).toContain('You');
-      expect(component.meterBars()).toEqual([
-        { label: 'Meeting', pct: 67 },
-        { label: 'You', pct: 0 },
-      ]);
-      expect(el.querySelector('[data-testid="stop-btn"]')!.textContent).toContain('Stop');
-      expect(el.querySelector('[data-testid="after-stop-note"]')!.textContent).toContain(
-        'Transcript appears after you stop.'
-      );
-      vi.restoreAllMocks();
-    });
-
-    it('drops the "appears after you stop" line when live text is on', async () => {
-      recordingSessionId.set('sess-live');
-      recordingLive.set(true);
-      await component.ngOnInit();
-      fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-testid="after-stop-note"]')).toBeNull();
-    });
-
-    it('labels a mono capture by its source and shows a flat bar before the first level', async () => {
-      recordingSessionId.set('sess-live');
-      recordingSource.set({ kind: 'microphone', device: null });
-      await component.ngOnInit();
-      expect(component.meterBars()).toEqual([{ label: 'You', pct: 0 }]);
-      recordingSource.set({ kind: 'system_wide' });
-      audioLevels.set([1]);
-      expect(component.meterBars()).toEqual([{ label: 'Meeting', pct: 100 }]);
-    });
-
-    it('shows 00:00 until the start time is known', () => {
-      expect(component.clock()).toBe('00:00');
-    });
   });
 
   describe('keyboard shortcut', () => {
@@ -407,7 +443,7 @@ describe('RecordingControlsComponent', () => {
       return ev;
     }
 
-    it('⌘⇧R / Ctrl+Shift+R starts a recording and then stops it', async () => {
+    it('⌘⇧R / Ctrl+Shift+R starts a recording, once', async () => {
       await component.ngOnInit();
       const ev = press({ metaKey: true, shiftKey: true });
       expect(ev.defaultPrevented).toBe(true);
@@ -415,7 +451,8 @@ describe('RecordingControlsComponent', () => {
       expect(svc.startRecording).toHaveBeenCalledTimes(1);
       press({ ctrlKey: true, shiftKey: true });
       await fixture.whenStable();
-      expect(svc.stopRecording).toHaveBeenCalledWith('sess-1');
+      expect(svc.startRecording).toHaveBeenCalledTimes(1);
+      expect(svc.stopRecording).not.toHaveBeenCalled();
     });
 
     it('ignores R without both modifiers', async () => {
@@ -447,7 +484,7 @@ describe('RecordingControlsComponent', () => {
     component.errorOccurred.subscribe(errSpy);
     await component.start();
     expect(errSpy).toHaveBeenCalledWith('model not downloaded');
-    expect(component.recording()).toBe(false);
+    expect(svc.captureOpen()).toBe(false);
   });
 
   describe('mic consent gate', () => {
@@ -562,7 +599,7 @@ describe('RecordingControlsComponent', () => {
     const warn = fixture.nativeElement.querySelector('[data-testid="finalize-model-warning"]');
     expect(warn).not.toBeNull();
     expect(warn.textContent).toContain('Large v3');
-    expect(warn.textContent).toContain('lower-quality live model');
+    expect(warn.textContent).toContain('made with the smaller model');
     expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
   });
 

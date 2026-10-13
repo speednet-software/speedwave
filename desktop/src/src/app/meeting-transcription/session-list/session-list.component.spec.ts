@@ -1,14 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { computed, signal, type Signal, type WritableSignal } from '@angular/core';
+import { signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SessionListComponent } from './session-list.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { TranscriptSummary } from '../../models/transcript';
+import type { RecommendedModelEntry, TranscriptSummary } from '../../models/transcript';
 
+/**
+ * A list row, created today at the given local hour unless overridden.
+ * @param id - row id.
+ * @param overrides - fields to replace.
+ */
 function summary(id: string, overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
+  const now = new Date();
   return {
     id,
-    created_at: '2026-05-12T07:28:04Z',
+    created_at: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0).toISOString(),
     title: null,
     language: 'pl',
     source_label: 'System',
@@ -17,8 +23,26 @@ function summary(id: string, overrides: Partial<TranscriptSummary> = {}): Transc
     segment_count: 12,
     preview: 'Dzień dobry wszystkim',
     size_bytes: 50 * 1024 * 1024,
+    finalize_model: 'large',
+    queued: false,
     ...overrides,
   };
+}
+
+/**
+ * RFC 3339 of a local time `daysAgo` days before today.
+ * @param daysAgo - whole days back.
+ * @param hour - local hour.
+ */
+function daysAgoAt(daysAgo: number, hour: number): string {
+  const now = new Date();
+  return new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - daysAgo,
+    hour,
+    0
+  ).toISOString();
 }
 
 describe('SessionListComponent', () => {
@@ -30,22 +54,22 @@ describe('SessionListComponent', () => {
     recordingsError: WritableSignal<string>;
     watchRecordings: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
-    transcribe: ReturnType<typeof vi.fn>;
-    resumeRecording: ReturnType<typeof vi.fn>;
-    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
-    recordingSessionId: WritableSignal<string | null>;
-    recording: Signal<boolean>;
     active: WritableSignal<{ id: string } | null>;
+    highQualityModel: WritableSignal<RecommendedModelEntry | null>;
   };
 
   const q = (testId: string): HTMLElement | null => el.querySelector(`[data-testid="${testId}"]`);
+  const click = (testId: string, init: MouseEventInit = {}): void => {
+    q(testId)!.dispatchEvent(new MouseEvent('click', { bubbles: true, ...init }));
+    fixture.detectChanges();
+  };
 
   beforeEach(async () => {
-    const recordingSessionId = signal<string | null>(null);
     const active = signal<{ id: string } | null>(null);
     const recordings = signal<TranscriptSummary[]>([
-      summary('b', { title: 'Sprint review', created_at: '2026-05-12T09:00:00Z' }),
-      summary('a'),
+      summary('c', { title: 'Sprint review', created_at: daysAgoAt(0, 11) }),
+      summary('b', { created_at: daysAgoAt(0, 9), preview: 'Zostają nasze rozmowy' }),
+      summary('a', { created_at: daysAgoAt(1, 12) }),
     ]);
     svc = {
       recordings,
@@ -53,16 +77,15 @@ describe('SessionListComponent', () => {
       watchRecordings: vi.fn(async () => undefined),
       delete: vi.fn(async (id: string) => {
         recordings.update((list) => list.filter((r) => r.id !== id));
-        if (active()?.id === id) active.set(null);
       }),
-      transcribe: vi.fn(async () => undefined),
-      resumeRecording: vi.fn(async (id: string) => {
-        active.set({ id });
-      }),
-      liveTranscriptPreferred: vi.fn(() => false),
-      recordingSessionId,
-      recording: computed(() => recordingSessionId() !== null),
       active,
+      highQualityModel: signal<RecommendedModelEntry | null>({
+        key: 'large',
+        display_name: 'Large',
+        size_bytes: 1,
+        downloaded: true,
+        downloading: false,
+      }),
     };
     await TestBed.configureTestingModule({
       imports: [SessionListComponent],
@@ -82,238 +105,203 @@ describe('SessionListComponent', () => {
     expect(errSpy).toHaveBeenCalledWith('boom');
   });
 
-  it('renders a card per recording: name, length, status and the first line', () => {
+  it('groups rows by day under Today and Yesterday, newest first', () => {
     fixture.detectChanges();
-    const row = q('open-b')!;
-    expect(row.textContent).toContain('Sprint review');
-    expect(row.textContent).toContain('30 min');
-    expect(row.textContent).toContain('Dzień dobry wszystkim');
-    expect(q('status-b')!.textContent).toContain('ready');
-    expect(row.textContent).not.toContain('2026-05-12T');
-    expect(row.textContent).not.toContain('segments');
+    const headings = [...el.querySelectorAll('h3')].map((h) => h.textContent?.trim());
+    expect(headings).toEqual(['Today', 'Yesterday']);
+    expect(component.groups().map((g) => g.rows.map((r) => r.rec.id))).toEqual([['c', 'b'], ['a']]);
   });
 
-  it('names an untitled recording by its local start time, not the UTC string', () => {
+  it('shows name, length and first line, and the start time only under a title', () => {
     fixture.detectChanges();
-    const text = q('open-a')!.textContent!;
-    expect(text).not.toContain('2026-05-12T07:28:04Z');
-    expect(text).toMatch(/\d{2}:\d{2}/);
+    const titled = q('open-c')!.textContent!;
+    expect(titled).toContain('Sprint review');
+    expect(titled).toContain('30 min');
+    expect(titled).toContain('11:00');
+    expect(q('preview-b')!.textContent).toContain('Zostają nasze rozmowy');
+    expect(q('open-b')!.textContent).toContain('Today 09:00');
   });
 
-  it('shows the total size on disk', () => {
+  it('puts no chip on a good finished transcript and one on every exception', () => {
+    svc.recordings.set([
+      summary('ok'),
+      summary('small', { finalize_model: 'small' }),
+      summary('rec', { status: { state: 'recording' } }),
+      summary('paused', { status: { state: 'paused' } }),
+      summary('busy', { status: { state: 'finalizing', progress: 0.42 } }),
+      summary('queued', { status: { state: 'finalizing', progress: 0 }, queued: true }),
+      summary('failed', { status: { state: 'failed', reason: 'interrupted' } }),
+    ]);
     fixture.detectChanges();
-    expect(q('recordings-size')!.textContent).toContain('100.0 MB');
+    expect(q('status-ok')).toBeNull();
+    expect(q('status-small')!.textContent).toBe('Smaller model');
+    expect(q('status-rec')!.textContent).toBe('Recording');
+    expect(q('status-paused')!.textContent).toBe('Paused');
+    expect(q('status-busy')!.textContent).toBe('Transcribing 42%');
+    expect(q('status-queued')!.textContent).toBe('Queued');
+    expect(q('status-failed')!.textContent).toBe('Not transcribed');
   });
 
-  it('turns the empty state into the three steps', () => {
+  it('shows no smaller-model chip while the best model is not known', () => {
+    svc.highQualityModel.set(null);
+    svc.recordings.set([summary('small', { finalize_model: 'small' })]);
+    fixture.detectChanges();
+    expect(q('status-small')).toBeNull();
+  });
+
+  it('shows the count and total size in the header', () => {
+    fixture.detectChanges();
+    expect(q('recordings-count')!.textContent).toContain('Recordings · 3');
+    expect(q('recordings-size')!.textContent).toContain('150');
+  });
+
+  it('opens a row on click, also while another recording captures', () => {
+    svc.recordings.update((list) => [summary('rec', { status: { state: 'recording' } }), ...list]);
+    fixture.detectChanges();
+    const spy = vi.fn();
+    component.opened.subscribe(spy);
+    click('open-a');
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }));
+    expect((q('open-a') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('marks the recording open in the pane as current', () => {
+    svc.active.set({ id: 'b' });
+    fixture.detectChanges();
+    expect(q('row-b')!.getAttribute('data-active')).toBe('true');
+    expect(q('open-b')!.getAttribute('aria-current')).toBe('true');
+    expect(q('row-a')!.getAttribute('data-active')).toBeNull();
+  });
+
+  it('filters by name and first line, case-insensitively, and says when nothing matches', () => {
+    fixture.detectChanges();
+    component.query.set('SPRINT');
+    fixture.detectChanges();
+    expect(component.visibleRows().map((r) => r.rec.id)).toEqual(['c']);
+    component.query.set('rozmowy');
+    fixture.detectChanges();
+    expect(component.visibleRows().map((r) => r.rec.id)).toEqual(['b']);
+    component.query.set('nic takiego');
+    fixture.detectChanges();
+    expect(q('recordings-no-match')!.textContent).toContain('nic takiego');
+  });
+
+  it('shows the three-step instruction for an empty list, without search or Select', () => {
     svc.recordings.set([]);
     fixture.detectChanges();
-    const empty = q('recordings-empty')!.textContent!;
-    expect(empty).toContain('Start recording');
-    expect(empty).toContain('Stop when the meeting ends');
-    expect(empty).toContain('Attach it to a chat');
+    expect(q('recordings-empty')).not.toBeNull();
+    expect(q('start-select')).toBeNull();
   });
 
-  it('emits the opened recording and highlights whatever the service has open', () => {
-    const spy = vi.fn();
-    component.opened.subscribe(spy);
-    const rec = svc.recordings()[0];
-    component.open(rec);
-    expect(spy).toHaveBeenCalledWith(rec);
-    svc.active.set({ id: 'b' });
-    expect(component.selectedId()).toBe('b');
-  });
-
-  it('a freshly mounted list highlights the recording still open in the pane', () => {
-    svc.active.set({ id: 'a' });
-    const remounted = TestBed.createComponent(SessionListComponent);
-    remounted.detectChanges();
-    const row = remounted.nativeElement.querySelector('[data-testid="row-a"]');
-    expect(row.getAttribute('data-active')).toBe('true');
-    expect(
-      remounted.nativeElement.querySelector('[data-testid="row-b"]').getAttribute('data-active')
-    ).toBeNull();
-  });
-
-  it('marks the open recording with the accent edge and aria-current, and only that one', () => {
-    svc.active.set({ id: 'b' });
-    fixture.detectChanges();
-    const open = q('row-b')!;
-    expect(open.getAttribute('data-active')).toBe('true');
-    expect(open.className).toContain('border-l-[var(--accent)]');
-    expect(open.className).not.toContain('ring-');
-    expect(q('open-b')!.getAttribute('aria-current')).toBe('true');
-    const other = q('row-a')!;
-    expect(other.getAttribute('data-active')).toBeNull();
-    expect(other.className).not.toContain('border-l-[var(--accent)]');
-    expect(q('open-a')!.getAttribute('aria-current')).toBeNull();
-  });
-
-  it('locks the other rows while a recording runs, with the reason', () => {
-    svc.recordingSessionId.set('b');
-    fixture.detectChanges();
-    expect((q('open-a') as HTMLButtonElement).disabled).toBe(true);
-    expect((q('open-b') as HTMLButtonElement).disabled).toBe(false);
-    const spy = vi.fn();
-    component.opened.subscribe(spy);
-    component.open(svc.recordings()[1]);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  describe('delete', () => {
-    it('asks first, naming the recording with its length and size', () => {
+  describe('select mode', () => {
+    beforeEach(() => {
       fixture.detectChanges();
-      q('delete-b')!.click();
-      fixture.detectChanges();
-      expect(svc.delete).not.toHaveBeenCalled();
-      const confirm = q('delete-confirm-b')!;
-      expect(confirm.getAttribute('role')).toBe('alertdialog');
-      expect(confirm.textContent).toContain('Sprint review');
-      expect(confirm.textContent).toContain('30 min');
-      expect(confirm.textContent).toContain('50.0 MB');
-      expect(confirm.textContent).toContain('cannot be undone');
+      click('start-select');
     });
 
-    it('deletes on confirm and clears the highlight of the deleted row', async () => {
-      svc.active.set({ id: 'b' });
-      component.pendingDeleteId.set('b');
-      fixture.detectChanges();
-      q('delete-yes-b')!.click();
-      await fixture.whenStable();
-      expect(svc.delete).toHaveBeenCalledWith('b');
-      expect(component.selectedId()).toBeNull();
-      expect(component.pendingDeleteId()).toBeNull();
-    });
-
-    it('cancel keeps the recording', () => {
-      component.pendingDeleteId.set('b');
-      fixture.detectChanges();
-      q('delete-no-b')!.click();
-      fixture.detectChanges();
-      expect(svc.delete).not.toHaveBeenCalled();
-      expect(q('delete-confirm-b')).toBeNull();
-    });
-
-    it('reports a refused delete to the parent', async () => {
-      svc.delete.mockRejectedValueOnce(new Error('stop the recording before deleting it'));
-      const errSpy = vi.fn();
-      component.errorOccurred.subscribe(errSpy);
-      await component.remove('b');
-      expect(errSpy).toHaveBeenCalledWith('stop the recording before deleting it');
-      expect(component.busy()).toBe(false);
-    });
-
-    it('offers no delete for a recording that is still capturing or transcribing', () => {
-      svc.recordings.set([
-        summary('r', { status: { state: 'recording' } }),
-        summary('f', { status: { state: 'finalizing', progress: 0.3 } }),
-      ]);
-      fixture.detectChanges();
-      expect(q('delete-r')).toBeNull();
-      expect(q('delete-f')).toBeNull();
-      expect(q('status-f')!.textContent).toContain('transcribing 30%');
-    });
-  });
-
-  describe('bulk delete', () => {
-    it('deletes the ticked recordings after one confirmation that names the total size', async () => {
-      fixture.detectChanges();
-      q('start-select')!.click();
-      fixture.detectChanges();
-      (q('select-a') as HTMLInputElement).click();
-      (q('select-b') as HTMLInputElement).click();
-      fixture.detectChanges();
-      expect(q('delete-selected')!.textContent).toContain('100.0 MB');
-      q('delete-selected')!.click();
-      fixture.detectChanges();
-      expect(q('bulk-delete-confirm')!.textContent).toContain('cannot be undone');
-      q('bulk-delete-yes')!.click();
-      await fixture.whenStable();
-      expect(svc.delete).toHaveBeenCalledTimes(2);
-      expect(component.selecting()).toBe(false);
+    it('ticks a row on click instead of opening it', () => {
+      const spy = vi.fn();
+      component.opened.subscribe(spy);
+      click('open-b');
+      expect(spy).not.toHaveBeenCalled();
+      expect([...component.selected()]).toEqual(['b']);
+      expect(q('selected-count')!.textContent).toContain('1 selected');
+      click('open-b');
       expect(component.selected().size).toBe(0);
     });
 
-    it('keeps going past a failure and reports how many could not be deleted', async () => {
-      svc.delete.mockRejectedValueOnce(new Error('locked'));
+    it('selects all selectable rows, leaves out ongoing ones, and clears', () => {
+      svc.recordings.update((list) => [
+        summary('busy', { status: { state: 'finalizing', progress: 0.1 } }),
+        ...list,
+      ]);
+      fixture.detectChanges();
+      expect(q('select-all')!.textContent).toContain('Select all (3)');
+      click('select-all');
+      expect([...component.selected()].sort()).toEqual(['a', 'b', 'c']);
+      expect((q('open-busy') as HTMLButtonElement).disabled).toBe(true);
+      expect(component.allSelected()).toBe(true);
+      click('clear-selection');
+      expect(component.selected().size).toBe(0);
+    });
+
+    it('shows the header box as partly ticked and toggles all from it', () => {
+      click('open-a');
+      const box = q('select-all-toggle') as HTMLInputElement;
+      expect(box.indeterminate).toBe(true);
+      expect(box.checked).toBe(false);
+      component.toggleAll();
+      fixture.detectChanges();
+      expect(component.allSelected()).toBe(true);
+      component.toggleAll();
+      expect(component.selected().size).toBe(0);
+    });
+
+    it('selects a range with Shift-click from the last ticked row, in either direction', () => {
+      click('open-c');
+      click('open-a', { shiftKey: true });
+      expect([...component.selected()].sort()).toEqual(['a', 'b', 'c']);
+      component.clearSelection();
+      click('open-a');
+      click('open-c', { shiftKey: true });
+      expect([...component.selected()].sort()).toEqual(['a', 'b', 'c']);
+    });
+
+    it('skips ongoing rows inside a Shift range', () => {
+      svc.recordings.set([
+        summary('x'),
+        summary('busy', { status: { state: 'recording' } }),
+        summary('y'),
+      ]);
+      fixture.detectChanges();
+      click('open-x');
+      click('open-y', { shiftKey: true });
+      expect([...component.selected()].sort()).toEqual(['x', 'y']);
+    });
+
+    it('treats a Shift-click without an earlier tick as a plain tick', () => {
+      click('open-b', { shiftKey: true });
+      expect([...component.selected()]).toEqual(['b']);
+    });
+
+    it('Select all ticks only rows the search shows', () => {
+      component.query.set('sprint');
+      fixture.detectChanges();
+      click('select-all');
+      expect([...component.selected()]).toEqual(['c']);
+    });
+
+    it('deletes the ticked recordings after one confirmation and leaves select mode', async () => {
+      click('open-a');
+      click('open-b');
+      click('delete-selected');
+      expect(q('bulk-delete-confirm')!.textContent).toContain('Delete 2 recordings');
+      await component.removeSelected();
+      fixture.detectChanges();
+      expect(svc.delete).toHaveBeenCalledTimes(2);
+      expect(component.selecting()).toBe(false);
+      expect(svc.recordings().map((r) => r.id)).toEqual(['c']);
+    });
+
+    it('reports how many deletes failed and still runs the rest', async () => {
+      svc.delete.mockImplementationOnce(async () => {
+        throw new Error('locked');
+      });
       const errSpy = vi.fn();
       component.errorOccurred.subscribe(errSpy);
-      component.selecting.set(true);
-      component.toggleSelected('a');
-      component.toggleSelected('b');
+      click('open-a');
+      click('open-b');
       await component.removeSelected();
       expect(svc.delete).toHaveBeenCalledTimes(2);
       expect(errSpy).toHaveBeenCalledWith('1 of 2 recordings could not be deleted: locked');
     });
 
-    it('cannot tick a recording that is still capturing', () => {
-      svc.recordings.set([summary('r', { status: { state: 'recording' } })]);
-      component.selecting.set(true);
-      fixture.detectChanges();
-      expect((q('select-r') as HTMLInputElement).disabled).toBe(true);
-    });
-
-    it('toggleSelected unticks a ticked recording', () => {
-      component.toggleSelected('a');
-      component.toggleSelected('a');
-      expect(component.selected().has('a')).toBe(false);
-    });
-  });
-
-  describe('continue and transcribe', () => {
-    it('continues a finished recording with the live preference and selects it', async () => {
-      const spy = vi.fn();
-      component.opened.subscribe(spy);
-      await component.resume(svc.recordings()[0]);
-      expect(svc.resumeRecording).toHaveBeenCalledWith('b', false);
-      expect(component.selectedId()).toBe('b');
-      expect(spy).not.toHaveBeenCalled();
-    });
-
-    it('reports a failed continue without selecting the recording', async () => {
-      svc.resumeRecording.mockRejectedValueOnce(new Error('capture busy'));
-      const errSpy = vi.fn();
-      component.errorOccurred.subscribe(errSpy);
-      await component.resume(svc.recordings()[0]);
-      expect(errSpy).toHaveBeenCalledWith('capture busy');
-      expect(component.selectedId()).toBeNull();
-    });
-
-    it('labels Continue recording on finished rows only, and only while nothing records', () => {
-      fixture.detectChanges();
-      expect(q('resume-b')!.textContent).toContain('Continue recording');
-      svc.recordingSessionId.set('b');
-      fixture.detectChanges();
-      expect(q('resume-b')).toBeNull();
-    });
-
-    it('offers Transcribe on a failed recording, with the reason on the status chip', () => {
-      svc.recordings.set([
-        summary('x', { status: { state: 'failed', reason: 'interrupted: Speedwave closed' } }),
-      ]);
-      fixture.detectChanges();
-      expect(q('transcribe-x')).not.toBeNull();
-      expect(q('resume-x')).toBeNull();
-      expect(q('status-x')!.textContent).toContain('failed');
-      expect(q('status-x')!.textContent).not.toContain('interrupted');
-    });
-
-    it('transcribes a failed recording and opens it so the progress shows', async () => {
-      const failed = summary('x', { status: { state: 'failed', reason: 'r' } });
-      const spy = vi.fn();
-      component.opened.subscribe(spy);
-      await component.transcribe(failed);
-      expect(svc.transcribe).toHaveBeenCalledWith('x');
-      expect(spy).toHaveBeenCalledWith(failed);
-      expect(component.busy()).toBe(false);
-    });
-
-    it('reports a refused transcribe', async () => {
-      svc.transcribe.mockRejectedValueOnce(new Error('no Whisper model'));
-      const errSpy = vi.fn();
-      component.errorOccurred.subscribe(errSpy);
-      await component.transcribe(summary('x', { status: { state: 'failed', reason: 'r' } }));
-      expect(errSpy).toHaveBeenCalledWith('no Whisper model');
+    it('Done leaves select mode and drops the selection', () => {
+      click('open-a');
+      click('cancel-select');
+      expect(component.selecting()).toBe(false);
+      expect(component.selected().size).toBe(0);
+      expect(q('recordings-search')).not.toBeNull();
     });
   });
 });

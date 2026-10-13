@@ -2,10 +2,8 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
-  DestroyRef,
   OnInit,
   computed,
-  effect,
   inject,
   output,
   signal,
@@ -14,17 +12,25 @@ import {
 import { TranscriptionService } from '../../services/transcription.service';
 import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
-import type { AudioSource, AudioSourceInfo, Language } from '../../models/transcript';
-import { formatClock } from '../recording-format';
+import { IconComponent } from '../../shared/icon.component';
+import type {
+  AudioSource,
+  AudioSourceInfo,
+  AudioSourceKind,
+  Language,
+} from '../../models/transcript';
+import { RECORD_SHORTCUT_HINT, recordingName } from '../recording-format';
 
-/** Tooltip on Start recording. */
+/** Tooltip on Record. */
 const START_TOOLTIP =
   'Records system audio and your microphone on this machine. Nothing leaves your computer.';
-/** Tooltip on Stop. */
-const STOP_TOOLTIP =
-  'Stops the capture and transcribes the audio. This takes a few minutes for a long meeting.';
-/** Shortcut that starts or stops a recording while this view is open. */
-const RECORD_SHORTCUT_HINT = '⌘⇧R';
+
+/** Short source names for the chooser. */
+const SOURCE_SHORT_LABEL: Record<AudioSourceKind, string> = {
+  mixed: 'Whole meeting',
+  system_wide: 'Other people only',
+  microphone: 'Your microphone only',
+};
 
 /** A named input device for the microphone dropdown. */
 interface MicChoice {
@@ -49,172 +55,151 @@ function micName(label: string): string {
 }
 
 /**
- * Maps linear RMS to a 0-100 meter width on a dB scale (-60..0 dBFS): speech RMS sits around
- * 0.005-0.15, which a linear meter would render as a near-invisible sliver.
- * @param rms - linear RMS in 0..1.
- */
-function rmsToPct(rms: number): number {
-  if (rms <= 0) return 0;
-  const db = 20 * Math.log10(rms);
-  return Math.round(Math.min(100, Math.max(0, ((db + 60) / 60) * 100)));
-}
-
-/**
- * Recording controls. Idle: language (PL/EN, never auto-detected), source, microphone and Start.
- * Recording: the elapsed time, a loudness meter per channel and Stop. Emits `started`/`stopped`;
- * errors go to the parent banner only. ⌘⇧R / Ctrl+Shift+R starts or stops.
+ * Record (view header, idle): the Record button with its shortcut, a chooser showing the language
+ * and source the next recording uses (remembered from the last one) that opens their pickers, and
+ * a line saying a recording can start while an earlier one is still being transcribed. Emits
+ * `started`; errors go to the parent banner. ⌘⇧R / Ctrl+Shift+R starts.
  */
 @Component({
   selector: 'app-recording-controls',
   standalone: true,
-  imports: [TooltipDirective],
-  host: { '(document:keydown)': 'onKeydown($event)' },
+  imports: [TooltipDirective, IconComponent],
+  host: {
+    '(document:keydown)': 'onKeydown($event)',
+    '(document:click)': 'onDocumentClick($event)',
+  },
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <section
-      class="rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-3"
-      data-testid="recording-controls"
-    >
-      @if (recording()) {
-        <div class="flex items-center gap-4" data-testid="recording-view">
-          <div class="flex items-center gap-2">
-            <span
-              class="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500"
-              aria-hidden="true"
-            ></span>
-            <span
-              class="mono text-2xl tabular-nums text-[var(--ink)]"
-              data-testid="recording-clock"
-              role="timer"
-              aria-label="Recording time"
-              >{{ clock() }}</span
+    <div class="relative flex flex-col items-end gap-1.5" data-testid="recording-controls">
+      <div class="flex items-center gap-2" data-chooser-root>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border bg-[var(--bg-1)] px-2.5 py-1.5 text-[12px] hover:text-[var(--ink)]"
+          [class]="
+            optionsOpen()
+              ? 'border-[var(--accent)] text-[var(--ink)]'
+              : 'border-[var(--line)] text-[var(--ink-dim)]'
+          "
+          aria-haspopup="dialog"
+          data-testid="recording-options"
+          [attr.aria-expanded]="optionsOpen()"
+          (click)="optionsOpen.set(!optionsOpen())"
+        >
+          {{ choiceLabel() }}
+          <app-icon name="chevron-down" class="h-3 w-3" />
+        </button>
+        <span [appTooltip]="startTooltip" [tooltipKbd]="shortcutHint" placement="bottom">
+          <button
+            type="button"
+            class="mono inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3.5 py-1.5 text-[13px] font-semibold text-[var(--bg)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="start-btn"
+            [disabled]="!canStart()"
+            (click)="start()"
+          >
+            <app-icon name="microphone" class="h-3.5 w-3.5" [strokeWidth]="2" />
+            {{ busy() ? 'Starting…' : 'Record' }}
+            <kbd
+              class="rounded border border-black/20 bg-black/15 px-1 font-mono text-[10px] font-normal"
+              >{{ shortcutHint }}</kbd
             >
-          </div>
-          <div class="flex-1 space-y-1" data-testid="audio-level-meter">
-            @for (bar of meterBars(); track bar.label) {
-              <div class="flex items-center gap-2">
-                <span class="mono w-14 shrink-0 text-[10px] text-[var(--ink-mute)]">{{
-                  bar.label
-                }}</span>
-                <div class="h-1.5 flex-1 overflow-hidden rounded bg-[var(--bg-2)]">
-                  <div
-                    class="h-full bg-[var(--accent)] transition-[width] duration-150"
-                    [style.width.%]="bar.pct"
-                  ></div>
-                </div>
-              </div>
-            }
-          </div>
-          <span [appTooltip]="stopTooltip" [tooltipKbd]="shortcutHint" placement="left">
-            <button
-              type="button"
-              class="mono rounded border border-red-500/50 bg-red-500/10 px-4 py-1.5 text-[12px] text-red-300 hover:bg-red-500/20 disabled:opacity-40"
-              data-testid="stop-btn"
-              [disabled]="busy()"
-              (click)="stop()"
-            >
-              {{ busy() ? 'stopping…' : 'Stop' }}
-            </button>
-          </span>
-        </div>
-        @if (!recordingLive()) {
-          <p class="mt-2 text-[11px] text-[var(--ink-mute)]" data-testid="after-stop-note">
-            Transcript appears after you stop.
-          </p>
-        }
-      } @else {
-        <h3 class="mono mb-2 text-[11px] uppercase tracking-widest text-[var(--ink-mute)]">
-          New recording
-        </h3>
-        <div class="flex flex-wrap items-center gap-3 text-[12px]">
-          <label class="flex items-center gap-1">
-            <span class="text-[var(--ink-mute)]">Language</span>
-            <select
-              class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
-              data-testid="language-select"
-              (change)="onLanguage($any($event.target).value)"
-            >
-              <option value="pl" [selected]="language() === 'pl'">Polish</option>
-              <option value="en" [selected]="language() === 'en'">English</option>
-            </select>
-          </label>
+          </button>
+        </span>
 
-          <label class="flex items-center gap-1">
-            <span class="text-[var(--ink-mute)]">Source</span>
-            <select
-              class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
-              data-testid="source-select"
-              (change)="onSource(+$any($event.target).value)"
-            >
-              @for (s of sources(); track $index) {
-                <option [value]="$index" [selected]="$index === sourceIndex()">
-                  {{ s.label }}
-                </option>
-              }
-            </select>
-          </label>
-
-          @if (micSelectable() && mics().length > 0) {
-            <label class="flex items-center gap-1">
-              <span class="text-[var(--ink-mute)]">Microphone</span>
-              <select
-                class="rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-0.5"
-                data-testid="mic-select"
-                (change)="onMic($any($event.target).value)"
+        @if (optionsOpen()) {
+          <div
+            class="absolute right-0 top-full z-30 mt-2 w-[25rem] rounded-lg border border-[var(--line-strong)] bg-[var(--bg-2)] p-3.5 text-[12.5px] shadow-xl"
+            role="dialog"
+            aria-label="Recording options"
+            data-testid="recording-options-panel"
+          >
+            <label class="mb-2.5 flex flex-col gap-1">
+              <span class="text-[11.5px] text-[var(--ink-mute)]"
+                >Language spoken in the meeting</span
               >
-                <option value="" [selected]="micDevice() === null">System default</option>
-                @for (m of mics(); track m.uid) {
-                  <option [value]="m.uid" [selected]="m.uid === micDevice()">{{ m.name }}</option>
+              <select
+                class="min-w-0 truncate rounded border border-[var(--line-strong)] bg-[var(--bg-1)] py-1.5 pl-2 pr-8 text-[var(--ink)]"
+                data-testid="language-select"
+                (change)="onLanguage($any($event.target).value)"
+              >
+                <option value="pl" [selected]="language() === 'pl'">Polish</option>
+                <option value="en" [selected]="language() === 'en'">English</option>
+              </select>
+            </label>
+            <label class="mb-2.5 flex flex-col gap-1">
+              <span class="text-[11.5px] text-[var(--ink-mute)]">Record</span>
+              <select
+                class="min-w-0 truncate rounded border border-[var(--line-strong)] bg-[var(--bg-1)] py-1.5 pl-2 pr-8 text-[var(--ink)]"
+                data-testid="source-select"
+                (change)="onSource(+$any($event.target).value)"
+              >
+                @for (s of sources(); track $index) {
+                  <option [value]="$index" [selected]="$index === sourceIndex()">
+                    {{ s.label }}
+                  </option>
                 }
               </select>
             </label>
-          }
-        </div>
-
-        @if (mixedSourceSelected()) {
-          <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
-            Records the other participants (system audio) and your microphone. Your OS may ask for
-            microphone and audio-recording permission the first time.
-          </p>
+            @if (micSelectable() && mics().length > 0) {
+              <label class="mb-2.5 flex flex-col gap-1">
+                <span class="text-[11.5px] text-[var(--ink-mute)]">Microphone</span>
+                <select
+                  class="min-w-0 truncate rounded border border-[var(--line-strong)] bg-[var(--bg-1)] py-1.5 pl-2 pr-8 text-[var(--ink)]"
+                  data-testid="mic-select"
+                  (change)="onMic($any($event.target).value)"
+                >
+                  <option value="" [selected]="micDevice() === null">System default</option>
+                  @for (m of mics(); track m.uid) {
+                    <option [value]="m.uid" [selected]="m.uid === micDevice()">{{ m.name }}</option>
+                  }
+                </select>
+              </label>
+            }
+            @if (mixedSourceSelected()) {
+              <p class="mb-2 text-[11.5px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
+                Records the other participants (system audio) and your microphone. Your OS may ask
+                for microphone and audio-recording permission the first time.
+              </p>
+            }
+            <p class="border-t border-[var(--line)] pt-2.5 text-[11.5px] text-[var(--ink-mute)]">
+              Remembered for your next recording.
+            </p>
+          </div>
         }
+      </div>
 
-        @if (modelsKnown() && !hasModel()) {
-          <p class="mono mt-2 text-[10px] text-[var(--ink-mute)]" data-testid="no-model-note">
-            No speech-to-text model is downloaded yet. Download it in Settings → Meeting
-            transcription; the download uses the network.
-          </p>
-        }
-
-        @if (hasModel() && missingFinalizeModel(); as missing) {
-          <p class="mono mt-2 text-[10px] text-amber-300" data-testid="finalize-model-warning">
-            The final-pass model ({{ missing }}) is not downloaded, so the transcript produced after
-            you stop falls back to the lower-quality live model. Download it in Settings → Meeting
-            transcription.
-          </p>
-        }
-
-        <div class="mt-3">
-          <span [appTooltip]="startTooltip" [tooltipKbd]="shortcutHint" placement="right">
-            <button
-              type="button"
-              class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-              data-testid="start-btn"
-              [disabled]="!canStart()"
-              (click)="start()"
-            >
-              {{ busy() ? 'starting…' : 'Start recording' }}
-            </button>
-          </span>
-        </div>
+      @if (stillTranscribing(); as note) {
+        <p
+          class="flex items-center gap-1.5 text-[12px] text-amber-300"
+          role="status"
+          data-testid="can-record-note"
+        >
+          {{ note }}
+        </p>
       }
-    </section>
+      @if (modelsKnown() && !hasModel()) {
+        <p
+          class="max-w-md text-right text-[11.5px] text-[var(--ink-mute)]"
+          data-testid="no-model-note"
+        >
+          No speech recognition model is downloaded yet. Download it in Settings → Meeting
+          transcription.
+        </p>
+      }
+      @if (hasModel() && missingFinalizeModel(); as missing) {
+        <p
+          class="max-w-md text-right text-[11.5px] text-amber-300"
+          data-testid="finalize-model-warning"
+        >
+          Transcripts are made with the smaller model until the high-quality one ({{ missing }}) is
+          downloaded in Settings.
+        </p>
+      }
+    </div>
   `,
 })
 export class RecordingControlsComponent implements OnInit {
   /** Emitted with the new session id once recording starts. */
   readonly started = output<string>();
-  /** Emitted with the stopped session id. */
-  readonly stopped = output<string>();
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
 
@@ -224,16 +209,17 @@ export class RecordingControlsComponent implements OnInit {
   readonly sources = signal<AudioSourceInfo[]>([]);
   /** Index into `sources()` of the chosen source. */
   readonly sourceIndex = signal(0);
-  /** Disables Start/Stop while a transition is in flight. */
+  /** Disables Record while a start is in flight. */
   readonly busy = signal(false);
+  /** Whether the language/source pickers are open. */
+  readonly optionsOpen = signal(false);
   /** `false` until the model list has been read at least once. */
   readonly modelsKnown = signal(false);
-  /** `true` if at least one Whisper model is downloaded (Start needs one). */
+  /** `true` if at least one Whisper model is downloaded (Record needs one). */
   readonly hasModel = signal(false);
   /**
-   * Display name of this host's finalize-pass model when it is not downloaded, else null.
-   * Start stays allowed — the offline pass falls back to the live model — but the quality
-   * cost must be visible before the recording, not discovered in the finished transcript.
+   * Display name of this host's high-quality model when it is not downloaded, else null. Record
+   * stays allowed (the pass falls back to the smaller model), but the cost shows before it.
    */
   readonly missingFinalizeModel = signal<string | null>(null);
   /** `true` when the chosen source is the mixed (system + mic) one. */
@@ -258,79 +244,45 @@ export class RecordingControlsComponent implements OnInit {
   private readonly log = inject(LoggerService);
   private readonly cdr = inject(ChangeDetectorRef);
 
+  /** "Polish · Whole meeting": what the next recording uses, on the chooser. */
+  readonly choiceLabel = computed(() => {
+    const lang = this.language() === 'pl' ? 'Polish' : 'English';
+    const kind = this.sources()[this.sourceIndex()]?.source.kind;
+    return kind ? `${lang} · ${SOURCE_SHORT_LABEL[kind]}` : lang;
+  });
+
   /**
-   * `true` while a recording is in progress — read from the service so it
-   * survives this tab being destroyed on navigation (the driver keeps going).
+   * The answer to "can I record now?" while earlier recordings are still transcribed: yes, and
+   * which one is still running.
    */
-  readonly recording = this.transcription.recording;
+  readonly stillTranscribing = computed(() => {
+    const busy = this.transcription.transcribing();
+    if (busy.length === 0) return '';
+    const what =
+      busy.length === 1
+        ? `"${recordingName(busy[0])}" is still being transcribed.`
+        : `${busy.length} recordings are still being transcribed.`;
+    return `${what} You can start recording now.`;
+  });
 
-  /** Whether the running recording shows live text (then no "appears after you stop" note). */
-  readonly recordingLive = computed(() => this.transcription.recordingLive() === true);
-
-  /** Whether Start can be pressed now. */
+  /** Whether Record can be pressed now. */
   readonly canStart = computed(
-    () => !this.busy() && this.sources().length > 0 && !(this.modelsKnown() && !this.hasModel())
+    () =>
+      !this.busy() &&
+      !this.transcription.captureOpen() &&
+      this.sources().length > 0 &&
+      !(this.modelsKnown() && !this.hasModel())
   );
 
   protected readonly startTooltip = START_TOOLTIP;
-  protected readonly stopTooltip = STOP_TOOLTIP;
   protected readonly shortcutHint = RECORD_SHORTCUT_HINT;
 
-  /** Wall-clock tick that drives the elapsed-time display while recording. */
-  private readonly now = signal(Date.now());
-
-  /** Elapsed time of the running recording (or its resumed part). */
-  readonly clock = computed(() => {
-    const started = this.transcription.recordingStartedAt();
-    return started === null ? '00:00' : formatClock(this.now() - started);
-  });
-
-  /** Loudness bars: one per captured channel, 0-100 for the width binding. */
-  readonly meterBars = computed<{ label: string; pct: number }[]>(() => {
-    const kind = this.transcription.recordingSource()?.kind;
-    const levels = this.transcription.audioLevels() ?? [];
-    if (kind === 'mixed' || levels.length === 2) {
-      return [
-        { label: 'Meeting', pct: rmsToPct(levels[0] ?? 0) },
-        { label: 'You', pct: rmsToPct(levels[1] ?? 0) },
-      ];
-    }
-    return [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: rmsToPct(levels[0] ?? 0) }];
-  });
-
-  /** Ticks the clock once a second, only while a recording runs. */
-  constructor() {
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const clear = (): void => {
-      if (timer !== undefined) clearInterval(timer);
-      timer = undefined;
-    };
-    effect(() => {
-      if (this.recording()) {
-        this.now.set(Date.now());
-        if (timer === undefined) timer = setInterval(() => this.now.set(Date.now()), 1000);
-      } else {
-        clear();
-      }
-    });
-    inject(DestroyRef).onDestroy(clear);
-  }
-
-  /** Loads capabilities + source list + model availability on first paint. */
+  /** Loads the source list and model availability, and restores the last recording's choice. */
   async ngOnInit(): Promise<void> {
     try {
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
-      const inProgressSource = this.transcription.recordingSource();
-      if (inProgressSource) {
-        this.restoreFromInProgressRecording(list, inProgressSource);
-      } else {
-        const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
-        const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
-        this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
-      }
-      const inProgressLanguage = this.transcription.recordingLanguage();
-      if (inProgressLanguage) this.language.set(inProgressLanguage);
+      this.restoreChoice(list);
     } catch (e: unknown) {
       this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
     }
@@ -339,21 +291,27 @@ export class RecordingControlsComponent implements OnInit {
   }
 
   /**
-   * Restores the picker selection of a recording already in progress.
+   * Picks the remembered language, source and microphone; without one, the mixed source (else
+   * system audio) in Polish.
    * @param list - the freshly-loaded source list.
-   * @param source - the in-progress recording's source.
    */
-  private restoreFromInProgressRecording(list: AudioSourceInfo[], source: AudioSource): void {
-    const idx = list.findIndex((s) => s.source.kind === source.kind);
-    if (idx >= 0) this.sourceIndex.set(idx);
-    if (source.kind === 'mixed') this.micDevice.set(source.mic);
-    else if (source.kind === 'microphone') this.micDevice.set(source.device);
+  private restoreChoice(list: AudioSourceInfo[]): void {
+    const saved = this.transcription.recordingChoice();
+    const savedIdx = saved ? list.findIndex((s) => s.source.kind === saved.source) : -1;
+    if (saved && savedIdx >= 0) {
+      this.language.set(saved.language);
+      this.sourceIndex.set(savedIdx);
+      const known = saved.mic === null || this.mics().some((m) => m.uid === saved.mic);
+      this.micDevice.set(known ? saved.mic : null);
+      return;
+    }
+    if (saved) this.language.set(saved.language);
+    const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
+    const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
+    this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
   }
 
-  /**
-   * Re-reads whether a Whisper model is downloaded. The parent calls this after
-   * a model download finishes so the Start button un-disables.
-   */
+  /** Re-reads whether a Whisper model is downloaded and whether the high-quality one is. */
   async refreshModelAvailability(): Promise<void> {
     try {
       const ack = await this.transcription.listModels();
@@ -375,54 +333,58 @@ export class RecordingControlsComponent implements OnInit {
   }
 
   /**
-   * Updates the forced language.
+   * Updates the forced language and remembers it.
    * @param v - 'pl' or 'en'.
    */
   onLanguage(v: string): void {
-    if (v === 'pl' || v === 'en') this.language.set(v);
+    if (v !== 'pl' && v !== 'en') return;
+    this.language.set(v);
+    this.saveChoice();
   }
 
   /**
-   * Updates the chosen source index.
+   * Updates the chosen source and remembers it.
    * @param i - index into `sources()`.
    */
   onSource(i: number): void {
-    if (i >= 0 && i < this.sources().length) this.sourceIndex.set(i);
+    if (i < 0 || i >= this.sources().length) return;
+    this.sourceIndex.set(i);
+    this.saveChoice();
   }
 
   /**
-   * Updates the chosen mic device.
+   * Updates the chosen mic device and remembers it.
    * @param uid - device id, or '' for the system default.
    */
   onMic(uid: string): void {
     this.micDevice.set(uid === '' ? null : uid);
+    this.saveChoice();
   }
 
   /**
-   * Overlays the chosen mic onto a mixed/mic source (no-op for others).
-   * @param src - the picked source.
+   * Closes the pickers on a click outside them.
+   * @param event - any click in the document.
    */
-  private applyMic(src: AudioSource): AudioSource {
-    const mic = this.micDevice();
-    if (src.kind === 'mixed') return { ...src, mic };
-    if (src.kind === 'microphone') return { ...src, device: mic };
-    return src;
+  onDocumentClick(event: MouseEvent): void {
+    if (!this.optionsOpen()) return;
+    const target = event.target as Element | null;
+    if (!target?.closest?.('[data-chooser-root]')) this.optionsOpen.set(false);
   }
 
   /**
-   * ⌘⇧R / Ctrl+Shift+R starts a recording, or stops the running one.
+   * ⌘⇧R / Ctrl+Shift+R starts a recording (the recording bar handles it while one runs).
    * @param event - the document keydown.
    */
   onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && this.optionsOpen()) {
+      this.optionsOpen.set(false);
+      return;
+    }
     if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.key.toLowerCase() !== 'r') {
       return;
     }
     event.preventDefault();
-    if (this.recording()) {
-      if (!this.busy()) void this.stop();
-    } else if (this.canStart()) {
-      void this.start();
-    }
+    if (this.canStart()) void this.start();
   }
 
   /** Starts recording the chosen source in the chosen language. */
@@ -433,11 +395,13 @@ export class RecordingControlsComponent implements OnInit {
       return;
     }
     const src = this.applyMic(picked);
+    this.optionsOpen.set(false);
     this.busy.set(true);
     try {
       if (src.kind !== 'system_wide' && !(await this.ensureMicConsent())) {
         return;
       }
+      this.saveChoice();
       const ack = await this.transcription.startRecording(
         src,
         this.language(),
@@ -450,6 +414,28 @@ export class RecordingControlsComponent implements OnInit {
       this.busy.set(false);
       this.cdr.markForCheck();
     }
+  }
+
+  /** Stores the current language, source and microphone for the next recording. */
+  private saveChoice(): void {
+    const kind = this.sources()[this.sourceIndex()]?.source.kind;
+    if (!kind) return;
+    this.transcription.setRecordingChoice({
+      language: this.language(),
+      source: kind,
+      mic: this.micDevice(),
+    });
+  }
+
+  /**
+   * Overlays the chosen mic onto a mixed/mic source (no-op for others).
+   * @param src - the picked source.
+   */
+  private applyMic(src: AudioSource): AudioSource {
+    const mic = this.micDevice();
+    if (src.kind === 'mixed') return { ...src, mic };
+    if (src.kind === 'microphone') return { ...src, device: mic };
+    return src;
   }
 
   /**
@@ -467,20 +453,5 @@ export class RecordingControlsComponent implements OnInit {
         'Privacy & Security → Microphone, then start again'
     );
     return false;
-  }
-
-  /** Stops the in-progress recording. */
-  async stop(): Promise<void> {
-    const id = this.transcription.recordingSessionId();
-    if (!id) return;
-    this.busy.set(true);
-    try {
-      await this.transcription.stopRecording(id);
-      this.stopped.emit(id);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    }
-    this.busy.set(false);
-    this.cdr.markForCheck();
   }
 }

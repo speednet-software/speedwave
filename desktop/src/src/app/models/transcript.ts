@@ -7,6 +7,9 @@ export type AudioSource =
   | { kind: 'microphone'; device: string | null }
   | { kind: 'mixed'; mic: string | null };
 
+/** The kind of an {@link AudioSource}. */
+export type AudioSourceKind = AudioSource['kind'];
+
 /** A capturable source the user can pick. */
 export interface AudioSourceInfo {
   source: AudioSource;

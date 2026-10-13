@@ -10,27 +10,18 @@ import {
 
 import { TranscriptionService } from '../../services/transcription.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { IconComponent } from '../../shared/icon.component';
 import { formatBytes } from '../../shared/format-bytes';
 import type { TranscriptSummary } from '../../models/transcript';
 import { isSessionOngoing } from '../../models/transcript';
 import {
+  dayGroupLabel,
   formatDuration,
-  formatRecordingDate,
+  formatStartTime,
   recordingName,
   statusChip,
   type StatusChip,
 } from '../recording-format';
-
-/** Tooltip on the Continue recording action. */
-const CONTINUE_TOOLTIP =
-  'Adds a new part to this recording. When you stop, the whole recording is transcribed again.';
-/** Tooltip on the Transcribe action. */
-const TRANSCRIBE_TOOLTIP = 'Runs the transcription on the recorded audio again.';
-/** Tooltip on the Delete action. */
-const DELETE_TOOLTIP =
-  'Removes the audio and the transcript from this machine. This cannot be undone.';
-/** Why rows cannot be opened while a recording runs. */
-const ROW_LOCKED_TOOLTIP = 'Stop the recording to open another one.';
 
 /** One rendered row: the summary plus everything the template derives from it. */
 interface RecordingRow {
@@ -39,256 +30,258 @@ interface RecordingRow {
   /** Start time, shown under a user title (the default name already is the start time). */
   when: string | null;
   duration: string;
-  size: string;
-  chip: StatusChip;
+  chip: StatusChip | null;
+  /** Whether the row can be ticked (a recording that can still change cannot). */
+  selectable: boolean;
+}
+
+/** Rows of one day, under its heading. */
+interface DayGroup {
+  label: string;
+  rows: RecordingRow[];
 }
 
 /**
- * Recordings list (left pane): one card per recording with its name, length, status and the
- * first line of its transcript, plus Continue / Transcribe / Delete. Delete asks first, alone or
- * for a selection. Rows refresh from the backend's change events, never on a timer.
+ * Recordings list (left pane): search, recordings grouped by day, one compact row each with its
+ * name, length, start time and first line, and a chip only when its state needs a look. Every
+ * action on one recording lives in the right pane; Select deletes several at once.
  */
 @Component({
   selector: 'app-session-list',
   standalone: true,
-  imports: [TooltipDirective],
+  imports: [TooltipDirective, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'flex min-h-0 flex-1 flex-col' },
   template: `
-    <div data-testid="session-list">
-      <div class="mb-2 flex items-baseline justify-between gap-2">
-        <h2 class="mono text-[11px] uppercase tracking-widest text-[var(--ink-mute)]">
-          Recordings ({{ rows().length }})
-        </h2>
-        @if (rows().length > 0) {
-          <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="recordings-size">
-            {{ totalSize() }} on disk
-          </span>
-        }
-      </div>
-
-      @if (rows().length === 0) {
-        <ol
-          class="space-y-1 rounded-md border border-dashed border-[var(--line)] p-3 text-[12px] text-[var(--ink-mute)]"
-          data-testid="recordings-empty"
-        >
-          <li>1. Start recording.</li>
-          <li>2. Stop when the meeting ends; the transcript appears here.</li>
-          <li>3. Attach it to a chat and ask about it.</li>
-        </ol>
-      } @else {
-        <div class="mb-2 flex items-center gap-2 text-[11px]">
-          @if (selecting()) {
+    <div class="flex min-h-0 flex-1 flex-col" data-testid="session-list">
+      <div class="border-b border-[var(--line)] px-3 pb-2.5 pt-3">
+        @if (selecting()) {
+          <div class="flex items-center gap-2 text-[12px]" data-testid="bulk-bar">
+            <input
+              type="checkbox"
+              class="h-3.5 w-3.5 accent-[var(--accent)]"
+              aria-label="Select all recordings"
+              data-testid="select-all-toggle"
+              [checked]="allSelected()"
+              [indeterminate]="someSelected()"
+              (change)="toggleAll()"
+            />
+            <span class="flex-1 whitespace-nowrap text-[var(--ink)]" data-testid="selected-count"
+              >{{ selected().size }} selected
+              <span class="text-[11px] text-[var(--ink-mute)]">· {{ selectedSize() }}</span></span
+            >
             <button
               type="button"
-              class="mono rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+              class="mono rounded border border-red-500/40 px-2 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
               data-testid="delete-selected"
               [disabled]="selected().size === 0 || busy()"
               (click)="pendingBulkDelete.set(true)"
             >
-              Delete {{ selected().size }} ({{ selectedSize() }})
+              Delete
             </button>
             <button
               type="button"
-              class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink-mute)] hover:text-[var(--ink)]"
+              class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
               data-testid="cancel-select"
               (click)="stopSelecting()"
             >
-              Cancel
+              Done
             </button>
-          } @else {
+          </div>
+          <div class="mt-2 flex items-center gap-2 text-[11px] text-[var(--ink-mute)]">
             <button
               type="button"
-              class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink-mute)] hover:text-[var(--ink)]"
-              data-testid="start-select"
-              (click)="selecting.set(true)"
+              class="text-[var(--accent)] hover:underline disabled:opacity-40"
+              data-testid="select-all"
+              [disabled]="allSelected()"
+              (click)="selectAll()"
             >
-              Select
+              Select all ({{ selectableIds().length }})
             </button>
-          }
-        </div>
-        @if (pendingBulkDelete()) {
-          <div
-            class="mb-2 rounded-md border border-red-500/40 bg-red-500/[0.06] p-2 text-[12px]"
-            role="alertdialog"
-            aria-label="Confirm deleting the selected recordings"
-            data-testid="bulk-delete-confirm"
-          >
-            <p class="text-[var(--ink)]">
-              Delete {{ selected().size }} recordings ({{ selectedSize() }})? Their audio and
-              transcripts are removed from this machine. This cannot be undone.
-            </p>
-            <div class="mt-2 flex gap-2">
-              <button
-                type="button"
-                class="mono rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
-                data-testid="bulk-delete-yes"
-                (click)="removeSelected()"
-              >
-                Delete
-              </button>
-              <button
-                type="button"
-                class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                data-testid="bulk-delete-no"
-                (click)="pendingBulkDelete.set(false)"
-              >
-                Cancel
-              </button>
+            <span aria-hidden="true">·</span>
+            <button
+              type="button"
+              class="text-[var(--ink-dim)] hover:underline disabled:opacity-40"
+              data-testid="clear-selection"
+              [disabled]="selected().size === 0"
+              (click)="clearSelection()"
+            >
+              Clear
+            </button>
+            <span class="ml-auto">Shift-click selects a range</span>
+          </div>
+          @if (pendingBulkDelete()) {
+            <div
+              class="mt-2 rounded-md border border-red-500/40 bg-red-500/[0.06] p-2 text-[12px]"
+              role="alertdialog"
+              aria-label="Confirm deleting the selected recordings"
+              data-testid="bulk-delete-confirm"
+            >
+              <p class="text-[var(--ink)]">
+                Delete {{ selected().size }} recordings ({{ selectedSize() }})? Their audio and
+                transcripts are removed from this machine. This cannot be undone.
+              </p>
+              <div class="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  class="mono rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
+                  data-testid="bulk-delete-yes"
+                  (click)="removeSelected()"
+                >
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink-mute)] hover:text-[var(--ink)]"
+                  data-testid="bulk-delete-no"
+                  (click)="pendingBulkDelete.set(false)"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
+          }
+        } @else {
+          <label
+            class="flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink-mute)] focus-within:border-[var(--accent)]"
+          >
+            <app-icon name="search" class="h-3.5 w-3.5" />
+            <input
+              type="search"
+              class="min-w-0 flex-1 bg-transparent text-[var(--ink)] outline-none placeholder:text-[var(--ink-mute)]"
+              placeholder="Search recordings"
+              aria-label="Search recordings"
+              data-testid="recordings-search"
+              [value]="query()"
+              (input)="query.set($any($event.target).value)"
+            />
+          </label>
+          <div
+            class="mono mt-2.5 flex items-center justify-between text-[10.5px] uppercase tracking-wider text-[var(--ink-mute)]"
+          >
+            <span data-testid="recordings-count">Recordings · {{ allRows().length }}</span>
+            <span class="flex items-center gap-3">
+              @if (allRows().length > 0) {
+                <span data-testid="recordings-size">{{ totalSize() }}</span>
+                <button
+                  type="button"
+                  class="normal-case tracking-normal text-[11px] text-[var(--ink-dim)] hover:text-[var(--ink)]"
+                  data-testid="start-select"
+                  (click)="selecting.set(true)"
+                >
+                  Select
+                </button>
+              }
+            </span>
           </div>
         }
-      }
+      </div>
 
-      <ul class="space-y-2">
-        @for (row of rows(); track row.rec.id) {
-          @let rec = row.rec;
-          @let ongoing = isOngoing(rec);
-          @let active = rec.id === selectedId();
-          <li
-            class="rounded-md border border-l-2 p-2 text-[12px]"
-            [class]="
-              active
-                ? 'border-[var(--line)] border-l-[var(--accent)] bg-[var(--bg-2)]'
-                : 'border-[var(--line)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)]'
-            "
-            [attr.data-active]="active ? 'true' : null"
-            [attr.data-testid]="'row-' + rec.id"
+      <div class="min-h-0 flex-1 overflow-y-auto pb-3">
+        @if (allRows().length === 0) {
+          <ol
+            class="m-3 space-y-1 rounded-md border border-dashed border-[var(--line)] p-3 text-[12px] text-[var(--ink-mute)]"
+            data-testid="recordings-empty"
           >
-            @if (pendingDeleteId() === rec.id) {
-              <div
-                role="alertdialog"
-                aria-label="Confirm deleting the recording"
-                [attr.data-testid]="'delete-confirm-' + rec.id"
+            <li>1. Press Record.</li>
+            <li>2. Stop when the meeting ends; the transcript appears here.</li>
+            <li>3. Attach it to a chat and ask about it.</li>
+          </ol>
+        } @else if (groups().length === 0) {
+          <p class="m-3 text-[12px] text-[var(--ink-mute)]" data-testid="recordings-no-match">
+            No recording matches "{{ query().trim() }}".
+          </p>
+        }
+        @for (group of groups(); track group.label) {
+          <h3
+            class="mono px-3.5 pb-1 pt-3 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
+          >
+            {{ group.label }}
+          </h3>
+          <ul>
+            @for (row of group.rows; track row.rec.id) {
+              @let rec = row.rec;
+              @let active = rec.id === selectedId();
+              @let ticked = selected().has(rec.id);
+              <li
+                class="border-l-2"
+                [class]="
+                  active
+                    ? 'border-l-[var(--accent)] bg-[var(--bg-2)]'
+                    : ticked
+                      ? 'border-l-transparent bg-[var(--accent-soft)]'
+                      : 'border-l-transparent hover:bg-[var(--bg-1)]'
+                "
+                [attr.data-active]="active ? 'true' : null"
+                [attr.data-testid]="'row-' + rec.id"
               >
-                <p class="text-[var(--ink)]">
-                  Delete "{{ row.name }}"{{
-                    row.duration ? ' (' + row.duration + ', ' + row.size + ')' : ''
-                  }}?
-                </p>
-                <p class="mt-1 text-[11px] text-[var(--ink-mute)]">
-                  The audio and the transcript are removed from this machine. This cannot be undone.
-                </p>
-                <div class="mt-2 flex gap-2">
-                  <button
-                    type="button"
-                    class="mono rounded border border-red-500/40 px-2 py-0.5 text-[11px] text-red-300 hover:bg-red-500/10"
-                    [attr.data-testid]="'delete-yes-' + rec.id"
-                    (click)="remove(rec.id)"
-                  >
-                    Delete
-                  </button>
-                  <button
-                    type="button"
-                    class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-mute)] hover:text-[var(--ink)]"
-                    [attr.data-testid]="'delete-no-' + rec.id"
-                    (click)="pendingDeleteId.set(null)"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            } @else {
-              <div class="flex items-start gap-2">
-                @if (selecting()) {
-                  <input
-                    type="checkbox"
-                    class="mt-1"
-                    [attr.aria-label]="'Select ' + row.name"
-                    [attr.data-testid]="'select-' + rec.id"
-                    [checked]="selected().has(rec.id)"
-                    [disabled]="ongoing"
-                    (change)="toggleSelected(rec.id)"
-                  />
-                }
-                <span
-                  class="block min-w-0 flex-1"
-                  [appTooltip]="rowLocked(rec) ? rowLockedTooltip : ''"
-                  placement="right"
+                <button
+                  type="button"
+                  class="flex w-full min-w-0 items-start gap-2.5 px-3 py-2 text-left disabled:cursor-not-allowed disabled:opacity-50"
+                  [attr.data-testid]="'open-' + rec.id"
+                  [attr.aria-current]="active && !selecting() ? 'true' : null"
+                  [attr.aria-pressed]="selecting() ? ticked : null"
+                  [disabled]="selecting() && !row.selectable"
+                  (click)="onRowClick(row, $event)"
                 >
-                  <button
-                    type="button"
-                    class="block w-full min-w-0 text-left disabled:cursor-not-allowed disabled:opacity-50"
-                    [attr.data-testid]="'open-' + rec.id"
-                    [attr.aria-current]="active ? 'true' : null"
-                    [disabled]="rowLocked(rec)"
-                    (click)="open(rec)"
-                  >
-                    <span class="block truncate font-medium text-[var(--ink)]">{{ row.name }}</span>
-                    <span
-                      class="mt-0.5 flex flex-wrap items-center gap-1 text-[10px] text-[var(--ink-mute)]"
-                    >
-                      @if (row.when) {
-                        <span>{{ row.when }}</span>
-                        <span aria-hidden="true">·</span>
+                  @if (selecting()) {
+                    <input
+                      type="checkbox"
+                      tabindex="-1"
+                      class="pointer-events-none mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
+                      aria-hidden="true"
+                      [attr.data-testid]="'select-' + rec.id"
+                      [checked]="ticked"
+                      [disabled]="!row.selectable"
+                    />
+                  }
+                  <span class="block min-w-0 flex-1">
+                    <span class="flex items-center gap-1.5 text-[13px]">
+                      <span class="min-w-0 flex-1 truncate font-medium text-[var(--ink)]">{{
+                        row.name
+                      }}</span>
+                      @if (row.chip; as chip) {
+                        <span
+                          class="mono shrink-0 rounded px-1.5 text-[10px]"
+                          [class]="chipClass(chip)"
+                          [appTooltip]="chip.tooltip"
+                          placement="top"
+                          [attr.data-testid]="'status-' + rec.id"
+                          >{{ chip.label }}</span
+                        >
                       }
                       @if (row.duration) {
-                        <span>{{ row.duration }}</span>
-                        <span aria-hidden="true">·</span>
+                        <span class="shrink-0 text-[11px] tabular-nums text-[var(--ink-mute)]">{{
+                          row.duration
+                        }}</span>
                       }
-                      <span
-                        class="mono rounded px-1"
-                        [class]="chipClass(row.chip)"
-                        [appTooltip]="row.chip.tooltip"
-                        placement="top"
-                        [attr.data-testid]="'status-' + rec.id"
-                        >{{ row.chip.label }}</span
-                      >
                     </span>
-                    @if (rec.preview) {
+                    @if (row.when || rec.preview) {
                       <span
-                        class="mt-1 line-clamp-2 block text-[11px] text-[var(--ink-dim)]"
-                        [attr.data-testid]="'preview-' + rec.id"
-                        >{{ rec.preview }}</span
+                        class="mt-0.5 flex gap-1.5 whitespace-nowrap text-[11.5px] text-[var(--ink-mute)]"
                       >
+                        @if (row.when) {
+                          <span class="shrink-0">{{ row.when }}</span>
+                        }
+                        @if (row.when && rec.preview) {
+                          <span aria-hidden="true">·</span>
+                        }
+                        @if (rec.preview) {
+                          <span
+                            class="truncate text-[var(--ink-dim)]"
+                            [attr.data-testid]="'preview-' + rec.id"
+                            >{{ rec.preview }}</span
+                          >
+                        }
+                      </span>
                     }
-                  </button>
-                </span>
-              </div>
-              @if (!selecting()) {
-                <div class="mt-1 flex items-center gap-2 text-[10px]">
-                  @if (rec.status.state === 'done' && !recordingInProgress()) {
-                    <span [appTooltip]="continueTooltip" placement="bottom">
-                      <button
-                        type="button"
-                        class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink)] hover:bg-[var(--bg-2)]"
-                        [attr.data-testid]="'resume-' + rec.id"
-                        (click)="resume(rec)"
-                      >
-                        Continue recording
-                      </button>
-                    </span>
-                  }
-                  @if (rec.status.state === 'failed') {
-                    <span [appTooltip]="transcribeTooltip" placement="bottom">
-                      <button
-                        type="button"
-                        class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink)] hover:bg-[var(--bg-2)] disabled:opacity-40"
-                        [attr.data-testid]="'transcribe-' + rec.id"
-                        [disabled]="busy()"
-                        (click)="transcribe(rec)"
-                      >
-                        Transcribe
-                      </button>
-                    </span>
-                  }
-                  @if (!ongoing) {
-                    <span class="ml-auto" [appTooltip]="deleteTooltip" placement="bottom">
-                      <button
-                        type="button"
-                        class="mono rounded px-2 py-0.5 text-[var(--ink-mute)] hover:bg-red-500/10 hover:text-red-300"
-                        [attr.data-testid]="'delete-' + rec.id"
-                        (click)="pendingDeleteId.set(rec.id)"
-                      >
-                        Delete
-                      </button>
-                    </span>
-                  }
-                </div>
-              }
+                  </span>
+                </button>
+              </li>
             }
-          </li>
+          </ul>
         }
-      </ul>
+      </div>
     </div>
   `,
 })
@@ -298,21 +291,18 @@ export class SessionListComponent implements OnInit {
   /** Forwards errors to the parent banner, the one place errors render. */
   readonly errorOccurred = output<string>();
 
-  /** Recording whose inline delete confirmation is showing. */
-  readonly pendingDeleteId = signal<string | null>(null);
+  /** Search text as typed. */
+  readonly query = signal('');
   /** Whether the list is in multi-select mode. */
   readonly selecting = signal(false);
   /** Ids ticked in multi-select mode. */
   readonly selected = signal<ReadonlySet<string>>(new Set());
   /** Whether the bulk-delete confirmation is showing. */
   readonly pendingBulkDelete = signal(false);
-  /** True while a delete or transcribe call runs. */
+  /** True while a bulk delete runs. */
   readonly busy = signal(false);
-
-  protected readonly continueTooltip = CONTINUE_TOOLTIP;
-  protected readonly transcribeTooltip = TRANSCRIBE_TOOLTIP;
-  protected readonly deleteTooltip = DELETE_TOOLTIP;
-  protected readonly rowLockedTooltip = ROW_LOCKED_TOOLTIP;
+  /** The row a plain click last ticked or unticked, where a Shift-click range starts. */
+  private readonly anchorId = signal<string | null>(null);
 
   private readonly transcription = inject(TranscriptionService);
   /**
@@ -320,21 +310,60 @@ export class SessionListComponent implements OnInit {
    * the list being destroyed and rebuilt on navigation, as the pane does.
    */
   readonly selectedId = computed(() => this.transcription.active()?.id ?? null);
-  /** True while any recording captures; done rows hide Continue then. */
-  readonly recordingInProgress = this.transcription.recording;
 
-  /** Rows in display order (the backend sorts newest first). */
-  readonly rows = computed<RecordingRow[]>(() => {
+  /** Every row in display order (the backend sorts newest first). */
+  readonly allRows = computed<RecordingRow[]>(() => {
     const now = new Date();
+    const best = this.transcription.highQualityModel()?.key ?? null;
     return this.transcription.recordings().map((rec) => ({
       rec,
       name: recordingName(rec, now),
-      when: rec.title?.trim() ? formatRecordingDate(rec.created_at, now) : null,
+      when: rec.title?.trim() ? formatStartTime(rec.created_at) : null,
       duration: formatDuration(rec.duration_secs),
-      size: formatBytes(rec.size_bytes),
-      chip: statusChip(rec.status),
+      chip: statusChip(rec, best),
+      selectable: !isSessionOngoing(rec.status),
     }));
   });
+
+  /** Rows matching the search (name, start time or first line), in display order. */
+  readonly visibleRows = computed<RecordingRow[]>(() => {
+    const q = this.query().trim().toLocaleLowerCase();
+    if (!q) return this.allRows();
+    return this.allRows().filter(
+      (row) =>
+        row.name.toLocaleLowerCase().includes(q) ||
+        (row.rec.preview ?? '').toLocaleLowerCase().includes(q)
+    );
+  });
+
+  /** Visible rows under one heading per day. */
+  readonly groups = computed<DayGroup[]>(() => {
+    const now = new Date();
+    const out: DayGroup[] = [];
+    for (const row of this.visibleRows()) {
+      const label = dayGroupLabel(row.rec.created_at, now);
+      const last = out[out.length - 1];
+      if (last?.label === label) last.rows.push(row);
+      else out.push({ label, rows: [row] });
+    }
+    return out;
+  });
+
+  /** Ids Select all ticks: the visible rows that can be deleted. */
+  readonly selectableIds = computed(() =>
+    this.visibleRows()
+      .filter((r) => r.selectable)
+      .map((r) => r.rec.id)
+  );
+
+  /** Every selectable visible row is ticked. */
+  readonly allSelected = computed(() => {
+    const ids = this.selectableIds();
+    return ids.length > 0 && ids.every((id) => this.selected().has(id));
+  });
+
+  /** Some, but not all, are ticked (the header box shows a dash). */
+  readonly someSelected = computed(() => this.selected().size > 0 && !this.allSelected());
 
   /** Disk use of every recording. */
   readonly totalSize = computed(() =>
@@ -360,97 +389,41 @@ export class SessionListComponent implements OnInit {
   }
 
   /**
-   * Whether a recording's status can still change (no delete, no selection).
-   * @param rec - the recording.
-   */
-  isOngoing(rec: TranscriptSummary): boolean {
-    return isSessionOngoing(rec.status);
-  }
-
-  /**
-   * A row other than the running recording cannot be opened while one records.
-   * @param rec - the recording.
-   */
-  rowLocked(rec: TranscriptSummary): boolean {
-    const recordingId = this.transcription.recordingSessionId();
-    return recordingId !== null && recordingId !== rec.id;
-  }
-
-  /**
    * Chip colours per tone.
    * @param chip - the chip to colour.
    */
   chipClass(chip: StatusChip): string {
     switch (chip.tone) {
       case 'live':
+      case 'error':
         return 'bg-red-500/15 text-red-300';
       case 'busy':
         return 'bg-amber-500/15 text-amber-300';
-      case 'ok':
-        return 'bg-[var(--bg-2)] text-[var(--ink-mute)]';
-      case 'error':
-        return 'bg-red-500/15 text-red-300';
+      case 'muted':
+        return 'bg-[var(--bg-3)] text-[var(--ink-dim)]';
     }
   }
 
   /**
-   * Opens a recording in the right pane.
-   * @param rec - the recording.
+   * Opens a row, or in select mode ticks it (Shift extends from the last ticked row).
+   * @param row - the clicked row.
+   * @param event - the click, read for Shift.
    */
-  open(rec: TranscriptSummary): void {
-    if (this.rowLocked(rec)) return;
-    this.opened.emit(rec);
-  }
-
-  /**
-   * Continues a finished recording: a new part is appended to it.
-   * @param rec - the recording to continue.
-   */
-  async resume(rec: TranscriptSummary): Promise<void> {
-    try {
-      await this.transcription.resumeRecording(
-        rec.id,
-        this.transcription.liveTranscriptPreferred()
-      );
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
+  onRowClick(row: RecordingRow, event: MouseEvent): void {
+    if (!this.selecting()) {
+      this.opened.emit(row.rec);
+      return;
     }
-  }
-
-  /**
-   * Transcribes a failed recording's audio again and opens it so the progress shows.
-   * @param rec - the failed recording.
-   */
-  async transcribe(rec: TranscriptSummary): Promise<void> {
-    this.busy.set(true);
-    try {
-      await this.transcription.transcribe(rec.id);
-      if (this.selectedId() !== rec.id) this.open(rec);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.busy.set(false);
+    if (!row.selectable) return;
+    if (event.shiftKey && this.anchorId() !== null) {
+      this.selectRange(this.anchorId() as string, row.rec.id);
+      return;
     }
+    this.toggleSelected(row.rec.id);
   }
 
   /**
-   * Deletes one recording (audio and transcript) after its confirmation.
-   * @param id - the recording id.
-   */
-  async remove(id: string): Promise<void> {
-    this.pendingDeleteId.set(null);
-    this.busy.set(true);
-    try {
-      await this.transcription.delete(id);
-    } catch (e: unknown) {
-      this.errorOccurred.emit(e instanceof Error ? e.message : String(e));
-    } finally {
-      this.busy.set(false);
-    }
-  }
-
-  /**
-   * Ticks or unticks a recording in multi-select mode.
+   * Ticks or unticks one recording and makes it the start of the next Shift range.
    * @param id - the recording id.
    */
   toggleSelected(id: string): void {
@@ -458,13 +431,31 @@ export class SessionListComponent implements OnInit {
     if (next.has(id)) next.delete(id);
     else next.add(id);
     this.selected.set(next);
+    this.anchorId.set(id);
+  }
+
+  /** Header box: ticks every selectable visible row, or clears when all are ticked. */
+  toggleAll(): void {
+    if (this.allSelected()) this.clearSelection();
+    else this.selectAll();
+  }
+
+  /** Ticks every selectable visible row. */
+  selectAll(): void {
+    this.selected.set(new Set([...this.selected(), ...this.selectableIds()]));
+  }
+
+  /** Unticks everything. */
+  clearSelection(): void {
+    this.selected.set(new Set());
+    this.anchorId.set(null);
+    this.pendingBulkDelete.set(false);
   }
 
   /** Leaves multi-select mode and clears the selection. */
   stopSelecting(): void {
     this.selecting.set(false);
-    this.selected.set(new Set());
-    this.pendingBulkDelete.set(false);
+    this.clearSelection();
   }
 
   /** Deletes every ticked recording; the first failure is reported, the rest still run. */
@@ -487,5 +478,25 @@ export class SessionListComponent implements OnInit {
         `${failures.length} of ${ids.length} recordings could not be deleted: ${failures[0]}`
       );
     }
+  }
+
+  /**
+   * Ticks every selectable visible row between two rows, both included.
+   * @param fromId - where the range starts.
+   * @param toId - where it ends.
+   */
+  private selectRange(fromId: string, toId: string): void {
+    const order = this.visibleRows().map((r) => r.rec.id);
+    const a = order.indexOf(fromId);
+    const b = order.indexOf(toId);
+    if (a < 0 || b < 0) {
+      this.toggleSelected(toId);
+      return;
+    }
+    const selectable = new Set(this.selectableIds());
+    const range = order
+      .slice(Math.min(a, b), Math.max(a, b) + 1)
+      .filter((id) => selectable.has(id));
+    this.selected.set(new Set([...this.selected(), ...range]));
   }
 }

@@ -25,7 +25,11 @@ export type IconName =
   | 'refresh'
   | 'trash'
   | 'pencil'
-  | 'chart';
+  | 'chart'
+  | 'search'
+  | 'more-horizontal'
+  | 'pause'
+  | 'stop';
 
 /**
  * Inline SVG icon, glyphs from the terminal-minimal mockup: nav/action icons use `stroke-width="1.75"`
@@ -143,6 +147,21 @@ export type IconName =
           <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
           <path d="M10 11v6M14 11v6" />
+        }
+        @case ('search') {
+          <circle cx="11" cy="11" r="7" />
+          <path d="m21 21-4.3-4.3" />
+        }
+        @case ('more-horizontal') {
+          <circle cx="5" cy="12" r="1" />
+          <circle cx="12" cy="12" r="1" />
+          <circle cx="19" cy="12" r="1" />
+        }
+        @case ('pause') {
+          <path d="M9 5v14M15 5v14" />
+        }
+        @case ('stop') {
+          <path d="M7 7h10v10H7z" />
         }
         @case ('pencil') {
           <path

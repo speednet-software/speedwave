@@ -24,6 +24,11 @@ const ICON_NAMES: readonly IconName[] = [
   'refresh',
   'trash',
   'pencil',
+  'chart',
+  'search',
+  'more-horizontal',
+  'pause',
+  'stop',
 ];
 
 const SHAPE_SELECTORS = ['path', 'line', 'polygon', 'polyline', 'circle'];

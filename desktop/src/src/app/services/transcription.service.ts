@@ -4,6 +4,7 @@ import { type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AudioSource,
   AudioSourceInfo,
+  AudioSourceKind,
   CaptureWarning,
   DownloadProgress,
   Language,
@@ -11,6 +12,7 @@ import type {
   MicPermissionStatus,
   ModelsAck,
   RecommendedModelAck,
+  RecommendedModelEntry,
   StartAck,
   SubscribeAck,
   TranscriptEvent,
@@ -37,6 +39,16 @@ export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript-v2';
 
 /** Pre-`-v2` key, removed on first use so a stale default-on pick does not linger. */
 const LEGACY_LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
+
+/** localStorage key of the language, source and microphone the last recording used. */
+export const RECORDING_CHOICE_STORAGE_KEY = 'speedwave-recording-choice';
+
+/** What the next recording starts with, remembered from the last one. */
+export interface RecordingChoice {
+  language: Language;
+  source: AudioSourceKind;
+  mic: string | null;
+}
 
 /** App-wide event the backend emits when a recordings-list row changes (Rust `TRANSCRIPTS_CHANGED_EVENT`). */
 const TRANSCRIPTS_CHANGED_EVENT = 'transcripts_changed';
@@ -69,6 +81,8 @@ export class TranscriptionService {
   private readonly activeSignal = signal<TranscriptSession | null>(null);
   private lastSeq = 0;
   private patchUnlisten: UnlistenFn | null = null;
+  private recordingUnlisten: UnlistenFn | null = null;
+  private recordingSeq = 0;
 
   private readonly downloadingModelKeySignal = signal<string | null>(null);
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
@@ -81,6 +95,8 @@ export class TranscriptionService {
   private readonly recordingStartedAtSignal = signal<number | null>(null);
   private readonly liveDraftSignal = signal<string>('');
   private readonly audioLevelsSignal = signal<number[] | null>(null);
+  private readonly recordingWarningsSignal = signal<readonly CaptureWarning[]>([]);
+  private readonly recommendedSignal = signal<RecommendedModelAck | null>(null);
   private readonly stagedTranscriptSignal = signal<string>('');
   private readonly stagedTranscriptNameSignal = signal<string>('');
   private readonly chatPromptDraftSignal = signal<string>('');
@@ -101,10 +117,34 @@ export class TranscriptionService {
 
   readonly recording: Signal<boolean> = computed(() => this.recordingSessionIdSignal() !== null);
 
+  /** The paused recording, from the list, so it is found again after a restart; null when none. */
+  readonly pausedRecording: Signal<TranscriptSummary | null> = computed(
+    () => this.recordingsSignal().find((r) => r.status.state === 'paused') ?? null
+  );
+
+  /** A recording is capturing or paused: it still owns the recording bar and its controls. */
+  readonly captureOpen: Signal<boolean> = computed(
+    () => this.recording() || this.pausedRecording() !== null
+  );
+
   /** Whether the shown session can still change, so its event stream must stay attached. */
   readonly liveStreamNeeded: Signal<boolean> = computed(() => {
     const status = this.activeSignal()?.status;
-    return this.recording() || (status !== undefined && isSessionOngoing(status));
+    return status !== undefined && isSessionOngoing(status);
+  });
+
+  /** Recordings being transcribed or waiting their turn, newest first. */
+  readonly transcribing: Signal<TranscriptSummary[]> = computed(() =>
+    this.recordingsSignal().filter((r) => r.status.state === 'finalizing')
+  );
+
+  /**
+   * The model a high-quality transcript is made with on this machine, with its download state;
+   * null until {@link loadRecommendedModel} has read it.
+   */
+  readonly highQualityModel: Signal<RecommendedModelEntry | null> = computed(() => {
+    const ack = this.recommendedSignal();
+    return ack ? (ack.finalize ?? ack.live) : null;
   });
 
   /**
@@ -129,10 +169,22 @@ export class TranscriptionService {
   /** Why the last recordings-list read failed ('' after a good read). */
   readonly recordingsError: Signal<string> = this.recordingsErrorSignal.asReadonly();
 
-  /** Capture warnings currently raised for the active session, in arrival order. */
-  readonly captureWarnings: Signal<readonly CaptureWarning[]> = computed(
-    () => this.activeSignal()?.active_warnings ?? []
-  );
+  /**
+   * Capture warnings to show: those of the running recording, whichever recording is open, plus
+   * any the open one still carries.
+   */
+  readonly captureWarnings: Signal<readonly CaptureWarning[]> = computed(() => {
+    const open = this.activeSignal();
+    const recordingId = this.recordingSessionIdSignal();
+    const fromOpen = open && open.id !== recordingId ? (open.active_warnings ?? []) : [];
+    const fromRecording =
+      recordingId === null
+        ? []
+        : open?.id === recordingId
+          ? (open.active_warnings ?? [])
+          : this.recordingWarningsSignal();
+    return [...new Set([...fromRecording, ...fromOpen])];
+  });
 
   /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
   readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
@@ -184,6 +236,36 @@ export class TranscriptionService {
     } catch {}
   }
 
+  /** The language, source and microphone the last recording used; null when none is stored. */
+  recordingChoice(): RecordingChoice | null {
+    try {
+      const raw = localStorage.getItem(RECORDING_CHOICE_STORAGE_KEY);
+      if (!raw) return null;
+      const v = JSON.parse(raw) as Partial<RecordingChoice>;
+      if (v.language !== 'pl' && v.language !== 'en') return null;
+      if (v.source !== 'system_wide' && v.source !== 'microphone' && v.source !== 'mixed') {
+        return null;
+      }
+      return {
+        language: v.language,
+        source: v.source,
+        mic: typeof v.mic === 'string' ? v.mic : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Remembers the choice for the next recording (tolerates private-mode/quota failures).
+   * @param choice - language, source kind and microphone as picked.
+   */
+  setRecordingChoice(choice: RecordingChoice): void {
+    try {
+      localStorage.setItem(RECORDING_CHOICE_STORAGE_KEY, JSON.stringify(choice));
+    } catch {}
+  }
+
   /** Audio sources the user can pick from (depends on host + capabilities). */
   listAudioSources(): Promise<AudioSourceInfo[]> {
     return this.tauri.invoke<AudioSourceInfo[]>('list_audio_sources');
@@ -199,33 +281,57 @@ export class TranscriptionService {
     const ack = await this.tauri.invoke<StartAck>('start_transcription', {
       params: { source, language, live },
     });
-    return this.applyStartAck(ack, source, language);
+    return this.applyStartAck(ack, source, language, 0);
   }
 
   /**
-   * Resumes a finished recording: a new part appends to the same transcript.
-   * @param sessionId - the Done session to reopen.
+   * Resumes a finished or paused recording: a new part appends to the same transcript, and the
+   * clock goes on from the length already recorded.
+   * @param sessionId - the Done or Paused session to reopen.
    * @param live - false = record-only (no live pass; transcript arrives after stop).
    */
   async resumeRecording(sessionId: string, live: boolean): Promise<StartAck> {
+    const recordedSecs = this.recordingsSignal().find((r) => r.id === sessionId)?.duration_secs;
     const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId, live });
-    return this.applyStartAck(ack, ack.snapshot.audio_source.source, ack.snapshot.language);
+    return this.applyStartAck(
+      ack,
+      ack.snapshot.audio_source.source,
+      ack.snapshot.language,
+      recordedSecs ?? 0
+    );
   }
 
   /**
-   * Applies a start/resume ack: snapshot, live listener, recording signals.
+   * Pauses the running recording: the capture ends and the microphone is released; the session
+   * waits as paused for {@link resumeRecording} or {@link stopRecording}.
+   * @param sessionId - the recording to pause.
+   */
+  async pauseRecording(sessionId: string): Promise<void> {
+    try {
+      await this.tauri.invoke<void>('pause_transcription', { sessionId });
+    } finally {
+      this.clearInProgressRecording(sessionId);
+    }
+    await this.refreshRecordings();
+  }
+
+  /**
+   * Applies a start/resume ack: snapshot, live listeners, recording signals.
    * @param ack - the backend acknowledgement to apply.
    * @param source - the capture source now recording.
    * @param language - the forced language now recording.
+   * @param recordedSecs - audio the session already holds, where the clock starts.
    */
   private async applyStartAck(
     ack: StartAck,
     source: AudioSource,
-    language: Language
+    language: Language,
+    recordedSecs: number
   ): Promise<StartAck> {
     this.activateSnapshot(ack.snapshot);
     try {
       await this.attachListener(ack.event_name);
+      await this.attachRecordingListener(ack.event_name, ack.snapshot);
     } catch (e) {
       try {
         await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
@@ -239,7 +345,7 @@ export class TranscriptionService {
     this.recordingSourceSignal.set(source);
     this.recordingLanguageSignal.set(language);
     this.recordingLiveSignal.set(ack.snapshot.models_used.live != null);
-    this.recordingStartedAtSignal.set(Date.now());
+    this.recordingStartedAtSignal.set(Date.now() - Math.max(0, recordedSecs) * 1000);
     return ack;
   }
 
@@ -256,24 +362,20 @@ export class TranscriptionService {
   }
 
   /**
-   * Re-attaches the live stream of the in-progress recording after the record
-   * tab was destroyed and recreated (the driver never stopped).
+   * Re-attaches the open recording's event stream after the view was destroyed and recreated
+   * (the driver or the offline pass kept going); opens the running recording when none is open.
    */
   async resumeActiveRecording(): Promise<void> {
-    const id = this.recordingSessionIdSignal();
+    const id = this.activeSignal()?.id ?? this.recordingSessionIdSignal();
     if (id && !this.patchUnlisten) await this.subscribeToTranscript(id);
   }
 
   /**
-   * Subscribes to an existing session's snapshot + live event stream. Refuses to switch away
-   * from an in-progress recording's own session, which would otherwise drop its live listener.
+   * Subscribes to an existing session's snapshot + live event stream. A running recording keeps
+   * its own listener, so any other recording can be opened meanwhile.
    * @param sessionId - the session to attach to.
    */
   async subscribeToTranscript(sessionId: string): Promise<SubscribeAck> {
-    const recordingId = this.recordingSessionIdSignal();
-    if (recordingId !== null && recordingId !== sessionId) {
-      throw new Error('a recording is in progress — stop it before viewing another session');
-    }
     const ack = await this.tauri.invoke<SubscribeAck>('subscribe_transcript', { sessionId });
     this.activateSnapshot(ack.snapshot);
     await this.attachListener(ack.event_name);
@@ -348,9 +450,9 @@ export class TranscriptionService {
   }
 
   /**
-   * Runs the transcription again over a failed recording's audio, then re-attaches the open
-   * pane to it so the progress shows.
-   * @param sessionId - the failed recording.
+   * Runs the transcription again over a failed or finished recording's audio, then re-attaches
+   * the open pane to it so the progress shows.
+   * @param sessionId - the recording to transcribe.
    */
   async transcribe(sessionId: string): Promise<void> {
     await this.tauri.invoke<void>('transcribe_transcript', { sessionId });
@@ -449,6 +551,15 @@ export class TranscriptionService {
     return this.tauri.invoke<RecommendedModelAck>('recommended_transcription_model');
   }
 
+  /** Reads the recommended models into {@link highQualityModel}; a failure keeps the last read. */
+  async loadRecommendedModel(): Promise<void> {
+    try {
+      this.recommendedSignal.set(await this.recommendedModel());
+    } catch (e) {
+      this.log.warn(`recommended-model read failed: ${String(e)}`);
+    }
+  }
+
   /** Status of all Whisper models on disk. */
   listModels(): Promise<ModelsAck> {
     return this.tauri.invoke<ModelsAck>('list_transcription_models');
@@ -469,6 +580,7 @@ export class TranscriptionService {
     } finally {
       this.clearDownloadTracking();
     }
+    await this.loadRecommendedModel();
   }
 
   /**
@@ -574,7 +686,6 @@ export class TranscriptionService {
       this.liveDraftSignal.set('');
     } else if (snapshot.status.state !== 'recording') {
       this.liveDraftSignal.set('');
-      this.audioLevelsSignal.set(null);
       this.clearInProgressRecording(snapshot.id);
     }
     this.activeSignal.set(snapshot);
@@ -587,17 +698,80 @@ export class TranscriptionService {
     });
   }
 
+  /**
+   * Follows the running recording on its own channel, whichever recording the pane shows: its
+   * loudness, its capture warnings, and the status change that ends the capture.
+   * @param eventName - the recording's event channel.
+   * @param snapshot - the recording's state at start.
+   */
+  private async attachRecordingListener(
+    eventName: string,
+    snapshot: TranscriptSession
+  ): Promise<void> {
+    this.dropRecordingListener();
+    this.recordingSeq = snapshot.last_seq ?? 0;
+    this.recordingWarningsSignal.set(snapshot.active_warnings ?? []);
+    this.recordingUnlisten = await this.tauri.listen<TranscriptEvent>(eventName, (e) => {
+      this.applyRecordingEvent(snapshot.id, e.payload);
+    });
+  }
+
+  /**
+   * Applies one event of the running recording's channel.
+   * @param sessionId - the recording the listener was attached for.
+   * @param ev - incoming event.
+   */
+  private applyRecordingEvent(sessionId: string, ev: TranscriptEvent): void {
+    if (ev.seq <= this.recordingSeq) return;
+    this.recordingSeq = ev.seq;
+    switch (ev.kind) {
+      case 'audio_level':
+        this.audioLevelsSignal.set(ev.levels);
+        break;
+      case 'capture_warning':
+        this.recordingWarningsSignal.update((w) =>
+          w.includes(ev.warning) ? w : [...w, ev.warning]
+        );
+        break;
+      case 'capture_warning_cleared':
+        this.recordingWarningsSignal.update((w) => w.filter((x) => x !== ev.warning));
+        break;
+      case 'status_changed':
+        if (ev.status.state !== 'recording') this.clearInProgressRecording(sessionId);
+        break;
+      case 'finished':
+        this.clearInProgressRecording(sessionId);
+        break;
+      default:
+        break;
+    }
+  }
+
+  private dropRecordingListener(): void {
+    if (this.recordingUnlisten) {
+      try {
+        this.recordingUnlisten();
+      } catch (e) {
+        this.log.warn(`recording listener detach failed: ${String(e)}`);
+      }
+      this.recordingUnlisten = null;
+    }
+  }
+
   private clearInProgressRecording(sessionId: string): void {
     if (this.recordingSessionIdSignal() !== sessionId) return;
     this.resetInProgressRecording();
   }
 
   private resetInProgressRecording(): void {
+    this.dropRecordingListener();
     this.recordingSessionIdSignal.set(null);
     this.recordingSourceSignal.set(null);
     this.recordingLanguageSignal.set(null);
     this.recordingLiveSignal.set(null);
     this.recordingStartedAtSignal.set(null);
+    this.audioLevelsSignal.set(null);
+    this.recordingWarningsSignal.set([]);
   }
 
   /**
@@ -616,14 +790,10 @@ export class TranscriptionService {
       case 'live_draft':
         this.liveDraftSignal.set(ev.text);
         break;
-      case 'audio_level':
-        this.audioLevelsSignal.set(ev.levels);
-        break;
       case 'status_changed':
         next.status = ev.status;
         if (ev.status.state !== 'recording') {
           this.liveDraftSignal.set('');
-          this.audioLevelsSignal.set(null);
           this.clearInProgressRecording(cur.id);
         }
         break;

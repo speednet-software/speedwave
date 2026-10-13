@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  dayGroupLabel,
   formatClock,
   formatDuration,
   formatRecordingDate,
+  formatStartTime,
   recordingName,
   statusChip,
+  transcriptQuality,
 } from './recording-format';
 
 const NOW = new Date(2026, 9, 12, 14, 0, 0);
@@ -66,17 +69,69 @@ describe('formatClock', () => {
   });
 });
 
+describe('dayGroupLabel', () => {
+  it('names today, yesterday, a date this year and one in an earlier year', () => {
+    expect(dayGroupLabel(utc(2026, 9, 12, 0, 1), NOW)).toBe('Today');
+    expect(dayGroupLabel(utc(2026, 9, 11, 23, 59), NOW)).toBe('Yesterday');
+    expect(dayGroupLabel(utc(2026, 9, 5, 11, 31), NOW)).toBe('Mon 5 Oct');
+    expect(dayGroupLabel(utc(2025, 11, 30, 8, 5), NOW)).toBe('30 Dec 2025');
+  });
+
+  it('is empty for a value it cannot parse', () => {
+    expect(dayGroupLabel('nope', NOW)).toBe('');
+  });
+});
+
+describe('formatStartTime', () => {
+  it('shows the local start time, empty when unparsable', () => {
+    expect(formatStartTime(utc(2026, 9, 12, 9, 3))).toBe('09:03');
+    expect(formatStartTime('nope')).toBe('');
+  });
+});
+
+describe('transcriptQuality', () => {
+  it('compares the model the pass ran with to the best one', () => {
+    expect(transcriptQuality('large-v3-turbo', 'large-v3-turbo')).toBe('high');
+    expect(transcriptQuality('small', 'large-v3-turbo')).toBe('smaller');
+  });
+
+  it('is unknown before a pass ran or while the best model is not known', () => {
+    expect(transcriptQuality(null, 'large-v3-turbo')).toBeNull();
+    expect(transcriptQuality(undefined, 'large-v3-turbo')).toBeNull();
+    expect(transcriptQuality('small', null)).toBeNull();
+  });
+});
+
 describe('statusChip', () => {
-  it('maps every status to a label, a tooltip and a tone', () => {
-    expect(statusChip({ state: 'recording' })).toEqual({
-      label: 'recording',
+  const done = { state: 'done' } as const;
+
+  it('gives a good finished transcript no chip', () => {
+    expect(statusChip({ status: done, finalize_model: 'large' }, 'large')).toBeNull();
+    expect(statusChip({ status: done, finalize_model: null }, 'large')).toBeNull();
+    expect(statusChip({ status: done, finalize_model: 'small' }, null)).toBeNull();
+  });
+
+  it('flags a transcript made with the smaller model', () => {
+    expect(statusChip({ status: done, finalize_model: 'small' }, 'large')?.label).toBe(
+      'Smaller model'
+    );
+  });
+
+  it('labels capture, pause, transcription, queue and failure', () => {
+    expect(statusChip({ status: { state: 'recording' } })).toEqual({
+      label: 'Recording',
       tooltip: 'Capture in progress.',
       tone: 'live',
     });
-    expect(statusChip({ state: 'finalizing', progress: 0.424 }).label).toBe('transcribing 42%');
-    expect(statusChip({ state: 'done' }).tone).toBe('ok');
-    expect(statusChip({ state: 'failed', reason: 'no model' })).toEqual({
-      label: 'failed',
+    expect(statusChip({ status: { state: 'paused' } })?.label).toBe('Paused');
+    expect(statusChip({ status: { state: 'finalizing', progress: 0.424 } })?.label).toBe(
+      'Transcribing 42%'
+    );
+    expect(
+      statusChip({ status: { state: 'finalizing', progress: 0 }, queued: true })
+    ).toMatchObject({ label: 'Queued', tone: 'muted' });
+    expect(statusChip({ status: { state: 'failed', reason: 'no model' } })).toEqual({
+      label: 'Not transcribed',
       tooltip: 'no model',
       tone: 'error',
     });
