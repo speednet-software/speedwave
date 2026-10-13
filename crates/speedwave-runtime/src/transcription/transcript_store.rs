@@ -505,8 +505,10 @@ impl TranscriptStore {
     /// was only on disk so far (so subsequent mutators have a broadcast channel).
     pub fn subscribe(&self, id: Uuid) -> Result<Subscription, StoreError> {
         let entry = self.activate(id)?;
-        let snapshot = entry.session.read().clone();
+        let session = entry.session.read();
         let events = entry.tx.subscribe();
+        let snapshot = session.clone();
+        drop(session);
         Ok(Subscription { snapshot, events })
     }
 
@@ -1823,6 +1825,40 @@ mod tests {
             store.get(id).unwrap().models_used.finalize.as_deref(),
             Some("large-v3")
         );
+    }
+
+    #[test]
+    fn subscribe_never_misses_an_event_sent_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(dir.path()));
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let store = store.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    store.live_draft(id, "draft".to_string()).unwrap();
+                }
+            })
+        };
+        let mut checked = 0;
+        while checked < 20_000 {
+            let Subscription {
+                snapshot,
+                mut events,
+            } = store.subscribe(id).unwrap();
+            if let Ok(event) = events.blocking_recv() {
+                assert_eq!(
+                    event.seq(),
+                    snapshot.last_seq + 1,
+                    "an event sent between the snapshot and the subscription was lost"
+                );
+                checked += 1;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
     }
 
     #[test]
