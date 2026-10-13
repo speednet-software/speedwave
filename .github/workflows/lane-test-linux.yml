@@ -57,3 +57,6 @@ jobs:
 
       - name: Release-gate tests (gh shim)
         run: make test-release-gate
+
+      - name: Desktop build bats tests (portable suites)
+        run: make test-desktop-build-portable
