@@ -68,6 +68,11 @@ impl DecodeCancel {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+
+    /// The shared flag itself, for whisper.cpp's abort hook.
+    fn flag(&self) -> &AtomicBool {
+        &self.0
+    }
 }
 
 impl PartialEq for DecodeCancel {
@@ -413,12 +418,8 @@ impl WhisperCppTranscriber {
             params.set_token_timestamps(true);
             params.set_max_len(1);
         }
-        if let Some(cancel) = opts.cancel.clone() {
-            params.set_abort_callback_safe(move || cancel.is_cancelled());
-        }
         let started = std::time::Instant::now();
-        state
-            .full(params, pcm)
+        full_with_cancel(state, params, pcm, opts.cancel.as_ref())
             .map_err(|e| TranscribeError::Inference(format!("whisper_full: {e}")))?;
         log::debug!(
             target: "transcription::transcriber",
@@ -533,6 +534,44 @@ fn is_hallucinated(no_speech: f32, seg_rms: f32) -> bool {
 
 /// Deterministic fake transcriber for orchestration tests — one segment per
 /// `seg_secs` of audio with placeholder text. `#[cfg(test)]` only.
+/// Runs `whisper_full` with `cancel` as whisper.cpp's abort hook, so raising it stops the decode
+/// after the current encoder or decoder step. whisper-rs 0.16's `set_abort_callback_safe` is not
+/// used: its trampoline reads the boxed closure as the bare closure type and aborts at random.
+#[expect(
+    unsafe_code,
+    reason = "whisper.cpp abort-callback FFI boundary; every block has a SAFETY comment"
+)]
+fn full_with_cancel(
+    state: &mut whisper_rs::WhisperState,
+    mut params: whisper_rs::FullParams<'_, '_>,
+    pcm: &[f32],
+    cancel: Option<&DecodeCancel>,
+) -> Result<(), whisper_rs::WhisperError> {
+    if let Some(cancel) = cancel {
+        let flag: *const AtomicBool = cancel.flag();
+        // SAFETY: `abort_when_cancelled` has the `ggml_abort_callback` signature and only reads the
+        // `AtomicBool` behind its data pointer. That pointer is the flag inside `cancel`, borrowed
+        // by this function until `full` returns, and whisper.cpp calls the hook only inside that
+        // call (the CPU backend it hands the hook to is created and dropped within it).
+        unsafe {
+            params.set_abort_callback(Some(abort_when_cancelled));
+            params.set_abort_callback_user_data(flag.cast_mut().cast());
+        }
+    }
+    state.full(params, pcm)
+}
+
+/// whisper.cpp's abort hook: `true` (abort) once the `AtomicBool` behind `data` is raised.
+#[expect(
+    unsafe_code,
+    reason = "whisper.cpp abort-callback FFI boundary; every block has a SAFETY comment"
+)]
+unsafe extern "C" fn abort_when_cancelled(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: the only caller is whisper.cpp with the pointer `full_with_cancel` installed, an
+    // `AtomicBool` that stays alive for the whole decode.
+    unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Acquire)
+}
+
 #[cfg(test)]
 pub struct MockTranscriber {
     /// Seconds of audio per emitted segment.
@@ -587,6 +626,28 @@ impl Transcriber for MockTranscriber {
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    #[expect(
+        unsafe_code,
+        reason = "calls the whisper.cpp abort hook the way whisper.cpp does"
+    )]
+    fn the_abort_hook_reads_the_decode_cancel_flag_it_was_given() {
+        let cancel = DecodeCancel::default();
+        let other = DecodeCancel::default();
+        let data = std::ptr::from_ref(cancel.flag()).cast_mut().cast();
+        // SAFETY: `data` points at `cancel`'s flag, alive for this whole test.
+        assert!(!unsafe { abort_when_cancelled(data) });
+        other.cancel();
+        // SAFETY: as above.
+        assert!(
+            !unsafe { abort_when_cancelled(data) },
+            "another pass's flag must not abort this decode"
+        );
+        cancel.clone().cancel();
+        // SAFETY: as above.
+        assert!(unsafe { abort_when_cancelled(data) });
+    }
 
     fn load_err(path: &Path, label: &str) -> TranscribeError {
         match WhisperCppTranscriber::load(path, label, GpuClass::None) {
