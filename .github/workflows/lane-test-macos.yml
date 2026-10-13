@@ -57,7 +57,7 @@ jobs:
         working-directory: desktop/src-tauri
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Desktop tests
         env:
