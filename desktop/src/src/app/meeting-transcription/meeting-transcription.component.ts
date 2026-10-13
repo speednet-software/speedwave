@@ -67,8 +67,8 @@ import { SessionListComponent } from './session-list/session-list.component';
               </li>
               <li>Delete removes the audio and the transcript. It cannot be undone.</li>
               <li>
-                Summarize in new chat opens a chat with the transcript attached; nothing is sent
-                until you press Send.
+                Attach to new chat opens a chat with the transcript attached; nothing is sent until
+                you press Send.
               </li>
               <li data-testid="quality-disclaimer">
                 Recognition quality depends on the speech: dictation reaches about 5% word error

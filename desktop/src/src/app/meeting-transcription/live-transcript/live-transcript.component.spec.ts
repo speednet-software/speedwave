@@ -202,7 +202,7 @@ describe('LiveTranscriptComponent', () => {
     fixture.detectChanges();
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="send-to-chat-btn"]')!.textContent).toContain(
-      'Summarize in new chat'
+      'Attach to new chat'
     );
     expect(el.querySelector('[data-testid="append-to-chat-btn"]')!.textContent).toContain(
       'Attach to current chat'

@@ -133,7 +133,7 @@
             [projectId]="projectState.activeProject() ?? ''"
             [modelError]="chat.modelSelectionError()"
             [contextLabel]="composerContextLabel()"
-            [transcriptAttached]="transcription.stagedTranscript() !== ''"
+            [transcriptName]="transcription.stagedTranscriptName()"
             [draftText]="transcription.chatPromptDraft()"
             [attachmentDraft]="chat.activeStore().composerAttachments"
             (submitted)="sendMessage($event)"

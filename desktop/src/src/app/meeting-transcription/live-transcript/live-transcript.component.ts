@@ -22,7 +22,7 @@ import { TranscriptionService, type SendTarget } from '../../services/transcript
 import type { Segment, TranscriptSession } from '../../models/transcript';
 import { formatDuration, formatRecordingDate, recordingName } from '../recording-format';
 
-/** Tooltip on "Summarize in new chat". */
+/** Tooltip on "Attach to new chat". */
 const NEW_CHAT_TOOLTIP =
   'Opens a new chat with the transcript attached and a prompt you can edit. Nothing is sent until you press Send.';
 /** Tooltip on "Attach to current chat". */
@@ -237,11 +237,11 @@ interface ProgressAnchor {
                 type="button"
                 class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
                 data-testid="send-to-chat-btn"
-                [attr.aria-label]="ariaLabel('Summarize in new chat', sendBlockedReason())"
+                [attr.aria-label]="ariaLabel('Attach to new chat', sendBlockedReason())"
                 [disabled]="sending() || sendBlockedReason() !== ''"
                 (click)="stageForChat()"
               >
-                {{ sending() ? 'opening…' : 'Summarize in new chat' }}
+                {{ sending() ? 'opening…' : 'Attach to new chat' }}
               </button>
             </span>
             <span [appTooltip]="appendBlockedReason() || currentChatTooltip" placement="top">

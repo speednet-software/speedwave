@@ -105,7 +105,7 @@ describe('SessionListComponent', () => {
     const empty = q('recordings-empty')!.textContent!;
     expect(empty).toContain('Start recording');
     expect(empty).toContain('Stop when the meeting ends');
-    expect(empty).toContain('Summarize it in chat');
+    expect(empty).toContain('Attach it to a chat');
   });
 
   it('emits the opened recording and highlights it', () => {

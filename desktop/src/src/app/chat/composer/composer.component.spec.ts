@@ -817,9 +817,13 @@ describe('ComposerComponent', () => {
       expect(transcriptRow()).toBeNull();
     });
 
-    it('names the destination so the user knows the text leaves the machine', () => {
-      fixture.componentRef.setInput('transcriptAttached', true);
+    it('names the attached recording and the destination, so the user knows the text leaves the machine', () => {
+      fixture.componentRef.setInput('transcriptName', 'Sprint review');
       fixture.detectChanges();
+      expect(transcriptRow()?.textContent).toContain('Transcript:');
+      expect(
+        rootEl.querySelector('[data-testid="composer-transcript-name"]')?.textContent?.trim()
+      ).toBe('Sprint review');
       expect(transcriptRow()?.textContent).toContain('next message');
       expect(transcriptRow()?.textContent).toContain('LLM provider');
     });
@@ -827,7 +831,7 @@ describe('ComposerComponent', () => {
     it('emits transcriptDetached when the row is unpinned', () => {
       const detached: number[] = [];
       component.transcriptDetached.subscribe(() => detached.push(1));
-      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.componentRef.setInput('transcriptName', 'Sprint review');
       fixture.detectChanges();
       expect(detachButton()?.getAttribute('aria-label')).toBe('Detach meeting transcript');
       detachButton()!.click();
@@ -858,7 +862,7 @@ describe('ComposerComponent', () => {
     it('does not submit an empty field, so a cleared prompt sends nothing', () => {
       const emitted: string[] = [];
       component.submitted.subscribe((v) => emitted.push(v.payload));
-      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.componentRef.setInput('transcriptName', 'Sprint review');
       component.text.setValue('');
       fixture.detectChanges();
       textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));

@@ -823,6 +823,33 @@ describe('TranscriptionService', () => {
       expect(mockChat.sendMessage).not.toHaveBeenCalled();
     });
 
+    it('says the transcript is attached, not "below", in both languages', async () => {
+      await svc.stageForChat('sess-1');
+      expect(svc.chatPromptDraft()).toMatch(/^Attached is a meeting transcript\./);
+      mockTauri.invokeHandler = transcriptHandler('pl');
+      await svc.stageForChat('sess-1');
+      expect(svc.chatPromptDraft()).toMatch(/^W załączniku transkrypt spotkania\./);
+      expect(svc.chatPromptDraft()).not.toContain('Poniżej');
+    });
+
+    it('names the staged transcript after the recording and forgets the name when cleared', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'en', title: 'Sprint review' });
+        if (cmd === 'get_transcript_markdown') return '# Sprint review';
+        return undefined;
+      };
+      await svc.stageForChat('sess-1');
+      expect(svc.stagedTranscriptName()).toBe('Sprint review');
+      svc.clearStagedTranscript();
+      expect(svc.stagedTranscriptName()).toBe('');
+    });
+
+    it('names an untitled transcript by its start time', async () => {
+      await svc.stageForChat('sess-1');
+      expect(svc.stagedTranscriptName()).not.toBe('');
+      expect(svc.stagedTranscriptName()).not.toContain('T00:00:00Z');
+    });
+
     it('uses the English default prompt for an English session', async () => {
       await svc.stageForChat('sess-1');
       expect(svc.chatPromptDraft()).toContain('summary');

@@ -18,6 +18,7 @@ import type {
   TranscriptSummary,
 } from '../models/transcript';
 import { isSessionOngoing } from '../models/transcript';
+import { recordingName } from '../meeting-transcription/recording-format';
 import { ChatStateService } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
@@ -46,11 +47,11 @@ export type SendTarget = 'new-chat' | 'current-chat';
 /** Default prompt loaded into the chat composer with a staged transcript, per session language. */
 const TRANSCRIPT_PROMPT_DEFAULTS: Record<Language, string> = {
   pl:
-    'Poniżej transkrypt spotkania. Przygotuj zwięzłe podsumowanie: najważniejsze wątki, ' +
+    'W załączniku transkrypt spotkania. Przygotuj zwięzłe podsumowanie: najważniejsze wątki, ' +
     'podjęte decyzje i listę zadań (kto, co, na kiedy — jeśli padło). ' +
     'Transkrypt może zawierać błędy rozpoznawania mowy; niejasne fragmenty oznacz.',
   en:
-    'Below is a meeting transcript. Write a concise summary: key topics, decisions made, ' +
+    'Attached is a meeting transcript. Write a concise summary: key topics, decisions made, ' +
     'and an action item list (who, what, by when — where stated). ' +
     'The transcript may contain speech-recognition errors; flag unclear fragments.',
 };
@@ -81,6 +82,7 @@ export class TranscriptionService {
   private readonly liveDraftSignal = signal<string>('');
   private readonly audioLevelsSignal = signal<number[] | null>(null);
   private readonly stagedTranscriptSignal = signal<string>('');
+  private readonly stagedTranscriptNameSignal = signal<string>('');
   private readonly chatPromptDraftSignal = signal<string>('');
   private readonly recordingsSignal = signal<TranscriptSummary[]>([]);
   private readonly recordingsErrorSignal = signal('');
@@ -137,6 +139,9 @@ export class TranscriptionService {
 
   /** Transcript markdown waiting to ride along with the next chat message ('' = none). */
   readonly stagedTranscript: Signal<string> = this.stagedTranscriptSignal.asReadonly();
+
+  /** Name of the staged recording (its title, else its start time), for the composer chip. */
+  readonly stagedTranscriptName: Signal<string> = this.stagedTranscriptNameSignal.asReadonly();
 
   /** Prompt text the chat composer should load into its field ('' = nothing pending). */
   readonly chatPromptDraft: Signal<string> = this.chatPromptDraftSignal.asReadonly();
@@ -412,6 +417,7 @@ export class TranscriptionService {
       this.reclaimOriginTab(originTabId);
     }
     this.stagedTranscriptSignal.set(md);
+    this.stagedTranscriptNameSignal.set(recordingName(session));
     this.chatPromptDraftSignal.set(TRANSCRIPT_PROMPT_DEFAULTS[session.language]);
   }
 
@@ -435,6 +441,7 @@ export class TranscriptionService {
   /** Drops the staged transcript — the user unpinned it, or it went out with a message. */
   clearStagedTranscript(): void {
     this.stagedTranscriptSignal.set('');
+    this.stagedTranscriptNameSignal.set('');
   }
 
   /** The single best model for this hardware + its download state. */

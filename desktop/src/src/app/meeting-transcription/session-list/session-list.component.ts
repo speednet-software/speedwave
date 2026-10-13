@@ -73,7 +73,7 @@ interface RecordingRow {
         >
           <li>1. Start recording.</li>
           <li>2. Stop when the meeting ends; the transcript appears here.</li>
-          <li>3. Summarize it in chat.</li>
+          <li>3. Attach it to a chat and ask about it.</li>
         </ol>
       } @else {
         <div class="mb-2 flex items-center gap-2 text-[11px]">
