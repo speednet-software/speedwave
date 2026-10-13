@@ -24,7 +24,6 @@ function summary(id: string, overrides: Partial<TranscriptSummary> = {}): Transc
     preview: 'Dzień dobry wszystkim',
     size_bytes: 50 * 1024 * 1024,
     finalize_model: 'large',
-    finalize_model_label: null,
     queued: false,
     ...overrides,
   };
@@ -132,7 +131,8 @@ describe('SessionListComponent', () => {
       summary('busy', { status: { state: 'finalizing', progress: 0.42 } }),
       summary('queued', { status: { state: 'finalizing', progress: 0 }, queued: true }),
       summary('failed', { status: { state: 'failed', reason: 'interrupted' } }),
-      summary('later', { status: { state: 'postponed' } }),
+      summary('later', { status: { state: 'postponed' }, segment_count: 0 }),
+      summary('live', { status: { state: 'postponed' } }),
     ]);
     fixture.detectChanges();
     expect(q('status-ok')).toBeNull();
@@ -143,6 +143,7 @@ describe('SessionListComponent', () => {
     expect(q('status-queued')!.textContent).toBe('Queued');
     expect(q('status-failed')!.textContent).toBe('Not transcribed');
     expect(q('status-later')!.textContent).toBe('Not transcribed yet');
+    expect(q('status-live')!.textContent).toBe('Smaller model');
   });
 
   it('shows no smaller-model chip while the best model is not known', () => {

@@ -290,7 +290,8 @@ impl TranscriptStore {
         model: &str,
     ) -> Result<(), StoreError> {
         self.pass_write(id, pass, |s, _| {
-            s.models_used.finalize = Some(model.to_string());
+            let prior = s.models_used.finalize.replace(model.to_string());
+            s.prior_finalize_model.get_or_insert(prior);
             Vec::new()
         })
         .map(|_| ())
@@ -476,7 +477,8 @@ impl TranscriptStore {
     }
 
     /// Puts off a running or queued offline pass ("Later"): cancels its claim, which also aborts
-    /// the decode, and leaves the session `Postponed` until the user transcribes it.
+    /// the decode. A session with a finished transcript goes back to `Done` with the model that
+    /// made it; any other waits as `Postponed` until the user transcribes it.
     pub fn postpone(&self, id: Uuid) -> Result<u64, StoreError> {
         let seq = self.guarded_batch(
             id,
@@ -490,11 +492,16 @@ impl TranscriptStore {
                 if let Some(pass) = s.offline_pass.take() {
                     pass.cancel();
                 }
-                s.status = TranscriptStatus::Postponed;
-                vec![TranscriptEvent::StatusChanged {
-                    seq,
-                    status: TranscriptStatus::Postponed,
-                }]
+                let status = if s.final_segments.is_some() {
+                    if let Some(prior) = s.prior_finalize_model.take() {
+                        s.models_used.finalize = prior;
+                    }
+                    TranscriptStatus::Done
+                } else {
+                    TranscriptStatus::Postponed
+                };
+                s.status = status.clone();
+                vec![TranscriptEvent::StatusChanged { seq, status }]
             },
         )?;
         self.set_queued(id, false);
@@ -851,6 +858,7 @@ impl TranscriptStore {
     pub fn finish(&self, id: Uuid, pass: &OfflinePass) -> Result<u64, StoreError> {
         self.pass_write(id, pass, |s, seq| {
             s.offline_pass = None;
+            s.prior_finalize_model = None;
             s.status = TranscriptStatus::Done;
             vec![TranscriptEvent::Finished { seq }]
         })
@@ -1730,6 +1738,101 @@ mod tests {
             store.postpone(Uuid::new_v4()).unwrap_err(),
             StoreError::NotFound(_)
         ));
+    }
+
+    fn finish_a_pass(store: &TranscriptStore, id: Uuid, model: &str, text: &str) {
+        let pass = store.begin_offline_pass(id).unwrap();
+        store.set_finalize_model(id, &pass, model).unwrap();
+        store
+            .set_final_segments(id, &pass, vec![seg(0.0, 1.0, text)])
+            .unwrap();
+        store.finish(id, &pass).unwrap();
+    }
+
+    #[test]
+    fn putting_off_another_pass_of_a_finished_recording_keeps_its_transcript_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        finish_a_pass(&store, id, "small", "first");
+        store.begin_retranscribe(id).unwrap();
+        let pass = store.begin_offline_pass(id).unwrap();
+        store
+            .set_finalize_model(id, &pass, "large-v3-turbo")
+            .unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+
+        store.postpone(id).unwrap();
+
+        assert!(pass.cancelled());
+        let session = store.get(id).unwrap();
+        assert_eq!(session.status, TranscriptStatus::Done);
+        assert_eq!(session.models_used.finalize.as_deref(), Some("small"));
+        assert_eq!(session.effective_segments()[0].text, "first");
+        assert!(matches!(
+            sub.events.try_recv().unwrap(),
+            TranscriptEvent::StatusChanged {
+                status: TranscriptStatus::Done,
+                ..
+            }
+        ));
+        store.sessions.remove(&id);
+        assert_eq!(
+            store.get(id).unwrap().models_used.finalize.as_deref(),
+            Some("small"),
+            "the restored model is persisted"
+        );
+    }
+
+    #[test]
+    fn putting_off_restores_the_model_of_the_last_finished_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        finish_a_pass(&store, id, "small", "first");
+        store.begin_retranscribe(id).unwrap();
+        let failed = store.begin_offline_pass(id).unwrap();
+        store.set_finalize_model(id, &failed, "medium").unwrap();
+        store.fail_pass(id, &failed, "boom".to_string()).unwrap();
+        store.begin_retranscribe(id).unwrap();
+        finish_a_pass(&store, id, "large-v3-turbo", "second");
+        store.begin_retranscribe(id).unwrap();
+        let pass = store.begin_offline_pass(id).unwrap();
+        store.set_finalize_model(id, &pass, "medium").unwrap();
+
+        store.postpone(id).unwrap();
+
+        let session = store.get(id).unwrap();
+        assert_eq!(session.status, TranscriptStatus::Done);
+        assert_eq!(
+            session.models_used.finalize.as_deref(),
+            Some("large-v3-turbo")
+        );
+        assert_eq!(session.effective_segments()[0].text, "second");
+    }
+
+    #[test]
+    fn putting_off_a_queued_pass_of_a_finished_recording_leaves_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        finish_a_pass(&store, id, "small", "first");
+        store.begin_retranscribe(id).unwrap();
+
+        store.postpone(id).unwrap();
+
+        let session = store.get(id).unwrap();
+        assert_eq!(session.status, TranscriptStatus::Done);
+        assert_eq!(session.models_used.finalize.as_deref(), Some("small"));
     }
 
     #[test]

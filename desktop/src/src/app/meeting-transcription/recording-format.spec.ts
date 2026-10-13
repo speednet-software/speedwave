@@ -6,6 +6,7 @@ import {
   formatRecordingDate,
   formatStartTime,
   recordingName,
+  shownTranscriptQuality,
   statusChip,
   transcriptQuality,
 } from './recording-format';
@@ -102,6 +103,35 @@ describe('transcriptQuality', () => {
   });
 });
 
+describe('shownTranscriptQuality', () => {
+  const postponed = { state: 'postponed' } as const;
+
+  it('rates a finished transcript by the model of its pass', () => {
+    const done = { state: 'done' } as const;
+    expect(shownTranscriptQuality({ status: done, finalize_model: 'large' }, 'large')).toBe('high');
+    expect(shownTranscriptQuality({ status: done, finalize_model: 'small' }, 'large')).toBe(
+      'smaller'
+    );
+    expect(shownTranscriptQuality({ status: done, finalize_model: null }, 'large')).toBeNull();
+  });
+
+  it('calls the live text of a put-off recording live, even before the best model is known', () => {
+    expect(shownTranscriptQuality({ status: postponed, segment_count: 3 }, 'large')).toBe('live');
+    expect(shownTranscriptQuality({ status: postponed, segment_count: 3 }, null)).toBe('live');
+  });
+
+  it('has nothing to rate without a transcript on screen', () => {
+    expect(shownTranscriptQuality({ status: postponed, segment_count: 0 }, 'large')).toBeNull();
+    expect(shownTranscriptQuality({ status: postponed }, 'large')).toBeNull();
+    expect(
+      shownTranscriptQuality(
+        { status: { state: 'finalizing', progress: 0.5 }, finalize_model: 'small' },
+        'large'
+      )
+    ).toBeNull();
+  });
+});
+
 describe('statusChip', () => {
   const done = { state: 'done' } as const;
 
@@ -142,5 +172,12 @@ describe('statusChip', () => {
       label: 'Not transcribed yet',
       tone: 'muted',
     });
+  });
+
+  it('flags the live text of a put-off recording as a smaller-model transcript', () => {
+    const chip = statusChip({ status: { state: 'postponed' }, segment_count: 2 }, 'large');
+    expect(chip).toMatchObject({ label: 'Smaller model', tone: 'busy' });
+    expect(chip?.tooltip).toContain('live text');
+    expect(chip?.tooltip).toContain('press Transcribe');
   });
 });

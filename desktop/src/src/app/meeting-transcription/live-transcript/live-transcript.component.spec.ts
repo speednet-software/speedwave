@@ -37,7 +37,6 @@ function row(overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
     preview: null,
     size_bytes: 12 * 1024 * 1024,
     finalize_model: 'large',
-    finalize_model_label: null,
     queued: false,
     ...overrides,
   };
@@ -709,7 +708,6 @@ describe('LiveTranscriptComponent', () => {
           status: { state: 'finalizing', progress: 0.1 },
           duration_secs: 45 * 60,
           finalize_model: null,
-          finalize_model_label: null,
         }),
       ]);
       fixture.componentRef.setInput(
@@ -722,14 +720,14 @@ describe('LiveTranscriptComponent', () => {
       expect(quality.textContent).not.toContain('Re-transcribing');
     });
 
-    it('names the model the pass runs with', () => {
+    it('mentions the model of the pass only when it is the smaller one', () => {
       svc.recordings.set([row({ status: { state: 'finalizing', progress: 0.1 } })]);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'finalizing', progress: 0.1 } })
       );
       fixture.detectChanges();
-      expect(component.quality()?.text).toBe('Transcribing with the high-quality model');
+      expect(component.quality()?.text).toBe('Transcribing 13 min of audio');
       svc.recordings.set([
         row({ status: { state: 'finalizing', progress: 0.1 }, finalize_model: 'small' }),
       ]);
@@ -889,6 +887,42 @@ describe('LiveTranscriptComponent', () => {
       expect(q('later-btn')).toBeNull();
     });
 
+    it('treats a put-off recording with live text as a smaller-model transcript', async () => {
+      svc.recordings.set([row({ status: { state: 'postponed' }, segment_count: 1 })]);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'postponed' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(q('transcript-quality')!.textContent).toContain('Made with a smaller model');
+      expect(q('transcript-quality')!.textContent).not.toContain('Not transcribed');
+      expect(q('smaller-model-banner')!.textContent).toContain('live text from the recording');
+      expect(q('transcribe-btn')).toBeNull();
+      expect(q('send-to-chat-btn')!.className).not.toContain('bg-[var(--bg-2)]');
+      expect((q('copy-btn') as HTMLButtonElement).disabled).toBe(false);
+      expect((q('export-btn') as HTMLButtonElement).disabled).toBe(false);
+      const banner = q('banner-transcribe') as HTMLButtonElement;
+      expect(banner.textContent!.trim()).toBe('Transcribe');
+      banner.click();
+      await fixture.whenStable();
+      expect(svc.transcribe).toHaveBeenCalledWith('sess-1');
+      (q('more-btn') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      expect(q('retranscribe-item')).not.toBeNull();
+    });
+
+    it('offers the download for live text while the high-quality model is missing', () => {
+      svc.highQualityModel.set(best(false));
+      svc.recordings.set([row({ status: { state: 'postponed' }, segment_count: 1 })]);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'postponed' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(q('banner-transcribe')).toBeNull();
+      expect(q('download-best-model')!.textContent).toContain('Download high-quality model');
+    });
+
     it('makes Transcribe the main action of a put-off recording', async () => {
       svc.recordings.set([row({ status: { state: 'postponed' } })]);
       fixture.componentRef.setInput('session', session({ status: { state: 'postponed' } }));
@@ -911,17 +945,16 @@ describe('LiveTranscriptComponent', () => {
   });
 
   describe('transcript quality', () => {
-    it('names the model of a good transcript in the meta line and adds no label', () => {
-      svc.highQualityModel.set({ ...best(), key: 'large-v3' });
-      svc.recordings.set([row({ finalize_model: 'large-v3', finalize_model_label: 'Large v3' })]);
+    it('names no model and adds no label for a good transcript', () => {
+      svc.recordings.set([row({ finalize_model: 'large' })]);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
       );
       fixture.detectChanges();
       const el: HTMLElement = fixture.nativeElement;
-      expect(el.querySelector('[data-testid="transcript-meta"]')!.textContent).toContain(
-        '13 min · System · Large v3'
+      expect(el.querySelector('[data-testid="transcript-meta"]')!.textContent!.trim()).toBe(
+        '13 min · System'
       );
       expect(el.querySelector('[data-testid="transcript-quality"]')).toBeNull();
       expect(el.querySelector('[data-testid="smaller-model-banner"]')).toBeNull();
@@ -956,7 +989,10 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('[data-testid="transcript-quality"]')!.textContent).toContain(
-        'Made with the smaller model'
+        'Made with a smaller model'
+      );
+      expect(el.querySelector('[data-testid="smaller-model-banner"]')!.textContent).toContain(
+        'high-quality one was not downloaded'
       );
       const btn = el.querySelector('[data-testid="download-best-model"]') as HTMLButtonElement;
       expect(btn.textContent).toContain('Download high-quality model');

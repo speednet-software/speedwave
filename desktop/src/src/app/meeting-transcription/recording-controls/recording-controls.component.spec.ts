@@ -398,7 +398,6 @@ describe('RecordingControlsComponent', () => {
       preview: null,
       size_bytes: 1,
       finalize_model: 'large',
-      finalize_model_label: null,
       queued: false,
     });
 

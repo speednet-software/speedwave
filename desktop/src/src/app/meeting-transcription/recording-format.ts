@@ -79,8 +79,11 @@ export function formatClock(ms: number): string {
   return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
 }
 
-/** Whether a transcript was made with this machine's best model, or with a smaller fallback. */
-export type TranscriptQuality = 'high' | 'smaller';
+/**
+ * Whether a transcript was made with this machine's best model, with a smaller fallback, or is
+ * only the live text made while recording (a smaller model too).
+ */
+export type TranscriptQuality = 'high' | 'smaller' | 'live';
 
 /**
  * Quality of a transcript from the model its offline pass ran with; null when no pass ran yet or
@@ -94,6 +97,29 @@ export function transcriptQuality(
 ): TranscriptQuality | null {
   if (!finalizeModel || !bestModel) return null;
   return finalizeModel === bestModel ? 'high' : 'smaller';
+}
+
+/**
+ * Quality of the transcript a finished or put-off recording shows: its offline pass's, or `live`
+ * when a put-off one has only the live text; null for any other state or when it is not known.
+ * @param rec - the recording.
+ * @param rec.status - its lifecycle status.
+ * @param rec.finalize_model - the model its offline pass ran with.
+ * @param rec.segment_count - segments in the transcript it shows.
+ * @param bestModel - key of this machine's high-quality model, when known.
+ */
+export function shownTranscriptQuality(
+  rec: { status: TranscriptStatus; finalize_model?: string | null; segment_count?: number },
+  bestModel: string | null | undefined
+): TranscriptQuality | null {
+  switch (rec.status.state) {
+    case 'done':
+      return transcriptQuality(rec.finalize_model, bestModel);
+    case 'postponed':
+      return (rec.segment_count ?? 0) > 0 ? 'live' : null;
+    default:
+      return null;
+  }
 }
 
 /**
@@ -125,6 +151,12 @@ export function formatStartTime(createdAt: string): string {
   return Number.isNaN(at.getTime()) ? '' : TIME.format(at);
 }
 
+/** Why a transcript is from a smaller model, by how it was made. */
+const SMALLER_MODEL_TOOLTIP = {
+  smaller: 'Transcribed with the smaller model because the high-quality one was not downloaded.',
+  live: 'Only the live text from the recording, made with a smaller model. Open it and press Transcribe for a more accurate transcript.',
+} as const;
+
 /** The words for a recording's state, shared by the list chip and the open recording's pane. */
 export const STATE_LABEL = {
   recording: 'Recording',
@@ -135,15 +167,21 @@ export const STATE_LABEL = {
 
 /**
  * The list chip of a recording, only for a state worth a look: recording, paused, transcribing or
- * queued, put off, failed, or made with the smaller model. A good finished transcript gets none.
+ * queued, put off, failed, or a transcript from a smaller model. A good finished one gets none.
  * @param rec - the list row.
  * @param rec.status - its lifecycle status.
  * @param rec.queued - whether its offline pass waits for another one.
  * @param rec.finalize_model - the model its offline pass ran with.
+ * @param rec.segment_count - segments in the transcript it shows.
  * @param bestModel - key of this machine's high-quality model, when known.
  */
 export function statusChip(
-  rec: { status: TranscriptStatus; queued?: boolean; finalize_model?: string | null },
+  rec: {
+    status: TranscriptStatus;
+    queued?: boolean;
+    finalize_model?: string | null;
+    segment_count?: number;
+  },
   bestModel: string | null = null
 ): StatusChip | null {
   const status = rec.status;
@@ -169,20 +207,19 @@ export function statusChip(
             tone: 'busy',
           };
     case 'done':
-      return transcriptQuality(rec.finalize_model, bestModel) === 'smaller'
+    case 'postponed': {
+      const quality = shownTranscriptQuality(rec, bestModel);
+      if (quality === 'smaller' || quality === 'live') {
+        return { label: 'Smaller model', tooltip: SMALLER_MODEL_TOOLTIP[quality], tone: 'busy' };
+      }
+      return status.state === 'postponed'
         ? {
-            label: 'Smaller model',
-            tooltip:
-              'Transcribed with the smaller model because the high-quality one was not downloaded.',
-            tone: 'busy',
+            label: STATE_LABEL.postponed,
+            tooltip: 'Transcription was put off. Open the recording and press Transcribe.',
+            tone: 'muted',
           }
         : null;
-    case 'postponed':
-      return {
-        label: STATE_LABEL.postponed,
-        tooltip: 'Transcription was put off. Open the recording and press Transcribe.',
-        tone: 'muted',
-      };
+    }
     case 'failed':
       return { label: STATE_LABEL.failed, tooltip: status.reason, tone: 'error' };
   }

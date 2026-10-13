@@ -22,7 +22,6 @@ function row(overrides: Partial<TranscriptSummary> = {}): TranscriptSummary {
     preview: null,
     size_bytes: 1,
     finalize_model: null,
-    finalize_model_label: null,
     queued: false,
     ...overrides,
   };

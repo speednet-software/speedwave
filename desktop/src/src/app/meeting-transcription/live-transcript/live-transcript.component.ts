@@ -27,6 +27,7 @@ import {
   formatRecordingDate,
   STATE_LABEL,
   recordingName,
+  shownTranscriptQuality,
   transcriptQuality,
 } from '../recording-format';
 
@@ -220,14 +221,19 @@ interface ProgressAnchor {
             </div>
           }
 
-          @if (smallerModel()) {
+          @if (smallerModel(); as kind) {
             <div
               class="mt-3 flex max-w-3xl items-center justify-between gap-3 rounded-md border border-amber-500/35 bg-amber-500/[0.07] px-3 py-2 text-[12.5px] leading-relaxed text-amber-200"
               data-testid="smaller-model-banner"
             >
               <span>
-                This transcript was made with the smaller model because the high-quality one was not
-                downloaded. Expect more mistakes.
+                @if (kind === 'live') {
+                  This is the live text from the recording, made with a smaller model. Expect more
+                  mistakes.
+                } @else {
+                  This transcript was made with the smaller model because the high-quality one was
+                  not downloaded. Expect more mistakes.
+                }
               </span>
               @if (bestModelReady()) {
                 <button
@@ -237,7 +243,7 @@ interface ProgressAnchor {
                   [disabled]="working()"
                   (click)="transcribe()"
                 >
-                  Transcribe again
+                  {{ kind === 'live' ? 'Transcribe' : 'Transcribe again' }}
                 </button>
               } @else {
                 <button
@@ -364,7 +370,7 @@ interface ProgressAnchor {
                     role="menu"
                     data-testid="more-menu"
                   >
-                    @if (status() === 'done') {
+                    @if (hasTranscript()) {
                       <button
                         type="button"
                         role="menuitem"
@@ -584,7 +590,7 @@ export class LiveTranscriptComponent {
     () => this.summary()?.finalize_model ?? this.session()?.models_used.finalize ?? null
   );
 
-  /** Start time (under a title), length, source and, once transcribed, the model that did it. */
+  /** Start time (under a title), length and source. */
   readonly meta = computed(() => {
     const s = this.session();
     if (!s) return '';
@@ -592,19 +598,23 @@ export class LiveTranscriptComponent {
       s.title ? formatRecordingDate(s.created_at) : '',
       formatDuration(this.summary()?.duration_secs ?? 0),
       s.audio_source.label,
-      this.status() === 'done' ? (this.summary()?.finalize_model_label ?? '') : '',
     ];
     return parts.filter(Boolean).join(' · ');
   });
 
-  /** High-quality or smaller-model transcript; null when not known. */
-  private readonly qualityKind = computed(() =>
-    transcriptQuality(this.finalizeModel(), this.transcription.highQualityModel()?.key)
-  );
+  /** Quality of the transcript on screen; null when there is none or it is not known. */
+  private readonly shownQuality = computed(() => {
+    const status = this.session()?.status;
+    if (!status) return null;
+    return shownTranscriptQuality(
+      { status, finalize_model: this.finalizeModel(), segment_count: this.lines().length },
+      this.transcription.highQualityModel()?.key
+    );
+  });
 
   /**
-   * The state line: only what needs a look (recording, transcribing, put off, failed, the smaller
-   * model). A good finished transcript gets none; its model is in the meta line.
+   * The state line: only what needs a look (recording, transcribing, put off, failed, a smaller
+   * model). A good finished transcript gets none and never names its model.
    */
   readonly quality = computed<QualityLine | null>(() => {
     const amber = 'text-amber-300';
@@ -617,20 +627,18 @@ export class LiveTranscriptComponent {
         if (this.summary()?.queued) {
           return { text: 'Waiting for another transcription to finish', cls: amber };
         }
-        switch (this.qualityKind()) {
-          case 'high':
-            return { text: 'Transcribing with the high-quality model', cls: amber };
-          case 'smaller':
-            return { text: 'Transcribing with the smaller model', cls: amber };
-          default:
-            return { text: this.transcribingLabel(), cls: amber };
-        }
+        return transcriptQuality(
+          this.finalizeModel(),
+          this.transcription.highQualityModel()?.key
+        ) === 'smaller'
+          ? { text: 'Transcribing with the smaller model', cls: amber }
+          : { text: this.transcribingLabel(), cls: amber };
       case 'done':
-        return this.qualityKind() === 'smaller'
-          ? { text: 'Made with the smaller model', cls: amber }
-          : null;
       case 'postponed':
-        return { text: STATE_LABEL.postponed, cls: 'text-[var(--ink-dim)]' };
+        if (this.smallerModel()) return { text: 'Made with a smaller model', cls: amber };
+        return this.status() === 'postponed'
+          ? { text: STATE_LABEL.postponed, cls: 'text-[var(--ink-dim)]' }
+          : null;
       case 'failed':
         return { text: STATE_LABEL.failed, cls: 'text-red-300' };
       default:
@@ -638,10 +646,14 @@ export class LiveTranscriptComponent {
     }
   });
 
-  /** A finished transcript made with the smaller model (the banner offers the fix). */
-  readonly smallerModel = computed(
-    () => this.status() === 'done' && this.qualityKind() === 'smaller'
-  );
+  /**
+   * How the transcript on screen came from a smaller model: a fallback offline pass, or only the
+   * live text; null for a good one. The banner offers the fix.
+   */
+  readonly smallerModel = computed(() => {
+    const quality = this.shownQuality();
+    return quality === 'smaller' || quality === 'live' ? quality : null;
+  });
 
   /** Whether the high-quality model is on disk, so Transcribe again would use it. */
   readonly bestModelReady = computed(
@@ -670,16 +682,20 @@ export class LiveTranscriptComponent {
     ['finalizing', 'done', 'postponed', 'failed'].includes(this.status())
   );
 
-  /** A recording without its transcription yet (failed or put off): Transcribe is the main action. */
-  readonly needsTranscription = computed(() => ['failed', 'postponed'].includes(this.status()));
+  /** A recording with no transcript to show (failed, or put off without live text): Transcribe leads. */
+  readonly needsTranscription = computed(
+    () => this.status() === 'failed' || (this.status() === 'postponed' && this.lines().length === 0)
+  );
 
   /** What Later does: drop out of the queue, or stop the running transcription. */
   readonly laterTooltip = computed(() =>
     this.summary()?.queued ? LATER_QUEUED_TOOLTIP : LATER_RUNNING_TOOLTIP
   );
 
-  /** Whether there is a finished transcript to copy or export. */
-  readonly hasTranscript = computed(() => this.status() === 'done' && this.lines().length > 0);
+  /** Whether there is a transcript to copy, export or transcribe again: finished, or live text only. */
+  readonly hasTranscript = computed(
+    () => ['done', 'postponed'].includes(this.status()) && this.lines().length > 0
+  );
 
   /** Continue recording is offered on a finished recording while nothing else records. */
   readonly canContinue = computed(

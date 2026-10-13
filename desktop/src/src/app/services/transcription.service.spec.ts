@@ -651,7 +651,6 @@ describe('TranscriptionService', () => {
         preview: null,
         size_bytes: 1,
         finalize_model: null,
-        finalize_model_label: null,
         queued: false,
         ...overrides,
       };
@@ -871,7 +870,6 @@ describe('TranscriptionService', () => {
         preview: 'hej',
         size_bytes: 1000,
         finalize_model: null,
-        finalize_model_label: null,
         queued: false,
         ...overrides,
       };
