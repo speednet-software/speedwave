@@ -143,10 +143,16 @@ interface RecordingRow {
         @for (row of rows(); track row.rec.id) {
           @let rec = row.rec;
           @let ongoing = isOngoing(rec);
+          @let active = rec.id === selectedId();
           <li
-            class="rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-2 text-[12px]"
-            [class.ring-1]="rec.id === selectedId()"
-            [class.ring-[var(--accent)]]="rec.id === selectedId()"
+            class="rounded-md border border-l-2 p-2 text-[12px]"
+            [class]="
+              active
+                ? 'border-[var(--line)] border-l-[var(--accent)] bg-[var(--bg-2)]'
+                : 'border-[var(--line)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)]'
+            "
+            [attr.data-active]="active ? 'true' : null"
+            [attr.data-testid]="'row-' + rec.id"
           >
             @if (pendingDeleteId() === rec.id) {
               <div
@@ -203,6 +209,7 @@ interface RecordingRow {
                     type="button"
                     class="block w-full min-w-0 text-left disabled:cursor-not-allowed disabled:opacity-50"
                     [attr.data-testid]="'open-' + rec.id"
+                    [attr.aria-current]="active ? 'true' : null"
                     [disabled]="rowLocked(rec)"
                     (click)="open(rec)"
                   >

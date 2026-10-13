@@ -117,6 +117,20 @@ describe('SessionListComponent', () => {
     expect(component.selectedId()).toBe('b');
   });
 
+  it('marks the open recording with the accent edge and aria-current, and only that one', () => {
+    component.markSelected('b');
+    fixture.detectChanges();
+    const open = q('row-b')!;
+    expect(open.getAttribute('data-active')).toBe('true');
+    expect(open.className).toContain('border-l-[var(--accent)]');
+    expect(open.className).not.toContain('ring-');
+    expect(q('open-b')!.getAttribute('aria-current')).toBe('true');
+    const other = q('row-a')!;
+    expect(other.getAttribute('data-active')).toBeNull();
+    expect(other.className).not.toContain('border-l-[var(--accent)]');
+    expect(q('open-a')!.getAttribute('aria-current')).toBeNull();
+  });
+
   it('locks the other rows while a recording runs, with the reason', () => {
     svc.recordingSessionId.set('b');
     fixture.detectChanges();
