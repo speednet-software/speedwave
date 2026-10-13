@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 pub const E2E_WEBDRIVER_PORT: u16 = 4445;
 
 #[cfg(any(test, feature = "e2e"))]
-static SPAWN_ARGS: std::sync::Mutex<
-    Option<(String, std::collections::HashMap<String, Vec<String>>)>,
-> = std::sync::Mutex::new(None);
+type SpawnArgsByTab = Option<(String, std::collections::HashMap<String, Vec<String>>)>;
+
+#[cfg(any(test, feature = "e2e"))]
+static SPAWN_ARGS: std::sync::Mutex<SpawnArgsByTab> = std::sync::Mutex::new(None);
 
 #[cfg(any(test, feature = "e2e"))]
 pub fn record_spawn_args(tab_id: &str, args: &[String]) {

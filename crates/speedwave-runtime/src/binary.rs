@@ -923,6 +923,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[serial_test::serial(system_root)]
     fn wait_with_output_timeout_captures_fast_child_output() {
         let child = spawn_shell("echo drained");
         let out = wait_with_output_timeout(child, std::time::Duration::from_secs(30))
@@ -932,13 +933,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[serial_test::serial(system_root)]
     fn wait_with_output_timeout_kills_and_errors_on_expiry() {
-        let script = if cfg!(windows) {
-            "ping -n 30 127.0.0.1 >NUL"
+        let child = if cfg!(windows) {
+            system_command("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn ping child")
         } else {
-            "sleep 30"
+            spawn_shell("sleep 30")
         };
-        let child = spawn_shell(script);
         let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
             .expect_err("must time out");
         assert!(err.to_string().contains("timed out"));

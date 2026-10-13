@@ -7,8 +7,10 @@ pub enum MicPermission {
     /// Mic access is (now, or already) granted.
     Granted,
     /// The user declined the consent prompt just shown.
+    #[cfg(any(target_os = "macos", test))]
     Denied,
     /// Consent was refused earlier — only System Settings can re-enable it.
+    #[cfg(any(target_os = "macos", test))]
     PreviouslyDenied,
 }
 
@@ -40,8 +42,10 @@ pub enum MicPermissionStatus {
     /// Mic access is granted.
     Granted,
     /// Consent was refused (or restricted by policy).
+    #[cfg(any(target_os = "macos", test))]
     Denied,
     /// Never asked — the prompt will appear on the first request.
+    #[cfg(any(target_os = "macos", test))]
     Undetermined,
 }
 

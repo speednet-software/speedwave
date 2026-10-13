@@ -161,6 +161,7 @@ fn build_install_failure_message(
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test assertions may expect freely")]
 mod tests {
     use super::*;
 

@@ -136,6 +136,15 @@ fn generate_filename(extension: &str) -> String {
 }
 
 #[cfg(test)]
+fn save_blocking_at(
+    project_dir: &Path,
+    media_type: &str,
+    bytes: &[u8],
+) -> Result<SavedPaste, String> {
+    save_to_dir(project_dir, media_type, bytes)
+}
+
+#[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
@@ -249,13 +258,4 @@ mod tests {
         let err = save_blocking_at(&project_dir, "image/png", b"not a png").unwrap_err();
         assert!(err.contains("do not match"));
     }
-}
-
-#[cfg(test)]
-fn save_blocking_at(
-    project_dir: &Path,
-    media_type: &str,
-    bytes: &[u8],
-) -> Result<SavedPaste, String> {
-    save_to_dir(project_dir, media_type, bytes)
 }
