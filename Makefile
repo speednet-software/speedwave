@@ -665,7 +665,7 @@ check-desktop-clippy: build-angular build-mcp
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	@bash scripts/bundle-build-context.sh
 	@bash scripts/create-desktop-stubs.sh
-	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
+	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy --all-targets -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
 check-proxy-clippy:
