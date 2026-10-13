@@ -1,0 +1,62 @@
+name: lane-test-linux
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup toolchain (Node + Rust + cache)
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-cache-workspaces: containers/proxy -> target
+          node-cache-dependency-path: |
+            mcp-servers/package-lock.json
+            desktop/src/package-lock.json
+
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
+      - name: Install dependencies
+        working-directory: mcp-servers
+        run: npm ci
+
+      - name: MCP tests + coverage
+        run: make coverage-mcp
+
+      - name: Office Python script tests
+        run: make test-mcp-office-py
+
+      - name: Install Angular dependencies
+        working-directory: desktop/src
+        run: npm ci
+
+      - name: Angular tests + coverage
+        working-directory: desktop/src
+        run: npx ng test --no-watch --coverage
+
+      - name: Proxy tests
+        run: make test-proxy
+
+      - name: Entrypoint tests
+        run: make test-entrypoint
+
+      - name: Desktop config tests (fast)
+        run: make test-desktop-config
+
+      - name: Release-gate tests (gh shim)
+        run: make test-release-gate

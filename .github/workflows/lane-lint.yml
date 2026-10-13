@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   lint:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -17,29 +17,25 @@ jobs:
         uses: ./.github/actions/setup-toolchain
         with:
           rust-components: clippy, rustfmt
-          rust-cache-workspaces: |
-            . -> target
-            containers/proxy -> target
+          rust-cache-workspaces: containers/proxy -> target
           node-cache-dependency-path: |
             package-lock.json
             mcp-servers/package-lock.json
+            desktop/src/package-lock.json
 
       - name: Install dependencies
         run: |
-          cargo fetch
           npm ci --ignore-scripts
           cd mcp-servers && npm ci
+
+      - name: Install Angular dependencies
+        working-directory: desktop/src
+        run: npm ci
 
       - name: Install wasm toolchain (PII engine)
         run: |
           rustup target add wasm32-unknown-unknown
           npm install -g wasm-pack
-
-      - name: Install cmake
-        run: brew install cmake
-
-      - name: Rust clippy
-        run: make check-clippy
 
       - name: Proxy clippy
         run: make check-proxy-clippy
@@ -63,3 +59,7 @@ jobs:
       - name: MCP ESLint
         working-directory: mcp-servers
         run: npx eslint .
+
+      - name: Angular ESLint
+        working-directory: desktop/src
+        run: npx eslint 'src/**/*.ts'
