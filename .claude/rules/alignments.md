@@ -105,6 +105,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - CLI filename leaf ↔ bundle manifest + Tauri config — `windows_bundle_cli_asset_matches_filename_ssot` and `macos_bundle_cli_asset_matches_filename_ssot` (bundle.rs) assert `{WINDOWS,MACOS}_BUNDLED_ASSETS` and `tauri.{windows,macos}.conf.json` carry `cli/<cli_binary_filename(is_windows)>`. The bundled-asset filename SSOT is `consts::cli_binary_filename`, single-sourced from `CLI_BINARY`. The _installed_ filename is a different SSOT, `consts::installed_cli_filename`, because it carries the instance on both platforms (ADR-016) — never use the bundle name for a destination path.
 - Root `[workspace.lints]` table ↔ `desktop/src-tauri/Cargo.toml` `[lints]` table ↔ `containers/proxy/Cargo.toml` `[lints]` table ↔ `crates/pii-engine/Cargo.toml` `[lints]` table (each vendored/built standalone, cannot inherit `workspace = true`) — `lint_tables_are_aligned` cross-read test.
 - No raw `Command::new` outside `binary.rs` — drift detector `tests/no_raw_command_spawn.rs` (escape hatch: `// SSOT-allow: <reason>`).
+- Anti-FOUC inline script in `desktop/src/src/index.html` ↔ `theme.service.ts` (`MODE_STORAGE_KEY` read from localStorage, only `light`/`dark` pass through else `DEFAULT_THEME_MODE`, plus the `prefers-color-scheme` branch that resolves `auto` before Angular boots, and a storage-read failure still falling through to that branch): `desktop/src/src/app/anti-fouc-alignment.spec.ts`.
 
 ## Manual alignments — NO automated guard; update together in the same commit
 
