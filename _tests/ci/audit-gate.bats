@@ -8,6 +8,10 @@ setup() {
   export PYTHON=python3
 }
 
+_audited_lockfiles() {
+  "$REPO_ROOT/scripts/audit-run.sh" --list | cut -d' ' -f3
+}
+
 @test "npm extraction reads the GHSA id out of the advisory url" {
   run "$PYTHON" "$SCRIPT" extract --ecosystem npm --in "$FIXTURES/npm-minimatch.json"
   [ "$status" -eq 0 ]
@@ -141,19 +145,19 @@ setup() {
 }
 
 @test "lockfiles-touched: true when package-lock.json changed" {
-  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-lockfile.json"
+  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-lockfile.json" $(_audited_lockfiles)
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
 
 @test "lockfiles-touched: true when the root Cargo.lock changed" {
-  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-root-cargo-lock.json"
+  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-root-cargo-lock.json" $(_audited_lockfiles)
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
 
 @test "lockfiles-touched: false when the diff never touches a lockfile" {
-  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-without-lockfile.json"
+  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-without-lockfile.json" $(_audited_lockfiles)
   [ "$status" -eq 0 ]
   [ "$output" = "false" ]
 }
@@ -161,16 +165,31 @@ setup() {
 @test "lockfiles-touched: true for each of the new npm lockfiles on its own" {
   for path in package-lock.json desktop/e2e/package-lock.json mcp-servers/playwright/package-lock.json; do
     printf '["%s"]' "$path" >"$BATS_TEST_TMPDIR/changed.json"
-    run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$BATS_TEST_TMPDIR/changed.json"
+    run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$BATS_TEST_TMPDIR/changed.json" $(_audited_lockfiles)
     [ "$status" -eq 0 ]
     [ "$output" = "true" ]
   done
 }
 
 @test "lockfiles-touched: false for a package-lock.json/Cargo.lock outside the audited lockfiles" {
-  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-unaudited-lockfile.json"
+  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-unaudited-lockfile.json" $(_audited_lockfiles)
   [ "$status" -eq 0 ]
   [ "$output" = "false" ]
+}
+
+@test "lockfiles-touched: false when no audited lockfile is passed, even if a lockfile changed" {
+  run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-lockfile.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "false" ]
+}
+
+@test "lockfiles-touched: true for every lockfile audit-run.sh lists, each on its own" {
+  for path in $(_audited_lockfiles); do
+    printf '["%s"]' "$path" >"$BATS_TEST_TMPDIR/changed.json"
+    run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$BATS_TEST_TMPDIR/changed.json" $(_audited_lockfiles)
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+  done
 }
 
 @test "issue-plan: creates when no matching open issue exists" {

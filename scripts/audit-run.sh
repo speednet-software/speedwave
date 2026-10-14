@@ -6,11 +6,29 @@ set -euo pipefail
 # scripts/audit-issue.sh (daily schedule) all shell out to this script
 # instead of repeating the cargo-audit/npm-audit invocations.
 
+list_targets() {
+    cat <<'LIST'
+cargo-root cargo Cargo.lock
+cargo-desktop cargo desktop/src-tauri/Cargo.lock
+npm-root npm package-lock.json
+npm-mcp npm mcp-servers/package-lock.json
+npm-playwright npm mcp-servers/playwright/package-lock.json
+npm-desktop npm desktop/src/package-lock.json
+npm-e2e npm desktop/e2e/package-lock.json
+LIST
+}
+
 usage() {
     echo "usage: audit-run.sh TARGET OUT_JSON [ROOT]" >&2
-    echo "  TARGET: cargo-root | cargo-desktop | npm-root | npm-mcp | npm-desktop | npm-e2e | npm-playwright" >&2
+    echo "       audit-run.sh --list   (one \"TARGET KIND LOCKFILE\" line per audited target)" >&2
+    echo "  TARGET: $(list_targets | cut -d' ' -f1 | paste -sd'|' - | sed 's/|/ | /g')" >&2
     exit 64
 }
+
+if [ "${1:-}" = "--list" ]; then
+    list_targets
+    exit 0
+fi
 
 [ "$#" -ge 2 ] || usage
 TARGET="$1"
@@ -43,16 +61,15 @@ run_npm() {
     rm -f "$err"
 }
 
-case "$TARGET" in
-    cargo-root) run_cargo "$ROOT/Cargo.lock" "$OUT_JSON" ;;
-    cargo-desktop) run_cargo "$ROOT/desktop/src-tauri/Cargo.lock" "$OUT_JSON" ;;
-    npm-root) run_npm "$ROOT" "$OUT_JSON" ;;
-    npm-mcp) run_npm "$ROOT/mcp-servers" "$OUT_JSON" ;;
-    npm-desktop) run_npm "$ROOT/desktop/src" "$OUT_JSON" ;;
-    npm-e2e) run_npm "$ROOT/desktop/e2e" "$OUT_JSON" ;;
-    npm-playwright) run_npm "$ROOT/mcp-servers/playwright" "$OUT_JSON" ;;
-    *)
-        echo "audit-run: unknown target '$TARGET' (expected cargo-root, cargo-desktop, npm-root, npm-mcp, npm-desktop, npm-e2e or npm-playwright)" >&2
-        usage
-        ;;
+ENTRY="$(list_targets | awk -v t="$TARGET" '$1 == t')"
+if [ -z "$ENTRY" ]; then
+    echo "audit-run: unknown target '$TARGET' (expected one of: $(list_targets | cut -d' ' -f1 | paste -sd' ' -))" >&2
+    usage
+fi
+KIND="$(echo "$ENTRY" | cut -d' ' -f2)"
+LOCKFILE="$(echo "$ENTRY" | cut -d' ' -f3)"
+
+case "$KIND" in
+    cargo) run_cargo "$ROOT/$LOCKFILE" "$OUT_JSON" ;;
+    npm) run_npm "$(cd "$ROOT/$(dirname "$LOCKFILE")" && pwd)" "$OUT_JSON" ;;
 esac
