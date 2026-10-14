@@ -73,5 +73,5 @@ runs:
         workspaces: ${{ inputs.rust-cache-workspaces }}
         shared-key: ${{ inputs.rust-cache-shared-key }}
         cache-directories: ${{ inputs.rust-cache-directories }}
-        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}
+        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}-${{ hashFiles('.github/workflows/lane-*.yml', '.github/workflows/build-publish.yml', '.github/actions/*/action.yml') }}
         save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/') }}
