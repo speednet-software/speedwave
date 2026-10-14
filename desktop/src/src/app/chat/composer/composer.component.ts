@@ -89,14 +89,19 @@ const PLAN_MODE_PREFIX =
       [attachments]="attachmentViewModels()"
       (remove)="removeAttachment($event)"
     />
-    @if (transcriptAttached()) {
+    @if (transcriptName()) {
       <div
         data-testid="composer-transcript"
         class="mono mb-2 flex items-center gap-2 rounded ring-1 ring-[var(--accent)]/40 bg-[var(--accent)]/[0.06] px-3 py-1.5 text-[11px] text-[var(--ink-dim)]"
       >
-        <span class="text-[var(--accent)]">transcript:</span>
-        <span class="truncate"
-          >goes out with your next message, to your configured LLM provider</span
+        <span class="shrink-0 text-[var(--accent)]">Transcript:</span>
+        <span
+          class="max-w-[50%] shrink-0 truncate text-[var(--ink)]"
+          data-testid="composer-transcript-name"
+          >{{ transcriptName() }}</span
+        >
+        <span class="truncate text-[var(--ink-mute)]"
+          >· sent with your next message to your configured LLM provider</span
         >
         <button
           type="button"
@@ -328,7 +333,7 @@ export class ComposerComponent implements AfterViewInit {
 
   readonly contextLabel = input('');
 
-  readonly transcriptAttached = input(false);
+  readonly transcriptName = input('');
 
   readonly draftText = input('');
 

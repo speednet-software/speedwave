@@ -15,12 +15,21 @@ pub const TRANSCRIPT_JSON: &str = "transcript.json";
 /// On-disk filename for the recorded audio.
 pub const AUDIO_WAV: &str = "audio.wav";
 
+/// Longest title a user can give a recording, in characters.
+pub const TITLE_MAX_CHARS: usize = 120;
+
+/// Longest transcript preview the recordings list carries, in characters.
+const PREVIEW_MAX_CHARS: usize = 140;
+
 /// Lifecycle status of a recording.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum TranscriptStatus {
     /// Capturing audio + live transcription.
     Recording,
+    /// Capture paused by the user: every part so far is closed, the microphone is released, and
+    /// nothing is transcribed until a resume adds a part or a stop starts the offline pass.
+    Paused,
     /// Stopped; running the higher-quality offline pass.
     Finalizing {
         /// 0.0 → 1.0 (driver-reported).
@@ -28,6 +37,9 @@ pub enum TranscriptStatus {
     },
     /// Done — `effective_segments()` returns the final pass if it ran.
     Done,
+    /// The user put the offline pass off ("Later"): the audio is kept untranscribed until they
+    /// start the pass again, so it does not load the machine during their next meeting.
+    Postponed,
     /// Failed at some stage.
     Failed {
         /// Human-readable reason.
@@ -52,6 +64,9 @@ pub struct TranscriptSession {
     pub id: Uuid,
     /// Created-at, RFC 3339 string (serde-friendly across platforms).
     pub created_at: String,
+    /// User-given name; `None` until renamed (the UI then shows the local start time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Forced language for this session.
     pub language: Language,
     /// What was captured.
@@ -86,6 +101,45 @@ pub struct TranscriptSession {
     pub(crate) prior_live_model: Option<String>,
     #[serde(skip, default)]
     pub(crate) prior_active_warnings: Vec<CaptureWarning>,
+    /// Whether the in-flight resume reopened a paused session, so a rollback returns it there.
+    #[serde(skip, default)]
+    pub(crate) resumed_from_pause: bool,
+    /// `models_used.finalize` from before the passes since the last finished one (outer `None`:
+    /// nothing stashed), so putting a pass off restores the model of the transcript on screen.
+    #[serde(skip, default)]
+    pub(crate) prior_finalize_model: Option<Option<String>>,
+    /// The offline pass allowed to write this session; a postponed or replaced one writes nothing.
+    #[serde(skip, default)]
+    pub(crate) offline_pass: Option<super::transcript_store::OfflinePass>,
+}
+
+/// One row of the recordings list: everything but the segments.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TranscriptSummary {
+    /// Session id.
+    pub id: Uuid,
+    /// Created-at, RFC 3339 UTC.
+    pub created_at: String,
+    /// User-given name, if any.
+    pub title: Option<String>,
+    /// Forced language.
+    pub language: Language,
+    /// Label of the captured source.
+    pub source_label: String,
+    /// Lifecycle.
+    pub status: TranscriptStatus,
+    /// Recorded audio across every part, from the WAV headers (0 while a part is still open).
+    pub duration_secs: f64,
+    /// Segments in the transcript the user sees (`effective_segments`).
+    pub segment_count: usize,
+    /// First non-empty line of that transcript, shortened.
+    pub preview: Option<String>,
+    /// Bytes the session directory takes on disk (audio and transcript).
+    pub size_bytes: u64,
+    /// Whisper catalogue key of the offline pass that made (or is making) the transcript.
+    pub finalize_model: Option<String>,
+    /// `true` while the offline pass waits for another recording's pass to finish.
+    pub queued: bool,
 }
 
 impl TranscriptSession {
@@ -105,6 +159,7 @@ impl TranscriptSession {
         Self {
             id,
             created_at: rfc3339_now(),
+            title: None,
             language,
             audio_source,
             status: TranscriptStatus::Recording,
@@ -118,6 +173,9 @@ impl TranscriptSession {
             live_draft: String::new(),
             prior_live_model: None,
             prior_active_warnings: Vec::new(),
+            resumed_from_pause: false,
+            prior_finalize_model: None,
+            offline_pass: None,
         }
     }
 
@@ -143,11 +201,59 @@ impl TranscriptSession {
         self.final_segments = Some(final_segs);
     }
 
+    /// The recordings-list row for this session; `dir` is its directory, read for the audio
+    /// duration (WAV headers only) and the size on disk.
+    pub fn summary(&self, dir: &Path) -> TranscriptSummary {
+        let duration_secs = self
+            .all_audio_parts()
+            .iter()
+            .filter_map(|p| crate::transcription::audio::wav_duration(p))
+            .map(|d| d.as_secs_f64())
+            .sum();
+        let size_bytes = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(std::fs::Metadata::is_file)
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0);
+        let mut segments: Vec<&Segment> = self.effective_segments().iter().collect();
+        segments.sort_by_key(|seg| seg.start);
+        let preview = segments
+            .iter()
+            .map(|seg| seg.text.trim())
+            .find(|text| !text.is_empty())
+            .map(|text| truncate_chars(text, PREVIEW_MAX_CHARS));
+        TranscriptSummary {
+            id: self.id,
+            created_at: self.created_at.clone(),
+            title: self.title.clone(),
+            language: self.language,
+            source_label: self.audio_source.label.clone(),
+            status: self.status.clone(),
+            duration_secs,
+            segment_count: segments.len(),
+            preview,
+            size_bytes,
+            finalize_model: self.models_used.finalize.clone(),
+            queued: false,
+        }
+    }
+
     /// Renders the transcript as markdown: a header plus one timestamped line per segment,
     /// channel-labelled on paired captures (channel attribution, not diarization — ADR-075).
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
-        s.push_str(&format!("# Meeting transcript ({})\n\n", self.created_at));
+        match &self.title {
+            Some(title) => {
+                s.push_str(&format!("# {title}\n\n"));
+                s.push_str(&format!("- Recorded: {}\n", self.created_at));
+            }
+            None => s.push_str(&format!("# Meeting transcript ({})\n\n", self.created_at)),
+        }
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
         s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
@@ -187,6 +293,29 @@ impl TranscriptSession {
     }
 }
 
+/// Normalises a user-typed title: control characters dropped, whitespace runs collapsed, cut to
+/// [`TITLE_MAX_CHARS`]; `None` when nothing is left (the session goes back to its default name).
+pub fn normalize_title(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(collapsed.chars().take(TITLE_MAX_CHARS).collect())
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// Time spent string `MM:SS.cs`.
 fn fmt_ts(d: std::time::Duration) -> String {
     let secs = d.as_secs();
@@ -197,8 +326,10 @@ fn fmt_ts(d: std::time::Duration) -> String {
 fn status_label(s: &TranscriptStatus) -> &'static str {
     match s {
         TranscriptStatus::Recording => "recording",
+        TranscriptStatus::Paused => "paused",
         TranscriptStatus::Finalizing { .. } => "finalizing",
         TranscriptStatus::Done => "done",
+        TranscriptStatus::Postponed => "postponed",
         TranscriptStatus::Failed { .. } => "failed",
     }
 }
@@ -378,6 +509,176 @@ mod tests {
     }
 
     #[test]
+    fn to_markdown_uses_the_title_as_heading_and_keeps_the_start_time() {
+        let mut s = TranscriptSession::new(Language::En, mk_source(), PathBuf::from("/a.wav"));
+        s.title = Some("Sprint review".to_string());
+        let md = s.to_markdown();
+        assert!(md.starts_with("# Sprint review\n\n"));
+        assert!(md.contains(&format!("- Recorded: {}\n", s.created_at)));
+        assert!(!md.contains("# Meeting transcript ("));
+    }
+
+    #[test]
+    fn normalize_title_trims_collapses_and_caps_the_length() {
+        assert_eq!(
+            normalize_title("  Weekly\t sync \n"),
+            Some("Weekly sync".to_string())
+        );
+        assert_eq!(normalize_title("a\u{7}b"), Some("a b".to_string()));
+        assert_eq!(normalize_title("   "), None);
+        assert_eq!(normalize_title(""), None);
+        assert_eq!(
+            normalize_title("Spotkanie zespołu 🎙"),
+            Some("Spotkanie zespołu 🎙".to_string())
+        );
+        let long = "ż".repeat(TITLE_MAX_CHARS + 10);
+        assert_eq!(
+            normalize_title(&long).unwrap().chars().count(),
+            TITLE_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn title_is_omitted_until_set_and_round_trips() {
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("a.wav"));
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("title").is_none());
+        s.title = Some("Demo".to_string());
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json.get("title").unwrap(), "Demo");
+        let back: TranscriptSession = serde_json::from_value(json).unwrap();
+        assert_eq!(back.title.as_deref(), Some("Demo"));
+    }
+
+    #[test]
+    fn title_field_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("title?: string | null"),
+            "models/transcript.ts TranscriptSession must carry the optional title field"
+        );
+    }
+
+    fn write_wav(path: &Path, frames: usize) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for _ in 0..frames {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn summary_sums_every_part_and_reports_the_final_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join(AUDIO_WAV);
+        let second = dir.path().join("audio-2.wav");
+        write_wav(&first, 16_000);
+        write_wav(&second, 8_000);
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), first);
+        s.audio_parts.push(second);
+        s.title = Some("Retro".to_string());
+        s.live_segments = vec![seg(0.0, 1.0, "live only")];
+        s.set_final_segments(vec![
+            seg(5.0, 6.0, "później"),
+            seg(0.0, 1.0, "  Dzień dobry "),
+        ]);
+        s.save(dir.path()).unwrap();
+
+        let sum = s.summary(dir.path());
+        assert_eq!(sum.id, s.id);
+        assert_eq!(sum.title.as_deref(), Some("Retro"));
+        assert_eq!(sum.source_label, "System (everything)");
+        assert!((sum.duration_secs - 1.5).abs() < 1e-9);
+        assert_eq!(
+            sum.segment_count, 2,
+            "counts the offline pass, not the live one"
+        );
+        assert_eq!(sum.preview.as_deref(), Some("Dzień dobry"));
+        let on_disk: u64 = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum();
+        assert_eq!(sum.size_bytes, on_disk);
+    }
+
+    #[test]
+    fn summary_of_a_record_only_session_counts_its_final_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), dir.path().join("a.wav"));
+        assert!(s.live_segments.is_empty());
+        s.set_final_segments(vec![seg(0.0, 1.0, "tekst")]);
+        assert_eq!(s.summary(dir.path()).segment_count, 1);
+    }
+
+    #[test]
+    fn summary_tolerates_missing_audio_and_an_empty_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = TranscriptSession::new(Language::En, mk_source(), dir.path().join("none.wav"));
+        let sum = s.summary(dir.path());
+        assert_eq!(sum.duration_secs, 0.0);
+        assert_eq!(sum.segment_count, 0);
+        assert_eq!(sum.preview, None);
+        assert_eq!(sum.size_bytes, 0);
+        let gone = s.summary(&dir.path().join("deleted"));
+        assert_eq!(gone.size_bytes, 0);
+    }
+
+    #[test]
+    fn summary_preview_skips_blank_segments_and_shortens_long_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = TranscriptSession::new(Language::En, mk_source(), dir.path().join("a.wav"));
+        let long = "word ".repeat(100);
+        s.live_segments = vec![seg(0.0, 1.0, "   "), seg(1.0, 2.0, &long)];
+        let preview = s.summary(dir.path()).preview.unwrap();
+        assert_eq!(preview.chars().count(), PREVIEW_MAX_CHARS);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn transcript_summary_fields_match_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let dir = tempfile::tempdir().unwrap();
+        let s = TranscriptSession::new(Language::En, mk_source(), dir.path().join("a.wav"));
+        let json = serde_json::to_value(s.summary(dir.path())).unwrap();
+        let start = src.find("export interface TranscriptSummary {").unwrap();
+        let body = &src[start..start + src[start..].find("\n}").unwrap()];
+        for key in json.as_object().unwrap().keys() {
+            assert!(
+                body.contains(&format!("  {key}:")),
+                "models/transcript.ts TranscriptSummary is missing `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn paused_status_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let wire = serde_json::to_string(&TranscriptStatus::Paused).unwrap();
+        assert_eq!(wire, r#"{"state":"paused"}"#);
+        assert!(
+            src.contains("| { state: 'paused' }"),
+            "models/transcript.ts TranscriptStatus must carry the paused state"
+        );
+    }
+
+    #[test]
+    fn postponed_status_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        let wire = serde_json::to_string(&TranscriptStatus::Postponed).unwrap();
+        assert_eq!(wire, r#"{"state":"postponed"}"#);
+        assert!(
+            src.contains("| { state: 'postponed' }"),
+            "models/transcript.ts TranscriptStatus must carry the postponed state"
+        );
+    }
+
+    #[test]
     fn audio_parts_field_matches_ts_mirror() {
         let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
         assert!(
@@ -528,8 +829,10 @@ mod tests {
     fn status_serde_round_trip() {
         for s in [
             TranscriptStatus::Recording,
+            TranscriptStatus::Paused,
             TranscriptStatus::Finalizing { progress: 0.42 },
             TranscriptStatus::Done,
+            TranscriptStatus::Postponed,
             TranscriptStatus::Failed {
                 reason: "oops".to_string(),
             },
