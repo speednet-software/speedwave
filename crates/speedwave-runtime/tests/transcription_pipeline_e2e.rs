@@ -112,6 +112,9 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
         audio_paths: vec![audio_wav],
         transcriber: Box::new(finalize_transcriber),
         transcribe_opts: TranscribeOptions::for_language(Language::En),
+        pass: store
+            .begin_offline_pass(id)
+            .expect("a stopped recording waits for its offline pass"),
     })
     .expect("finalize run");
 

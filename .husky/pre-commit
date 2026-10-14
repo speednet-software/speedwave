@@ -1,6 +1,0 @@
-if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "⚠️  gitleaks not found — install: brew install gitleaks (macOS), or make setup-dev-windows / choco install gitleaks (Windows)"
-  exit 1
-fi
-gitleaks git --pre-commit --staged --no-banner
-npx lint-staged

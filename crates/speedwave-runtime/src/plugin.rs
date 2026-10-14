@@ -290,6 +290,13 @@ pub struct PluginManifest {
     pub oauth: Option<PluginOAuthSpec>,
 }
 
+impl PluginManifest {
+    /// Per-project toggle and token-dir key: `service_id` for an MCP plugin, `slug` otherwise.
+    pub fn config_key(&self) -> &str {
+        self.service_id.as_deref().unwrap_or(&self.slug)
+    }
+}
+
 /// Host-bridge declaration in `plugin.json`. Desktop reads this at startup and spawns a
 /// `HostBridge` per these fields; `compose::apply_plugins_from_verified` injects `{url_env}`/`{token_env}`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -409,7 +416,11 @@ pub struct PluginManifestSummary {
 
 /// Returns `~/.speedwave/plugins/`
 pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
-    Ok(consts::data_dir().join("plugins"))
+    Ok(plugins_base_dir_in(consts::data_dir()))
+}
+
+pub(crate) fn plugins_base_dir_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("plugins")
 }
 
 /// The claude-resources dir a plugin's `/speedwave/plugins/<slug>` mount must come from —
@@ -788,8 +799,10 @@ fn get_plugin_token_status_in(
         return TokenStatus::NoTokensRequired;
     }
 
-    let service_id = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-    let token_dir = data_dir.join("tokens").join(project).join(service_id);
+    let token_dir = data_dir
+        .join("tokens")
+        .join(project)
+        .join(manifest.config_key());
 
     let mut missing = Vec::new();
     for field in &secret_fields {
@@ -845,7 +858,10 @@ fn validate_slug(slug: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
+fn check_speedwave_compat_against(
+    compat: Option<&str>,
+    current_version: &semver::Version,
+) -> anyhow::Result<()> {
     let s = match compat {
         None => return Ok(()),
         Some(s) => s,
@@ -862,14 +878,7 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
             e
         )
     })?;
-    let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| {
-        anyhow::anyhow!(
-            "internal: CARGO_PKG_VERSION '{}' is not valid semver: {}",
-            env!("CARGO_PKG_VERSION"),
-            e
-        )
-    })?;
-    if !req.matches(&current_version) {
+    if !req.matches(current_version) {
         anyhow::bail!(
             "Plugin requires Speedwave version matching '{}', but this Speedwave is {}. Upgrade Speedwave or install an older plugin version.",
             s,
@@ -877,6 +886,17 @@ fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_speedwave_compat(compat: Option<&str>) -> anyhow::Result<()> {
+    let current_version = semver::Version::parse(env!("SPEEDWAVE_VERSION")).map_err(|e| {
+        anyhow::anyhow!(
+            "internal: SPEEDWAVE_VERSION '{}' is not valid semver: {}",
+            env!("SPEEDWAVE_VERSION"),
+            e
+        )
+    })?;
+    check_speedwave_compat_against(compat, &current_version)
 }
 
 /// Validates manifest constraints at install time.
@@ -1998,6 +2018,26 @@ pub(crate) fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
     out
 }
 
+pub(crate) fn enabled_claude_resources_dirs(
+    plugins_dir: &Path,
+    enabled_keys: &[String],
+) -> Vec<PathBuf> {
+    let mut linked: Vec<PluginListEntry> = list_for_ui_from_dir(plugins_dir)
+        .into_iter()
+        .filter(|e| e.verification_status == VerificationStatus::Verified)
+        .filter(|e| {
+            e.manifest
+                .as_ref()
+                .is_some_and(|m| enabled_keys.iter().any(|k| k == m.config_key()))
+        })
+        .collect();
+    linked.sort_by(|a, b| a.slug.cmp(&b.slug));
+    linked
+        .iter()
+        .map(|e| plugin_claude_resources_dir(&e.dir))
+        .collect()
+}
+
 fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry {
     let manifest_path = plugin_dir.join("plugin.json");
     let manifest: Option<PluginManifest> = std::fs::read_to_string(&manifest_path)
@@ -2558,7 +2598,7 @@ pub fn generate_plugin_service(
 
     let mut env_lines = format!(
         "  - PORT={port}\n  - SPEEDWAVE_VERSION={}",
-        env!("CARGO_PKG_VERSION")
+        env!("SPEEDWAVE_VERSION")
     );
     if let Some(ref extra) = manifest.extra_env {
         for (k, v) in extra {
@@ -2785,6 +2825,7 @@ fn warn_legacy_addons() {
 )]
 mod tests {
     use super::*;
+    use crate::signing::test_support::{unsigned_env_lock, UnsignedBypassGuard};
 
     const FIXTURE_UUID: &str = "11111111-2222-3333-4444-555555555555";
 
@@ -3182,7 +3223,7 @@ mod tests {
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         assert!(yaml.contains("PORT=3000"), "PORT env: {yaml}");
         assert!(
-            yaml.contains(&format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"))),
+            yaml.contains(&format!("SPEEDWAVE_VERSION={}", env!("SPEEDWAVE_VERSION"))),
             "SPEEDWAVE_VERSION env: {yaml}"
         );
         assert!(
@@ -3881,34 +3922,6 @@ mod tests {
         std::fs::write(zip_path, buf.into_inner()).unwrap();
     }
 
-    /// Serializes tests that mutate the global `SPEEDWAVE_ALLOW_UNSIGNED` env var so concurrent
-    /// runs don't see each other's set/unset. Acquired before set_var, dropped after remove_var.
-    fn unsigned_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// RAII guard that turns on the debug-only signature bypass for the test scope, holding
-    /// `unsigned_env_lock`. Use in tests synthesising plugin dirs without a real SIGNATURE.
-    struct UnsignedBypassGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl UnsignedBypassGuard {
-        fn new() -> Self {
-            let lock = unsigned_env_lock();
-            std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
-            Self { _lock: lock }
-        }
-    }
-    impl Drop for UnsignedBypassGuard {
-        fn drop(&mut self) {
-            std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
-        }
-    }
-
     #[test]
     fn test_peek_plugin_manifest_mcp_plugin() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4322,6 +4335,102 @@ mod tests {
         assert_eq!(
             entries[0].changelog, None,
             "unverified plugin must not surface changelog content"
+        );
+    }
+
+    #[test]
+    fn plugins_base_dir_in_is_the_plugins_subdir_of_the_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(plugins_base_dir_in(tmp.path()), tmp.path().join("plugins"));
+    }
+
+    fn keys(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn config_key_is_the_service_id_of_an_mcp_plugin_and_the_slug_otherwise() {
+        let mut manifest: PluginManifest = serde_json::from_str(
+            r#"{"name":"x","slug":"acme-tools","version":"1.0.0","description":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.config_key(), "acme-tools");
+        manifest.service_id = Some("acme".into());
+        assert_eq!(manifest.config_key(), "acme");
+    }
+
+    #[test]
+    fn enabled_claude_resources_dirs_lists_enabled_verified_plugins_in_slug_order() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        make_resource_only_plugin_dir(&plugins, "zeta", "1.0.0");
+        make_resource_only_plugin_dir(&plugins, "alpha", "1.0.0");
+
+        assert_eq!(
+            enabled_claude_resources_dirs(&plugins, &keys(&["zeta", "alpha"])),
+            vec![
+                plugins.join("alpha").join("claude-resources"),
+                plugins.join("zeta").join("claude-resources"),
+            ]
+        );
+    }
+
+    #[test]
+    fn enabled_claude_resources_dirs_skips_a_plugin_not_enabled_in_the_project() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        make_resource_only_plugin_dir(&plugins, "on", "1.0.0");
+        make_resource_only_plugin_dir(&plugins, "off", "1.0.0");
+        assert_eq!(list_for_ui_from_dir(&plugins).len(), 2);
+
+        assert_eq!(
+            enabled_claude_resources_dirs(&plugins, &keys(&["on"])),
+            vec![plugins.join("on").join("claude-resources")]
+        );
+        assert!(enabled_claude_resources_dirs(&plugins, &[]).is_empty());
+    }
+
+    #[test]
+    fn enabled_claude_resources_dirs_includes_an_enabled_mcp_plugin() {
+        let _g = UnsignedBypassGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        make_mcp_plugin_dir(&plugins, "acme", "1.0.0");
+        assert_eq!(
+            list_for_ui_from_dir(&plugins)[0].verification_status,
+            VerificationStatus::Verified
+        );
+
+        assert_eq!(
+            enabled_claude_resources_dirs(&plugins, &keys(&["acme"])),
+            vec![plugins.join("acme").join("claude-resources")]
+        );
+    }
+
+    #[test]
+    fn enabled_claude_resources_dirs_skips_a_plugin_that_fails_verification() {
+        let _g = unsigned_env_lock();
+        std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        make_resource_only_plugin_dir(&plugins, "unsigned", "1.0.0");
+        std::fs::create_dir_all(plugins.join("unsigned").join("claude-resources/skills/s"))
+            .unwrap();
+        assert_eq!(
+            list_for_ui_from_dir(&plugins)[0].verification_status,
+            VerificationStatus::MissingSignature
+        );
+
+        assert!(enabled_claude_resources_dirs(&plugins, &keys(&["unsigned"])).is_empty());
+    }
+
+    #[test]
+    fn enabled_claude_resources_dirs_is_empty_without_a_plugins_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            enabled_claude_resources_dirs(&tmp.path().join("plugins"), &keys(&["any"])).is_empty()
         );
     }
 
@@ -8446,72 +8555,91 @@ mod tests {
     }
 
     #[test]
-    fn test_compat_exact_current_version_matches() {
-        let range = format!("={}", env!("CARGO_PKG_VERSION"));
+    fn test_validate_speedwave_compat_reads_the_build_version() {
+        let range = format!("={}", env!("SPEEDWAVE_VERSION"));
         assert!(validate_speedwave_compat(Some(&range)).is_ok());
     }
 
-    #[test]
-    fn test_compat_lower_bound_current_version_matches() {
-        let range = format!(">={}", env!("CARGO_PKG_VERSION"));
-        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+    fn fixed_test_version() -> semver::Version {
+        semver::Version::parse("2.7.3").unwrap()
     }
 
     #[test]
-    fn test_compat_current_major_minor_range_matches() {
-        let v = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    fn test_compat_exact_version_matches() {
+        let v = fixed_test_version();
+        let range = format!("={v}");
+        assert!(check_speedwave_compat_against(Some(&range), &v).is_ok());
+    }
+
+    #[test]
+    fn test_compat_lower_bound_matches() {
+        let v = fixed_test_version();
+        let range = format!(">={v}");
+        assert!(check_speedwave_compat_against(Some(&range), &v).is_ok());
+    }
+
+    #[test]
+    fn test_compat_major_minor_range_matches() {
+        let v = fixed_test_version();
         let next_major = v.major + 1;
         let range = format!(">={}.{}, <{}", v.major, v.minor, next_major);
-        assert!(validate_speedwave_compat(Some(&range)).is_ok());
+        assert!(check_speedwave_compat_against(Some(&range), &v).is_ok());
     }
 
     #[test]
     fn test_compat_legacy_wide_range_matches() {
-        assert!(validate_speedwave_compat(Some(">=0.1.0")).is_ok());
+        let v = fixed_test_version();
+        assert!(check_speedwave_compat_against(Some(">=0.1.0"), &v).is_ok());
     }
 
     #[test]
     fn test_compat_empty_string_rejected() {
-        let result = validate_speedwave_compat(Some(""));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some(""), &v);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("speedwave_compat"));
     }
 
     #[test]
     fn test_compat_whitespace_only_rejected() {
-        let result = validate_speedwave_compat(Some("   "));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some("   "), &v);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("speedwave_compat"));
     }
 
     #[test]
     fn test_compat_garbage_rejected() {
-        let result = validate_speedwave_compat(Some("banana"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some("banana"), &v);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("banana"));
     }
 
     #[test]
     fn test_compat_unsatisfied_range_rejected() {
-        let result = validate_speedwave_compat(Some(">=99.0.0"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some(">=99.0.0"), &v);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains(">=99.0.0"));
-        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
+        assert!(msg.contains(v.to_string().as_str()));
     }
 
     #[test]
     fn test_compat_unsatisfied_upper_bound_rejected() {
-        let result = validate_speedwave_compat(Some("<0.1"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some("<0.1"), &v);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("<0.1"));
-        assert!(msg.contains(env!("CARGO_PKG_VERSION")));
+        assert!(msg.contains(v.to_string().as_str()));
     }
 
     #[test]
     fn test_compat_error_message_contains_upgrade_guidance() {
-        let result = validate_speedwave_compat(Some(">=99.0.0"));
+        let v = fixed_test_version();
+        let result = check_speedwave_compat_against(Some(">=99.0.0"), &v);
         assert!(result
             .unwrap_err()
             .to_string()
@@ -8546,7 +8674,7 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_accepts_compatible_compat() {
-        let range = format!(">={}", env!("CARGO_PKG_VERSION"));
+        let range = format!(">={}", env!("SPEEDWAVE_VERSION"));
         let manifest = minimal_resource_only_manifest(Some(range));
         let tmp = tempfile::tempdir().unwrap();
         assert!(validate_manifest(&manifest, tmp.path()).is_ok());

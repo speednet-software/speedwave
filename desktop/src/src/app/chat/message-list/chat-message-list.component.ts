@@ -78,6 +78,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   readonly loadingTranscript = input(false);
   /** Index of the most recent assistant entry in `messages` (`-1` when none); gates the per-message Retry button. */
   readonly lastAssistantIndex = input(-1);
+  /** Identity of the rendered conversation (tab id); a change resets the per-conversation scroll tracking. */
+  readonly conversationKey = input('');
 
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
 
@@ -87,19 +89,40 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   private pendingScrollSync = false;
   /** Tracks message-count to detect new turns (vs. mere streaming deltas). */
   private lastMessageCount = 0;
+  private lastConversationKey: string | null = null;
+  private rederiveFromViewport = false;
 
   /** Wires the streaming-aware scroll sync, re-run on every signal-input change. */
   constructor() {
     effect(() => {
+      const key = this.conversationKey();
       const count = this.messages().length;
       this.currentBlocks();
       this.isStreaming();
+      const keyChanged = this.lastConversationKey !== null && key !== this.lastConversationKey;
+      this.lastConversationKey = key;
+      if (keyChanged) {
+        this.lastMessageCount = count;
+        this.rederiveFromViewport = true;
+        this.pendingScrollSync = false;
+        return;
+      }
+      if (this.rederiveFromViewport) {
+        this.rederiveFromViewport = false;
+        this.shouldAutoScroll = this.isAtBottom();
+      }
       if (count > this.lastMessageCount) {
         this.shouldAutoScroll = true;
       }
       this.lastMessageCount = count;
       this.pendingScrollSync = true;
     });
+  }
+
+  private isAtBottom(): boolean {
+    const el = this.scrollContainer?.nativeElement;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
   }
 
   /** Whether to show the transcript loader: fetching with nothing rendered yet. */
@@ -137,10 +160,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
 
   /** Tracks user scrolling to decide whether to pin new output to the bottom. */
   onScroll(): void {
-    const el = this.scrollContainer?.nativeElement;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
-    this.shouldAutoScroll = atBottom;
+    if (!this.scrollContainer?.nativeElement) return;
+    this.shouldAutoScroll = this.isAtBottom();
   }
 
   /** Pins to the bottom after each render when the user has not scrolled up. */

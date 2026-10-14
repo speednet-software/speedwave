@@ -13,6 +13,10 @@ import {
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
+const LOCAL_DATE_FORMS =
+  'YYYY-MM-DD (local midnight) or YYYY-MM-DDTHH:MM:SS (local time); a Z or ±HH:MM offset is converted';
+const UTC_OUTPUT = 'UTC instant, e.g. 2026-06-15T07:00:00Z';
+
 /** Input parameters for the listCalendars tool (no params required). */
 type ListCalendarsParams = Record<string, never>;
 
@@ -126,8 +130,7 @@ const listEventsTool: Tool = {
     [META_KEYS.OS_CATEGORY]: 'calendar',
   },
   keywords: ['os', 'calendar', 'events', 'list', 'schedule', 'meetings', 'appointments'],
-  example:
-    'const { events } = await os.listEvents({ start: "2025-01-13T00:00:00Z", end: "2025-01-17T23:59:59Z" })',
+  example: 'const { events } = await os.listEvents({ start: "2026-01-12", end: "2026-01-17" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -135,8 +138,11 @@ const listEventsTool: Tool = {
         type: 'string',
         description: 'Filter by calendar id or its exact display name',
       },
-      start: { type: 'string', description: 'Start date in ISO8601 format (default: now)' },
-      end: { type: 'string', description: 'End date in ISO8601 format (default: now + 7 days)' },
+      start: { type: 'string', description: `Range start: ${LOCAL_DATE_FORMS} (default: now)` },
+      end: {
+        type: 'string',
+        description: `Range end: ${LOCAL_DATE_FORMS} (default: now + 7 days)`,
+      },
       limit: { type: 'number', description: 'Max events to return (default 20)' },
     },
   },
@@ -150,8 +156,8 @@ const listEventsTool: Tool = {
           properties: {
             id: { type: 'string' },
             summary: { type: 'string' },
-            start: { type: 'string', description: 'ISO8601' },
-            end: { type: 'string', description: 'ISO8601' },
+            start: { type: 'string', description: UTC_OUTPUT },
+            end: { type: 'string', description: UTC_OUTPUT },
             location: { type: 'string' },
             all_day: { type: 'boolean' },
             calendar_id: { type: 'string', description: 'Calendar identifier' },
@@ -168,10 +174,10 @@ const listEventsTool: Tool = {
       input: {},
     },
     {
-      description: 'Full: specific calendar and date range',
+      description: 'Full: specific calendar and a Monday-to-Friday range',
       input: {
-        start: '2025-01-13T00:00:00Z',
-        end: '2025-01-17T23:59:59Z',
+        start: '2026-01-12',
+        end: '2026-01-17',
         calendar_id: 'work-cal',
         limit: 20,
       },
@@ -206,8 +212,8 @@ const getEventTool: Tool = {
     properties: {
       id: { type: 'string' },
       summary: { type: 'string' },
-      start: { type: 'string' },
-      end: { type: 'string' },
+      start: { type: 'string', description: UTC_OUTPUT },
+      end: { type: 'string', description: UTC_OUTPUT },
       location: { type: 'string' },
       notes: { type: 'string' },
       all_day: { type: 'boolean' },
@@ -236,13 +242,13 @@ const createEventTool: Tool = {
   },
   keywords: ['os', 'calendar', 'event', 'create', 'new', 'add', 'meeting', 'schedule'],
   example:
-    'const { id } = await os.createEvent({ summary: "Team standup", start: "2025-01-15T09:00:00Z", end: "2025-01-15T09:30:00Z" })',
+    'const { id } = await os.createEvent({ summary: "Team standup", start: "2026-01-15T09:00:00", end: "2026-01-15T09:30:00" })',
   inputSchema: {
     type: 'object',
     properties: {
       summary: { type: 'string', description: 'Event title' },
-      start: { type: 'string', description: 'Start time in ISO8601 format' },
-      end: { type: 'string', description: 'End time in ISO8601 format' },
+      start: { type: 'string', description: `Start: ${LOCAL_DATE_FORMS}` },
+      end: { type: 'string', description: `End: ${LOCAL_DATE_FORMS}` },
       calendar_id: {
         type: 'string',
         description:
@@ -250,7 +256,11 @@ const createEventTool: Tool = {
       },
       location: { type: 'string', description: 'Event location' },
       description: { type: 'string', description: 'Event description/notes' },
-      all_day: { type: 'boolean', description: 'Whether this is an all-day event' },
+      all_day: {
+        type: 'boolean',
+        description:
+          'true for an all-day event: pass date-only start and end, end being the day after the last day (start 2026-06-15 and end 2026-06-16 is June 15 only)',
+      },
     },
     required: ['summary', 'start', 'end'],
   },
@@ -266,16 +276,16 @@ const createEventTool: Tool = {
       description: 'Minimal: create with required fields',
       input: {
         summary: 'Team standup',
-        start: '2025-01-15T09:00:00Z',
-        end: '2025-01-15T09:30:00Z',
+        start: '2026-01-15T09:00:00',
+        end: '2026-01-15T09:30:00',
       },
     },
     {
       description: 'Full: create with all fields',
       input: {
         summary: 'Sprint Planning',
-        start: '2025-01-15T10:00:00Z',
-        end: '2025-01-15T11:00:00Z',
+        start: '2026-01-15T10:00:00',
+        end: '2026-01-15T11:00:00',
         calendar_id: 'work-cal',
         location: 'Room 42',
         description: 'Q1 sprint planning',
@@ -296,7 +306,7 @@ const updateEventTool: Tool = {
   },
   keywords: ['os', 'calendar', 'event', 'update', 'edit', 'modify', 'reschedule'],
   example:
-    'await os.updateEvent({ id: "evt-123", summary: "Updated meeting title", start: "2025-01-15T10:00:00Z", end: "2025-01-15T11:00:00Z" })',
+    'await os.updateEvent({ id: "evt-123", summary: "Updated meeting title", start: "2026-01-15T10:00:00", end: "2026-01-15T11:00:00" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -306,8 +316,8 @@ const updateEventTool: Tool = {
           'Event ID to update (must be the exact id returned by a list/get/create call; names are not accepted)',
       },
       summary: { type: 'string', description: 'New event title' },
-      start: { type: 'string', description: 'New start time in ISO8601 format' },
-      end: { type: 'string', description: 'New end time in ISO8601 format' },
+      start: { type: 'string', description: `New start: ${LOCAL_DATE_FORMS}` },
+      end: { type: 'string', description: `New end: ${LOCAL_DATE_FORMS}` },
       location: { type: 'string', description: 'New location' },
       description: { type: 'string', description: 'New description' },
     },
@@ -329,8 +339,8 @@ const updateEventTool: Tool = {
       input: {
         id: 'evt-123',
         summary: 'Sprint Planning (moved)',
-        start: '2025-01-16T10:00:00Z',
-        end: '2025-01-16T11:00:00Z',
+        start: '2026-01-16T10:00:00',
+        end: '2026-01-16T11:00:00',
         location: 'Room 7',
         description: 'Updated planning session',
       },

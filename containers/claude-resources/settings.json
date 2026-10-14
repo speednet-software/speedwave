@@ -1,8 +1,9 @@
 {
-  "effortLevel": "high",
   "outputStyle": "Speedwave",
   "showThinkingSummaries": true,
   "skipDangerousModePermissionPrompt": true,
+  "syncClaudeAiSkills": false,
+  "syncClaudeAiPlugins": false,
   "statusLine": {
     "type": "command",
     "command": "~/.claude/statusline.sh"

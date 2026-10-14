@@ -1,5 +1,5 @@
 name: 'Prepare Desktop Bundle'
-description: 'Downloads per-platform runtime assets (Lima/WSL/Node), bundles the build context + native binaries, builds the CLI, and verifies the bundle. Shared by desktop-build.yml and desktop-release.yml.'
+description: 'Downloads per-platform runtime assets (Lima/WSL/Node), bundles the build context + native binaries, builds the CLI, and verifies the bundle. Shared by the build lane in test.yml and by build-publish.yml.'
 inputs:
   platform:
     description: 'Runner platform (e.g. macos-latest, windows-latest)'

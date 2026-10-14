@@ -394,6 +394,54 @@ pub fn wav_duration(path: &Path) -> Option<Duration> {
     ))
 }
 
+/// Rewrites the RIFF and `data` sizes of a WAV whose writer never finalized (the app closed mid
+/// recording, so `hound` left both at 0). Returns `true` when it changed the header.
+pub fn repair_wav_header(path: &Path) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let file_len = file.metadata()?.len();
+    let mut riff = [0u8; 12];
+    if file_len < 12 || file.read_exact(&mut riff).is_err() {
+        return Ok(false);
+    }
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return Ok(false);
+    }
+    let mut pos: u64 = 12;
+    let mut block_align: u64 = 1;
+    while pos + 8 <= file_len {
+        let mut head = [0u8; 8];
+        file.seek(SeekFrom::Start(pos))?;
+        file.read_exact(&mut head)?;
+        let declared = u64::from(u32::from_le_bytes([head[4], head[5], head[6], head[7]]));
+        if &head[0..4] == b"fmt " && declared >= 14 {
+            let mut fmt = [0u8; 14];
+            file.read_exact(&mut fmt)?;
+            block_align = u64::from(u16::from_le_bytes([fmt[12], fmt[13]])).max(1);
+        }
+        if &head[0..4] == b"data" {
+            let available = file_len - (pos + 8);
+            let data_len = (available - available % block_align).min(u64::from(u32::MAX));
+            let riff_len = (file_len - 8).min(u64::from(u32::MAX));
+            let stored_riff = u64::from(u32::from_le_bytes([riff[4], riff[5], riff[6], riff[7]]));
+            if declared == data_len && stored_riff == riff_len {
+                return Ok(false);
+            }
+            file.seek(SeekFrom::Start(4))?;
+            file.write_all(&(riff_len as u32).to_le_bytes())?;
+            file.seek(SeekFrom::Start(pos + 4))?;
+            file.write_all(&(data_len as u32).to_le_bytes())?;
+            file.sync_all()?;
+            return Ok(true);
+        }
+        pos += 8 + declared + (declared & 1);
+    }
+    Ok(false)
+}
+
 /// File-backed dev path: parse + resample to 16 kHz.
 fn read_wav_as_mono_16k(path: &Path) -> Result<Vec<f32>, CaptureError> {
     let (mono, rate) = parse_wav_to_mono_f32(path)?;
@@ -766,6 +814,74 @@ mod tests {
         let ok = dir.path().join("ok.wav");
         write_raw_wav(&ok, 16_000, 8_000);
         assert_eq!(wav_duration(&ok), Some(Duration::from_millis(500)));
+    }
+
+    fn zero_wav_sizes(path: &Path) {
+        let mut b = std::fs::read(path).unwrap();
+        b[4..8].copy_from_slice(&0u32.to_le_bytes());
+        b[40..44].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn repair_wav_header_restores_the_sizes_an_unfinalized_writer_left_at_zero() {
+        let (_g, path) = write_temp_wav(&vec![0.1f32; 8_000], 16_000, 2);
+        let intact = std::fs::read(&path).unwrap();
+        zero_wav_sizes(&path);
+        assert_eq!(wav_duration(&path), Some(Duration::ZERO));
+
+        assert!(repair_wav_header(&path).unwrap());
+        assert_eq!(wav_duration(&path), Some(Duration::from_millis(500)));
+        assert_eq!(std::fs::read(&path).unwrap(), intact);
+        assert!(
+            !repair_wav_header(&path).unwrap(),
+            "a repaired header is left alone"
+        );
+    }
+
+    #[test]
+    fn repair_wav_header_leaves_a_finalized_file_untouched() {
+        let (_g, path) = write_temp_wav(&vec![0.2f32; 1_600], 16_000, 1);
+        let before = std::fs::read(&path).unwrap();
+        assert!(!repair_wav_header(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn repair_wav_header_drops_a_trailing_partial_frame() {
+        let (_g, path) = write_temp_wav(&vec![0.1f32; 100], 16_000, 2);
+        zero_wav_sizes(&path);
+        let mut b = std::fs::read(&path).unwrap();
+        b.extend_from_slice(&[1, 2, 3]);
+        std::fs::write(&path, b).unwrap();
+
+        assert!(repair_wav_header(&path).unwrap());
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.duration(), 100, "only whole stereo frames count");
+    }
+
+    #[test]
+    fn repair_wav_header_ignores_non_wav_and_header_only_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let garbage = dir.path().join("garbage.wav");
+        std::fs::write(&garbage, vec![0xAAu8; 200]).unwrap();
+        assert!(!repair_wav_header(&garbage).unwrap());
+        assert_eq!(std::fs::read(&garbage).unwrap(), vec![0xAAu8; 200]);
+
+        let short = dir.path().join("short.wav");
+        std::fs::write(&short, b"RIFF").unwrap();
+        assert!(!repair_wav_header(&short).unwrap());
+
+        let header_only = dir.path().join("header.wav");
+        write_raw_wav(&header_only, 16_000, 0);
+        assert!(!repair_wav_header(&header_only).unwrap());
+
+        assert_eq!(
+            repair_wav_header(&dir.path().join("missing.wav"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -222,13 +222,8 @@ fn apply_llm_config_legacy_in(
     }
 }
 
-/// Reads a local-LLM token file. Returns `None` on any failure (missing file,
-/// I/O error, empty content); callers fall back to a dummy or skip injection.
-pub fn read_local_llm_token_opt(project: &str, file: &str) -> Option<String> {
-    read_local_llm_token_opt_in(consts::data_dir().as_path(), project, file)
-}
-
-/// Testable variant: resolves the token file under an explicit data directory.
+/// Reads a local-LLM token file under `data_dir`. Returns `None` on any failure (missing
+/// file, I/O error, empty content); callers fall back to a dummy or skip injection.
 pub fn read_local_llm_token_opt_in(data_dir: &Path, project: &str, file: &str) -> Option<String> {
     let path = tokens_path_in(data_dir, project, "local-llm", file).ok()?;
     let content = std::fs::read_to_string(&path).ok()?;

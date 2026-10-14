@@ -1,0 +1,27 @@
+{
+  "version": "0.21.0+115",
+  "notes": "Release notes for 0.21.0+115",
+  "pub_date": "2026-04-16T00:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "canned-sig",
+      "url": "https://api.github.com/repos/test/repo/releases/assets/101"
+    },
+    "darwin-aarch64-app": {
+      "signature": "canned-sig",
+      "url": "https://api.github.com/repos/test/repo/releases/assets/101"
+    },
+    "windows-x86_64": {
+      "signature": "canned-sig",
+      "url": "https://api.github.com/repos/test/repo/releases/assets/103"
+    },
+    "windows-x86_64-msi": {
+      "signature": "canned-sig",
+      "url": "https://api.github.com/repos/test/repo/releases/assets/104"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "canned-sig",
+      "url": "https://api.github.com/repos/test/repo/releases/assets/103"
+    }
+  }
+}

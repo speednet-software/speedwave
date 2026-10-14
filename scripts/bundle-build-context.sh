@@ -46,8 +46,8 @@ fi
 copy_tree() {
   local src="$1" dest="$2"
   mkdir -p "$dest"
-  (cd "$src" && find . -type d \
-      \( -name target -o -name dist -o -name node_modules \) -prune -o ! -type d -print0 |
+  (cd "$src" && find . \( -type d -o -type l \) \
+      \( -iname target -o -iname dist -o -iname node_modules \) -prune -o ! -type d -print0 |
     tar -cf - --null -T -) | { tar -xpmf - -C "$dest" && cat >/dev/null; }
 }
 
@@ -87,6 +87,13 @@ for svc in $MCP_SERVICES; do
   for f in Dockerfile Containerfile; do
     [ -f "$svc_src/$f" ] && cp "$svc_src/$f" "$svc_dest/"
   done
+done
+
+for tree in containers mcp-servers; do
+  (cd "$DEST/build-context/$tree" &&
+    find . \( -type f -o -type l \) ! -path ./.speedwave-shipped-files | sed 's#^\./##' | LC_ALL=C sort) \
+    > "$DEST/build-context/.$tree.speedwave-shipped-files"
+  mv "$DEST/build-context/.$tree.speedwave-shipped-files" "$DEST/build-context/$tree/.speedwave-shipped-files"
 done
 
 

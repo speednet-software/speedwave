@@ -4,12 +4,18 @@ import { provideRouter } from '@angular/router';
 import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
+import { makeTranscriptSession } from '../testing/transcript-session';
 import type {
   AudioSource,
   CaptureWarning,
+  DownloadProgress,
   Language,
+  RecommendedModelEntry,
   TranscriptSession,
+  TranscriptStatus,
+  TranscriptSummary,
 } from '../models/transcript';
+import { isSessionOngoing } from '../models/transcript';
 
 describe('MeetingTranscriptionComponent', () => {
   let component: MeetingTranscriptionComponent;
@@ -20,27 +26,47 @@ describe('MeetingTranscriptionComponent', () => {
     subscribeToTranscript: ReturnType<typeof vi.fn>;
     resumeActiveRecording: ReturnType<typeof vi.fn>;
     recommendedModel: ReturnType<typeof vi.fn>;
-    getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
-    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
-    list: ReturnType<typeof vi.fn>;
+    watchRecordings: ReturnType<typeof vi.fn>;
+    recordings: Signal<TranscriptSummary[]>;
+    recordingsError: Signal<string>;
+    recordingStartedAt: Signal<number | null>;
+    audioLevels: Signal<number[] | null>;
+    liveDraft: Signal<string>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     captureWarnings: typeof captureWarningsSig;
     recordingSessionId: typeof recordingSessionIdSig;
     recording: Signal<boolean>;
+    liveStreamNeeded: Signal<boolean>;
     recordingSource: typeof recordingSourceSig;
     recordingLanguage: typeof recordingLanguageSig;
     recordingLive: typeof recordingLiveSig;
+    captureOpen: Signal<boolean>;
+    pausedRecording: typeof pausedRecordingSig;
+    transcribing: Signal<TranscriptSummary[]>;
+    highQualityModel: typeof highQualityModelSig;
+    downloadingModelKey: typeof downloadingModelKeySig;
+    downloadProgress: typeof downloadProgressSig;
+    loadRecommendedModel: ReturnType<typeof vi.fn>;
+    downloadModel: ReturnType<typeof vi.fn>;
+    recordingChoice: ReturnType<typeof vi.fn>;
+    setRecordingChoice: ReturnType<typeof vi.fn>;
   };
+  const pausedRecordingSig = signal<TranscriptSummary | null>(null);
+  const highQualityModelSig = signal<RecommendedModelEntry | null>(null);
+  const downloadingModelKeySig = signal<string | null>(null);
+  const downloadProgressSig = signal<DownloadProgress | null>(null);
   const activeSig = signal<TranscriptSession | null>(null);
   const captureWarningsSig = signal<readonly CaptureWarning[]>([]);
   const recordingSessionIdSig = signal<string | null>(null);
   const recordingSourceSig = signal<AudioSource | null>(null);
   const recordingLanguageSig = signal<Language | null>(null);
   const recordingLiveSig = signal<boolean | null>(null);
+
+  const session = (status: TranscriptStatus) => makeTranscriptSession({ status });
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -62,34 +88,55 @@ describe('MeetingTranscriptionComponent', () => {
     recordingSourceSig.set(null);
     recordingLanguageSig.set(null);
     recordingLiveSig.set(null);
+    pausedRecordingSig.set(null);
+    downloadingModelKeySig.set(null);
+    downloadProgressSig.set(null);
+    highQualityModelSig.set({
+      key: 'large-v3',
+      display_name: 'Large v3',
+      size_bytes: 1_600_000_000,
+      downloaded: true,
+      downloading: false,
+    });
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
       subscribeToTranscript: vi.fn(async () => ({ event_name: 'e', snapshot: {} as never })),
       resumeActiveRecording: vi.fn(async () => undefined),
       recommendedModel: vi.fn(async () => recommended(true)),
-      getCapabilities: vi.fn(async () => ({
-        capabilities: {
-          supports_system_audio: true,
-          supports_microphone: false,
-          note: null,
-        },
-        gpu_class: 'none' as const,
-        accel_label: 'CPU',
-      })),
       listAudioSources: vi.fn(async () => []),
-      liveTranscriptPreferred: vi.fn(() => true),
-      setLiveTranscriptPreferred: vi.fn(),
+      liveTranscriptPreferred: vi.fn(() => false),
       listModels: vi.fn(async () => models(true)),
-      list: vi.fn(async () => []),
+      watchRecordings: vi.fn(async () => undefined),
+      recordings: signal<TranscriptSummary[]>([]),
+      recordingsError: signal(''),
+      recordingStartedAt: signal<number | null>(null),
+      audioLevels: signal<number[] | null>(null),
+      liveDraft: signal(''),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       captureWarnings: captureWarningsSig,
       recordingSessionId: recordingSessionIdSig,
       recording: computed(() => recordingSessionIdSig() !== null),
+      liveStreamNeeded: computed(() => {
+        const status = activeSig()?.status;
+        return status !== undefined && isSessionOngoing(status);
+      }),
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,
       recordingLive: recordingLiveSig,
+      captureOpen: computed(
+        () => recordingSessionIdSig() !== null || pausedRecordingSig() !== null
+      ),
+      pausedRecording: pausedRecordingSig,
+      transcribing: signal<TranscriptSummary[]>([]),
+      highQualityModel: highQualityModelSig,
+      downloadingModelKey: downloadingModelKeySig,
+      downloadProgress: downloadProgressSig,
+      loadRecommendedModel: vi.fn(async () => undefined),
+      downloadModel: vi.fn(async () => undefined),
+      recordingChoice: vi.fn(() => null),
+      setRecordingChoice: vi.fn(),
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
@@ -119,7 +166,10 @@ describe('MeetingTranscriptionComponent', () => {
     fixture.detectChanges();
     const gate = fixture.nativeElement.querySelector('[data-testid="model-required-gate"]');
     expect(gate).not.toBeNull();
-    expect(gate.textContent.toLowerCase()).toContain('model required');
+    expect(gate.textContent).toContain('One download before your first recording');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="gate-download"]').textContent
+    ).toContain('Download (1.5 GB)');
     const link = fixture.nativeElement.querySelector('[data-testid="download-model-link"]');
     expect(link).not.toBeNull();
     expect(link.getAttribute('href')).toContain('/settings');
@@ -169,14 +219,119 @@ describe('MeetingTranscriptionComponent', () => {
     expect(svc.listModels).not.toHaveBeenCalled();
   });
 
-  it('shows the "audio local, send uses network" banner text', () => {
-    expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain(
-      'transcribed locally'
+  it('says in one line that everything stays local until a transcript is sent', () => {
+    const header = (fixture.nativeElement.querySelector('header')?.textContent ?? '').toLowerCase();
+    expect(header).toContain('on this machine');
+    expect(header).toContain('nothing leaves your computer');
+  });
+
+  it('keeps the details in a collapsed "How it works" panel', () => {
+    const details: HTMLDetailsElement = fixture.nativeElement.querySelector(
+      '[data-testid="how-it-works"]'
     );
+    expect(details.open).toBe(false);
+    const text = details.textContent ?? '';
+    expect(text).toContain('Pause turns the microphone off');
+    expect(text).toContain('still being transcribed');
+    expect(details.querySelector('[data-testid="quality-disclaimer"]')).not.toBeNull();
+  });
+
+  it('starts following the recordings list through the list component', () => {
+    expect(svc.watchRecordings).toHaveBeenCalled();
+  });
+
+  it('clears the banner when a recording starts or stops', () => {
+    component.onError('boom');
+    component.onStarted();
+    expect(component.error()).toBe('');
+    component.onError('boom');
+    component.onStopped();
+    expect(component.error()).toBe('');
+  });
+
+  it('puts Record in the header and swaps it for the recording bar while one captures or is paused', () => {
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('header app-recording-controls')).not.toBeNull();
+    expect(el.querySelector('app-recording-bar')).toBeNull();
+    recordingSessionIdSig.set('sess-1');
+    fixture.detectChanges();
+    expect(el.querySelector('app-recording-controls')).toBeNull();
+    expect(el.querySelector('app-recording-bar')).not.toBeNull();
+    recordingSessionIdSig.set(null);
+    pausedRecordingSig.set({ id: 'sess-1', status: { state: 'paused' } } as TranscriptSummary);
+    fixture.detectChanges();
+    expect(el.querySelector('app-recording-bar')).not.toBeNull();
+  });
+
+  it('links to the transcription settings from the header', () => {
+    const link = fixture.nativeElement.querySelector('[data-testid="transcription-settings-link"]');
+    expect(link.getAttribute('href')).toContain('/settings');
+  });
+
+  it('loads which model is the high-quality one on init', async () => {
+    await component.ngOnInit();
+    expect(svc.loadRecommendedModel).toHaveBeenCalled();
+  });
+
+  it('opens the recording the bar names, and not again when it is already open', async () => {
+    await component.onOpenById('sess-2');
+    expect(svc.subscribeToTranscript).toHaveBeenCalledWith('sess-2');
+    activeSig.set(makeTranscriptSession({ id: 'sess-2' }));
+    svc.subscribeToTranscript.mockClear();
+    await component.onOpenById('sess-2');
+    expect(svc.subscribeToTranscript).not.toHaveBeenCalled();
+  });
+
+  describe('first-run gate', () => {
+    beforeEach(async () => {
+      svc.listModels.mockResolvedValue(models(false));
+      highQualityModelSig.set({
+        key: 'large-v3',
+        display_name: 'Large v3',
+        size_bytes: 1_600_000_000,
+        downloaded: false,
+        downloading: false,
+      });
+      await component.ngOnInit();
+      fixture.detectChanges();
+    });
+
+    it('downloads the high-quality model in place and lifts the gate', async () => {
+      svc.listModels.mockResolvedValue(models(true));
+      fixture.nativeElement.querySelector('[data-testid="gate-download"]').click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
+      expect(component.modelReady()).toBe(true);
+    });
+
+    it('shows the progress while the download runs', () => {
+      downloadingModelKeySig.set('large-v3');
+      downloadProgressSig.set({
+        model_key: 'large-v3',
+        downloaded_bytes: 672_000_000,
+        total_bytes: 1_600_000_000,
+      });
+      fixture.detectChanges();
+      const progress = fixture.nativeElement.querySelector('[data-testid="gate-progress"]');
+      expect(progress.textContent).toContain('Downloading 42%');
+      expect(progress.textContent).toContain('of 1.5 GB');
+      expect(fixture.nativeElement.querySelector('[data-testid="gate-download"]')).toBeNull();
+    });
+
+    it('keeps the gate and says why when the download fails', async () => {
+      svc.downloadModel.mockRejectedValueOnce(new Error('network down'));
+      await component.downloadFromGate();
+      fixture.detectChanges();
+      expect(component.modelReady()).toBe(false);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="gate-error"]').textContent
+      ).toContain('network down');
+    });
   });
 
   it('subscribes to a session when one is opened', async () => {
-    await component.onOpenSession({ id: 'sess-1' } as TranscriptSession);
+    await component.onOpenSession({ id: 'sess-1' } as TranscriptSummary);
     expect(svc.subscribeToTranscript).toHaveBeenCalledWith('sess-1');
   });
 
@@ -195,10 +350,42 @@ describe('MeetingTranscriptionComponent', () => {
     expect(svc.detach).toHaveBeenCalled();
   });
 
-  it('keeps the live stream attached on destroy while a recording runs', async () => {
-    recordingSessionIdSig.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+  it('keeps the live stream attached on destroy while the open recording captures', async () => {
+    recordingSessionIdSig.set('sess-1');
+    activeSig.set(session({ state: 'recording' }));
     await component.ngOnDestroy();
     expect(svc.detach).not.toHaveBeenCalled();
+  });
+
+  it('detaches the open finished recording on destroy even while another one captures', async () => {
+    recordingSessionIdSig.set('another');
+    activeSig.set(session({ state: 'done' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).toHaveBeenCalled();
+  });
+
+  it('keeps the live stream attached on destroy while the offline pass runs', async () => {
+    activeSig.set(session({ state: 'finalizing', progress: 0.47 }));
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live stream attached on destroy right after Stop, before finalizing arrives', async () => {
+    activeSig.set(session({ state: 'recording' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
+  });
+
+  it('detaches the live stream on destroy once the session is done', async () => {
+    activeSig.set(session({ state: 'done' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).toHaveBeenCalled();
+  });
+
+  it('detaches the live stream on destroy once the session failed', async () => {
+    activeSig.set(session({ state: 'failed', reason: 'decoder crashed' }));
+    await component.ngOnDestroy();
+    expect(svc.detach).toHaveBeenCalled();
   });
 
   it('renders no capture-warning banner without a warning', () => {

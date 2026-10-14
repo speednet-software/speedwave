@@ -1,9 +1,12 @@
+use crate::control_channel::{
+    self, ControlChannel, ControlHandle, ControlQuery, SessionInfoEvent, SessionInfoState,
+};
 use crate::history;
 use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
     AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
 };
-use speedwave_runtime::{config, consts, runtime};
+use speedwave_runtime::{claude_settings, config, consts, runtime};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Stdio};
@@ -64,6 +67,8 @@ pub enum StreamChunk {
     },
     Error {
         content: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_ended: bool,
     },
     SystemInit {
         model: String,
@@ -72,8 +77,11 @@ pub enum StreamChunk {
     },
     RateLimit {
         status: String,
-        utilization: Option<f64>,
+        rate_limit_type: Option<String>,
+        utilization_percent: Option<f64>,
         resets_at: Option<u64>,
+        overage_status: Option<String>,
+        is_using_overage: Option<bool>,
     },
     UserMessageCommit {
         uuid: String,
@@ -108,8 +116,12 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             content: sanitize(&content),
             is_error,
         },
-        StreamChunk::Error { content } => StreamChunk::Error {
+        StreamChunk::Error {
+            content,
+            turn_ended,
+        } => StreamChunk::Error {
             content: sanitize(&content),
+            turn_ended,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -182,8 +194,12 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
             content: detok(policy, &content),
             is_error,
         },
-        StreamChunk::Error { content } => StreamChunk::Error {
+        StreamChunk::Error {
+            content,
+            turn_ended,
+        } => StreamChunk::Error {
             content: detok(policy, &content),
+            turn_ended,
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -235,9 +251,25 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
     }
 }
 
-fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, policy: &DisplayPolicy) {
+#[derive(Serialize, Debug, Clone)]
+pub(crate) struct TabStreamChunk<'a> {
+    pub(crate) tab_id: &'a str,
+    #[serde(flatten)]
+    pub(crate) chunk: StreamChunk,
+}
+
+fn emit_sanitized_chunk(
+    app_handle: &tauri::AppHandle,
+    tab_id: &str,
+    chunk: StreamChunk,
+    policy: &DisplayPolicy,
+) {
     let chunk = detokenize_chunk(chunk, policy);
-    if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
+    let wrapped = TabStreamChunk {
+        tab_id,
+        chunk: sanitize_chunk(chunk),
+    };
+    if let Err(e) = app_handle.emit("chat_stream", wrapped) {
         log::warn!("failed to emit chat_stream event: {e}");
     }
 }
@@ -306,7 +338,6 @@ pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsa
 
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
-const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
 const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
 
 #[derive(Debug, Clone)]
@@ -315,6 +346,7 @@ pub struct ControlRequest {
     pub tool_name: String,
     pub input: serde_json::Value,
     pub tool_use_id: String,
+    pub safety_check: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -384,7 +416,6 @@ pub struct StreamParser {
     previous_session_cost: Option<f64>,
     model_tracker: crate::session_model::SessionModelTracker,
     seen_unknown_types: std::collections::HashSet<String>,
-    soft_impose_done: bool,
 }
 
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
@@ -400,7 +431,6 @@ impl StreamParser {
             previous_session_cost: None,
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
-            soft_impose_done: false,
         }
     }
 
@@ -417,6 +447,11 @@ impl StreamParser {
             self.model_tracker.observe_init(m);
         }
         self.last_context_usage = context_usage;
+    }
+
+    pub(crate) fn restore_resume_snapshot(&mut self, seed: crate::history::ResumeSnapshot) {
+        let usage = seed.usage();
+        self.restore_session_snapshot(usage, seed.total_cost, seed.model, seed.context_usage);
     }
 
     #[cfg(test)]
@@ -537,11 +572,19 @@ impl StreamParser {
         let tool_name = request["tool_name"].as_str()?.to_string();
         let input = request["input"].clone();
         let tool_use_id = request["tool_use_id"].as_str()?.to_string();
+        let safety_check =
+            (request["decision_reason_type"].as_str() == Some(SAFETY_CHECK)).then(|| {
+                request["decision_reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            });
         Some(ControlRequest {
             request_id,
             tool_name,
             input,
             tool_use_id,
+            safety_check,
         })
     }
 
@@ -872,6 +915,7 @@ impl StreamParser {
             return (
                 Some(StreamChunk::Error {
                     content: error_text,
+                    turn_ended: true,
                 }),
                 Some(LogEntry {
                     prefix: "RESULT",
@@ -970,25 +1014,35 @@ impl StreamParser {
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
-        let utilization = info["utilization"].as_f64();
+        let rate_limit_type = info["rateLimitType"].as_str().map(str::to_string);
+        let utilization_percent = info["utilization"]
+            .as_f64()
+            .and_then(utilization_fraction_to_percent);
         let resets_at = info["resetsAt"]
             .as_u64()
             .or_else(|| info["resets_at"].as_u64());
+        let overage_status = info["overageStatus"].as_str().map(str::to_string);
+        let is_using_overage = info["isUsingOverage"].as_bool();
 
         let log_entry = Some(LogEntry {
             prefix: "RATE_LIMIT",
             message: format!(
-                "status={status} utilization={} resets_at={}",
-                utilization.map_or("none".to_string(), |v| format!("{v:.1}")),
+                "status={status} type={} utilization={} resets_at={} overage={}",
+                rate_limit_type.as_deref().unwrap_or("none"),
+                utilization_percent.map_or("none".to_string(), |v| format!("{v:.0}%")),
                 resets_at.map_or("none".to_string(), |v| v.to_string()),
+                overage_status.as_deref().unwrap_or("none"),
             ),
         });
 
         (
             Some(StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
+                overage_status,
+                is_using_overage,
             }),
             log_entry,
         )
@@ -1065,12 +1119,22 @@ impl StreamParser {
             (
                 Some(StreamChunk::Error {
                     content: message.to_string(),
+                    turn_ended: false,
                 }),
                 log_entry,
             )
         } else {
             (None, log_entry)
         }
+    }
+}
+
+fn utilization_fraction_to_percent(fraction: f64) -> Option<f64> {
+    if (0.0..=1.0).contains(&fraction) {
+        Some(fraction * 100.0)
+    } else {
+        log::debug!("ignored a rate_limit_event utilization outside the 0-1 fraction: {fraction}");
+        None
     }
 }
 
@@ -1111,7 +1175,7 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
             ("cacheReadInputTokens", &mut total.cache_read_tokens),
             ("cacheCreationInputTokens", &mut total.cache_write_tokens),
         ] {
-            if let Some(n) = stats[key].as_u64() {
+            if let Some(n) = model_usage_count(&stats[key]) {
                 *target = target.saturating_add(n);
                 any_field = true;
             }
@@ -1129,8 +1193,17 @@ fn dominant_model_by_output_tokens(
 ) -> Option<String> {
     model_usage.and_then(|mu| {
         mu.iter()
-            .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
+            .max_by_key(|(_, stats)| model_usage_count(&stats["outputTokens"]).unwrap_or(0))
             .map(|(k, _)| k.clone())
+    })
+}
+
+fn model_usage_count(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n.round() as u64)
     })
 }
 
@@ -1164,7 +1237,7 @@ pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     })
 }
 
-fn soft_impose_message(
+fn soft_impose_target(
     kind: speedwave_runtime::config::LlmProviderKind,
     entry_id: &str,
     entry_model: Option<&str>,
@@ -1179,7 +1252,7 @@ fn soft_impose_message(
     if observed == speedwave_runtime::model_id::normalize_observed(&expected, entry_id) {
         return None;
     }
-    Some(format!("/model {expected}"))
+    Some(expected)
 }
 
 struct SoftImposeConfig {
@@ -1188,42 +1261,295 @@ struct SoftImposeConfig {
     entry_model: Option<String>,
 }
 
-fn maybe_soft_impose(
-    parser: &mut StreamParser,
-    cfg: &SoftImposeConfig,
-    init_line: &serde_json::Value,
-    mut write: impl FnMut(&str),
-) {
-    if parser.soft_impose_done {
-        return;
+#[derive(Clone, Default)]
+struct ModelSettled {
+    settled: Arc<std::sync::atomic::AtomicBool>,
+    typed_command: Arc<std::sync::atomic::AtomicU8>,
+}
+
+const NO_TYPED_COMMAND: u8 = 0;
+const TYPED_COMMAND_WRITTEN: u8 = 1;
+const TYPED_COMMAND_RUNNING: u8 = 2;
+
+impl ModelSettled {
+    fn settle(&self) {
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    let Some(observed) = init_line["model"].as_str().filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let Some(cmd) = soft_impose_message(
+
+    fn settle_by_command(&self) {
+        self.settle();
+        self.typed_command
+            .store(TYPED_COMMAND_WRITTEN, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn input_started(&self) {
+        let _ = self.typed_command.compare_exchange(
+            TYPED_COMMAND_WRITTEN,
+            TYPED_COMMAND_RUNNING,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    fn is_settled(&self) -> bool {
+        self.settled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn command_awaits_reply(&self) -> bool {
+        self.typed_command.load(std::sync::atomic::Ordering::SeqCst) != NO_TYPED_COMMAND
+    }
+
+    fn take_command_reply(&self) -> bool {
+        self.typed_command
+            .compare_exchange(
+                TYPED_COMMAND_RUNNING,
+                NO_TYPED_COMMAND,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+}
+
+const FIRST_TURN_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub(crate) const FIRST_TURN_WAIT: std::time::Duration =
+    control_channel::SET_MODEL_TIMEOUT.saturating_add(FIRST_TURN_MARGIN);
+
+#[derive(Clone)]
+pub(crate) struct FirstTurnGate(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+impl FirstTurnGate {
+    fn open() -> Self {
+        Self(Arc::new((Mutex::new(true), std::sync::Condvar::new())))
+    }
+
+    fn closed() -> Self {
+        Self(Arc::new((Mutex::new(false), std::sync::Condvar::new())))
+    }
+
+    pub(crate) fn release(&self) {
+        let (open, changed) = &*self.0;
+        *open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+
+    pub(crate) fn is(&self, other: &FirstTurnGate) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn wait(&self, limit: std::time::Duration) -> bool {
+        let (open, changed) = &*self.0;
+        let guard = open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (guard, _) = changed
+            .wait_timeout_while(guard, limit, |open| !*open)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard
+    }
+}
+
+fn settles_model(text: &str) -> bool {
+    matches!(
+        speedwave_runtime::slash::parse_control_command(text),
+        Some(("model", _))
+    )
+}
+
+fn soft_impose_step(
+    line: &serde_json::Value,
+    chunks: &[StreamChunk],
+    cfg: &SoftImposeConfig,
+    settled: &ModelSettled,
+    control: &ControlChannel,
+    stdin: &Mutex<impl Write>,
+) -> Option<(control_channel::PendingControl, String)> {
+    if !chunks
+        .iter()
+        .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
+    {
+        return None;
+    }
+    let observed = line["model"].as_str().filter(|s| !s.is_empty())?;
+    let model = soft_impose_target(
         cfg.kind,
         &cfg.entry_id,
         cfg.entry_model.as_deref(),
         observed,
-    ) else {
-        return;
-    };
-    parser.soft_impose_done = true;
-    let wire_line = build_user_message(&text_only(&cmd)).to_string();
-    write(&wire_line);
-    log::debug!("soft-imposing model at spawn: {cmd}");
+    )?;
+    let pending = send_soft_impose(stdin, control, settled, &model)?;
+    Some((pending, model))
 }
 
-pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
+fn send_soft_impose(
+    stdin: &Mutex<impl Write>,
+    control: &ControlChannel,
+    settled: &ModelSettled,
+    model: &str,
+) -> Option<control_channel::PendingControl> {
+    let Ok(mut handle) = stdin.lock() else {
+        log::error!("stdin mutex poisoned; dropping the soft-impose");
+        return None;
+    };
+    if settled.is_settled() {
+        return None;
+    }
+    settled.settle();
+    match control.send_set_model(&mut *handle, model) {
+        Ok(pending) => {
+            log::info!("soft-imposing {model} with a set_model control request");
+            Some(pending)
+        }
+        Err(e) => {
+            log::error!("the soft-impose set_model request was not written: {e}");
+            None
+        }
+    }
+}
+
+pub(crate) struct ModelSwitch {
+    control: ControlChannel,
+    stdin: Arc<Mutex<std::process::ChildStdin>>,
+    settled: ModelSettled,
+}
+
+impl ModelSwitch {
+    pub(crate) fn apply(
+        &self,
+        model: &str,
+    ) -> Result<control_channel::ModelSwitchOutcome, control_channel::ControlError> {
+        let pending = send_model_pick(&self.stdin, &self.control, &self.settled, model)?;
+        control_channel::ModelSwitchOutcome::of(pending.wait(control_channel::SET_MODEL_TIMEOUT))
+    }
+}
+
+fn send_model_pick(
+    stdin: &Mutex<impl Write>,
+    control: &ControlChannel,
+    settled: &ModelSettled,
+    model: &str,
+) -> Result<control_channel::PendingControl, control_channel::ControlError> {
+    let mut handle = stdin
+        .lock()
+        .map_err(|e| control_channel::ControlError::Write(format!("stdin lock poisoned: {e}")))?;
+    settled.settle();
+    control.send_set_model(&mut *handle, model)
+}
+
+fn soft_impose_failure(pending: control_channel::PendingControl, model: &str) -> Option<String> {
+    let answer =
+        control_channel::ModelSwitchOutcome::of(pending.wait(control_channel::SET_MODEL_TIMEOUT));
+    let failure =
+        control_channel::ModelSwitchOutcome::failure(answer, control_channel::SET_MODEL_TIMEOUT);
+    match &failure {
+        None => log::info!("Claude Code switched the session to {model}"),
+        Some(reason) => log::warn!("the soft-impose to {model} did not apply: {reason}"),
+    }
+    failure
+}
+
+fn soft_impose_report(
+    pending: control_channel::PendingControl,
+    model: &str,
+    stopping: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    let reason = soft_impose_failure(pending, model)?;
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        log::info!("the session stopped before Claude Code answered the switch to {model}");
+        return None;
+    }
+    Some(reason)
+}
+
+fn spawn_soft_impose_report(
+    app_handle: AppHandle,
+    project: String,
+    tab_id: String,
+    pending: control_channel::PendingControl,
+    model: String,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
+    first_turn: Option<FirstTurnGate>,
+) {
+    std::thread::spawn(move || {
+        if let Some(reason) = soft_impose_report(pending, &model, &stopping) {
+            let event = control_channel::ModelSwitchFailedEvent {
+                project,
+                tab_id,
+                model,
+                reason,
+            };
+            if let Err(e) = app_handle.emit(control_channel::MODEL_SWITCH_FAILED_EVENT, event) {
+                log::warn!("failed to emit the model switch failure event: {e}");
+            }
+        }
+        if let Some(gate) = first_turn {
+            gate.release();
+        }
+    });
+}
+
+fn spawn_soft_impose_target(
+    cfg: &SoftImposeConfig,
+    rendered_model: Option<&str>,
+) -> Option<String> {
+    soft_impose_target(
+        cfg.kind,
+        &cfg.entry_id,
+        cfg.entry_model.as_deref(),
+        rendered_model?,
+    )
+}
+
+const MODEL_SWITCHED_PREFIX: &str = "Set model to ";
+
+fn refused_model_command(line: &serde_json::Value, settled: &ModelSettled) -> Option<String> {
+    if line["type"] == "system" && line["subtype"] == "init" {
+        settled.input_started();
+        return None;
+    }
+    if line["type"] != "assistant"
+        || line["message"]["model"] != crate::session_model::SYNTHETIC_MODEL
+    {
+        return None;
+    }
+    let text = line["message"]["content"]
+        .as_array()?
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() || !settled.take_command_reply() {
+        return None;
+    }
+    (!text.starts_with(MODEL_SWITCHED_PREFIX)).then_some(text)
+}
+
+const SAFETY_CHECK: &str = "safetyCheck";
+
+pub(crate) const SAFETY_CHECK_DECLINED: &str = "Speedwave runs Claude Code with no one to approve a tool call, so it declines every call Claude Code's safety check holds for manual approval. Run it with an explicit, resolved target instead";
+
+pub fn build_tool_permission_response(request: &ControlRequest) -> serde_json::Value {
+    let decision = match &request.safety_check {
+        Some(reason) => serde_json::json!({
+            "behavior": "deny",
+            "message": format!("{SAFETY_CHECK_DECLINED}. Claude Code's reason: {reason}"),
+        }),
+        None => serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": request.input
+        }),
+    };
     serde_json::json!({
         "type": "control_response",
         "response": {
             "subtype": "success",
             "request_id": request.request_id,
-            "response": {
-                "behavior": "allow",
-                "updatedInput": request.input
-            }
+            "response": decision
         }
     })
 }
@@ -1290,6 +1616,40 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
+pub(crate) const MAX_MODEL_ID_LEN: usize = 128;
+
+pub(crate) fn validate_launch_model(model: &str) -> Result<(), String> {
+    if model.is_empty() {
+        return Err("model id must not be empty".to_string());
+    }
+    if model.len() > MAX_MODEL_ID_LEN {
+        return Err(format!("model id too long (max {MAX_MODEL_ID_LEN} chars)"));
+    }
+    let base = model
+        .strip_suffix(speedwave_runtime::defaults::ONE_MILLION_SUFFIX)
+        .unwrap_or(model);
+    let alias = speedwave_runtime::defaults::CLAUDE_CODE_MODEL_ALIASES.contains(&base);
+    let claude_shaped = base.starts_with("claude-")
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+    if !alias && !claude_shaped {
+        return Err(format!("not an Anthropic model id or alias: {model}"));
+    }
+    Ok(())
+}
+
+fn launch_model_id(pin: Option<&str>, model_override: Option<&str>) -> anyhow::Result<String> {
+    if let Some(model) = model_override {
+        validate_launch_model(model).map_err(|e| anyhow::anyhow!(e))?;
+        return Ok(model.to_string());
+    }
+    Ok(pin
+        .filter(|m| validate_launch_model(m).is_ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| speedwave_runtime::defaults::DEFAULT_MODEL_ALIAS.to_string()))
+}
+
 pub fn build_claude_args(
     instance_id: &str,
     resume_session_id: Option<&str>,
@@ -1335,16 +1695,9 @@ fn claude_container_name_with_prefix(prefix: &str, project: &str) -> String {
     format!("{prefix}_{project}_claude")
 }
 
-fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
-    (
-        claude_container_name(project),
-        speedwave_runtime::session::kill_by_instance_command(id),
-    )
-}
-
 fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "type": MSG_TYPE_CONTROL_REQUEST,
+        "type": control_channel::MSG_TYPE_CONTROL_REQUEST,
         "request_id": request_id,
         "request": { "subtype": CTRL_SUBTYPE_INTERRUPT },
     })
@@ -1362,33 +1715,193 @@ fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::
     Ok(())
 }
 
+fn consume_control_response(control: &ControlChannel, parsed: &serde_json::Value) -> bool {
+    if parsed["type"].as_str() != Some(control_channel::MSG_TYPE_CONTROL_RESPONSE) {
+        return false;
+    }
+    control.route_response(parsed);
+    true
+}
+
+fn emit_session_info(
+    app_handle: &AppHandle,
+    project: &str,
+    tab_id: &str,
+    status: SessionInfoState,
+) {
+    let event = SessionInfoEvent {
+        project: project.to_string(),
+        tab_id: tab_id.to_string(),
+        status,
+    };
+    if let Err(e) = app_handle.emit(control_channel::SESSION_INFO_EVENT, event) {
+        log::warn!("failed to emit the chat session info event: {e}");
+    }
+}
+
+type SessionInfoEmitter = Arc<dyn Fn(SessionInfoState) + Send + Sync>;
+
+fn probe_session_info(
+    query: impl FnOnce() -> Result<serde_json::Value, control_channel::ControlError>,
+    slot: &Mutex<SessionInfoState>,
+    stopping: &std::sync::atomic::AtomicBool,
+    prepare: impl FnOnce(&SessionInfoState),
+    emit: impl FnOnce(SessionInfoState),
+) -> Option<SessionInfoState> {
+    let status = control_channel::session_info_state_from(query());
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    prepare(&status);
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stopping.load(std::sync::atomic::Ordering::SeqCst) || *slot != SessionInfoState::Pending {
+        return None;
+    }
+    *slot = status.clone();
+    emit(status.clone());
+    Some(status)
+}
+
+fn log_tag(tab_id: &str, stream: &str) -> String {
+    let short = tab_id.get(..8).unwrap_or(tab_id);
+    format!("{stream}:{short}")
+}
+
+fn announce_pending_session_info(
+    slot: &Mutex<SessionInfoState>,
+    emit: impl FnOnce(SessionInfoState),
+) {
+    let slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *slot == SessionInfoState::Pending {
+        emit(SessionInfoState::Pending);
+    }
+}
+
+fn end_session_info(slot: &Mutex<SessionInfoState>, emit: Option<&SessionInfoEmitter>) {
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reported = *slot != SessionInfoState::Unavailable;
+    *slot = SessionInfoState::Unavailable;
+    if let Some(emit) = emit.filter(|_| reported) {
+        emit(SessionInfoState::Unavailable);
+    }
+}
+
+#[derive(Clone)]
+struct AwaitedResult(Arc<std::sync::atomic::AtomicBool>);
+
+impl AwaitedResult {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    }
+
+    fn observe(&self, chunks: &[StreamChunk]) {
+        if chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }))
+        {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        } else if !chunks.is_empty() {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn message_written(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_awaited(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedSpawn {
+    pub args: Vec<String>,
+    pub container: String,
+}
+
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
+    tab_id: String,
+    pub(crate) transcript: Arc<Mutex<Option<String>>>,
     shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     pending_requests: PendingRequests,
+    control: ControlChannel,
+    session_info: Arc<Mutex<SessionInfoState>>,
+    session_info_emitter: Option<SessionInfoEmitter>,
     drain_handles: Vec<std::thread::JoinHandle<()>>,
     session_log_path: Option<std::path::PathBuf>,
     instance_id: Option<String>,
     stopping: Arc<std::sync::atomic::AtomicBool>,
+    awaited_result: AwaitedResult,
+    model_settled: ModelSettled,
+    first_turn_gate: FirstTurnGate,
 }
 
 impl ChatSession {
-    pub fn new(project_name: &str) -> Self {
+    pub fn new(project_name: &str, tab_id: &str, transcript: Arc<Mutex<Option<String>>>) -> Self {
         Self {
             child: None,
             project_name: project_name.to_string(),
+            tab_id: tab_id.to_string(),
+            transcript,
             shared_stdin: None,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            control: ControlChannel::default(),
+            session_info: Arc::new(Mutex::new(SessionInfoState::Unavailable)),
+            session_info_emitter: None,
             drain_handles: Vec::new(),
             session_log_path: None,
             instance_id: None,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            awaited_result: AwaitedResult::new(),
+            model_settled: ModelSettled::default(),
+            first_turn_gate: FirstTurnGate::open(),
         }
     }
 
-    pub fn project_name(&self) -> &str {
-        &self.project_name
+    pub(crate) fn first_turn_gate(&self) -> FirstTurnGate {
+        self.first_turn_gate.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_first_turn(&mut self) -> FirstTurnGate {
+        self.first_turn_gate = FirstTurnGate::closed();
+        self.first_turn_gate.clone()
+    }
+
+    pub(crate) fn control_handle(&self) -> anyhow::Result<ControlHandle> {
+        let stdin = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        Ok(ControlHandle::new(self.control.clone(), stdin.clone()))
+    }
+
+    pub(crate) fn model_switch(&self) -> anyhow::Result<ModelSwitch> {
+        let stdin = self
+            .shared_stdin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no active session"))?;
+        Ok(ModelSwitch {
+            control: self.control.clone(),
+            stdin: stdin.clone(),
+            settled: self.model_settled.clone(),
+        })
+    }
+
+    pub(crate) fn session_info_state(&self) -> SessionInfoState {
+        self.session_info
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn prepare_args(
@@ -1397,7 +1910,9 @@ impl ChatSession {
         instance_id: &str,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
-    ) -> anyhow::Result<(Vec<String>, String)> {
+        model_override: Option<&str>,
+        model_pin: Option<&str>,
+    ) -> anyhow::Result<PreparedSpawn> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
         }
@@ -1414,22 +1929,45 @@ impl ChatSession {
             flags.push("--effort".to_string());
             flags.push(level);
         }
+        let is_anthropic = resolved
+            .llm
+            .active_provider()
+            .is_none_or(|entry| entry.kind.is_anthropic());
+        let launch_model = if is_anthropic {
+            Some(launch_model_id(model_pin, model_override)?)
+        } else {
+            if let Some(model) = model_override {
+                log::info!(
+                    "ignoring the tab model override {model}: the active provider is not Anthropic"
+                );
+            }
+            None
+        };
+        if let Some(model) = &launch_model {
+            flags.push("--model".to_string());
+            flags.push(model.clone());
+        }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 
-        #[cfg(feature = "e2e")]
-        crate::e2e_support::record_spawn_args(&args);
-
-        Ok((args, container))
+        Ok(PreparedSpawn { args, container })
     }
 
     pub fn start(
         &mut self,
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
+        allow_log_truncate: bool,
+        model_override: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.start_with_retry(app_handle, resume_session_id, None)
+        self.start_with_retry(
+            app_handle,
+            resume_session_id,
+            None,
+            allow_log_truncate,
+            model_override,
+        )
     }
 
     pub fn start_with_retry(
@@ -1437,6 +1975,8 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
+        allow_log_truncate: bool,
+        model_override: Option<&str>,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
         crate::pin_cmd::ensure_effort_pin_migrated_in(
@@ -1446,16 +1986,29 @@ impl ChatSession {
         .map_err(|e| anyhow::anyhow!(e))?;
         let user_config = config::load_user_config()?;
 
-        self.reap_instance();
+        self.reap_instance_with(&rt);
+        speedwave_runtime::session::reap_unconfirmed(
+            &rt,
+            &claude_container_name(&self.project_name),
+        )?;
 
         let instance_id = speedwave_runtime::session::new_instance_id();
-        let (args, container) = Self::prepare_args(
+        let model_pin = claude_settings::get_model_pin(
+            speedwave_runtime::consts::data_dir(),
+            &self.project_name,
+        );
+        let PreparedSpawn { args, container } = Self::prepare_args(
             &self.project_name,
             &user_config,
             &instance_id,
             resume_session_id,
             resume_at_uuid,
+            model_override,
+            model_pin.as_deref(),
         )?;
+
+        #[cfg(feature = "e2e")]
+        crate::e2e_support::record_spawn_args(&self.tab_id, &args);
 
         let soft_impose_cfg = {
             let project_dir =
@@ -1476,6 +2029,20 @@ impl ChatSession {
             }
         };
 
+        let provider_kind = soft_impose_cfg.kind;
+        let asks_claude_code_for_session_info = provider_kind.is_anthropic();
+        let rendered_model = if asks_claude_code_for_session_info {
+            None
+        } else {
+            speedwave_runtime::compose::rendered_service_env_in(
+                consts::data_dir(),
+                &self.project_name,
+                "claude",
+                "ANTHROPIC_MODEL",
+            )
+        };
+        let spawn_impose = spawn_soft_impose_target(&soft_impose_cfg, rendered_model.as_deref());
+
         let mut cmd = rt.container_exec_piped(
             &container,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
@@ -1490,6 +2057,11 @@ impl ChatSession {
         self.instance_id = Some(instance_id);
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self
+            .transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            resume_session_id.map(str::to_string);
 
         let stdout = child
             .stdout
@@ -1502,20 +2074,48 @@ impl ChatSession {
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin from child process"))?;
         let shared_stdin = Arc::new(Mutex::new(stdin));
         self.shared_stdin = Some(shared_stdin.clone());
+        self.control = ControlChannel::default();
+        self.session_info = Arc::new(Mutex::new(if asks_claude_code_for_session_info {
+            SessionInfoState::Pending
+        } else {
+            SessionInfoState::Unavailable
+        }));
+        self.session_info_emitter = asks_claude_code_for_session_info.then(|| {
+            let app = app_handle.clone();
+            let project = self.project_name.clone();
+            let tab_id = self.tab_id.clone();
+            let emit: SessionInfoEmitter = Arc::new(move |status: SessionInfoState| {
+                emit_session_info(&app, &project, &tab_id, status)
+            });
+            emit
+        });
+        let session_info_probe = self.session_info_emitter.clone().map(|emit| {
+            (
+                emit,
+                ControlHandle::new(self.control.clone(), shared_stdin.clone()),
+            )
+        });
 
         let session_log_path = {
             let path = consts::claude_session_log_path(&self.project_name);
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            speedwave_runtime::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            if allow_log_truncate {
+                speedwave_runtime::log_file::truncate_if_oversized(&path, 2 * 1024 * 1024);
+            }
             let mut f = speedwave_runtime::log_file::open_log_file(&path);
-            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "started");
+            speedwave_runtime::log_file::write_log_line(
+                &mut f,
+                &log_tag(&self.tab_id, "SESSION"),
+                "started",
+            );
             Some(path)
         };
         self.session_log_path = session_log_path.clone();
 
         let stderr_log_path = session_log_path.clone();
+        let tab_id_for_stderr = self.tab_id.clone();
         if let Some(stderr) = child.stderr.take() {
             let h = std::thread::spawn(move || {
                 let mut log_file = stderr_log_path
@@ -1528,7 +2128,7 @@ impl ChatSession {
                             log::debug!("{l}");
                             speedwave_runtime::log_file::write_log_line(
                                 &mut log_file,
-                                "STDERR",
+                                &log_tag(&tab_id_for_stderr, "STDERR"),
                                 &l,
                             );
                         }
@@ -1543,9 +2143,20 @@ impl ChatSession {
         }
 
         let pending_requests = self.pending_requests.clone();
+        let control_for_reader = self.control.clone();
+        let transcript_for_reader = self.transcript.clone();
+        let tab_id_for_reader = self.tab_id.clone();
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
+        let info_for_reader = self.session_info.clone();
+        let info_emitter_for_reader = self.session_info_emitter.clone();
+        self.awaited_result = AwaitedResult::new();
+        let awaited_for_reader = self.awaited_result.clone();
+        self.model_settled = ModelSettled::default();
+        let settled_for_reader = self.model_settled.clone();
+        let project_for_reader = self.project_name.clone();
+        let impose_app_handle = app_handle.clone();
 
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
@@ -1563,23 +2174,12 @@ impl ChatSession {
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
             if let Some(seed) = resume_seed {
-                parser.restore_session_snapshot(
-                    TurnUsage {
-                        input_tokens: seed.input_tokens,
-                        output_tokens: seed.output_tokens,
-                        cache_read_tokens: seed.cache_read_tokens,
-                        cache_write_tokens: seed.cache_write_tokens,
-                    },
-                    seed.total_cost,
-                    seed.model,
-                    seed.context_usage,
-                );
+                parser.restore_resume_snapshot(seed);
             }
             let mut log_file = stdout_log_path
                 .as_deref()
                 .and_then(speedwave_runtime::log_file::open_log_file);
             let reader = BufReader::new(stdout);
-            let mut got_result = false;
             let mut http_collator = speedwave_runtime::http_debug_collator::Collator::new();
             for line in reader.lines() {
                 let line = match line {
@@ -1596,7 +2196,7 @@ impl ChatSession {
                         for entry in http_collator.push(line) {
                             speedwave_runtime::log_file::write_log_line(
                                 &mut log_file,
-                                "STDOUT",
+                                &log_tag(&tab_id_for_reader, "STDOUT"),
                                 &entry,
                             );
                         }
@@ -1606,10 +2206,14 @@ impl ChatSession {
 
                 let msg_type = parsed["type"].as_str().unwrap_or("");
 
+                if consume_control_response(&control_for_reader, &parsed) {
+                    continue;
+                }
+
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
-                        "CONTROL",
+                        &log_tag(&tab_id_for_reader, "CONTROL"),
                         &format!("request: {} ({})", ctrl.tool_name, ctrl.tool_use_id),
                     );
                     if ctrl.tool_name == ASK_USER_TOOL_NAME {
@@ -1633,9 +2237,11 @@ impl ChatSession {
                                 );
                                 emit_sanitized_chunk(
                                     &app_handle,
+                                    &tab_id_for_reader,
                                     StreamChunk::Error {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
+                                        turn_ended: false,
                                     },
                                     &display_policy,
                                 );
@@ -1644,6 +2250,7 @@ impl ChatSession {
                         }
                         emit_sanitized_chunk(
                             &app_handle,
+                            &tab_id_for_reader,
                             StreamChunk::AskUserQuestion {
                                 tool_id: ctrl.tool_use_id.clone(),
                                 questions,
@@ -1652,7 +2259,13 @@ impl ChatSession {
                             &display_policy,
                         );
                     } else {
-                        let response = build_auto_approve_response(&ctrl);
+                        if let Some(reason) = &ctrl.safety_check {
+                            log::warn!(
+                                "declined a {} call that Claude Code's safety check holds for approval: {reason}",
+                                ctrl.tool_name
+                            );
+                        }
+                        let response = build_tool_permission_response(&ctrl);
                         match stdin_for_reader.lock() {
                             Ok(mut stdin) => {
                                 if let Err(e) = writeln!(stdin, "{}", response) {
@@ -1661,10 +2274,12 @@ impl ChatSession {
                                     );
                                     emit_sanitized_chunk(
                                         &app_handle,
+                                        &tab_id_for_reader,
                                         StreamChunk::Error {
                                             content: format!(
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
+                                            turn_ended: false,
                                         },
                                         &display_policy,
                                     );
@@ -1676,10 +2291,12 @@ impl ChatSession {
                                     );
                                     emit_sanitized_chunk(
                                         &app_handle,
+                                        &tab_id_for_reader,
                                         StreamChunk::Error {
                                             content: format!(
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
+                                            turn_ended: false,
                                         },
                                         &display_policy,
                                     );
@@ -1690,8 +2307,10 @@ impl ChatSession {
                                 log::error!("stdin mutex poisoned: {e}; dropping stream");
                                 emit_sanitized_chunk(
                                     &app_handle,
+                                    &tab_id_for_reader,
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
+                                        turn_ended: false,
                                     },
                                     &display_policy,
                                 );
@@ -1708,7 +2327,7 @@ impl ChatSession {
                     );
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
-                        "CONTROL",
+                        &log_tag(&tab_id_for_reader, "CONTROL"),
                         "unrecognized control_request shape (missing request_id/tool_name/tool_use_id); not auto-responding",
                     );
                     continue;
@@ -1718,79 +2337,158 @@ impl ChatSession {
                 if let Some(entry) = log_entry {
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
-                        entry.prefix,
+                        &log_tag(&tab_id_for_reader, entry.prefix),
                         &entry.message,
                     );
                     if matches!(entry.prefix, "RESULT" | "SYSTEM" | "SESSION" | "RATE_LIMIT") {
                         for merged in http_collator.flush_all_pending_responses() {
                             speedwave_runtime::log_file::write_log_line(
                                 &mut log_file,
-                                "STDOUT",
+                                &log_tag(&tab_id_for_reader, "STDOUT"),
                                 &merged,
                             );
                         }
                     }
                 }
-                let is_terminal = chunks
-                    .iter()
-                    .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
+                if let Some((pending, model)) = soft_impose_step(
+                    &parsed,
+                    &chunks,
+                    &soft_impose_cfg,
+                    &settled_for_reader,
+                    &control_for_reader,
+                    &stdin_for_reader,
+                ) {
+                    spawn_soft_impose_report(
+                        app_handle.clone(),
+                        project_for_reader.clone(),
+                        tab_id_for_reader.clone(),
+                        pending,
+                        model,
+                        stopping_for_reader.clone(),
+                        None,
+                    );
+                }
+                if let Some(refusal) = refused_model_command(&parsed, &settled_for_reader) {
+                    log::warn!(
+                        "Claude Code did not switch the model for a typed /model: {refusal}"
+                    );
+                    emit_sanitized_chunk(
+                        &app_handle,
+                        &tab_id_for_reader,
+                        StreamChunk::Error {
+                            content: refusal,
+                            turn_ended: false,
+                        },
+                        &display_policy,
+                    );
+                }
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
-                if chunks
-                    .iter()
-                    .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
-                {
-                    maybe_soft_impose(&mut parser, &soft_impose_cfg, &parsed, |line| {
-                        match stdin_for_reader.lock() {
-                            Ok(mut stdin) => {
-                                if let Err(e) = writeln!(stdin, "{}", line) {
-                                    log::error!("soft-impose stdin write failed: {e}");
-                                } else if let Err(e) = stdin.flush() {
-                                    log::error!("soft-impose stdin flush failed: {e}");
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("stdin mutex poisoned: {e}; dropping soft-impose")
-                            }
-                        }
-                    });
-                }
-                if is_terminal {
-                    got_result = true;
-                } else if !chunks.is_empty() {
-                    got_result = false;
-                }
+                awaited_for_reader.observe(&chunks);
                 for chunk in chunks {
-                    emit_sanitized_chunk(&app_handle, chunk, &display_policy);
+                    if let StreamChunk::SystemInit {
+                        session_id: Some(sid),
+                        ..
+                    }
+                    | StreamChunk::Result {
+                        session_id: sid, ..
+                    } = &chunk
+                    {
+                        *transcript_for_reader
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sid.clone());
+                    }
+                    emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
                 }
                 if let Some(session_id) = result_session_id {
-                    drain_queued_message(
+                    if drain_queued_message(
                         &app_handle,
+                        &tab_id_for_reader,
                         &session_id,
                         &stdin_for_reader,
+                        &settled_for_reader,
                         &display_policy,
-                    );
+                    ) {
+                        awaited_for_reader.message_written();
+                    }
                 }
             }
 
             if let Some(entry) = http_collator.flush() {
-                speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
+                speedwave_runtime::log_file::write_log_line(
+                    &mut log_file,
+                    &log_tag(&tab_id_for_reader, "STDOUT"),
+                    &entry,
+                );
             }
+            control_for_reader.close();
+            end_session_info(&info_for_reader, info_emitter_for_reader.as_ref());
 
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
-            if !got_result && !stopping {
+            if awaited_for_reader.is_awaited() && !stopping {
                 log::warn!("stdout reader stream ended without result");
                 let chunk = StreamChunk::Error {
                     content:
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
+                    turn_ended: false,
                 };
-                emit_sanitized_chunk(&app_handle, chunk, &display_policy);
+                emit_sanitized_chunk(&app_handle, &tab_id_for_reader, chunk, &display_policy);
             }
         });
         self.drain_handles.push(h);
+
+        if let Some(model) = spawn_impose {
+            let stdin = self
+                .shared_stdin
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no stdin for the soft-impose"))?;
+            if let Some(pending) =
+                send_soft_impose(&stdin, &self.control, &self.model_settled, &model)
+            {
+                let gate = FirstTurnGate::closed();
+                self.first_turn_gate = gate.clone();
+                spawn_soft_impose_report(
+                    impose_app_handle,
+                    self.project_name.clone(),
+                    self.tab_id.clone(),
+                    pending,
+                    model,
+                    self.stopping.clone(),
+                    Some(gate),
+                );
+            }
+        }
+
+        if let Some((emit, handle)) = session_info_probe {
+            let project = self.project_name.clone();
+            let slot = self.session_info.clone();
+            let stopping = self.stopping.clone();
+            announce_pending_session_info(&slot, |status| emit(status));
+            let h = std::thread::spawn(move || {
+                probe_session_info(
+                    || handle.query(ControlQuery::Initialize),
+                    &slot,
+                    &stopping,
+                    |status| {
+                        let info = match status {
+                            SessionInfoState::Ready { info } => Some(info),
+                            SessionInfoState::Pending | SessionInfoState::Unavailable => None,
+                        };
+                        crate::model_picker::normalize_pin_for_session(
+                            consts::data_dir(),
+                            &project,
+                            provider_kind,
+                            info,
+                        );
+                    },
+                    |status| emit(status),
+                );
+            });
+            self.drain_handles.push(h);
+        }
 
         self.child = Some(child);
         Ok(())
@@ -1803,8 +2501,9 @@ impl ChatSession {
     ) -> anyhow::Result<()> {
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
+        let tab_id = self.tab_id.clone();
         self.send_message_with_emit(blocks, |chunk| {
-            emit_sanitized_chunk(app_handle, chunk, &display_policy)
+            emit_sanitized_chunk(app_handle, &tab_id, chunk, &display_policy)
         })
     }
 
@@ -1852,9 +2551,13 @@ impl ChatSession {
         let mut stdin = shared
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+        if matches!(blocks, [WireContentBlock::Text { text }] if settles_model(text)) {
+            self.model_settled.settle_by_command();
+        }
         writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
         drop(stdin);
+        self.awaited_result.message_written();
 
         if let [WireContentBlock::Text { text }] = blocks {
             if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text)
@@ -1870,15 +2573,28 @@ impl ChatSession {
     }
 
     #[cfg(test)]
-    fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
+    pub(crate) fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
-        self.child = Some(spawn_test_blocked_child());
+        self.child = Some(spawn_test_child());
+    }
+
+    #[cfg(test)]
+    fn set_test_stdin_capture(&mut self) -> std::thread::JoinHandle<Vec<u8>> {
+        let (stdin, capture) = test_capturing_stdin();
+        self.shared_stdin = Some(Arc::new(Mutex::new(stdin)));
+        self.child = Some(spawn_test_child());
+        capture
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_channel_for_test(&self) -> ControlChannel {
+        self.control.clone()
     }
 
     #[cfg(test)]
     fn set_test_stdin_broken_pipe(&mut self) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_broken_pipe_stdin())));
-        self.child = Some(spawn_test_blocked_child());
+        self.child = Some(spawn_test_child());
     }
 
     pub fn submit_question_answer(
@@ -2026,19 +2742,18 @@ impl ChatSession {
     }
 
     fn reap_instance(&mut self) {
+        if self.instance_id.is_some() {
+            self.reap_instance_with(&runtime::detect_runtime());
+        }
+    }
+
+    fn reap_instance_with(&mut self, rt: &runtime::LockedRuntime) {
         let Some(id) = self.instance_id.take() else {
             return;
         };
-        let (container, argv) = reap_exec_plan(&self.project_name, &id);
-        let rt = runtime::detect_runtime();
-        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        match rt.container_exec_piped(&container, &argv_refs) {
-            Ok(mut cmd) => {
-                if let Err(e) = cmd.status() {
-                    log::warn!("kill exec for orphaned instance failed: {e}");
-                }
-            }
-            Err(e) => log::warn!("could not build kill exec for orphaned instance: {e}"),
+        let container = claude_container_name(&self.project_name);
+        if let Err(e) = speedwave_runtime::session::reap_instance(rt, &container, &id) {
+            log::warn!("kill exec for orphaned instance failed: {e}");
         }
     }
 
@@ -2046,6 +2761,8 @@ impl ChatSession {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared_stdin = None;
+        self.control.close();
+        end_session_info(&self.session_info, self.session_info_emitter.as_ref());
         self.reap_instance();
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -2089,7 +2806,11 @@ impl ChatSession {
         }
         if let Some(ref log_path) = self.session_log_path {
             let mut f = speedwave_runtime::log_file::open_log_file(log_path);
-            speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "stopped");
+            speedwave_runtime::log_file::write_log_line(
+                &mut f,
+                &log_tag(&self.tab_id, "SESSION"),
+                "stopped",
+            );
         }
         self.session_log_path = None;
         if let Ok(mut map) = self.pending_requests.lock() {
@@ -2105,45 +2826,49 @@ impl Drop for ChatSession {
     }
 }
 
-pub type SharedChatSession = Arc<Mutex<ChatSession>>;
-
 fn drain_queued_message(
     app_handle: &AppHandle,
+    tab_id: &str,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    settled: &ModelSettled,
     policy: &DisplayPolicy,
-) {
+) -> bool {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
         Some(m) => m,
-        None => return,
+        None => return false,
     };
-    write_and_emit_drained_message(session_id, &drained.text, stdin, |chunk| {
-        emit_sanitized_chunk(app_handle, chunk, policy)
-    });
+    write_and_emit_drained_message(session_id, &drained.text, stdin, settled, |chunk| {
+        emit_sanitized_chunk(app_handle, tab_id, chunk, policy)
+    })
 }
 
 fn write_and_emit_drained_message(
     session_id: &str,
     text: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    settled: &ModelSettled,
     mut emit: impl FnMut(StreamChunk),
-) {
+) -> bool {
     let payload = build_user_message(&text_only(text));
     match stdin.lock() {
         Ok(mut handle) => {
+            if settles_model(text) {
+                settled.settle_by_command();
+            }
             if let Err(e) = writeln!(handle, "{}", payload) {
                 log::warn!("failed to write queued message to stdin: {e}");
-                return;
+                return false;
             }
             if let Err(e) = handle.flush() {
                 log::warn!("failed to flush queued message to stdin: {e}");
-                return;
+                return false;
             }
         }
         Err(e) => {
             log::warn!("stdin lock poisoned while draining queued message: {e}");
-            return;
+            return false;
         }
     }
     if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text) {
@@ -2158,21 +2883,89 @@ fn write_and_emit_drained_message(
         text: text.to_string(),
     });
     log::debug!("queue drained: {} bytes for session", text.len());
+    true
+}
+
+#[cfg(all(test, unix))]
+#[expect(clippy::expect_used, reason = "test helper may expect freely")]
+fn test_stdin_pipe() -> (
+    impl std::io::Read + Send + 'static,
+    std::process::ChildStdin,
+) {
+    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
+    let stdin = std::process::ChildStdin::from(std::os::fd::OwnedFd::from(writer));
+    (reader, stdin)
+}
+
+#[cfg(all(test, windows))]
+#[expect(
+    unsafe_code,
+    reason = "ChildStdin needs an overlapped pipe handle, which std::io::pipe cannot create"
+)]
+fn test_stdin_pipe() -> (
+    impl std::io::Read + Send + 'static,
+    std::process::ChildStdin,
+) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+        PIPE_ACCESS_INBOUND,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name: Vec<u16> = format!(
+        r"\\.\pipe\speedwave-test-stdin-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect();
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; null security attributes are accepted by the API.
+    let read = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            4096,
+            4096,
+            0,
+            std::ptr::null(),
+        )
+    };
+    assert_ne!(read, INVALID_HANDLE_VALUE, "create test stdin pipe");
+    // SAFETY: `read` was just created, is valid and is owned by nobody else.
+    let reader = unsafe { OwnedHandle::from_raw_handle(read) };
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; null security attributes and template handle are accepted by the API.
+    let write = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(write, INVALID_HANDLE_VALUE, "open test stdin pipe writer");
+    // SAFETY: `write` was just created, is valid and is owned by nobody else.
+    let writer = unsafe { OwnedHandle::from_raw_handle(write) };
+    (
+        std::fs::File::from(reader),
+        std::process::ChildStdin::from(writer),
+    )
 }
 
 #[cfg(test)]
 fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
-    let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
-    #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
-    #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
+    let (mut reader, stdin) = test_stdin_pipe();
     std::thread::spawn(move || {
         let mut drained = buf;
         let _ = std::io::Read::read_to_end(&mut reader, &mut drained);
@@ -2181,24 +2974,31 @@ fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
 }
 
 #[cfg(test)]
-fn test_broken_pipe_stdin() -> std::process::ChildStdin {
-    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
-    drop(reader);
-    #[cfg(unix)]
-    let stdin: std::process::ChildStdin = {
-        let fd: std::os::fd::OwnedFd = writer.into();
-        fd.into()
-    };
-    #[cfg(windows)]
-    let stdin: std::process::ChildStdin = {
-        let handle: std::os::windows::io::OwnedHandle = writer.into();
-        handle.into()
-    };
-    stdin
+fn test_capturing_stdin() -> (std::process::ChildStdin, std::thread::JoinHandle<Vec<u8>>) {
+    let (mut reader, stdin) = test_stdin_pipe();
+    let capture = std::thread::spawn(move || {
+        let mut written = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut written);
+        written
+    });
+    (stdin, capture)
 }
 
 #[cfg(test)]
-fn spawn_test_blocked_child() -> Child {
+fn test_broken_pipe_stdin() -> std::process::ChildStdin {
+    for _ in 0..100 {
+        let (reader, mut stdin) = test_stdin_pipe();
+        drop(reader);
+        if stdin.write_all(b"\n").is_err() {
+            return stdin;
+        }
+    }
+    panic!("every test pipe stayed writable: a process spawned meanwhile kept its read end");
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test helper may expect freely")]
+fn spawn_test_child() -> Child {
     #[cfg(unix)]
     let mut command = {
         let mut c = std::process::Command::new("sh");
@@ -2207,8 +3007,8 @@ fn spawn_test_blocked_child() -> Child {
     };
     #[cfg(windows)]
     let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "pause"]);
+        let mut c = speedwave_runtime::binary::system_command("cmd");
+        c.arg("/C").arg("set /p line=");
         c
     };
     command
@@ -2216,7 +3016,7 @@ fn spawn_test_blocked_child() -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn test blocked child")
+        .expect("spawn test child")
 }
 
 #[cfg(test)]
@@ -2227,6 +3027,41 @@ fn spawn_test_blocked_child() -> Child {
 )]
 mod tests {
     use super::*;
+
+    fn wait_for_exit(child: &mut Child, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn the_test_child_waits_for_a_line_on_stdin_and_exits_after_it() {
+        let mut child = spawn_test_child();
+        assert!(!wait_for_exit(
+            &mut child,
+            std::time::Duration::from_millis(500)
+        ));
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+        let exited = wait_for_exit(&mut child, std::time::Duration::from_secs(20));
+        child.kill().ok();
+        assert!(exited, "the test child must exit once it has read a line");
+    }
+
+    #[test]
+    fn the_test_child_exits_when_its_stdin_closes() {
+        let mut child = spawn_test_child();
+        drop(child.stdin.take());
+        let exited = wait_for_exit(&mut child, std::time::Duration::from_secs(20));
+        child.kill().ok();
+        assert!(exited, "the test child must exit at end of input");
+    }
 
     #[test]
     fn chat_stream_emits_go_through_helper() {
@@ -2244,6 +3079,39 @@ mod tests {
             "exactly one chat_stream emit allowed (inside emit_sanitized_chunk); \
              found {raw_emits} — a new raw emit bypasses sanitization"
         );
+    }
+
+    #[test]
+    fn tab_stream_chunk_serializes_tab_id_beside_the_tagged_chunk() {
+        let wrapped = TabStreamChunk {
+            tab_id: "550e8400-e29b-41d4-a716-446655440000",
+            chunk: StreamChunk::Text {
+                content: "hi".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&wrapped).unwrap();
+        assert_eq!(v["tab_id"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(v["chunk_type"], "Text");
+        assert_eq!(v["data"]["content"], "hi");
+    }
+
+    #[test]
+    fn tab_stream_chunk_matches_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        assert!(
+            ts.contains("export type TabStreamChunk = StreamChunk & { tab_id: string };"),
+            "models/chat.ts must mirror TabStreamChunk as the tagged chunk plus tab_id"
+        );
+        let wrapped = TabStreamChunk {
+            tab_id: "550e8400-e29b-41d4-a716-446655440000",
+            chunk: StreamChunk::Text {
+                content: "hi".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&wrapped).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["chunk_type", "data", "tab_id"]);
     }
 
     #[test]
@@ -2356,6 +3224,7 @@ mod tests {
             },
             StreamChunk::Error {
                 content: secret.into(),
+                turn_ended: false,
             },
         ] {
             let out = format!("{:?}", sanitize_chunk(chunk));
@@ -2501,10 +3370,17 @@ mod tests {
         match detokenize_chunk(
             StreamChunk::Error {
                 content: tokenized.clone(),
+                turn_ended: true,
             },
             &policy,
         ) {
-            StreamChunk::Error { content } => assert_eq!(content, "secret@example.com"),
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
+                assert_eq!(content, "secret@example.com");
+                assert!(turn_ended, "detokenizing must keep the turn-end marker");
+            }
             other => panic!("variant changed: {other:?}"),
         }
     }
@@ -2652,7 +3528,11 @@ mod tests {
 
     #[test]
     fn interrupt_without_active_session_errors() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let err = s
             .interrupt()
             .expect_err("expected 'no active session' when stdin not set");
@@ -2664,7 +3544,11 @@ mod tests {
 
     #[test]
     fn send_message_rejects_bare_slash_before_session_check() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let err = s
             .send_message_with_emit(&text_only("/"), |_| {})
             .expect_err("bare slash must be rejected");
@@ -2676,7 +3560,11 @@ mod tests {
 
     #[test]
     fn send_message_allows_real_text_through_to_session_check() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let err = s
             .send_message_with_emit(&text_only("hej"), |_| {})
             .expect_err("no active session expected");
@@ -2688,7 +3576,11 @@ mod tests {
 
     #[test]
     fn send_message_matching_control_shape_emits_control_chip_after_stdin_write() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         let result =
@@ -2716,7 +3608,11 @@ mod tests {
 
     #[test]
     fn send_message_stdin_write_failure_propagates_error_and_emits_no_control_chip() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_broken_pipe();
         let result =
@@ -2732,7 +3628,11 @@ mod tests {
 
     #[test]
     fn send_message_plain_text_emits_no_control_chip() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         session
@@ -2743,7 +3643,11 @@ mod tests {
 
     #[test]
     fn send_message_bare_model_without_argument_emits_no_control_chip() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         session
@@ -2754,7 +3658,11 @@ mod tests {
 
     #[test]
     fn send_message_multi_block_never_matches_control_shape_even_when_joined_text_would() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         let blocks = vec![
@@ -2776,7 +3684,11 @@ mod tests {
 
     #[test]
     fn send_message_single_block_control_command_still_matches() {
-        let mut session = ChatSession::new("proj");
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
         session
@@ -2797,11 +3709,20 @@ mod tests {
     #[test]
     fn drained_control_shaped_text_emits_control_chip_then_queue_drained_and_writes_stdin_once() {
         let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
         let mut emitted: Vec<StreamChunk> = Vec::new();
-        write_and_emit_drained_message("sess-1", "/model claude-sonnet-5", &stdin, |chunk| {
-            emitted.push(chunk)
-        });
+        write_and_emit_drained_message(
+            "sess-1",
+            "/model claude-sonnet-5",
+            &stdin,
+            &settled,
+            |chunk| emitted.push(chunk),
+        );
 
+        assert!(
+            settled.is_settled(),
+            "a queued model pick must stop the session-start soft-impose"
+        );
         assert_eq!(
             emitted.len(),
             2,
@@ -2828,13 +3749,250 @@ mod tests {
     #[test]
     fn drained_plain_text_emits_only_queue_drained() {
         let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
         let mut emitted: Vec<StreamChunk> = Vec::new();
-        write_and_emit_drained_message("sess-1", "what is 2+2?", &stdin, |chunk| {
+        write_and_emit_drained_message("sess-1", "what is 2+2?", &stdin, &settled, |chunk| {
             emitted.push(chunk)
         });
 
         assert_eq!(emitted.len(), 1);
         assert!(matches!(emitted[0], StreamChunk::QueueDrained { .. }));
+        assert!(!settled.is_settled());
+    }
+
+    #[test]
+    fn a_drained_effort_pick_leaves_the_soft_impose_armed() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        write_and_emit_drained_message("sess-1", "/effort high", &stdin, &settled, |_| {});
+        assert!(!settled.is_settled());
+    }
+
+    fn finished_turn() -> StreamChunk {
+        StreamChunk::Result {
+            session_id: "sess-1".to_string(),
+            total_cost: None,
+            usage: None,
+            result_text: None,
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+            context_usage: None,
+        }
+    }
+
+    #[test]
+    fn a_result_is_awaited_until_one_arrives_and_again_after_the_next_message() {
+        let awaited = AwaitedResult::new();
+        assert!(
+            awaited.is_awaited(),
+            "a process that dies before its first output line must be reported"
+        );
+        awaited.observe(&[finished_turn()]);
+        assert!(!awaited.is_awaited());
+        awaited.message_written();
+        assert!(
+            awaited.is_awaited(),
+            "the previous turn's result must not cover a message sent after it"
+        );
+    }
+
+    #[test]
+    fn turn_output_keeps_the_result_awaited_and_an_error_or_empty_batch_does_not() {
+        let awaited = AwaitedResult::new();
+        awaited.observe(&[StreamChunk::Error {
+            content: "boom".to_string(),
+            turn_ended: false,
+        }]);
+        assert!(!awaited.is_awaited());
+        awaited.observe(&[]);
+        assert!(!awaited.is_awaited());
+        awaited.observe(&[StreamChunk::Text {
+            content: "hi".to_string(),
+        }]);
+        assert!(awaited.is_awaited());
+        awaited.observe(&[
+            StreamChunk::Text {
+                content: "bye".to_string(),
+            },
+            finished_turn(),
+        ]);
+        assert!(!awaited.is_awaited());
+    }
+
+    #[test]
+    fn a_message_sent_after_a_finished_turn_awaits_its_own_result() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        session.awaited_result.observe(&[finished_turn()]);
+        session
+            .send_message_with_emit(&text_only("next question"), |_| {})
+            .unwrap();
+        assert!(session.awaited_result.is_awaited());
+    }
+
+    #[test]
+    fn a_message_that_fails_to_reach_the_process_awaits_nothing() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_broken_pipe();
+        session.awaited_result.observe(&[finished_turn()]);
+        session
+            .send_message_with_emit(&text_only("next question"), |_| {})
+            .unwrap_err();
+        assert!(!session.awaited_result.is_awaited());
+    }
+
+    #[test]
+    fn a_model_pick_sent_to_the_session_stops_the_soft_impose() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model openrouter/openai/gpt-4o-mini"), |_| {})
+            .unwrap();
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_typed_model_command_waits_for_claude_codes_answer() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("what model are you?"), |_| {})
+            .unwrap();
+        assert!(!session.model_settled.command_awaits_reply());
+
+        session
+            .send_message_with_emit(&text_only("/model claude-haiku-4-5"), |_| {})
+            .unwrap();
+
+        assert!(session.model_settled.command_awaits_reply());
+    }
+
+    #[test]
+    fn a_typed_model_command_drained_from_the_queue_waits_for_claude_codes_answer() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+
+        assert!(write_and_emit_drained_message(
+            "sess-1",
+            "/model claude-haiku-4-5",
+            &stdin,
+            &settled,
+            |_| {}
+        ));
+
+        assert!(settled.is_settled());
+        assert!(settled.command_awaits_reply());
+    }
+
+    #[test]
+    fn a_plain_message_or_an_effort_pick_leaves_the_soft_impose_armed() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/effort high"), |_| {})
+            .unwrap();
+        session
+            .send_message_with_emit(&text_only("what model are you?"), |_| {})
+            .unwrap();
+        assert!(!session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_drained_message_reports_whether_it_reached_the_process() {
+        let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
+        let settled = ModelSettled::default();
+        assert!(write_and_emit_drained_message(
+            "sess-1",
+            "queued",
+            &stdin,
+            &settled,
+            |_| {}
+        ));
+        let broken = Arc::new(Mutex::new(test_broken_pipe_stdin()));
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        assert!(!write_and_emit_drained_message(
+            "sess-1",
+            "queued",
+            &broken,
+            &settled,
+            |chunk| emitted.push(chunk)
+        ));
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn the_stdout_reader_reports_an_unexpected_end_from_the_shared_result_state() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")];
+        for wiring in [
+            "awaited_for_reader.observe(&chunks)",
+            "awaited_for_reader.message_written()",
+            "awaited_for_reader.is_awaited() && !stopping",
+        ] {
+            assert!(body.contains(wiring), "the reader must use `{wiring}`");
+        }
+    }
+
+    #[test]
+    fn the_stdout_reader_runs_the_soft_impose_step_on_every_parsed_line() {
+        let source = include_str!("chat.rs");
+        let start = source
+            .find("pub fn start_with_retry(")
+            .expect("start_with_retry must exist");
+        let body = &source[start..];
+        let body: String = body[..body
+            .find("pub fn send_message(")
+            .expect("send_message must follow start_with_retry")]
+            .split_whitespace()
+            .collect();
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("the reader must use `{needle}`"))
+        };
+        let answers_routed =
+            at("ifconsume_control_response(&control_for_reader,&parsed){continue;}");
+        let parsed = at("let(chunks,log_entry)=parser.parse_line(&parsed);");
+        let step = at(concat!(
+            "ifletSome((pending,model))=soft_impose_step(&parsed,&chunks,&soft_impose_cfg,",
+            "&settled_for_reader,&control_for_reader,&stdin_for_reader,)",
+            "{spawn_soft_impose_report(app_handle.clone(),project_for_reader.clone(),",
+            "tab_id_for_reader.clone(),pending,",
+            "model,stopping_for_reader.clone(),None,);}"
+        ));
+        assert!(
+            answers_routed < parsed,
+            "control answers never reach the parser"
+        );
+        assert!(parsed < step, "the step reads the parsed chunks");
     }
 
     #[test]
@@ -2888,20 +4046,438 @@ mod tests {
     }
 
     #[test]
-    fn reap_exec_plan_targets_project_container_with_marker() {
-        let (container, argv) = reap_exec_plan("acme", "inst-123");
+    fn control_response_is_consumed_before_the_stream_parser() {
+        let control = ControlChannel::default();
+        let line = serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": "req_interrupt_1" }
+        });
+        assert!(consume_control_response(&control, &line));
+
+        for other in [
+            serde_json::json!({ "type": "control_request", "request_id": "r" }),
+            serde_json::json!({ "type": "result" }),
+            serde_json::json!({ "foo": "bar" }),
+        ] {
+            assert!(!consume_control_response(&control, &other), "{other}");
+        }
+    }
+
+    #[test]
+    fn stdout_reader_routes_control_responses_before_parsing_the_line() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let route_pos = prod
+            .find("if consume_control_response(&control_for_reader, &parsed)")
+            .expect("the stdout reader must route control responses");
+        let parse_pos = prod
+            .find("parser.parse_line(&parsed)")
+            .expect("the stdout reader must parse lines");
         assert!(
-            container.ends_with("_acme_claude"),
-            "must target the project's claude container, got: {container}"
+            route_pos < parse_pos,
+            "a control_response reaching parse_line is logged as an unknown stream-json type"
         );
-        let joined = argv.join(" ");
-        assert!(joined.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
-        assert!(joined.contains("kill"));
+    }
+
+    #[test]
+    fn stdout_reader_ends_pending_control_requests_when_the_stream_closes() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        assert!(
+            prod.contains("control_for_reader.close();"),
+            "a dead process must fail waiting control requests instead of letting them time out"
+        );
+    }
+
+    #[test]
+    fn probe_session_info_stores_the_parsed_initialize_result() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let mut reported = None;
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+            |_| {},
+            |status| reported = Some(status),
+        )
+        .expect("a live session reports its status");
+        assert!(matches!(&status, SessionInfoState::Ready { info } if info.models.len() == 5));
+        assert_eq!(*slot.lock().unwrap(), status);
+        assert_eq!(reported, Some(status));
+    }
+
+    #[test]
+    fn probe_session_info_degrades_to_unavailable_when_the_request_fails() {
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let status = probe_session_info(
+            || {
+                Err(control_channel::ControlError::Timeout {
+                    subtype: "initialize",
+                    timeout: std::time::Duration::from_secs(15),
+                })
+            },
+            &slot,
+            &stopping,
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(status, Some(SessionInfoState::Unavailable));
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn probe_session_info_of_a_stopped_session_reports_nothing() {
+        let slot = Mutex::new(SessionInfoState::Unavailable);
+        let stopping = std::sync::atomic::AtomicBool::new(true);
+        let mut prepared = false;
+        let mut reported = false;
+        let status = probe_session_info(
+            || Err(control_channel::ControlError::SessionEnded),
+            &slot,
+            &stopping,
+            |_| prepared = true,
+            |_| reported = true,
+        );
+        assert_eq!(status, None);
+        assert!(!prepared);
+        assert!(!reported);
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn the_probe_prepares_its_report_without_holding_the_info_lock() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let mut free_while_preparing = false;
+        let mut locked_while_emitting = false;
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+            |_| free_while_preparing = slot.try_lock().is_ok(),
+            |_| locked_while_emitting = slot.try_lock().is_err(),
+        );
+        assert!(status.is_some());
+        assert!(free_while_preparing);
+        assert!(locked_while_emitting);
+    }
+
+    #[test]
+    fn a_stop_during_the_probes_preparation_reports_nothing() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let slot = Mutex::new(SessionInfoState::Pending);
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+        let mut reported = false;
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &slot,
+            &stopping,
+            |_| stopping.store(true, std::sync::atomic::Ordering::SeqCst),
+            |_| reported = true,
+        );
+        assert_eq!(status, None);
+        assert!(!reported);
+        assert_eq!(*slot.lock().unwrap(), SessionInfoState::Pending);
+    }
+
+    fn session_reporting_into(
+        info: SessionInfoState,
+    ) -> (ChatSession, Arc<Mutex<Vec<SessionInfoState>>>) {
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        s.session_info = Arc::new(Mutex::new(info));
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let sink = reported.clone();
+        s.session_info_emitter = Some(Arc::new(move |status: SessionInfoState| {
+            sink.lock().unwrap().push(status)
+        }));
+        (s, reported)
+    }
+
+    #[test]
+    fn stopping_a_session_whose_info_is_pending_reports_it_unavailable_once() {
+        let (mut s, reported) = session_reporting_into(SessionInfoState::Pending);
+        s.stop().expect("stop");
+        s.stop().expect("second stop");
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn stopping_a_session_whose_info_is_ready_reports_it_unavailable() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let ready =
+            control_channel::session_info_state_from(Ok(fixture["run_A"]["initialize"].clone()));
+        assert!(matches!(ready, SessionInfoState::Ready { .. }));
+        let (mut s, reported) = session_reporting_into(ready);
+        s.stop().expect("stop");
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+    }
+
+    #[test]
+    fn stopping_a_session_that_reported_no_info_reports_nothing() {
+        let (mut s, reported) = session_reporting_into(SessionInfoState::Unavailable);
+        s.stop().expect("stop");
+        assert!(reported.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stop_during_the_probes_report_is_reported_after_it() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let (mut s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let slot = s.session_info.clone();
+        let stopping = s.stopping.clone();
+        let stop_begun = s.stopping.clone();
+        let emit = s.session_info_emitter.clone().expect("emitter");
+        let (in_report, reporting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let probe = std::thread::spawn(move || {
+            probe_session_info(
+                || Ok(fixture["run_A"]["initialize"].clone()),
+                &slot,
+                &stopping,
+                |_| {},
+                |status| {
+                    in_report.send(()).expect("signal");
+                    released.recv().expect("release");
+                    emit(status);
+                },
+            )
+        });
+        reporting.recv().expect("the probe reports");
+        let stopper = std::thread::spawn(move || {
+            s.stop().expect("stop");
+            s
+        });
+        while !stop_begun.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        release.send(()).expect("release");
+        assert!(probe.join().expect("probe").is_some());
+        let s = stopper.join().expect("stopper");
+        let reported = reported.lock().unwrap();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        assert!(matches!(reported[0], SessionInfoState::Ready { .. }));
+        assert_eq!(reported[1], SessionInfoState::Unavailable);
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn a_probe_that_answers_after_the_stop_reports_nothing() {
+        let (mut s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let slot = s.session_info.clone();
+        let stopping = s.stopping.clone();
+        let emit = s.session_info_emitter.clone().expect("emitter");
+        s.stop().expect("stop");
+        let status = probe_session_info(
+            || Err(control_channel::ControlError::SessionEnded),
+            &slot,
+            &stopping,
+            |_| {},
+            |status| emit(status),
+        );
+        assert_eq!(status, None);
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+    }
+
+    #[test]
+    fn a_process_that_ends_on_its_own_reports_its_info_unavailable_and_a_late_probe_nothing() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(control_channel::FIXTURE).expect("fixture");
+        let (s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let emit = s.session_info_emitter.clone().expect("emitter");
+
+        end_session_info(&s.session_info, s.session_info_emitter.as_ref());
+        let status = probe_session_info(
+            || Ok(fixture["run_A"]["initialize"].clone()),
+            &s.session_info,
+            &s.stopping,
+            |_| {},
+            |status| emit(status),
+        );
+
+        assert_eq!(status, None);
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn the_end_of_a_replaced_sessions_stream_reports_nothing_and_leaves_its_successor_alone() {
+        let (mut old, old_reported) = session_reporting_into(SessionInfoState::Pending);
+        let old_reader_slot = old.session_info.clone();
+        let old_reader_emitter = old.session_info_emitter.clone();
+        old.stop().expect("stop");
+        let (successor, new_reported) = session_reporting_into(SessionInfoState::Pending);
+
+        end_session_info(&old_reader_slot, old_reader_emitter.as_ref());
+
+        assert_eq!(
+            *old_reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert!(new_reported.lock().unwrap().is_empty());
+        assert_eq!(successor.session_info_state(), SessionInfoState::Pending);
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_the_pending_announcement_leaves_the_session_unavailable() {
+        let (s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let emit = s.session_info_emitter.clone().expect("emitter");
+
+        end_session_info(&s.session_info, s.session_info_emitter.as_ref());
+        announce_pending_session_info(&s.session_info, |status| emit(status));
+
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Unavailable]
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn a_stream_that_ends_after_the_pending_announcement_is_reported_after_it() {
+        let (s, reported) = session_reporting_into(SessionInfoState::Pending);
+        let emit = s.session_info_emitter.clone().expect("emitter");
+
+        announce_pending_session_info(&s.session_info, |status| emit(status));
+        end_session_info(&s.session_info, s.session_info_emitter.as_ref());
+
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![SessionInfoState::Pending, SessionInfoState::Unavailable]
+        );
+    }
+
+    #[test]
+    fn start_announces_pending_only_through_the_slot_lock() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        assert!(prod.contains("announce_pending_session_info(&slot, |status| emit(status));"));
+        assert_eq!(prod.matches("emit(SessionInfoState::Pending)").count(), 1);
+    }
+
+    #[test]
+    fn stdout_reader_ends_the_session_info_when_the_stream_closes() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let closed = prod
+            .find("control_for_reader.close();")
+            .expect("the reader closes the control channel at EOF");
+        let ended = prod
+            .find("end_session_info(&info_for_reader, info_emitter_for_reader.as_ref());")
+            .expect("the reader reports the end of its session's info at EOF");
+        assert!(closed < ended);
+    }
+
+    #[test]
+    fn fresh_session_has_no_session_info_and_no_control_handle() {
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+        let err = s.control_handle().err().expect("no stdin yet");
+        assert!(err.to_string().contains("no active session"), "{err}");
+    }
+
+    #[test]
+    fn stop_ends_a_control_request_that_is_still_waiting() {
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        s.set_test_stdin_sink(Vec::new());
+        let handle = s.control_handle().expect("handle");
+        let control = s.control.clone();
+        let waiter = std::thread::spawn(move || handle.query(ControlQuery::Usage));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while control.pending_ids().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "request never sent");
+            std::thread::yield_now();
+        }
+        s.stop().expect("stop");
+        assert_eq!(
+            waiter.join().expect("join"),
+            Err(control_channel::ControlError::SessionEnded)
+        );
+        assert_eq!(s.session_info_state(), SessionInfoState::Unavailable);
+    }
+
+    #[test]
+    fn a_session_is_reaped_in_its_projects_claude_container() {
+        let (rt, handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+        let mut session = ChatSession::new(
+            "acme",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.instance_id = Some("inst-123".to_string());
+
+        session.reap_instance_with(&rt);
+
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].container, claude_container_name("acme"));
+        assert_eq!(
+            calls[0].argv,
+            speedwave_runtime::session::kill_by_instance_command("inst-123")
+        );
+        assert!(session.instance_id.is_none());
+    }
+
+    #[test]
+    fn a_start_reaps_every_unconfirmed_instance_before_it_spawns() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start_with_retry(")
+            .expect("start_with_retry");
+        let body: String = source[from..].split_whitespace().collect();
+        let gate = body
+            .find(concat!(
+                "speedwave_runtime::session::reap_unconfirmed(&rt,",
+                "&claude_container_name(&self.project_name)"
+            ))
+            .expect("the start refuses while an earlier instance survives");
+        let spawn = body.find("rt.container_exec_piped(").expect("the spawn");
+
+        assert!(gate < spawn);
     }
 
     #[test]
     fn reap_instance_is_noop_without_an_id() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s.instance_id.is_none());
         s.reap_instance();
         assert!(s.instance_id.is_none());
@@ -2910,7 +4486,11 @@ mod tests {
     #[test]
     fn stop_sets_stopping_flag() {
         use std::sync::atomic::Ordering;
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(!s.stopping.load(Ordering::SeqCst));
         s.stop().unwrap();
         assert!(
@@ -2921,7 +4501,11 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent_when_no_session_running() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s.stop().is_ok());
         assert!(s.stop().is_ok());
         assert!(s.child.is_none());
@@ -2932,7 +4516,11 @@ mod tests {
 
     #[test]
     fn stop_grace_period_joins_reader_that_finishes_late() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }));
@@ -2948,7 +4536,11 @@ mod tests {
 
     #[test]
     fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(10));
         }));
@@ -2964,7 +4556,11 @@ mod tests {
 
     #[test]
     fn stop_clears_pending_requests() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-1".to_string(),
             PartialAnswers {
@@ -2973,6 +4569,7 @@ mod tests {
                     tool_name: ASK_USER_TOOL_NAME.to_string(),
                     input: serde_json::json!({}),
                     tool_use_id: "tool-1".to_string(),
+                    safety_check: None,
                 },
                 questions: vec![AskUserQuestionItem {
                     question: "q".to_string(),
@@ -2989,10 +4586,18 @@ mod tests {
 
     #[test]
     fn second_session_can_be_created_after_stop() {
-        let mut s1 = ChatSession::new("test-project");
+        let mut s1 = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s1.stop().is_ok());
         drop(s1);
-        let mut s2 = ChatSession::new("test-project");
+        let mut s2 = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(s2.stop().is_ok());
     }
 
@@ -3264,159 +4869,1370 @@ mod tests {
     }
 
     #[test]
-    fn soft_impose_message_returns_command_on_mismatch() {
-        let msg = soft_impose_message(
+    fn soft_impose_target_is_the_configured_wire_id_on_a_mismatch() {
+        let target = soft_impose_target(
             speedwave_runtime::config::LlmProviderKind::Local,
             "local",
             Some("llama-3.1-70b"),
             "wrong-observed-model",
         );
-        assert_eq!(msg.as_deref(), Some("/model local/llama-3.1-70b"));
+        assert_eq!(target.as_deref(), Some("local/llama-3.1-70b"));
     }
 
     #[test]
-    fn soft_impose_message_returns_none_on_match() {
-        let msg = soft_impose_message(
+    fn soft_impose_target_is_none_on_a_match() {
+        let target = soft_impose_target(
             speedwave_runtime::config::LlmProviderKind::Local,
             "local",
             Some("llama-3.1-70b"),
             "local/llama-3.1-70b",
         );
-        assert_eq!(msg, None);
+        assert_eq!(target, None);
     }
 
     #[test]
-    fn soft_impose_message_returns_none_for_anthropic_kind() {
-        let msg = soft_impose_message(
+    fn soft_impose_target_is_none_for_an_anthropic_kind() {
+        let target = soft_impose_target(
             speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
             "anthropic",
             Some("claude-sonnet-5"),
             "some-other-observed",
         );
-        assert_eq!(msg, None);
+        assert_eq!(target, None);
     }
 
     #[test]
-    fn soft_impose_message_returns_none_when_entry_model_absent() {
-        let msg = soft_impose_message(
+    fn soft_impose_target_is_none_without_an_entry_model() {
+        let target = soft_impose_target(
             speedwave_runtime::config::LlmProviderKind::OpenRouter,
             "openrouter",
             None,
             "anthropic/claude-sonnet-5",
         );
-        assert_eq!(msg, None);
+        assert_eq!(target, None);
     }
 
     #[test]
-    fn soft_impose_message_matches_when_catalog_id_already_prefixed() {
-        let msg = soft_impose_message(
+    fn soft_impose_target_matches_an_already_prefixed_catalog_id() {
+        let target = soft_impose_target(
             speedwave_runtime::config::LlmProviderKind::Local,
             "llama",
             Some("llama/whatever"),
             "llama/whatever",
         );
         assert_eq!(
-            msg, None,
+            target, None,
             "an already-prefixed catalog id must still be recognized as matching"
         );
     }
 
     #[test]
-    fn soft_impose_message_still_fires_for_openrouter_and_local_kinds_on_mismatch() {
+    fn soft_impose_target_fires_for_openrouter_and_local_kinds_on_a_mismatch() {
         for kind in [
             speedwave_runtime::config::LlmProviderKind::OpenRouter,
             speedwave_runtime::config::LlmProviderKind::Local,
         ] {
-            let mismatch = soft_impose_message(kind, "entry", Some("model-a"), "model-b");
+            let mismatch = soft_impose_target(kind, "entry", Some("model-a"), "model-b");
             assert!(mismatch.is_some(), "{kind:?} must fire on mismatch");
 
-            let matching = soft_impose_message(kind, "entry", Some("model-a"), "entry/model-a");
+            let matching = soft_impose_target(kind, "entry", Some("model-a"), "entry/model-a");
             assert_eq!(matching, None, "{kind:?} must suppress on match");
         }
     }
 
-    #[test]
-    fn soft_impose_fires_once_on_mismatch_and_writes_wrapped_stdin_line() {
-        let mut parser = StreamParser::new();
-        let mut captured: Vec<String> = Vec::new();
-        let cfg = SoftImposeConfig {
+    fn local_llama() -> SoftImposeConfig {
+        SoftImposeConfig {
             kind: speedwave_runtime::config::LlmProviderKind::Local,
             entry_id: "local".to_string(),
             entry_model: Some("llama-3.1-70b".to_string()),
-        };
-        let init_line = serde_json::json!({
+        }
+    }
+
+    fn init_with_model(model: &str) -> serde_json::Value {
+        serde_json::json!({
             "type": "system",
             "subtype": "init",
             "session_id": "sess-1",
-            "model": "wrong-observed-model",
-        });
-        let (chunk, _log) = parser.parse_system_message(&init_line);
-        assert!(matches!(chunk, Some(StreamChunk::SystemInit { .. })));
+            "model": model,
+        })
+    }
 
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
-            captured.push(line.to_string());
-        });
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
-            captured.push(line.to_string());
-        });
+    fn init_chunk(model: &str) -> Vec<StreamChunk> {
+        vec![StreamChunk::SystemInit {
+            model: model.to_string(),
+            session_id: Some("sess-1".to_string()),
+        }]
+    }
 
-        assert_eq!(captured.len(), 1, "must fire exactly once across two calls");
-        let expected = build_user_message(&text_only("/model local/llama-3.1-70b")).to_string();
-        assert_eq!(captured[0], expected);
-        let decoded: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
-        assert_eq!(decoded["type"], "user");
+    fn written_lines(stdin: &Mutex<Vec<u8>>) -> Vec<serde_json::Value> {
+        String::from_utf8(stdin.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_mismatched_init_sends_one_set_model_with_the_configured_wire_id() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        let init = init_with_model("wrong-observed-model");
+        let chunks = init_chunk("wrong-observed-model");
+
+        let first = soft_impose_step(&init, &chunks, &local_llama(), &settled, &control, &stdin);
+        let second = soft_impose_step(&init, &chunks, &local_llama(), &settled, &control, &stdin);
+
         assert_eq!(
-            decoded["message"]["content"][0]["text"],
-            "/model local/llama-3.1-70b"
+            first.map(|(_, model)| model).as_deref(),
+            Some("local/llama-3.1-70b")
         );
+        assert!(second.is_none(), "a session is soft-imposed once");
+        let written = written_lines(&stdin);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0]["type"], "control_request");
+        assert_eq!(
+            written[0]["request"],
+            serde_json::json!({ "subtype": "set_model", "model": "local/llama-3.1-70b" })
+        );
+        assert!(settled.is_settled());
     }
 
     #[test]
-    fn soft_impose_does_not_fire_when_models_match() {
-        let mut parser = StreamParser::new();
-        let mut captured: Vec<String> = Vec::new();
-        let cfg = SoftImposeConfig {
-            kind: speedwave_runtime::config::LlmProviderKind::Local,
-            entry_id: "local".to_string(),
-            entry_model: Some("llama-3.1-70b".to_string()),
-        };
-        let init_line = serde_json::json!({
-            "type": "system",
-            "subtype": "init",
-            "session_id": "sess-1",
-            "model": "local/llama-3.1-70b",
-        });
-        parser.parse_system_message(&init_line);
+    fn a_matching_init_a_line_that_is_not_an_init_or_a_picked_model_sends_nothing() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        let cfg = local_llama();
 
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
-            captured.push(line.to_string());
-        });
+        let matching = soft_impose_step(
+            &init_with_model("local/llama-3.1-70b"),
+            &init_chunk("local/llama-3.1-70b"),
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+        let not_an_init = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &[],
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
+        settled.settle();
+        let picked = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &init_chunk("wrong-observed-model"),
+            &cfg,
+            &settled,
+            &control,
+            &stdin,
+        );
 
-        assert!(captured.is_empty());
+        assert!(matching.is_none());
+        assert!(not_an_init.is_none());
+        assert!(
+            picked.is_none(),
+            "a model the user picked is never switched back"
+        );
+        assert!(written_lines(&stdin).is_empty());
+        assert!(control.pending_ids().is_empty());
     }
 
     #[test]
-    fn soft_impose_never_fires_for_anthropic() {
-        let mut parser = StreamParser::new();
-        let mut captured: Vec<String> = Vec::new();
+    fn an_anthropic_session_is_never_soft_imposed() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let settled = ModelSettled::default();
         let cfg = SoftImposeConfig {
             kind: speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
             entry_id: "anthropic".to_string(),
             entry_model: Some("claude-sonnet-5".to_string()),
         };
-        let init_line = serde_json::json!({
-            "type": "system",
-            "subtype": "init",
-            "session_id": "sess-1",
-            "model": "totally-different",
-        });
-        parser.parse_system_message(&init_line);
 
-        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
-            captured.push(line.to_string());
+        let sent = soft_impose_step(
+            &init_with_model("totally-different"),
+            &init_chunk("totally-different"),
+            &cfg,
+            &settled,
+            &ControlChannel::default(),
+            &stdin,
+        );
+
+        assert!(sent.is_none());
+        assert!(written_lines(&stdin).is_empty());
+        assert!(!settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_written_while_the_soft_impose_waits_for_stdin_cancels_it() {
+        let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+        let held = stdin.lock().unwrap();
+        let sender = {
+            let (stdin, settled, control) = (stdin.clone(), settled.clone(), control.clone());
+            std::thread::spawn(move || {
+                send_soft_impose(&stdin, &control, &settled, "local/llama-3.1-70b").is_some()
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        settled.settle();
+        drop(held);
+
+        assert!(!sender.join().unwrap());
+        assert!(written_lines(&stdin).is_empty());
+        assert!(control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_soft_impose_that_fails_to_reach_the_process_is_not_retried() {
+        struct BrokenPipe;
+        impl Write for BrokenPipe {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+
+        let sent = send_soft_impose(
+            &Mutex::new(BrokenPipe),
+            &control,
+            &settled,
+            "local/llama-3.1-70b",
+        );
+
+        assert!(sent.is_none());
+        assert!(
+            settled.is_settled(),
+            "a dead process is not written to again at the next init"
+        );
+        assert!(control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_first_matching_init_then_a_mismatch_sends_one_set_model() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+
+        let first = soft_impose_step(
+            &init_with_model("local/llama-3.1-70b"),
+            &init_chunk("local/llama-3.1-70b"),
+            &local_llama(),
+            &settled,
+            &control,
+            &stdin,
+        );
+        let later = soft_impose_step(
+            &init_with_model("wrong-observed-model"),
+            &init_chunk("wrong-observed-model"),
+            &local_llama(),
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(first.is_none());
+        assert_eq!(
+            later.map(|(_, model)| model).as_deref(),
+            Some("local/llama-3.1-70b")
+        );
+        assert_eq!(written_lines(&stdin).len(), 1);
+    }
+
+    #[test]
+    fn the_soft_impose_report_ends_on_the_answer_and_on_the_session_end() {
+        let control = ControlChannel::default();
+        let answered = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        let id = control.pending_ids().pop().expect("a waiter");
+        control.route_response(&serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        }));
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.close();
+        let started = std::time::Instant::now();
+
+        let confirmed = soft_impose_failure(answered, "local/llama-3.1-70b");
+        let ended = soft_impose_failure(orphaned, "local/llama-3.1-70b");
+
+        assert!(
+            started.elapsed() < control_channel::SET_MODEL_TIMEOUT / 2,
+            "neither report waited for the timeout"
+        );
+        assert_eq!(confirmed, None);
+        assert_eq!(
+            ended,
+            Some(control_channel::ControlError::SessionEnded.to_string())
+        );
+    }
+
+    #[test]
+    fn a_model_pick_is_sent_every_time_and_settles_the_session() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+
+        let first = send_model_pick(&stdin, &control, &settled, "claude-haiku-4-5");
+        let second = send_model_pick(&stdin, &control, &settled, "default");
+
+        assert!(first.is_ok() && second.is_ok());
+        assert!(settled.is_settled(), "no soft-impose follows a pick");
+        let models: Vec<serde_json::Value> = written_lines(&stdin)
+            .iter()
+            .map(|l| l["request"]["model"].clone())
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                serde_json::json!("claude-haiku-4-5"),
+                serde_json::json!("default")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_soft_impose_after_a_model_pick_sends_nothing() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let settled = ModelSettled::default();
+        send_model_pick(&stdin, &control, &settled, ROUTED_PICK).expect("written");
+
+        let after = soft_impose_step(
+            &init_with_model(ENV_MODEL),
+            &init_chunk(ENV_MODEL),
+            &openrouter_mini(),
+            &settled,
+            &control,
+            &stdin,
+        );
+
+        assert!(after.is_none());
+        assert_eq!(written_lines(&stdin).len(), 1);
+    }
+
+    #[test]
+    fn a_model_pick_on_a_live_session_settles_it_and_resolves_on_the_answer() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        let control = session.control.clone();
+        let switch = session.model_switch().expect("a live session");
+        let answerer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(id) = control.pending_ids().pop() {
+                    return control.route_response(&serde_json::json!({
+                        "type": "control_response",
+                        "response": { "subtype": "success", "request_id": id },
+                    }));
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the pick never registered a waiter"
+                );
+                std::thread::yield_now();
+            }
         });
 
-        assert!(captured.is_empty());
+        let applied = switch.apply("claude-haiku-4-5");
+
+        assert_eq!(applied, Ok(control_channel::ModelSwitchOutcome::Confirmed));
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_claude_code_refuses_comes_back_refused_with_its_reason() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        let switch = session.model_switch().expect("a live session");
+        let answerer = answer_the_pending_request(session.control.clone(), |id| {
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": id,
+                    "error": "API Error: 429 Usage credits are required for long context requests",
+                },
+            })
+        });
+
+        let applied = switch.apply("claude-sonnet-4-6[1m]");
+
+        assert_eq!(
+            applied,
+            Ok(control_channel::ModelSwitchOutcome::Refused {
+                reason: "API Error: 429 Usage credits are required for long context requests"
+                    .to_string(),
+            })
+        );
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(session.model_settled.is_settled());
+    }
+
+    #[test]
+    fn a_model_pick_that_cannot_reach_the_process_reports_the_write_failure() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_broken_pipe();
+        let switch = session.model_switch().expect("a session with a pipe");
+
+        let err = switch
+            .apply("claude-haiku-4-5")
+            .expect_err("the pipe is closed");
+
+        assert!(
+            matches!(err, control_channel::ControlError::Write(_)),
+            "{err}"
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn a_session_without_a_process_has_no_model_switch() {
+        assert!(ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None))
+        )
+        .model_switch()
+        .is_err());
+    }
+
+    fn answer_the_pending_request(
+        control: ControlChannel,
+        answer: fn(&str) -> serde_json::Value,
+    ) -> std::thread::JoinHandle<control_channel::Routed> {
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(id) = control.pending_ids().pop() {
+                    return control.route_response(&answer(&id));
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the effort pick never registered a waiter"
+                );
+                std::thread::yield_now();
+            }
+        })
+    }
+
+    fn lines_written_until_stdin_closed(
+        capture: std::thread::JoinHandle<Vec<u8>>,
+    ) -> Vec<serde_json::Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !capture.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stdin was never closed: a handle to it is still alive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let text = String::from_utf8(capture.join().unwrap()).unwrap();
+        assert!(
+            text.is_empty() || text.ends_with('\n'),
+            "every write to stdin is a whole line: {text:?}"
+        );
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_effort_pick_on_a_live_session_is_an_apply_flag_settings_request_resolved_by_its_answer() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        let capture = session.set_test_stdin_capture();
+        let answerer = answer_the_pending_request(session.control.clone(), |id| {
+            serde_json::json!({
+                "type": "control_response",
+                "response": { "subtype": "success", "request_id": id },
+            })
+        });
+
+        let applied = session
+            .control_handle()
+            .expect("a live session")
+            .apply_effort("low");
+
+        assert_eq!(applied, Ok(()));
+        assert_eq!(answerer.join().unwrap(), control_channel::Routed::Delivered);
+        assert!(
+            !session.model_settled.is_settled(),
+            "an effort pick leaves the soft-impose armed"
+        );
+        assert!(session.control.pending_ids().is_empty());
+        drop(session);
+        let written = lines_written_until_stdin_closed(capture);
+        assert_eq!(written.len(), 1, "one request, no /effort input");
+        assert_eq!(written[0]["type"], "control_request");
+        assert_eq!(
+            written[0]["request"],
+            serde_json::json!({
+                "subtype": "apply_flag_settings",
+                "settings": { "effortLevel": "low" },
+            })
+        );
+    }
+
+    #[test]
+    fn an_effort_pick_after_the_process_output_ended_fails_at_once_and_writes_nothing() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        let capture = session.set_test_stdin_capture();
+        let handle = session.control_handle().expect("stdin is still open");
+        session.control.close();
+        let started = std::time::Instant::now();
+
+        let applied = handle.apply_effort("low");
+
+        assert_eq!(applied, Err(control_channel::ControlError::SessionEnded));
+        assert!(started.elapsed() < control_channel::APPLY_EFFORT_TIMEOUT / 2);
+        drop(handle);
+        drop(session);
+        assert!(lines_written_until_stdin_closed(capture).is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_claude_code_rejects_fails_with_its_text() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        let answerer = answer_the_pending_request(session.control.clone(), |id| {
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": id,
+                    "error": "effortLevel is not supported",
+                },
+            })
+        });
+
+        let applied = session
+            .control_handle()
+            .expect("a live session")
+            .apply_effort("max");
+
+        assert_eq!(
+            applied,
+            Err(control_channel::ControlError::Rejected(
+                "effortLevel is not supported".to_string()
+            ))
+        );
+        answerer.join().unwrap();
+    }
+
+    #[test]
+    fn an_unanswered_effort_pick_times_out_and_forgets_its_waiter() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+
+        let applied = session
+            .control_handle()
+            .expect("a live session")
+            .apply_effort_within("high", std::time::Duration::from_millis(30));
+
+        assert_eq!(
+            applied,
+            Err(control_channel::ControlError::Timeout {
+                subtype: "apply_flag_settings",
+                timeout: std::time::Duration::from_millis(30),
+            })
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_that_cannot_reach_the_process_reports_the_write_failure() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_broken_pipe();
+
+        let applied = session
+            .control_handle()
+            .expect("a session with a pipe")
+            .apply_effort("low");
+
+        assert!(
+            matches!(applied, Err(control_channel::ControlError::Write(_))),
+            "{applied:?}"
+        );
+        assert!(session.control.pending_ids().is_empty());
+    }
+
+    #[test]
+    fn an_effort_pick_on_a_stopped_session_fails_its_waiter_at_once() {
+        let mut session = ChatSession::new(
+            "proj",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        session.set_test_stdin_sink(Vec::new());
+        let handle = session.control_handle().expect("a live session");
+        let control = session.control.clone();
+        let stopper = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while control.pending_ids().is_empty() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            control.close();
+        });
+        let started = std::time::Instant::now();
+
+        let applied = handle.apply_effort("low");
+
+        stopper.join().unwrap();
+        assert_eq!(applied, Err(control_channel::ControlError::SessionEnded));
+        assert!(started.elapsed() < control_channel::APPLY_EFFORT_TIMEOUT / 2);
+    }
+
+    #[test]
+    fn a_typed_model_pick_settles_under_the_stdin_lock_before_it_is_written() {
+        let source = include_str!("chat.rs");
+        let body_of = |signature: &str, end: &str| -> String {
+            let start = source.find(signature).expect("function exists");
+            let body = &source[start..];
+            body[..body.find(end).expect("end marker")]
+                .split_whitespace()
+                .collect()
+        };
+        let send = body_of("fn send_message_with_emit(", "fn set_test_stdin_sink(");
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("the send path must use `{needle}`"))
+        };
+        let locked = at(&send, "letmutstdin=shared.lock()");
+        let settled = at(&send, "self.model_settled.settle_by_command();");
+        let written = at(&send, "writeln!(stdin,\"{}\",serialized)?;");
+        assert!(locked < settled && settled < written);
+
+        let drain = body_of("fn write_and_emit_drained_message(", "#[cfg(test)]");
+        let locked = at(&drain, "matchstdin.lock(){Ok(muthandle)=>{");
+        let settled = at(&drain, "settled.settle_by_command();");
+        let written = at(&drain, "writeln!(handle,\"{}\",payload)");
+        assert!(locked < settled && settled < written);
+    }
+
+    const ROUTED_PICK: &str = "openrouter/openai/gpt-4o-mini";
+    const ENV_MODEL: &str = "openrouter/anthropic/claude-sonnet-5";
+
+    fn openrouter_mini() -> SoftImposeConfig {
+        SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            entry_id: "openrouter".to_string(),
+            entry_model: Some("openai/gpt-4o-mini".to_string()),
+        }
+    }
+
+    #[test]
+    fn the_answer_to_a_soft_impose_reaches_its_waiter_and_not_the_chat() {
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let control = ControlChannel::default();
+        let (pending, model) = soft_impose_step(
+            &init_with_model(ENV_MODEL),
+            &init_chunk(ENV_MODEL),
+            &openrouter_mini(),
+            &ModelSettled::default(),
+            &control,
+            &stdin,
+        )
+        .expect("a mismatch is soft-imposed");
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": written_lines(&stdin)[0]["request_id"],
+            },
+        });
+
+        assert!(consume_control_response(&control, &answer));
+        assert_eq!(
+            pending.wait(std::time::Duration::from_secs(5)),
+            Ok(serde_json::Value::Null)
+        );
+        assert_eq!(model, ROUTED_PICK);
+    }
+
+    const SOFT_IMPOSE_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-soft-impose.sanitized.ndjson");
+    const MID_TURN_COMMAND_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-model-command-mid-tool-turn.sanitized.ndjson");
+    const MODEL_PICKS_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-model-picks.sanitized.ndjson");
+    const MODEL_PICKS_REQUESTS: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-model-picks-requests.sanitized.json");
+    const SET_MODEL_CHECK: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-set-model-check.sanitized.json");
+
+    fn set_model_check() -> serde_json::Value {
+        serde_json::from_str(SET_MODEL_CHECK).unwrap()
+    }
+
+    fn synthetic_line(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [{ "type": "text", "text": text }],
+            },
+        })
+    }
+
+    fn init_line() -> serde_json::Value {
+        serde_json::json!({ "type": "system", "subtype": "init", "model": "claude-opus-5-5" })
+    }
+
+    #[test]
+    fn the_set_model_check_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            set_model_check()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the set_model check with the new Claude Code pin"
+        );
+    }
+
+    #[test]
+    fn a_set_model_before_the_first_turn_moves_the_first_init_and_request() {
+        let run = &set_model_check()["before_first_turn"];
+        assert_eq!(run["answer"]["subtype"], "success");
+        assert_eq!(
+            run["probes"],
+            serde_json::json!([{ "model": run["set_model"], "max_tokens": 1, "stream": null }])
+        );
+        assert_eq!(run["first_init_model"], run["set_model"]);
+        assert_eq!(
+            run["first_turn_models"],
+            serde_json::json!([run["set_model"]])
+        );
+        assert_ne!(run["set_model"], run["launched"]);
+    }
+
+    #[test]
+    fn a_set_model_refused_before_the_first_turn_leaves_the_launch_model() {
+        let run = &set_model_check()["refused_not_found"];
+        assert_eq!(run["answer"]["subtype"], "error");
+        assert_eq!(run["first_init_model"], run["launched"]);
+        assert_eq!(
+            run["first_turn_models"],
+            serde_json::json!([run["launched"]])
+        );
+    }
+
+    #[test]
+    fn claude_code_refuses_an_unanswered_set_model_check_before_speedwave_stops_waiting() {
+        let run = &set_model_check()["unanswered"];
+        let answered_after = run["answered_after_s"].as_f64().unwrap();
+        assert!(
+            answered_after < control_channel::SET_MODEL_TIMEOUT.as_secs_f64(),
+            "SET_MODEL_TIMEOUT must outlast Claude Code's own check, answered after {answered_after} s"
+        );
+        assert_eq!(run["answer"]["subtype"], "error");
+        assert_eq!(run["answer"]["error_code"], "check_failed");
+    }
+
+    #[test]
+    fn a_refused_typed_model_command_is_shown_and_a_confirmed_one_is_not() {
+        let check = set_model_check();
+        let refused = check["typed_model_refused"]["synthetic_text"][0]
+            .as_str()
+            .unwrap();
+        let confirmed = check["typed_model_confirmed"]["synthetic_text"][0]
+            .as_str()
+            .unwrap();
+        let settled = ModelSettled::default();
+        settled.settle_by_command();
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
+
+        assert_eq!(
+            refused_model_command(&synthetic_line(refused), &settled),
+            Some(refused.to_string())
+        );
+        assert!(!settled.command_awaits_reply());
+
+        settled.settle_by_command();
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
+        assert_eq!(
+            refused_model_command(&synthetic_line(confirmed), &settled),
+            None
+        );
+        assert!(!settled.command_awaits_reply());
+        assert_eq!(
+            check["typed_model_refused"]["turn_models"][0],
+            check["typed_model_refused"]["turn_models"][1],
+            "a refused typed /model leaves the next turn on the session's model"
+        );
+    }
+
+    #[test]
+    fn only_a_synthetic_answer_to_a_typed_model_command_is_read_as_its_reply() {
+        let settled = ModelSettled::default();
+        let refusal = synthetic_line("API error: 429 · model not changed");
+        assert_eq!(refused_model_command(&refusal, &settled), None);
+
+        settled.settle_by_command();
+        refused_model_command(&init_line(), &settled);
+        let reply = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "claude-opus-5-5", "content": [{ "type": "text", "text": "hi" }] },
+        });
+        assert_eq!(refused_model_command(&reply, &settled), None);
+        assert!(
+            settled.command_awaits_reply(),
+            "a normal reply leaves the command waiting for its own answer"
+        );
+
+        settled.settle();
+        assert!(settled.command_awaits_reply());
+        let picked = ModelSettled::default();
+        picked.settle();
+        assert!(
+            !picked.command_awaits_reply(),
+            "a composer pick or the soft-impose settles the model without a typed command"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_line_without_content_blocks_leaves_the_typed_model_waiting() {
+        let settled = ModelSettled::default();
+        settled.settle_by_command();
+        refused_model_command(&init_line(), &settled);
+        let shapeless = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "<synthetic>", "content": "not a block list" },
+        });
+        let textless = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "<synthetic>", "content": [{ "type": "tool_use", "id": "t" }] },
+        });
+
+        assert_eq!(refused_model_command(&shapeless, &settled), None);
+        assert_eq!(refused_model_command(&textless, &settled), None);
+        assert!(settled.command_awaits_reply());
+        assert_eq!(
+            refused_model_command(&synthetic_line("model not changed"), &settled),
+            Some("model not changed".to_string())
+        );
+    }
+
+    #[test]
+    fn a_synthetic_line_before_the_typed_commands_own_init_is_not_its_reply() {
+        let settled = ModelSettled::default();
+        settled.settle_by_command();
+        let aborted_turn_error = synthetic_line("API Error: Request was aborted.");
+
+        assert_eq!(refused_model_command(&aborted_turn_error, &settled), None);
+        assert!(settled.command_awaits_reply());
+
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
+        assert_eq!(
+            refused_model_command(&synthetic_line("model not changed"), &settled),
+            Some("model not changed".to_string())
+        );
+        assert!(!settled.command_awaits_reply());
+    }
+
+    #[test]
+    fn an_init_without_a_typed_command_arms_nothing() {
+        let settled = ModelSettled::default();
+
+        assert_eq!(refused_model_command(&init_line(), &settled), None);
+        assert!(!settled.command_awaits_reply());
+        assert_eq!(
+            refused_model_command(&synthetic_line("model not changed"), &settled),
+            None
+        );
+    }
+
+    #[test]
+    fn the_typed_model_reply_is_matched_by_the_synthetic_model_ssot() {
+        let source = include_str!("chat.rs");
+        let body = &source[source
+            .find("fn refused_model_command(")
+            .expect("refused_model_command")..];
+        let body = &body[..body.find("\n}\n").expect("end of refused_model_command")];
+
+        assert!(body.contains("session_model::SYNTHETIC_MODEL"));
+        assert!(!body.contains("\"<synthetic>\""));
+    }
+
+    #[test]
+    fn an_anthropic_session_reads_no_rendered_model_for_the_soft_impose() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start_with_retry(")
+            .expect("ChatSession::start_with_retry");
+        let start: String = source[from..].split_whitespace().collect();
+        let gated = start
+            .find("letrendered_model=ifasks_claude_code_for_session_info{None}else{")
+            .expect("the rendered model is read only for a routed provider");
+        let read = start
+            .find("speedwave_runtime::compose::rendered_service_env_in(")
+            .expect("the rendered model read");
+
+        assert!(gated < read);
+    }
+
+    #[test]
+    fn the_spawn_soft_imposes_the_configured_model_only_when_the_rendered_one_differs() {
+        let cfg = SoftImposeConfig {
+            kind: config::LlmProviderKind::Local,
+            entry_id: "my-ollama".to_string(),
+            entry_model: Some("llama4".to_string()),
+        };
+        assert_eq!(
+            spawn_soft_impose_target(&cfg, Some("my-ollama/qwen3")),
+            Some("my-ollama/llama4".to_string())
+        );
+        assert_eq!(
+            spawn_soft_impose_target(&cfg, Some("my-ollama/llama4")),
+            None
+        );
+        assert_eq!(spawn_soft_impose_target(&cfg, None), None);
+        let anthropic = SoftImposeConfig {
+            kind: config::LlmProviderKind::AnthropicOauth,
+            entry_id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+            entry_model: None,
+        };
+        assert_eq!(
+            spawn_soft_impose_target(&anthropic, Some("claude-opus-5-5")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_spawn_soft_impose_goes_out_once_the_stdout_reader_routes_answers() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start(")
+            .expect("ChatSession::start");
+        let to = from
+            + source[from..]
+                .find("    pub fn send_message(")
+                .expect("the next method");
+        let start = &source[from..to];
+        let reader = start
+            .find("let mut parser = StreamParser::new();")
+            .expect("start spawns the stdout reader");
+        let imposed = start
+            .find("if let Some(model) = spawn_impose {")
+            .expect("start soft-imposes a rendered model that differs");
+        assert!(reader < imposed);
+    }
+
+    #[test]
+    fn the_spawn_soft_impose_is_awaited_off_the_thread_that_holds_the_session() {
+        let source = include_str!("chat.rs");
+        let from = source
+            .find("    pub fn start_with_retry(")
+            .expect("ChatSession::start_with_retry");
+        let to = from
+            + source[from..]
+                .find("    pub fn send_message(")
+                .expect("the next method");
+        let start: String = source[from..to].split_whitespace().collect();
+        let imposed = start
+            .find("ifletSome(model)=spawn_impose{")
+            .expect("the spawn-time soft-impose");
+        let closed = start
+            .find("letgate=FirstTurnGate::closed();self.first_turn_gate=gate.clone();")
+            .expect("the first turn waits for the switch");
+        let awaited = start
+            .find(concat!(
+                "spawn_soft_impose_report(impose_app_handle,self.project_name.clone(),",
+                "self.tab_id.clone(),pending,",
+                "model,self.stopping.clone(),Some(gate),);"
+            ))
+            .expect("the answer is awaited by the report thread");
+
+        assert!(imposed < closed && closed < awaited);
+        let report_from = source
+            .find("fn spawn_soft_impose_report(")
+            .expect("the report thread");
+        let report: String = source[report_from..]
+            .split("\n}\n")
+            .next()
+            .expect("its body")
+            .split_whitespace()
+            .collect();
+        let spawned = report
+            .find("std::thread::spawn(move||{")
+            .expect("the wait runs on its own thread");
+        let released = report
+            .find("ifletSome(gate)=first_turn{gate.release();}")
+            .expect("the gate opens once the answer is in");
+        assert!(spawned < released);
+    }
+
+    #[test]
+    fn a_switch_that_fails_because_its_session_stopped_is_not_reported() {
+        let control = ControlChannel::default();
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.close();
+        let stopping = std::sync::atomic::AtomicBool::new(true);
+
+        assert_eq!(
+            soft_impose_report(orphaned, "local/llama-3.1-70b", &stopping),
+            None
+        );
+    }
+
+    #[test]
+    fn a_switch_that_fails_in_a_live_session_is_reported() {
+        let control = ControlChannel::default();
+        let orphaned = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        control.close();
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            soft_impose_report(orphaned, "local/llama-3.1-70b", &stopping),
+            Some(control_channel::ControlError::SessionEnded.to_string())
+        );
+    }
+
+    #[test]
+    fn a_confirmed_switch_is_never_reported() {
+        let control = ControlChannel::default();
+        let answered = control
+            .send_set_model(&mut Vec::new(), "local/llama-3.1-70b")
+            .expect("written");
+        let id = control.pending_ids().pop().expect("a waiter");
+        control.route_response(&serde_json::json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": id },
+        }));
+        let stopping = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            soft_impose_report(answered, "local/llama-3.1-70b", &stopping),
+            None
+        );
+    }
+
+    #[test]
+    fn the_first_turn_wait_outlasts_the_soft_impose_answer() {
+        assert!(FIRST_TURN_WAIT > control_channel::SET_MODEL_TIMEOUT);
+        assert_eq!(
+            FIRST_TURN_WAIT - control_channel::SET_MODEL_TIMEOUT,
+            FIRST_TURN_MARGIN,
+            "the whole answer timeout is kept, sub-second part included"
+        );
+    }
+
+    #[test]
+    fn a_new_session_lets_its_first_turn_go_at_once() {
+        let session = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+
+        assert!(session
+            .first_turn_gate()
+            .wait(std::time::Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn a_held_first_turn_goes_once_the_switch_is_answered() {
+        let gate = FirstTurnGate::closed();
+        let releaser = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                gate.release();
+            })
+        };
+
+        assert!(gate.wait(std::time::Duration::from_secs(5)));
+        releaser.join().unwrap();
+    }
+
+    #[test]
+    fn a_held_first_turn_stops_waiting_at_its_limit() {
+        let gate = FirstTurnGate::closed();
+        let started = std::time::Instant::now();
+
+        assert!(!gate.wait(std::time::Duration::from_millis(30)));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+    }
+
+    #[test]
+    fn set_model_checks_a_catalog_id_with_a_one_token_request_and_default_with_none() {
+        let capture: serde_json::Value = serde_json::from_str(MODEL_PICKS_REQUESTS).unwrap();
+        assert_eq!(
+            capture["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the model-picks requests with the new Claude Code pin"
+        );
+        let requests = capture["requests"].as_array().unwrap();
+        let checks: Vec<(usize, &serde_json::Value)> = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r["max_tokens"] == 1)
+            .collect();
+
+        assert_eq!(checks.len(), 1, "{requests:?}");
+        let (index, check) = checks[0];
+        assert_eq!(index, 1, "the check follows the first turn: {requests:?}");
+        assert_eq!(check["model"], "claude-haiku-4-5");
+        assert_eq!(check["stream"], serde_json::Value::Null);
+        assert_eq!(
+            requests.len(),
+            4,
+            "one request per turn plus the check: {requests:?}"
+        );
+    }
+
+    fn capture_lines(capture: &str) -> Vec<serde_json::Value> {
+        capture
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn init_models(lines: &[serde_json::Value]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+            .map(|l| l["model"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_soft_impose_captures_are_of_the_pinned_claude_code() {
+        for capture in [
+            SOFT_IMPOSE_CAPTURE,
+            MID_TURN_COMMAND_CAPTURE,
+            MODEL_PICKS_CAPTURE,
+        ] {
+            let versions: Vec<String> = capture_lines(capture)
+                .iter()
+                .filter(|l| l["type"] == "system" && l["subtype"] == "init")
+                .map(|l| l["claude_code_version"].as_str().unwrap().to_string())
+                .collect();
+            assert!(!versions.is_empty());
+            assert!(
+                versions
+                    .iter()
+                    .all(|v| v == speedwave_runtime::defaults::CLAUDE_VERSION),
+                "re-capture the soft-impose streams from Claude Code {} (got {versions:?})",
+                speedwave_runtime::defaults::CLAUDE_VERSION
+            );
+        }
+    }
+
+    #[test]
+    fn set_model_switches_to_an_anthropic_id_and_back_to_the_account_default() {
+        let lines = capture_lines(MODEL_PICKS_CAPTURE);
+        let answers: Vec<&str> = lines
+            .iter()
+            .filter(|l| l["type"] == "control_response")
+            .map(|l| l["response"]["subtype"].as_str().unwrap())
+            .collect();
+        let confirmations: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l["message"]["content"].as_str())
+            .collect();
+
+        assert_eq!(answers, vec!["success", "success"]);
+        assert_eq!(
+            confirmations,
+            vec![
+                "<local-command-stdout>Set model to `claude-haiku-4-5`</local-command-stdout>",
+                "<local-command-stdout>Set model to `claude-opus-5-5`</local-command-stdout>",
+            ]
+        );
+        assert_eq!(
+            init_models(&lines)[..3],
+            ["claude-opus-5-5", "claude-haiku-4-5", "claude-opus-5-5"]
+        );
+    }
+
+    fn turn_end_count(lines: &[serde_json::Value]) -> usize {
+        let mut parser = StreamParser::new();
+        lines
+            .iter()
+            .flat_map(|l| parser.parse_line(l).0)
+            .filter(|c| matches!(c, StreamChunk::Result { .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_typed_model_command_answers_as_an_input_of_its_own() {
+        let lines = capture_lines(MODEL_PICKS_CAPTURE);
+        let tail: Vec<String> = lines
+            .iter()
+            .filter(|l| l["type"] != "stream_event" && l["subtype"] != "status")
+            .rev()
+            .take(3)
+            .map(|l| match l["type"].as_str().unwrap() {
+                "assistant" => format!("assistant {}", l["message"]["model"].as_str().unwrap()),
+                "result" => format!("result {}", l["num_turns"]),
+                other => format!("{other} {}", l["subtype"].as_str().unwrap_or("")),
+            })
+            .collect();
+        let turn_ends = turn_end_count(&lines);
+
+        assert_eq!(
+            tail,
+            vec!["result 0", "assistant <synthetic>", "system init"]
+        );
+        assert_eq!(
+            turn_ends, 4,
+            "the typed command's answer is a turn end in the chat, the two switches are not"
+        );
+    }
+
+    #[test]
+    fn a_model_command_written_during_a_tool_using_turn_runs_after_it_as_an_input_of_its_own() {
+        let lines = capture_lines(MID_TURN_COMMAND_CAPTURE);
+        let results: Vec<u64> = lines
+            .iter()
+            .filter(|l| l["type"] == "result")
+            .map(|l| l["num_turns"].as_u64().unwrap())
+            .collect();
+        let turn_ends = turn_end_count(&lines);
+
+        assert_eq!(
+            results,
+            vec![2, 0, 1],
+            "the tool-using turn, then the queued /model's own answer, then the next message"
+        );
+        assert_eq!(init_models(&lines), vec![ENV_MODEL, ENV_MODEL, ROUTED_PICK]);
+        assert_eq!(
+            turn_ends, 3,
+            "the command's answer is a turn end in the chat, which is why no switch is a /model input"
+        );
+    }
+
+    #[test]
+    fn a_set_model_soft_impose_switches_the_running_turn_and_adds_nothing_to_the_chat() {
+        let cfg = openrouter_mini();
+        let mut parser = StreamParser::new();
+        let settled = ModelSettled::default();
+        let control = ControlChannel::default();
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        let mut sent = Vec::new();
+        let mut routed_answers = 0;
+        let mut confirmations = 0;
+
+        for mut parsed in capture_lines(SOFT_IMPOSE_CAPTURE) {
+            if parsed["type"] == "control_response" {
+                parsed["response"]["request_id"] = written_lines(&stdin)[0]["request_id"].clone();
+            }
+            if consume_control_response(&control, &parsed) {
+                routed_answers += 1;
+                continue;
+            }
+            let (chunks, _log) = parser.parse_line(&parsed);
+            if parsed["message"]["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("<local-command-stdout>"))
+            {
+                confirmations += 1;
+                assert!(chunks.is_empty(), "{chunks:?}");
+            }
+            if let Some(step) = soft_impose_step(&parsed, &chunks, &cfg, &settled, &control, &stdin)
+            {
+                sent.push(step);
+            }
+            emitted.extend(chunks);
+        }
+
+        assert_eq!(sent.len(), 1, "one set_model, at the first init");
+        assert_eq!(confirmations, 1, "the confirmation line makes no chunk");
+        let (pending, model) = sent.remove(0);
+        assert_eq!(model, ROUTED_PICK);
+        assert_eq!(routed_answers, 1);
+        assert_eq!(
+            pending.wait(std::time::Duration::from_secs(1)),
+            Ok(serde_json::Value::Null),
+            "the captured answer resolves the request"
+        );
+        let turn_ends: Vec<(Option<String>, Option<String>)> = emitted
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Result {
+                    result_text, model, ..
+                } => Some((result_text.clone(), model.clone())),
+                StreamChunk::Error { content, .. } => Some((Some(content.clone()), None)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            turn_ends,
+            vec![
+                (
+                    Some("stub reply".to_string()),
+                    Some(ROUTED_PICK.to_string())
+                ),
+                (
+                    Some("stub reply".to_string()),
+                    Some(ROUTED_PICK.to_string())
+                ),
+            ],
+            "only the user's two turns end, and the first already ends on the pick"
+        );
+        let emitted_inits: Vec<&str> = emitted
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::SystemInit { model, .. } => Some(model.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(emitted_inits, vec![ENV_MODEL, ROUTED_PICK]);
+        assert!(
+            !emitted
+                .iter()
+                .any(|c| matches!(c, StreamChunk::UserMessageCommit { .. })),
+            "the set_model confirmation line adds no user message"
+        );
     }
 
     #[test]
@@ -4260,7 +7076,16 @@ mod tests {
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
         let (chunk, log_entry) = parse_line_full(&mut parser, line);
         match chunk.unwrap() {
-            StreamChunk::Error { content } => assert_eq!(content, "Something went wrong"),
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
+                assert_eq!(content, "Something went wrong");
+                assert!(
+                    turn_ended,
+                    "an is_error result ends the turn of a live process"
+                );
+            }
             other => panic!("expected Error, got {other:?}"),
         }
         let entry = log_entry.expect("error result must produce a log entry");
@@ -4281,7 +7106,7 @@ mod tests {
                 )
             });
             let content = match chunk {
-                StreamChunk::Error { content } => {
+                StreamChunk::Error { content, .. } => {
                     assert!(
                         !content.trim().is_empty(),
                         "placeholder content must be non-empty so the UI has something to render"
@@ -4473,8 +7298,12 @@ mod tests {
         let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => {
+            StreamChunk::Error {
+                content,
+                turn_ended,
+            } => {
                 assert!(content.contains("hit your limit"));
+                assert!(!turn_ended, "a system message may arrive mid-turn");
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -4486,7 +7315,7 @@ mod tests {
         let line = r#"{"type":"system","message":"Error: connection refused"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => {
+            StreamChunk::Error { content, .. } => {
                 assert!(content.contains("Error: connection refused"));
             }
             other => panic!("expected Error, got {other:?}"),
@@ -4588,7 +7417,7 @@ mod tests {
         let line = r#"{"type":"system","message":"You've hit your limit · resets 5pm (UTC)"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
-            StreamChunk::Error { content } => assert!(content.contains("hit your limit")),
+            StreamChunk::Error { content, .. } => assert!(content.contains("hit your limit")),
             other => panic!("expected Error, got {other:?}"),
         }
     }
@@ -4692,28 +7521,77 @@ mod tests {
         assert_eq!(entry.message, "init: model=claude-opus-4-6");
     }
 
-    #[test]
-    fn parse_rate_limit_event_extracts_fields() {
+    fn parse_rate_limit(line: &str) -> (StreamChunk, LogEntry) {
         let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
         let (chunks, log_entry) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+        (
+            chunks.into_iter().next().expect("a RateLimit chunk"),
+            log_entry.expect("a RATE_LIMIT log entry"),
+        )
+    }
+
+    #[test]
+    fn parse_rate_limit_event_stores_a_warning_fraction_as_percent() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1738425600,"rateLimitType":"five_hour","utilization":0.6,"overageStatus":"rejected","isUsingOverage":false},"uuid":"u","session_id":"s"}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                overage_status,
+                is_using_overage,
+            } => {
                 assert_eq!(status, "allowed_warning");
-                assert!((utilization.unwrap() - 73.5).abs() < f64::EPSILON);
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert!((utilization_percent.unwrap() - 60.0).abs() < 1e-9);
                 assert_eq!(resets_at, Some(1738425600));
+                assert_eq!(overage_status.as_deref(), Some("rejected"));
+                assert_eq!(is_using_overage, Some(false));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
-        let entry = log_entry.unwrap();
         assert_eq!(entry.prefix, "RATE_LIMIT");
-        assert!(entry.message.contains("73.5"));
+        assert!(
+            entry.message.contains("utilization=60%"),
+            "{}",
+            entry.message
+        );
+        assert!(
+            entry.message.contains("type=five_hour"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_ignores_a_utilization_that_is_not_a_fraction() {
+        for raw in ["73.5", "1.01", "-0.1"] {
+            let line = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed_warning","utilization":{raw}}}}}"#
+            );
+            match parse_rate_limit(&line).0 {
+                StreamChunk::RateLimit {
+                    utilization_percent,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(utilization_percent, None, "{raw}");
+                    assert_eq!(status, "allowed_warning");
+                }
+                other => panic!("expected RateLimit, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn utilization_fraction_bounds_map_to_zero_and_one_hundred_percent() {
+        assert_eq!(utilization_fraction_to_percent(0.0), Some(0.0));
+        assert_eq!(utilization_fraction_to_percent(1.0), Some(100.0));
+        assert_eq!(utilization_fraction_to_percent(f64::NAN), None);
     }
 
     #[test]
@@ -4731,41 +7609,76 @@ mod tests {
     }
 
     #[test]
-    fn parse_rate_limit_event_without_utilization() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
+    fn parse_rate_limit_event_without_utilization_keeps_status_type_and_reset_time() {
+        let (chunk, entry) = parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1738425600,"rateLimitType":"seven_day","overageStatus":"rejected","isUsingOverage":false}}"#,
+        );
         match chunk {
-            Some(StreamChunk::RateLimit {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                rate_limit_type,
+                utilization_percent,
                 resets_at,
-            }) => {
+                ..
+            } => {
                 assert_eq!(status, "allowed");
-                assert!(utilization.is_none());
-                assert!(resets_at.is_none());
+                assert_eq!(rate_limit_type.as_deref(), Some("seven_day"));
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, Some(1738425600));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        assert!(
+            entry.message.contains("utilization=none"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_event_with_only_a_status_leaves_every_other_field_absent() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
+                status,
+                rate_limit_type,
+                utilization_percent,
+                resets_at,
+                overage_status,
+                is_using_overage,
+            } => {
+                assert_eq!(status, "allowed");
+                assert_eq!(rate_limit_type, None);
+                assert_eq!(utilization_percent, None);
+                assert_eq!(resets_at, None);
+                assert_eq!(overage_status, None);
+                assert_eq!(is_using_overage, None);
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_rate_limit_event_rejected() {
-        let mut parser = StreamParser::new();
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":100.0,"resetsAt":1738430000}}"#;
-        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (chunks, _) = parser.parse_line(&parsed);
-        let chunk = chunks.into_iter().next();
-        match chunk {
-            Some(StreamChunk::RateLimit {
+    fn parse_rate_limit_event_rejected_at_the_limit() {
+        match parse_rate_limit(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1738430000,"rateLimitType":"five_hour","utilization":1.0,"overageStatus":"allowed","isUsingOverage":true}}"#,
+        )
+        .0
+        {
+            StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
+                is_using_overage,
+                overage_status,
                 ..
-            }) => {
+            } => {
                 assert_eq!(status, "rejected");
-                assert!((utilization.unwrap() - 100.0).abs() < f64::EPSILON);
+                assert!((utilization_percent.unwrap() - 100.0).abs() < 1e-9);
+                assert_eq!(overage_status.as_deref(), Some("allowed"));
+                assert_eq!(is_using_overage, Some(true));
             }
             other => panic!("expected RateLimit, got {other:?}"),
         }
@@ -4774,24 +7687,89 @@ mod tests {
     #[test]
     fn stream_chunk_rate_limit_round_trips() {
         let chunk = StreamChunk::RateLimit {
-            status: "allowed".to_string(),
-            utilization: Some(42.5),
+            status: "allowed_warning".to_string(),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization_percent: Some(42.0),
             resets_at: Some(1738425600),
+            overage_status: None,
+            is_using_overage: Some(false),
         };
-        let json = serde_json::to_string(&chunk).unwrap();
-        let deserialized: StreamChunk = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["chunk_type"], "RateLimit");
+        let mut keys: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "is_using_overage",
+                "overage_status",
+                "rate_limit_type",
+                "resets_at",
+                "status",
+                "utilization_percent"
+            ]
+        );
+        let deserialized: StreamChunk = serde_json::from_value(json).unwrap();
         match deserialized {
             StreamChunk::RateLimit {
                 status,
-                utilization,
+                utilization_percent,
                 resets_at,
+                ..
             } => {
-                assert_eq!(status, "allowed");
-                assert!((utilization.unwrap() - 42.5).abs() < f64::EPSILON);
+                assert_eq!(status, "allowed_warning");
+                assert!((utilization_percent.unwrap() - 42.0).abs() < f64::EPSILON);
                 assert_eq!(resets_at, Some(1738425600));
             }
             other => panic!("expected RateLimit after round-trip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rate_limit_chunk_fields_match_ts_mirror() {
+        let ts = include_str!("../../src/src/app/models/chat.ts");
+        let marker = "export interface RateLimitInfo {";
+        let idx = ts
+            .find(marker)
+            .expect("chat.ts must declare `export interface RateLimitInfo`");
+        let body = ts[idx + marker.len()..]
+            .split("\n}")
+            .next()
+            .expect("RateLimitInfo must close");
+        let mut ts_fields: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts_fields.sort_unstable();
+        let chunk = StreamChunk::RateLimit {
+            status: "allowed".to_string(),
+            rate_limit_type: None,
+            utilization_percent: None,
+            resets_at: None,
+            overage_status: None,
+            is_using_overage: None,
+        };
+        let json = serde_json::to_value(&chunk).unwrap();
+        let mut rust_fields: Vec<&str> = json["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust_fields.sort_unstable();
+        assert_eq!(rust_fields, ts_fields);
+        let compact: String = ts.split_whitespace().collect();
+        assert!(
+            compact.contains("chunk_type:'RateLimit';data:RateLimitInfo"),
+            "the RateLimit chunk must carry RateLimitInfo"
+        );
     }
 
     #[test]
@@ -4817,13 +7795,21 @@ mod tests {
 
     #[test]
     fn chat_session_new_stores_project_name() {
-        let session = ChatSession::new("acme-corp");
+        let session = ChatSession::new(
+            "acme-corp",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert_eq!(session.project_name, "acme-corp");
     }
 
     #[test]
     fn chat_session_new_has_no_child() {
-        let session = ChatSession::new("acme-corp");
+        let session = ChatSession::new(
+            "acme-corp",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(session.child.is_none());
         assert!(session.shared_stdin.is_none());
         assert!(session.pending_requests.lock().unwrap().is_empty());
@@ -5124,15 +8110,93 @@ mod tests {
         assert_eq!(req.tool_use_id, "toolu_bash1");
     }
 
+    const SAFETY_CHECK_CAPTURE: &str =
+        include_str!("../tests/fixtures/cc-2.1.295-safety-check.sanitized.json");
+
+    fn safety_check_capture() -> serde_json::Value {
+        serde_json::from_str(SAFETY_CHECK_CAPTURE).unwrap()
+    }
+
     #[test]
-    fn build_auto_approve_response_structure() {
+    fn the_safety_check_capture_is_of_the_pinned_claude_code() {
+        assert_eq!(
+            safety_check_capture()["claude_code_version"],
+            speedwave_runtime::defaults::CLAUDE_VERSION,
+            "re-capture the safety-check request with the new Claude Code pin"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_claude_codes_safety_check_holds_is_declined_with_its_reason() {
+        let capture = safety_check_capture();
+        let request = &capture["control_request"];
+        let reason = request["request"]["decision_reason"].as_str().unwrap();
+        assert_eq!(request["request"]["decision_reason_type"], "safetyCheck");
+        let req = try_parse_control_request_str(&request.to_string()).unwrap();
+        assert_eq!(req.safety_check.as_deref(), Some(reason));
+
+        let resp = build_tool_permission_response(&req);
+
+        assert_eq!(resp["response"]["subtype"], "success");
+        assert_eq!(resp["response"]["request_id"], request["request_id"]);
+        assert_eq!(resp["response"]["response"]["behavior"], "deny");
+        let message = resp["response"]["response"]["message"].as_str().unwrap();
+        assert!(message.starts_with(SAFETY_CHECK_DECLINED), "{message}");
+        assert!(message.contains(reason), "{message}");
+        assert!(resp["response"]["response"].get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn claude_code_hands_a_declined_call_to_the_model_as_a_failed_tool_result() {
+        let capture = safety_check_capture();
+        let req = try_parse_control_request_str(&capture["control_request"].to_string()).unwrap();
+        let decline = build_tool_permission_response(&req);
+        assert_eq!(
+            decline, capture["control_response"],
+            "record the capture again with the decline Speedwave sends now"
+        );
+        let results = capture["tool_results"].as_array().unwrap();
+
+        let [result] = results.as_slice() else {
+            panic!("one tool call, one result: {results:?}");
+        };
+        assert_eq!(result["is_error"], true);
+        assert_eq!(
+            result["content"],
+            decline["response"]["response"]["message"]
+        );
+        assert_eq!(
+            result["tool_use_id"],
+            capture["control_request"]["request"]["tool_use_id"]
+        );
+        assert_eq!(capture["result"]["is_error"], false);
+        assert_eq!(
+            capture["target_kept"], true,
+            "the declined rm left its target in place"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_without_a_safety_check_is_allowed() {
+        let line = r#"{"type":"control_request","request_id":"req_2","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_bash1","input":{"command":"ls"},"decision_reason_type":"mode"}}"#;
+        let req = try_parse_control_request_str(line).unwrap();
+        assert_eq!(req.safety_check, None);
+        assert_eq!(
+            build_tool_permission_response(&req)["response"]["response"]["behavior"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn build_tool_permission_response_structure() {
         let req = ControlRequest {
             request_id: "req_42".to_string(),
             tool_name: "Read".to_string(),
             input: serde_json::json!({"file_path": "/tmp/test.rs"}),
             tool_use_id: "toolu_read1".to_string(),
+            safety_check: None,
         };
-        let resp = build_auto_approve_response(&req);
+        let resp = build_tool_permission_response(&req);
         assert_eq!(resp["type"], "control_response");
         assert_eq!(resp["response"]["subtype"], "success");
         assert_eq!(resp["response"]["request_id"], "req_42");
@@ -5174,6 +8238,7 @@ mod tests {
                 tool_name: "AskUserQuestion".into(),
                 input: serde_json::json!({ "questions": serde_q }),
                 tool_use_id: "toolu_t".into(),
+                safety_check: None,
             },
             questions,
             answers,
@@ -5244,7 +8309,11 @@ mod tests {
 
     #[test]
     fn submit_question_answer_no_session_errors_cleanly() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
             make_partial("r1", &[("Q", "")], vec![None]),
@@ -5263,7 +8332,11 @@ mod tests {
 
     #[test]
     fn submit_question_answer_oversize_answer_errors_cleanly() {
-        let mut s = ChatSession::new("test-project");
+        let mut s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-y".into(),
             make_partial("r2", &[("Q", "")], vec![None]),
@@ -5280,7 +8353,11 @@ mod tests {
 
     #[test]
     fn fill_slot_invalid_index_errors_and_preserves_entry() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-bad-idx".into(),
             make_partial("r1", &[("Q", "h")], vec![None]),
@@ -5299,7 +8376,11 @@ mod tests {
 
     #[test]
     fn fill_slot_already_answered_errors_and_preserves_entry() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-dup".into(),
             make_partial("r1", &[("Q", "h")], vec![Some("first".into())]),
@@ -5318,7 +8399,11 @@ mod tests {
 
     #[test]
     fn fill_slot_pending_after_partial_completion() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-multi".into(),
             make_partial("r1", &[("Q0", ""), ("Q1", "")], vec![None, None]),
@@ -5336,7 +8421,11 @@ mod tests {
 
     #[test]
     fn fill_slot_completed_removes_entry_and_returns_partial() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         s.pending_requests.lock().unwrap().insert(
             "tool-fin".into(),
             make_partial("r1", &[("Q0", "")], vec![None]),
@@ -5355,7 +8444,11 @@ mod tests {
 
     #[test]
     fn restore_partial_clears_specified_slot() {
-        let s = ChatSession::new("test-project");
+        let s = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         let partial = make_partial(
             "r1",
             &[("Q0", ""), ("Q1", "")],
@@ -5409,6 +8502,7 @@ mod tests {
             tool_name: "AskUserQuestion".to_string(),
             input: serde_json::json!({ "questions": questions }),
             tool_use_id: "toolu_multi".to_string(),
+            safety_check: None,
         }
     }
 
@@ -5530,6 +8624,7 @@ mod tests {
                 "options": [{"label": "Yes"}, {"label": "No"}]
             }),
             tool_use_id: "toolu_flat".to_string(),
+            safety_check: None,
         };
         let chunk = StreamParser::emit_ask_user_from_control_request(&req).unwrap();
         let (_, questions, _) = unwrap_ask_chunk(chunk);
@@ -5593,7 +8688,8 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result = ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None);
+        let result =
+            ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None, None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -5625,6 +8721,8 @@ mod tests {
             "inst",
             Some("../../../etc/passwd"),
             None,
+            None,
+            None,
         );
         assert!(result.is_err());
     }
@@ -5652,6 +8750,8 @@ mod tests {
             "inst",
             Some("550e8400-e29b-41d4-a716-446655440000"),
             Some("$(rm -rf /)"),
+            None,
+            None,
         );
         assert!(result.is_err(), "shell-injection uuid must be rejected");
     }
@@ -5673,13 +8773,18 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
+        let result =
+            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None);
         assert!(result.is_ok());
-        let (args, container) = result.unwrap();
+        let PreparedSpawn {
+            args, container, ..
+        } = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
         assert!(!args.contains(&"--effort".to_string()));
-        assert!(!args.contains(&"--model".to_string()));
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "default");
+        assert_eq!(args.iter().filter(|a| *a == "--model").count(), 1);
     }
 
     #[test]
@@ -5699,20 +8804,123 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let (args, _) =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None).unwrap();
+        let args =
+            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None)
+                .unwrap()
+                .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1, "exactly one --effort flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "xhigh");
 
         user_config.projects[0].effort_pin = Some("max".to_string());
-        let (args, _) =
-            ChatSession::prepare_args("myproject", &user_config, "inst", None, None).unwrap();
+        let args =
+            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None, None)
+                .unwrap()
+                .args;
         let effort_count = args.iter().filter(|a| *a == "--effort").count();
         assert_eq!(effort_count, 1);
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "max");
+    }
+
+    #[test]
+    fn a_resumed_spawn_carries_the_pin_and_never_an_unknown_level() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let mut user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "myproject".to_string(),
+                dir: "/home/user/myproject".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let spawn = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            Some(session_id),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!spawn.args.contains(&"--effort".to_string()));
+
+        user_config.projects[0].effort_pin = Some("low".to_string());
+        let spawn = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            Some(session_id),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let pos = spawn.args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(spawn.args[pos + 1], "low");
+        assert!(spawn.args.contains(&"--resume".to_string()));
+
+        user_config.projects[0].effort_pin = Some("turbo".to_string());
+        let spawn = ChatSession::prepare_args(
+            "myproject",
+            &user_config,
+            "inst",
+            Some(session_id),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !spawn.args.contains(&"--effort".to_string()),
+            "an unknown pin is never launched"
+        );
+    }
+
+    #[test]
+    fn chat_session_exposes_tab_id_and_shares_the_transcript_slot() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let session =
+            ChatSession::new("acme", "550e8400-e29b-41d4-a716-446655440000", slot.clone());
+        assert_eq!(session.tab_id, "550e8400-e29b-41d4-a716-446655440000");
+        *slot.lock().unwrap() = Some("sid-1".to_string());
+        assert_eq!(session.transcript.lock().unwrap().as_deref(), Some("sid-1"));
+    }
+
+    #[test]
+    fn error_chunk_carries_turn_ended_only_when_set() {
+        let mid_turn = serde_json::to_value(StreamChunk::Error {
+            content: "rate limit".to_string(),
+            turn_ended: false,
+        })
+        .unwrap();
+        assert!(mid_turn["data"].get("turn_ended").is_none(), "{mid_turn}");
+
+        let ended = serde_json::to_value(StreamChunk::Error {
+            content: "overloaded".to_string(),
+            turn_ended: true,
+        })
+        .unwrap();
+        assert_eq!(ended["data"]["turn_ended"], serde_json::Value::Bool(true));
+
+        let decoded: StreamChunk =
+            serde_json::from_str(r#"{"chunk_type":"Error","data":{"content":"x"}}"#).unwrap();
+        assert!(matches!(
+            decoded,
+            StreamChunk::Error {
+                turn_ended: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -5733,10 +8941,17 @@ mod tests {
             telemetry: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
+        let result = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "my-inst",
+            Some(session_id),
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok());
-        let (args, _container) = result.unwrap();
+        let args = result.unwrap().args;
         assert!(args.contains(&format!(
             "{}=my-inst",
             speedwave_runtime::session::SESSION_INSTANCE_ENV
@@ -5765,10 +8980,17 @@ mod tests {
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, "inst", Some(session_id), Some(uuid));
+        let result = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            Some(session_id),
+            Some(uuid),
+            None,
+            None,
+        );
         assert!(result.is_ok());
-        let (args, _) = result.unwrap();
+        let args = result.unwrap().args;
         assert!(args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&uuid.to_string()));
     }
@@ -5792,21 +9014,185 @@ mod tests {
     }
 
     #[test]
-    fn prepare_args_never_appends_a_model_flag_without_a_pin_file() {
+    fn prepare_args_launches_the_default_alias_without_a_pin_or_override() {
         let user_config = single_project_user_config();
-        let (args, _) =
-            ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();
-        assert!(!args.contains(&"--model".to_string()));
+        let args = ChatSession::prepare_args("proj", &user_config, "inst", None, None, None, None)
+            .unwrap()
+            .args;
+        let count = args.iter().filter(|a| *a == "--model").count();
+        assert_eq!(count, 1, "exactly one --model flag, got: {args:?}");
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "default");
     }
 
     #[test]
-    fn prepare_args_never_appends_a_model_flag_even_with_a_model_pin_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        crate::claude_settings::set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+    fn prepare_args_launches_the_settings_pin_when_no_tab_override_exists() {
         let user_config = single_project_user_config();
-        let (args, _) =
-            ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();
-        assert!(!args.contains(&"--model".to_string()));
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            Some("claude-sonnet-4-6[1m]"),
+        )
+        .unwrap()
+        .args;
+        let count = args.iter().filter(|a| *a == "--model").count();
+        assert_eq!(count, 1, "exactly one --model flag, got: {args:?}");
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "claude-sonnet-4-6[1m]");
+    }
+
+    #[test]
+    fn prepare_args_tab_override_outranks_the_settings_pin() {
+        let user_config = single_project_user_config();
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            Some("claude-opus-4-8"),
+            Some("claude-haiku-5-5"),
+        )
+        .unwrap()
+        .args;
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "claude-opus-4-8");
+        assert_eq!(args.iter().filter(|a| *a == "--model").count(), 1);
+    }
+
+    #[test]
+    fn prepare_args_tab_override_applies_on_a_resume_spawn() {
+        let user_config = single_project_user_config();
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            None,
+            Some("claude-sonnet-5"),
+            None,
+        )
+        .unwrap()
+        .args;
+        assert!(args.contains(&"--resume".to_string()));
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], "claude-sonnet-5");
+    }
+
+    #[test]
+    fn prepare_args_rejects_a_malformed_tab_override() {
+        let user_config = single_project_user_config();
+        for bad in ["gpt-4o", "local/qwen3", "claude x", "claude-$(rm)", ""] {
+            let result = ChatSession::prepare_args(
+                "proj",
+                &user_config,
+                "inst",
+                None,
+                None,
+                Some(bad),
+                None,
+            );
+            assert!(result.is_err(), "override {bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn prepare_args_falls_back_to_the_default_alias_for_an_invalid_settings_pin() {
+        let user_config = single_project_user_config();
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            None,
+            Some("local/qwen3"),
+        )
+        .unwrap()
+        .args;
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(
+            args[pos + 1],
+            "default",
+            "a foreign pin is never launched, default stands in"
+        );
+    }
+
+    #[test]
+    fn prepare_args_ignores_a_tab_override_and_pin_for_a_routed_provider() {
+        let mut user_config = single_project_user_config();
+        user_config.projects[0].claude = Some(config::ClaudeOverrides {
+            env: None,
+            settings: None,
+            llm: Some(config::LlmConfig {
+                schema_version: Some(config::LLM_SCHEMA_VERSION),
+                providers: vec![config::LlmProviderEntry {
+                    id: "local".to_string(),
+                    kind: config::LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("llama-3.1-70b".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                }],
+                active: Some(config::LlmActive {
+                    provider_id: "local".to_string(),
+                    model: None,
+                }),
+                ..Default::default()
+            }),
+        });
+        let args = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            None,
+            None,
+            Some("claude-opus-4-8"),
+            Some("claude-sonnet-5"),
+        )
+        .unwrap()
+        .args;
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "routed spawns never take --model: {args:?}"
+        );
+    }
+
+    #[test]
+    fn validate_launch_model_accepts_wire_ids_and_aliases() {
+        for ok in [
+            "claude-sonnet-5",
+            "claude-sonnet-5[1m]",
+            "claude-opus-4-8[1m]",
+            "claude-mystery-9.5",
+            "opus",
+            "fable[1m]",
+            "default",
+        ] {
+            assert!(validate_launch_model(ok).is_ok(), "{ok} must pass");
+        }
+    }
+
+    #[test]
+    fn validate_launch_model_rejects_foreign_and_unsafe_ids() {
+        let too_long = format!("claude-{}", "a".repeat(130));
+        for bad in [
+            "",
+            "gpt-4o",
+            "local/qwen3",
+            "claude x",
+            "claude-$(rm -rf /)",
+            "claude-sonnet-5[2m]",
+            "claude-sonnet;5",
+            too_long.as_str(),
+        ] {
+            assert!(validate_launch_model(bad).is_err(), "{bad:?} must fail");
+        }
     }
 
     #[test]
@@ -5933,6 +9319,7 @@ mod tests {
             tool_name: "AskUserQuestion".to_string(),
             input: serde_json::json!({"question": "test"}),
             tool_use_id: "toolu_test".to_string(),
+            safety_check: None,
         };
         assert_eq!(ctrl.tool_name, "AskUserQuestion");
     }
@@ -6356,7 +9743,11 @@ mod tests {
 
     #[test]
     fn chat_session_new_has_no_session_log_path() {
-        let session = ChatSession::new("test-project");
+        let session = ChatSession::new(
+            "test-project",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         assert!(session.session_log_path.is_none());
         assert!(session.drain_handles.is_empty());
     }
@@ -6367,7 +9758,11 @@ mod tests {
         let log_path = tmp
             .path()
             .join(".speedwave/logs/default/claude-session.log");
-        let mut session = ChatSession::new("default");
+        let mut session = ChatSession::new(
+            "default",
+            "550e8400-e29b-41d4-a716-446655440000",
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
         session.stop().unwrap();
         assert!(
             !log_path.exists(),
@@ -6761,6 +10156,43 @@ mod tests {
     }
 
     #[test]
+    fn extract_cumulative_usage_counts_json_float_counts() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "modelUsage": {
+                    "claude-opus-4-7": {"inputTokens":7.0,"outputTokens":20.0,"cacheReadInputTokens":5,"cacheCreationInputTokens":-1.0}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let cumulative = extract_cumulative_usage(&parsed).unwrap();
+
+        assert_eq!(
+            (
+                cumulative.input_tokens,
+                cumulative.output_tokens,
+                cumulative.cache_read_tokens,
+                cumulative.cache_write_tokens
+            ),
+            (7, 20, 5, 0)
+        );
+    }
+
+    #[test]
+    fn the_dominant_model_counts_a_json_float_output_count() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{"claude-haiku-4-5": {"outputTokens": 3}, "claude-fable-5": {"outputTokens": 9.0}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dominant_model_by_output_tokens(parsed.as_object()).as_deref(),
+            Some("claude-fable-5")
+        );
+    }
+
+    #[test]
     fn extract_cumulative_usage_returns_none_for_absent_model_usage() {
         let parsed: serde_json::Value = serde_json::from_str(r#"{"modelUsage": {}}"#).unwrap();
         assert!(extract_cumulative_usage(&parsed).is_none());
@@ -6825,5 +10257,50 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
+        let after_sig = source
+            .split(fn_signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in source"));
+        let brace_start = after_sig.find('{').expect("opening brace not found");
+        let rest = &after_sig[brace_start..];
+        let mut depth = 0i32;
+        let mut end = 0;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > 0, "closing brace not found for {fn_signature}");
+        &rest[..end]
+    }
+
+    #[test]
+    fn log_tag_carries_the_stream_and_the_tab_prefix() {
+        assert_eq!(
+            log_tag("550e8400-e29b-41d4-a716-446655440000", "STDERR"),
+            "STDERR:550e8400"
+        );
+        assert_eq!(log_tag("ab", "SESSION"), "SESSION:ab");
+    }
+
+    #[test]
+    fn start_truncates_the_session_log_only_when_no_sibling_tab_exists() {
+        let source = include_str!("chat.rs");
+        let body = extract_fn_body(source, "pub fn start_with_retry(");
+        assert!(
+            body.contains("allow_log_truncate"),
+            "truncation must be gated by the caller-computed sibling check"
+        );
     }
 }

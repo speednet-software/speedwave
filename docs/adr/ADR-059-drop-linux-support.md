@@ -29,8 +29,8 @@ Drop Linux as a supported host platform. The application targets macOS (Lima) an
 - `desktop/src-tauri/packaging/linux/` (AppArmor profile)
 - All `#[cfg(target_os = "linux")]` blocks across the runtime crate and the desktop Tauri crate
 - Linux branches in `containers/compose.template.yml`, `containers/entrypoint.sh`, the `Makefile`, and `scripts/e2e-vm*.sh`
-- `ubuntu-22.04` / `ubuntu-latest` matrix entries from `.github/workflows/desktop-build.yml`, `desktop-release.yml`, and `test.yml`
-- `.deb` from `release-please-config.json` and the Tauri bundle target list
+- `ubuntu-22.04` / `ubuntu-latest` matrix entries from `.github/workflows/desktop-build.yml`, `desktop-release.yml`, and `test.yml` (both `desktop-build.yml` and `desktop-release.yml` were later deleted outright and replaced by `build-publish.yml` / `beta.yml` / `release.yml`, SPEED-674 ticket 7 — unrelated to this ADR's decision, noted here only so the paths are not read as still current)
+- `.deb` from `release-please-config.json` and the Tauri bundle target list (`release-please-config.json` was later deleted along with the rest of release-please, SPEED-674 ticket 7; version is computed by `crates/speedwave-version` instead)
 
 ### Simplified
 

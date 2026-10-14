@@ -14,6 +14,7 @@ import { filter } from 'rxjs/operators';
 import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.component';
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
+import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
@@ -108,47 +109,45 @@ const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
           </div>
         }
       }
-      @if (
+      @if (projectState.restarting) {
+        <div
+          class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Restarting containers"
+          data-testid="restart-overlay"
+        >
+          <div
+            class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
+          >
+            <div class="flex flex-col items-center">
+              <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
+              <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
+              <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
+            </div>
+          </div>
+        </div>
+      } @else if (
         projectState.needsRestart &&
         (projectState.status() === 'ready' || projectState.status() === 'auth_required')
       ) {
-        @if (projectState.restarting) {
-          <div
-            class="fixed inset-0 z-[900] flex items-center justify-center bg-black/75 backdrop-blur-sm"
-            role="alertdialog"
-            aria-modal="true"
-            aria-label="Restarting containers"
-            data-testid="restart-overlay"
-          >
-            <div
-              class="w-[min(24rem,calc(100vw-2rem))] rounded border border-[var(--line-strong)] bg-[var(--bg-1)] p-5"
-            >
-              <div class="flex flex-col items-center">
-                <app-spin-icon class="block h-8 w-8 text-[var(--accent)]" />
-                <p class="mono mt-4 text-sm text-[var(--ink)]">Restarting containers...</p>
-                <p class="mono mt-2 text-[11px] text-[var(--ink-mute)]">This may take a while</p>
-              </div>
-            </div>
-          </div>
-        } @else {
-          <app-modal-overlay
-            [open]="true"
-            kicker="⚠ restart required"
-            kickerColor="amber"
-            modalTitle="Container config changed"
-            body="Enabling/disabling services needs a container restart. Running conversations will pause briefly."
-            [inlineError]="projectState.restartError"
-            primaryLabel="restart now"
-            secondaryLabel="later"
-            testId="restart-overlay"
-            primaryTestId="restart-now-btn"
-            secondaryTestId="restart-later-btn"
-            inlineErrorTestId="restart-error"
-            (primary)="restartContainers()"
-            (secondary)="dismissRestart()"
-            (closed)="dismissRestart()"
-          />
-        }
+        <app-modal-overlay
+          [open]="true"
+          kicker="⚠ restart required"
+          kickerColor="amber"
+          modalTitle="Container config changed"
+          body="Applying this change needs a container restart. Running conversations will pause briefly."
+          [inlineError]="projectState.restartError"
+          primaryLabel="restart now"
+          secondaryLabel="later"
+          testId="restart-overlay"
+          primaryTestId="restart-now-btn"
+          secondaryTestId="restart-later-btn"
+          inlineErrorTestId="restart-error"
+          (primary)="restartContainers()"
+          (secondary)="dismissRestart()"
+          (closed)="dismissRestart()"
+        />
       }
       <app-update-notification />
 
@@ -192,6 +191,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
   readonly beta = inject(BetaService);
+  private readonly chat = inject(ChatStateService);
   private readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
@@ -243,7 +243,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
     const recording = this.transcription.recording();
-    const show = this.beta.enabled() || recording;
+    const show = this.beta.enabled() || this.transcription.captureOpen();
     return this.entryCatalog
       .filter((e) => e.id !== TRANSCRIPTION_ENTRY_ID || show)
       .map((e) => (e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e));
@@ -339,7 +339,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        if (this.beta.enabled() || this.transcription.recording()) {
+        if (this.beta.enabled() || this.transcription.captureOpen()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
         return;
@@ -354,6 +354,40 @@ export class ShellComponent implements OnInit, OnDestroy {
       case 'l':
         event.preventDefault();
         void this.router.navigateByUrl('/logs');
+        return;
+      case 'r':
+        if (
+          this.beta.enabled() &&
+          this.activeViewId() === 'chat' &&
+          this.projectState.status() === 'ready'
+        ) {
+          event.preventDefault();
+          this.ui.requestRestart();
+        }
+        return;
+      case 't':
+      case 'n':
+        if (this.beta.enabled()) {
+          if (this.chat.canOpenTab()) {
+            event.preventDefault();
+            void this.chat.openTab();
+          }
+          return;
+        }
+        if (
+          key.toLowerCase() === 'n' &&
+          this.activeViewId() === 'chat' &&
+          this.projectState.status() === 'ready'
+        ) {
+          event.preventDefault();
+          this.ui.requestRestart();
+        }
+        return;
+      case 'w':
+        if (this.beta.enabled() && this.chat.tabs().size > 1) {
+          event.preventDefault();
+          void this.chat.closeTab(this.chat.activeTabId());
+        }
         return;
       default:
         return;
@@ -372,7 +406,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   /** Triggers a container restart from the restart-required overlay. */
   restartContainers(): void {
-    this.projectState.restartContainers();
+    this.projectState.restartContainers(this.projectState.activeProject());
   }
 
   /** Dismisses the restart-required overlay without restarting. */

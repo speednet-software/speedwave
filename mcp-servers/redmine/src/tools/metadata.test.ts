@@ -1,5 +1,5 @@
 /**
- * Metadata Tests - validates that all 23 Redmine tools have required metadata fields
+ * Metadata Tests - validates that all 24 Redmine tools have required metadata fields
  */
 
 import { describe, it, expect } from 'vitest';
@@ -27,6 +27,7 @@ const EXPECTED_TOOL_NAMES = [
   'listProjectIds',
   'getProjectFull',
   'searchProjectIds',
+  'listVersions',
   'listRelations',
   'createRelation',
   'deleteRelation',
@@ -35,8 +36,8 @@ const EXPECTED_TOOL_NAMES = [
 ];
 
 describe('Redmine tool metadata', () => {
-  it('exports exactly 23 tools', () => {
-    expect(ALL_TOOLS).toHaveLength(23);
+  it('exports exactly 24 tools', () => {
+    expect(ALL_TOOLS).toHaveLength(24);
   });
 
   it('exports all expected tool names', () => {

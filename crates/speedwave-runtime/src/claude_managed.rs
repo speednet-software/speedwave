@@ -140,10 +140,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_managed_settings(tmp.path(), "proj-a", &locked_sample()).unwrap();
         write_managed_settings(tmp.path(), "proj-b", &locked_sample()).unwrap();
-        let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
             let mode = std::fs::metadata(&top).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
         }

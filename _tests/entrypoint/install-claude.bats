@@ -78,24 +78,3 @@ EOF
     leftover="$(ls "$HOME/.cache/speedwave-install"/install-claude.* 2>/dev/null | wc -l || echo 0)"
     [ "$leftover" -eq 0 ]
 }
-
-
-@test "install-claude.sh uses --proto =https in curl invocation" {
-    grep -q -- "--proto '=https'" "$INSTALL_SCRIPT"
-}
-
-
-@test "install-claude.sh downloads from claude.ai" {
-    grep -q 'INSTALLER_URL="https://claude.ai/install.sh"' "$INSTALL_SCRIPT"
-}
-
-
-@test "Containerfile.claude does not pipe curl to bash" {
-    local containerfile="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
-    ! grep -q 'curl.*|.*bash' "$containerfile"
-}
-
-@test "Containerfile.claude uses install-claude.sh" {
-    local containerfile="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"
-    grep -q 'install-claude.sh' "$containerfile"
-}

@@ -200,21 +200,26 @@ fn add_project_with_validated_dir(
         )?)
     };
 
-    init_project_dirs_in(name, data_dir)?;
+    commit_new_project(name, &user_config, &config_path, yaml.as_deref(), data_dir)
+}
 
-    if let Err(e) = config::save_user_config_to(&user_config, &config_path) {
+fn commit_new_project(
+    name: &str,
+    user_config: &config::SpeedwaveUserConfig,
+    config_path: &Path,
+    compose_yaml: Option<&str>,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let committed = init_project_dirs_in(name, data_dir)
+        .and_then(|()| match compose_yaml {
+            Some(yaml) => save_compose_in(name, yaml, data_dir),
+            None => Ok(()),
+        })
+        .and_then(|()| config::save_user_config_to(user_config, config_path));
+    if committed.is_err() {
         cleanup_project_dirs_in(name, data_dir);
-        return Err(e);
     }
-
-    if let Some(yaml) = yaml {
-        if let Err(e) = save_compose_in(name, &yaml, data_dir) {
-            cleanup_project_dirs_in(name, data_dir);
-            return Err(e);
-        }
-    }
-
-    Ok(())
+    committed
 }
 
 /// Sentinel prefix on the error message when the caller tried to remove the active project.
@@ -401,6 +406,100 @@ mod tests {
             "compose.yml must not be written before a provider is chosen"
         );
         assert!(data_dir.join("compose").join("myproject").is_dir());
+    }
+
+    fn config_with(active: &str, names: &[&str]) -> SpeedwaveUserConfig {
+        SpeedwaveUserConfig {
+            projects: names
+                .iter()
+                .map(|name| config::ProjectUserEntry {
+                    name: name.to_string(),
+                    dir: format!("/work/{name}"),
+                    claude: None,
+                    integrations: None,
+                    plugin_settings: None,
+                    policy: None,
+                    effort_pin: None,
+                })
+                .collect(),
+            active_project: Some(active.to_string()),
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        }
+    }
+
+    #[test]
+    fn a_committed_project_has_its_config_and_compose_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let config_path = data_dir.join("config.json");
+        save_user_config_to(&config_with("existing", &["existing"]), &config_path).unwrap();
+
+        commit_new_project(
+            "newproj",
+            &config_with("newproj", &["existing", "newproj"]),
+            &config_path,
+            Some("services: {}\n"),
+            &data_dir,
+        )
+        .unwrap();
+
+        let on_disk = config::load_user_config_from(&config_path).unwrap();
+        assert_eq!(on_disk.active_project.as_deref(), Some("newproj"));
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join("compose").join("newproj").join("compose.yml"))
+                .unwrap(),
+            "services: {}\n"
+        );
+    }
+
+    #[test]
+    fn a_compose_write_failure_leaves_the_saved_config_and_no_project_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let config_path = data_dir.join("config.json");
+        save_user_config_to(&config_with("existing", &["existing"]), &config_path).unwrap();
+        std::fs::create_dir_all(data_dir.join("compose").join("newproj").join("compose.yml"))
+            .unwrap();
+
+        commit_new_project(
+            "newproj",
+            &config_with("newproj", &["existing", "newproj"]),
+            &config_path,
+            Some("services: {}\n"),
+            &data_dir,
+        )
+        .unwrap_err();
+
+        let on_disk = config::load_user_config_from(&config_path).unwrap();
+        assert_eq!(
+            on_disk.active_project.as_deref(),
+            Some("existing"),
+            "a failed add must not leave the new project active"
+        );
+        assert!(on_disk.find_project("newproj").is_none());
+        assert!(!data_dir.join("compose").join("newproj").exists());
+    }
+
+    #[test]
+    fn a_config_write_failure_removes_the_new_project_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let config_path = data_dir.join("config.json");
+        std::fs::create_dir_all(&config_path).unwrap();
+
+        commit_new_project(
+            "newproj",
+            &config_with("newproj", &["newproj"]),
+            &config_path,
+            Some("services: {}\n"),
+            &data_dir,
+        )
+        .unwrap_err();
+
+        assert!(!data_dir.join("compose").join("newproj").exists());
+        assert!(!data_dir.join("context").join("newproj").exists());
     }
 
     #[test]

@@ -9,7 +9,14 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
-import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
+import {
+  UPDATE_CHANNELS,
+  UpdateChannel,
+  UpdateCheckOutcome,
+  UpdateSettings,
+  newerVersionNoticeText,
+  recheckNewerVersion,
+} from '../../models/update';
 
 /** Displays app update controls, container update/rollback, and auto-check settings. */
 @Component({
@@ -25,6 +32,9 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
           <div>
             <div class="mono text-[12px] text-[var(--ink)]">
               speedwave {{ currentVersion ? 'v' + currentVersion : '' }}
+              @if (currentVersion) {
+                · {{ channelLabel() }}
+              }
             </div>
             <div class="mono mt-0.5 text-[11px]" [class]="updateStatusClass()">
               {{ updateStatusText() }}
@@ -53,6 +63,36 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
             }
           </div>
         </div>
+        <div class="border-t border-[var(--line)] px-4 py-3">
+          <div class="mono mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            update channel
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            @for (channel of channels; track channel) {
+              <button
+                type="button"
+                [attr.data-testid]="'settings-channel-' + channel"
+                [class.active]="channel === channelLabel()"
+                [attr.aria-pressed]="channel === channelLabel()"
+                class="theme-card flex items-center gap-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2 text-left hover:border-[var(--line-strong)] disabled:cursor-not-allowed disabled:opacity-40"
+                (click)="setChannel(channel)"
+                [disabled]="updateInstalling"
+              >
+                <span class="mono text-[12px] text-[var(--ink)]">{{ channel }}</span>
+                <span class="check ml-auto text-[var(--accent)]">&#9679;</span>
+              </button>
+            }
+          </div>
+        </div>
+        @if (channelLabel() === 'beta') {
+          <p
+            class="mono border-t border-[var(--line)] px-4 py-3 text-[11px] text-[var(--ink-mute)]"
+            data-testid="settings-channel-beta-warning"
+          >
+            Beta installs every build merged to dev. It may break and comes with no support.
+            Switching back to stable keeps the current version until a newer stable release ships.
+          </p>
+        }
       </div>
 
       @if (updateInstallError) {
@@ -60,6 +100,14 @@ import { UpdateCheckOutcome, UpdateSettings } from '../../models/update';
           class="mono mt-3 rounded border border-red-500/40 bg-red-500/5 px-3 py-2 text-[11px] text-red-300"
         >
           {{ updateInstallError }}
+        </p>
+      }
+      @if (updateInstallNotice) {
+        <p
+          class="mono mt-3 rounded border border-[var(--line)] px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+          data-testid="settings-update-notice"
+        >
+          {{ updateInstallNotice }}
         </p>
       }
     </section>
@@ -70,6 +118,8 @@ export class UpdateSectionComponent implements OnInit {
 
   readonly errorOccurred = output<string>();
 
+  protected readonly channels = UPDATE_CHANNELS;
+
   /** Hard-coded auto-check interval in hours; the UI exposes no toggle or frequency control. */
   private static readonly DEFAULT_INTERVAL_HOURS = 12;
 
@@ -77,11 +127,14 @@ export class UpdateSectionComponent implements OnInit {
   /** Always true; auto-check is non-negotiable. */
   updateAutoCheck = true;
   updateIntervalHours = UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
+  /** Loaded channel; `undefined` until settings load. */
+  private updateChannel?: UpdateChannel;
   updateChecking = false;
   updateResult: 'none' | 'up-to-date' | 'available' = 'none';
   updateAvailableVersion = '';
   updateInstalling = false;
   updateInstallError = '';
+  updateInstallNotice = '';
   error = '';
 
   private cdr = inject(ChangeDetectorRef);
@@ -110,6 +163,11 @@ export class UpdateSectionComponent implements OnInit {
     return 'text-[var(--ink-mute)]';
   }
 
+  /** Current channel for display; missing settings read as `stable`. */
+  protected channelLabel(): UpdateChannel {
+    return this.updateChannel ?? 'stable';
+  }
+
   private async loadCurrentVersion(): Promise<void> {
     try {
       this.currentVersion = await this.tauri.getVersion();
@@ -120,6 +178,7 @@ export class UpdateSectionComponent implements OnInit {
   private async loadUpdateSettings(): Promise<void> {
     try {
       const settings = await this.tauri.invoke<UpdateSettings>('get_update_settings');
+      this.updateChannel = settings.channel;
       const needsRewrite =
         !settings.auto_check ||
         settings.check_interval_hours !== UpdateSectionComponent.DEFAULT_INTERVAL_HOURS;
@@ -132,12 +191,14 @@ export class UpdateSectionComponent implements OnInit {
 
   private async saveUpdateSettings(): Promise<void> {
     try {
-      await this.tauri.invoke('set_update_settings', {
-        settings: {
-          auto_check: this.updateAutoCheck,
-          check_interval_hours: this.updateIntervalHours,
-        },
-      });
+      const settings: UpdateSettings = {
+        auto_check: this.updateAutoCheck,
+        check_interval_hours: this.updateIntervalHours,
+      };
+      if (this.updateChannel !== undefined) {
+        settings.channel = this.updateChannel;
+      }
+      await this.tauri.invoke('set_update_settings', { settings });
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
       this.errorOccurred.emit(this.error);
@@ -145,11 +206,24 @@ export class UpdateSectionComponent implements OnInit {
     }
   }
 
+  /**
+   * Switches the update channel, persists it and immediately checks for updates on the new channel.
+   * @param channel - The channel to switch to.
+   */
+  protected async setChannel(channel: UpdateChannel): Promise<void> {
+    if (this.updateInstalling || channel === this.channelLabel()) return;
+    this.updateChannel = channel;
+    this.cdr.markForCheck();
+    await this.saveUpdateSettings();
+    await this.checkForUpdate();
+  }
+
   /** Manually checks for available updates. */
   async checkForUpdate(): Promise<void> {
     this.updateChecking = true;
     this.updateResult = 'none';
     this.error = '';
+    this.updateInstallNotice = '';
     this.cdr.markForCheck();
     try {
       const outcome = await this.tauri.invoke<UpdateCheckOutcome>('check_for_update');
@@ -179,15 +253,27 @@ export class UpdateSectionComponent implements OnInit {
     if (!this.updateAvailableVersion) return;
     this.updateInstalling = true;
     this.updateInstallError = '';
+    this.updateInstallNotice = '';
     this.cdr.markForCheck();
+    const triedVersion = this.updateAvailableVersion;
     try {
       await this.tauri.invoke('install_update_and_reconcile', {
-        expectedVersion: this.updateAvailableVersion,
+        expectedVersion: triedVersion,
       });
     } catch (e: unknown) {
-      this.updateInstallError = e instanceof Error ? e.message : String(e);
+      await this.handleInstallFailure(e, triedVersion);
     }
     this.updateInstalling = false;
     this.cdr.markForCheck();
+  }
+
+  private async handleInstallFailure(e: unknown, triedVersion: string): Promise<void> {
+    const newerVersion = await recheckNewerVersion(this.tauri, triedVersion);
+    if (newerVersion) {
+      this.updateAvailableVersion = newerVersion;
+      this.updateInstallNotice = newerVersionNoticeText(newerVersion);
+      return;
+    }
+    this.updateInstallError = e instanceof Error ? e.message : String(e);
   }
 }

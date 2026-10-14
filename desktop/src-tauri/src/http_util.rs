@@ -1,9 +1,8 @@
-/// Maximum response body size (5 MiB) to prevent OOM from rogue servers.
-pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize =
+    speedwave_runtime::consts::HTTP_MAX_RESPONSE_BODY_BYTES;
 
-/// Default request timeout (ADR-041). A stalled upstream must not hang the
-/// command; discovery probes override this per-request with their own value.
-pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: std::time::Duration =
+    speedwave_runtime::consts::HTTP_REQUEST_TIMEOUT;
 
 /// Reads a body chunk-by-chunk, aborting past `MAX_RESPONSE_BODY_BYTES`.
 /// `label` identifies the failed HTTP operation in error messages.
@@ -51,13 +50,26 @@ pub(crate) fn build_hardened_client(
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(DEFAULT_REQUEST_TIMEOUT)
-        .user_agent(format!("Speedwave-Desktop/{}", env!("CARGO_PKG_VERSION")));
+        .user_agent(format!("Speedwave-Desktop/{}", env!("SPEEDWAVE_VERSION")));
     if let Some(headers) = default_headers {
         builder = builder.default_headers(headers);
     }
     builder
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+/// `err` and every `source()` under it, joined with `: `; reqwest's own Display stops at
+/// "error sending request", which hides whether DNS, TCP or TLS failed.
+pub(crate) fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
 }
 
 /// Translates the container host alias to `127.0.0.1` (host-side only).
@@ -71,6 +83,7 @@ pub(crate) fn rewrite_container_alias_to_loopback(host: &str) -> Option<&'static
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -83,6 +96,66 @@ mod tests {
     fn test_hardened_client_has_default_timeout() {
         assert!(DEFAULT_REQUEST_TIMEOUT > std::time::Duration::ZERO);
         assert!(build_hardened_client(None).is_ok());
+    }
+
+    #[derive(Debug)]
+    struct Layer {
+        message: &'static str,
+        source: Option<Box<Layer>>,
+    }
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|inner| inner as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn test_error_chain_joins_every_source() {
+        let err = Layer {
+            message: "error sending request",
+            source: Some(Box::new(Layer {
+                message: "client error (Connect)",
+                source: Some(Box::new(Layer {
+                    message: "Connection refused",
+                    source: None,
+                })),
+            })),
+        };
+        assert_eq!(
+            error_chain(&err),
+            "error sending request: client error (Connect): Connection refused"
+        );
+    }
+
+    #[test]
+    fn test_error_chain_of_a_sourceless_error_is_its_message() {
+        let err = std::io::Error::other("plain failure");
+        assert_eq!(error_chain(&err), "plain failure");
+    }
+
+    #[tokio::test]
+    async fn test_error_chain_names_the_cause_of_a_refused_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let err = build_hardened_client(None)
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .send()
+            .await
+            .unwrap_err();
+        let chain = error_chain(&err);
+        assert!(chain.len() > err.to_string().len(), "{chain}");
+        assert!(chain.contains("os error"), "{chain}");
     }
 
     #[test]

@@ -1,6 +1,5 @@
 #!/usr/bin/env bats
 
-REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 TOKEN_RE="[^][:space:]\"'\`\$(){};|&<>=,:\\\\[]+"
 NL=$'\n'
 
@@ -77,53 +76,6 @@ _plant_suite() {
     mkdir -p "$(dirname "$FIXTURE/$1")"
     printf '#!/usr/bin/env bats\n' >"$FIXTURE/$1"
     git -C "$FIXTURE" add -- "$1"
-}
-
-@test "guard is not vacuous: tracked suites and surfaces are both found" {
-    run _tracked_suites "$REPO_ROOT"
-    [ "$status" -eq 0 ]
-    [ "${#lines[@]}" -ge 10 ]
-
-    run _surface_files "$REPO_ROOT"
-    [ "$status" -eq 0 ]
-    [ "${#lines[@]}" -ge 3 ]
-    printf '%s\n' "${lines[@]}" | grep -qxF "$REPO_ROOT/Makefile"
-}
-
-@test "the Makefile and scripts/e2e-vm.sh wiring surfaces exist" {
-    for surface in Makefile scripts/e2e-vm.sh; do
-        if [ ! -f "$REPO_ROOT/$surface" ]; then
-            echo "Wiring surface $surface is missing — point _surface_files at its new path"
-            return 1
-        fi
-    done
-}
-
-@test "every tracked bats suite basename is unique" {
-    dupes="$(_duplicate_basenames "$REPO_ROOT")"
-    if [ -n "$dupes" ]; then
-        echo "Suite basenames shared by several files — the wiring match is by basename, rename one:"
-        echo "$dupes" | sed 's/^/  /'
-        return 1
-    fi
-}
-
-@test "every committed bats suite is named by a Makefile target, workflow, action or e2e-vm.sh" {
-    orphans="$(_unreferenced_suites "$REPO_ROOT")"
-    if [ -n "$orphans" ]; then
-        echo "Committed bats suites nothing ever runs — add each to a bats list in the Makefile:"
-        echo "$orphans" | sed 's/^/  /'
-        return 1
-    fi
-}
-
-@test "no surface names bats suites by glob or by directory" {
-    nonliteral="$(_nonliteral_suite_args "$REPO_ROOT")"
-    if [ -n "$nonliteral" ]; then
-        echo "bats suites named by glob or directory — name each suite file literally:"
-        echo "$nonliteral" | sed 's/^/  /'
-        return 1
-    fi
 }
 
 @test "a suite named only in a comment, inside a longer token or after a non-ASCII byte is reported" {

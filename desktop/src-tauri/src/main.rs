@@ -7,12 +7,13 @@ mod auth;
 mod auth_commands;
 mod bridges;
 mod chat;
+mod chat_registry;
 mod chat_session_cmd;
-mod claude_settings;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
+mod control_channel;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
@@ -33,6 +34,7 @@ mod llm_cmd;
 mod logging_cmd;
 mod mic_permission_cmd;
 mod mirror_relay;
+mod model_picker;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -66,7 +68,7 @@ mod window;
 
 use types::check_project;
 
-use chat::{ChatSession, SharedChatSession};
+use chat_registry::SharedChatSessions;
 use speedwave_runtime::config;
 
 use serde::Serialize;
@@ -80,7 +82,7 @@ use reconcile::{
     SharedPluginBridges,
 };
 
-pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
+pub(crate) use project_cmd::{clear_chat_sessions, rollback_and_emit_failed};
 
 pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
     let watchdog = std::thread::spawn(|| {
@@ -641,35 +643,32 @@ fn format_audit_failure_message(failures: &[(String, String)]) -> String {
     body
 }
 
-fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
-        #[expect(
-            clippy::print_stderr,
-            reason = "panic-hook stderr fallback (logging.md)"
-        )]
-        {
-            eprintln!("PANIC: {sanitized} (log sink also panicked)");
-        }
-    }
+#[cfg(any(not(debug_assertions), test))]
+fn write_panic_line(out: &mut dyn std::io::Write, sanitized: &str) {
+    let _ = writeln!(out, "PANIC: {sanitized}");
+}
+
+fn line_output<W, F>(open: F) -> tauri_plugin_log::fern::Output
+where
+    W: std::io::Write,
+    F: Fn() -> W + Send + Sync + 'static,
+{
+    tauri_plugin_log::fern::Output::call(move |record| {
+        let _ = writeln!(open(), "{}", record.args());
+    })
 }
 
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let sanitized = speedwave_runtime::log_sanitizer::sanitize(&format!("{info}"));
-        log_panic_with_fallback(&sanitized, || log::error!("PANIC: {sanitized}"));
+        log::error!("PANIC: {sanitized}");
         #[cfg(debug_assertions)]
         default_hook(info);
         #[cfg(not(debug_assertions))]
         {
             let _ = &default_hook;
-            #[expect(
-                clippy::print_stderr,
-                reason = "panic-hook stderr fallback (logging.md)"
-            )]
-            {
-                eprintln!("PANIC: {sanitized}");
-            }
+            write_panic_line(&mut std::io::stderr(), &sanitized);
         }
     }));
 
@@ -688,7 +687,7 @@ fn main() {
         }
     }
 
-    let initial_session: SharedChatSession = Arc::new(Mutex::new(ChatSession::new("default")));
+    let chat_sessions: SharedChatSessions = Arc::new(chat_registry::ChatSessions::default());
     let queue_service = speedwave_runtime::session::QueuedMessageService::new();
     let transcript_store: transcription_cmd::TranscriptStoreHandle =
         Arc::new(speedwave_runtime::transcription::TranscriptStore::new());
@@ -784,7 +783,10 @@ fn main() {
             use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
             tauri_plugin_log::Builder::new()
                 .targets([
-                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::Dispatch(
+                        tauri_plugin_log::fern::Dispatch::new()
+                            .chain(line_output(std::io::stdout)),
+                    )),
                     Target::new(TargetKind::LogDir {
                         file_name: Some("speedwave-desktop".into()),
                     }),
@@ -819,7 +821,7 @@ fn main() {
                 }
             }
         }))
-        .manage(initial_session)
+        .manage(chat_sessions)
         .manage(ide_bridge.clone())
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
@@ -847,6 +849,12 @@ fn main() {
             if let Ok(mut slot) = clipboard_bridge_slot.lock() {
                 *slot = clipboard_bridge::spawn(app.handle().clone());
             }
+
+            let interrupted = transcript_store.reconcile_interrupted();
+            if interrupted > 0 {
+                log::info!("{interrupted} interrupted recording(s) marked for transcription");
+            }
+            transcription_cmd::spawn_change_forwarder(app.handle().clone(), transcript_store);
 
             if let Err(failures) = speedwave_runtime::plugin::audit_all() {
                 let body = format_audit_failure_message(&failures);
@@ -925,6 +933,7 @@ fn main() {
 
             // Post-setup migrations, off the main thread.
             if setup_started {
+                reconcile::mark_image_check_pending();
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     let migrations = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -986,10 +995,6 @@ fn main() {
                                         "update available from tray check: {}",
                                         info.version
                                     );
-                                    use tauri::Emitter;
-                                    if let Err(e) = app_clone.emit("update_available", &info) {
-                                        log::error!("failed to emit update_available event: {e}");
-                                    }
                                 }
                                 Ok(updater::UpdateCheckOutcome::UpToDate) => {
                                     log::info!("tray update check found no new version");
@@ -1156,7 +1161,11 @@ fn main() {
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
             pin_cmd::get_model_hint,
+            pin_cmd::get_model_pin,
             pin_cmd::set_model_pin,
+            pin_cmd::clear_model_pin,
+            pin_cmd::restore_model_pin,
+            model_picker::list_model_picker,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,
@@ -1182,19 +1191,32 @@ fn main() {
             paste_cmd::save_pasted_image,
             chat_session_cmd::submit_question_answer,
             chat_session_cmd::stop_chat,
+            chat_session_cmd::close_chat_tab,
+            chat_session_cmd::reset_chat_tabs,
+            chat_session_cmd::get_chat_session_info,
+            chat_session_cmd::switch_chat_model,
+            chat_session_cmd::apply_chat_effort,
+            chat_session_cmd::get_plan_usage,
+            chat_session_cmd::get_context_usage,
+            chat_session_cmd::tab_owning_transcript,
             retry_cmd::retry_last_turn,
             queue_cmd::queue_message,
             queue_cmd::cancel_queued_message,
-            transcription_cmd::transcription_capabilities,
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
             transcription_cmd::stop_transcription,
+            transcription_cmd::pause_transcription,
             transcription_cmd::resume_transcription,
             transcription_cmd::subscribe_transcript,
             transcription_cmd::list_transcripts,
             transcription_cmd::get_transcript,
             transcription_cmd::delete_transcript,
             transcription_cmd::get_transcript_markdown,
+            transcription_cmd::rename_transcript,
+            transcription_cmd::transcribe_transcript,
+            transcription_cmd::postpone_transcription,
+            transcription_cmd::export_transcript,
+            transcription_cmd::reveal_transcript_audio,
             transcription_cmd::recommended_transcription_model,
             transcription_cmd::list_transcription_models,
             transcription_cmd::download_transcription_model,
@@ -1265,6 +1287,8 @@ fn main() {
             #[cfg(feature = "e2e")]
             e2e_support::e2e_last_spawn_args,
             #[cfg(feature = "e2e")]
+            e2e_support::e2e_last_applied_effort,
+            #[cfg(feature = "e2e")]
             e2e_support::e2e_restart_app,
         ])
         .on_window_event(move |window, event| {
@@ -1333,7 +1357,11 @@ fn main() {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test-only assertions")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -1389,16 +1417,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn log_panic_with_fallback_runs_log_fn_when_it_succeeds() {
-        let ran = std::cell::Cell::new(false);
-        log_panic_with_fallback("msg", || ran.set(true));
-        assert!(ran.get(), "log_fn must run on the happy path");
+    struct ClosedPipe;
+
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn log_through(output: tauri_plugin_log::fern::Output, message: &str) {
+        let (_, logger) = tauri_plugin_log::fern::Dispatch::new()
+            .format(|out, message, record| {
+                out.finish(format_args!("[{}] {message}", record.level()))
+            })
+            .chain(output)
+            .into_log();
+        logger.log(
+            &log::Record::builder()
+                .args(format_args!("{message}"))
+                .level(log::Level::Error)
+                .target("speedwave_desktop")
+                .build(),
+        );
     }
 
     #[test]
-    fn log_panic_with_fallback_survives_a_panicking_log_fn() {
-        log_panic_with_fallback("msg", || panic!("simulated log sink panic"));
+    fn line_output_writes_the_formatted_line() {
+        let buf = SharedBuf::default();
+        let sink = buf.clone();
+        log_through(line_output(move || sink.clone()), "stdout mirror");
+        let written = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(written, "[ERROR] stdout mirror\n");
+    }
+
+    #[test]
+    fn line_output_ignores_a_closed_pipe() {
+        log_through(line_output(|| ClosedPipe), "written after the pipe closed");
+    }
+
+    #[test]
+    fn line_output_writes_an_empty_message_as_a_bare_line() {
+        let buf = SharedBuf::default();
+        let sink = buf.clone();
+        log_through(line_output(move || sink.clone()), "");
+        let written = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(written, "[ERROR] \n");
+    }
+
+    #[test]
+    fn panic_line_is_written_to_a_healthy_stream() {
+        let mut out = Vec::new();
+        write_panic_line(&mut out, "worker panicked");
+        assert_eq!(String::from_utf8(out).unwrap(), "PANIC: worker panicked\n");
+    }
+
+    #[test]
+    fn panic_line_ignores_a_closed_stream() {
+        write_panic_line(&mut ClosedPipe, "worker panicked");
     }
 
     #[test]
@@ -1626,10 +1719,10 @@ mod tests {
                 let before = &source[..*idx];
                 let last_mod_tests = before.rfind("mod tests");
                 let last_cfg_test = before.rfind("#[cfg(test)]");
-                match (last_mod_tests, last_cfg_test) {
-                    (Some(mt), Some(ct)) if ct < mt && *idx > mt => false,
-                    _ => true,
-                }
+                !matches!(
+                    (last_mod_tests, last_cfg_test),
+                    (Some(mt), Some(ct)) if ct < mt && *idx > mt
+                )
             })
             .count();
         assert!(

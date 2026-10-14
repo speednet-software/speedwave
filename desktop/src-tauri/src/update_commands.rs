@@ -128,9 +128,10 @@ pub(crate) fn get_update_settings() -> Result<updater::UpdateSettings, String> {
 #[tauri::command]
 pub(crate) fn set_update_settings(settings: updater::UpdateSettings) -> Result<(), String> {
     log::info!(
-        "saving update settings: auto_check={}, interval={}h",
+        "saving update settings: auto_check={}, interval={}h, channel={}",
         settings.auto_check,
-        settings.check_interval_hours
+        settings.check_interval_hours,
+        settings.effective_channel()
     );
     updater::save_update_settings(&settings)
 }
@@ -160,6 +161,7 @@ fn build_install_failure_message(
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test assertions may expect freely")]
 mod tests {
     use super::*;
 

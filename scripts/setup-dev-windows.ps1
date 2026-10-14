@@ -154,6 +154,12 @@ if ((Test-Path $vcvars) -and $msvcVer) {
         if (Test-Path $llvmBin) { $sh += "export LIBCLANG_PATH='$llvmBin'" }
         $sh += "export PATH=`"$bashPath`:`$PATH`""
         $sh += "export CMAKE_GENERATOR='Ninja'"
+        $vulkanSdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
+        if ([string]::IsNullOrWhiteSpace($vulkanSdk)) {
+            $failedItems += @{ Name = 'VULKAN_SDK in ~/msvc-env.sh'; Hint = 'machine VULKAN_SDK is unset -- re-run after the Vulkan SDK install succeeds.' }
+        } else {
+            $sh += "export VULKAN_SDK='$vulkanSdk'"
+        }
         $home_ = $env:USERPROFILE
         $envShWin = Join-Path $home_ 'msvc-env.sh'
         Set-Content -Path $envShWin -Value (($sh -join "`n") + "`n") -Encoding ascii -NoNewline

@@ -12,7 +12,7 @@ Give `mcp-playwright` a static `extra_hosts` entry mapping `host.docker.internal
 ## Why
 
 - Plugin authors and end users want Claude-driven Playwright to inspect a host-bound dev server (e.g. an Angular app on `host.docker.internal:4200`) or a host-side MCP endpoint. Without the alias, Chromium fails name resolution with `ERR_NAME_NOT_RESOLVED`[^1].
-- The only prior workaround was hardcoding the per-platform gateway IP, which breaks portability: on macOS the gateway is the Lima vzNAT static `192.168.5.2`[^2], but on Windows it is discovered at runtime from the WSL default route and is not a fixed value[^3].
+- The only prior workaround was hardcoding the per-platform gateway IP, which breaks portability: on macOS the gateway is the static `192.168.5.2` of Lima's user-mode network[^2], but on Windows it is discovered at runtime from the WSL default route and is not a fixed value[^3].
 - The canonical alias keeps plugin Containerfiles and project configs free of per-platform IP branches.
 - ADR-039 § Decision 2 claimed `--allowed-hosts mcp-hub`; the code shipped `--allowed-hosts "*"`. This ADR resolves that drift in favour of the code: built-in workers publish no ports (enforced in compose), and any container already on the compose network can forge a `Host` header, so a hostname pin authenticates nothing. Real isolation comes from `cap_drop: ALL`, `read_only`, and the network boundary.
 
@@ -20,7 +20,7 @@ Give `mcp-playwright` a static `extra_hosts` entry mapping `host.docker.internal
 
 - Static `extra_hosts` entry on `mcp-playwright` — `containers/compose.template.yml` (the `${HOST_GATEWAY}` placeholder, mirroring the `claude` service)
 - Host gateway alias constant — `crates/speedwave-runtime/src/consts.rs` (`HOST_GATEWAY_ALIAS`)
-- macOS gateway IP (static Lima vzNAT) — `crates/speedwave-runtime/src/consts.rs` (`LIMA_VZ_HOST_IP`)
+- macOS gateway IP (static, Lima user-mode network) — `crates/speedwave-runtime/src/consts.rs` (`LIMA_VZ_HOST_IP`)
 - Windows gateway IP (detected at runtime from the WSL default route, no compile-time constant) — `crates/speedwave-runtime/src/compose.rs` (`host_addressing_impls::WslDetector::detect_wsl_gateway_ip` / `parse_default_route_gateway`); see [ADR-067](ADR-067-host-addressing-ssot-windows-wsl2-mirrored.md)
 - `${HOST_GATEWAY}` substitution at render time — `crates/speedwave-runtime/src/compose.rs` (`host_gateway_ip`, reading `host_addressing`)
 - Toggle-off removes the whole `mcp-playwright` block (including the new entry) — `crates/speedwave-runtime/src/compose.rs` (`apply_integrations_filter`)
@@ -41,6 +41,6 @@ Give `mcp-playwright` a static `extra_hosts` entry mapping `host.docker.internal
 
 [^1]: [Chromium `net_error_list.h`](https://source.chromium.org/chromium/chromium/src/+/main:net/base/net_error_list.h) - `ERR_NAME_NOT_RESOLVED` is the standard Chromium net error for DNS resolution failure.
 
-[^2]: [Lima docs: User-mode Network](https://lima-vm.io/docs/config/network/user/) - documents `192.168.5.2` as the host's address reachable from the guest in Lima's default (vzNAT) user-mode network.
+[^2]: [Lima docs: User-mode Network](https://lima-vm.io/docs/config/network/user/) - documents `192.168.5.2` as the host's address reachable from the guest in Lima's default user-mode network.
 
 [^3]: [Microsoft Learn: Accessing network applications with WSL](https://learn.microsoft.com/en-us/windows/wsl/networking) - documents that under WSL2's default NAT mode the Windows host IP is not fixed and must be discovered at runtime via `ip route show | grep -i default`.

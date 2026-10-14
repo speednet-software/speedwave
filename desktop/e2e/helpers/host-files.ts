@@ -23,6 +23,15 @@ export function clearModelPinFile(project: string): void {
   fs.writeFileSync(settingsPath, JSON.stringify(raw, null, 2));
 }
 
+/** Reads the project's settings.json `model` key (the project default for new tabs), or null. */
+export function readModelPin(project: string): string | null {
+  const settingsPath = settingsJsonPath(project);
+  if (!fs.existsSync(settingsPath)) return null;
+  const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+  const model = raw['model'];
+  return typeof model === 'string' ? model : null;
+}
+
 export function clearEffortPinFile(project: string): void {
   const configPath = configJsonPath();
   if (!fs.existsSync(configPath)) return;
@@ -33,4 +42,33 @@ export function clearEffortPinFile(project: string): void {
   if (!entry || !('effort_pin' in entry)) return;
   delete entry.effort_pin;
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+}
+
+interface UserConfigWithUiPrefs {
+  ui?: { beta_enabled?: boolean };
+  [key: string]: unknown;
+}
+
+function readUserConfig(): UserConfigWithUiPrefs {
+  const configPath = configJsonPath();
+  if (!fs.existsSync(configPath)) return {};
+  return JSON.parse(fs.readFileSync(configPath, 'utf8')) as UserConfigWithUiPrefs;
+}
+
+/** Reads the persisted `ui.beta_enabled` flag, defaulting to `false` like the backend getter. */
+export function readBetaEnabled(): boolean {
+  return readUserConfig().ui?.beta_enabled ?? false;
+}
+
+/**
+ * Writes `ui.beta_enabled` directly to `config.json`, the same file the Tauri
+ * `get_beta_enabled`/`apply_beta_toggle_inner` pair reads and writes. A direct
+ * file edit is not picked up by an already-running app (the frontend only
+ * refetches on the `beta-changed` event) — pair this with
+ * `restartAppAndReconnect()` from `app-restart.ts` so the fresh boot re-reads it.
+ */
+export function setBetaEnabled(enabled: boolean): void {
+  const cfg = readUserConfig();
+  cfg.ui = { ...cfg.ui, beta_enabled: enabled };
+  fs.writeFileSync(configJsonPath(), JSON.stringify(cfg, null, 2));
 }

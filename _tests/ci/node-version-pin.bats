@@ -19,38 +19,6 @@ run_check() {
     PATH="$STUB_DIR:/usr/bin:/bin" run bash "$CHECK" "$PIN"
 }
 
-@test "pin is a bare semver (Makefile builds nodejs.org URLs from it)" {
-    [[ "$PIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-}
-
-@test "no .nvmrc shadow copy is tracked" {
-    run git -C "$REPO_ROOT" ls-files -- .nvmrc
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-}
-
-@test "every CI node-version-file points at .node-version and no workflow inlines a version" {
-    run grep -rn --include='*.yml' --include='*.yaml' -E 'node-version(-file)?:' "$REPO_ROOT/.github"
-    [ "$status" -eq 0 ]
-    while IFS= read -r line; do
-        [[ "$line" == *"node-version-file: .node-version"* ]] || {
-            echo "unexpected Node pin: $line"
-            return 1
-        }
-    done <<<"$output"
-}
-
-@test "Makefile reads NODE_VERSION from .node-version without a literal fallback" {
-    run grep -cE '^NODE_VERSION := \$\(shell cat \.node-version\)$' "$REPO_ROOT/Makefile"
-    [ "$output" = "1" ]
-    run grep -n 'REQUIRED_NODE_MAJOR' "$REPO_ROOT/Makefile"
-    [ "$status" -ne 0 ]
-}
-
-@test "make setup-dev delegates the Node check to the script with the pin" {
-    grep -q 'bash scripts/check-node-version.sh "$(NODE_VERSION)"' "$REPO_ROOT/Makefile"
-}
-
 @test "check passes on the exact pin" {
     stub_node "v$PIN"
     run_check

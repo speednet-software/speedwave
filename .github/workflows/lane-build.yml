@@ -1,0 +1,100 @@
+name: lane-build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+    runs-on: ${{ github.event_name == 'pull_request' && github.base_ref == 'dev' && 'ubuntu-latest' || matrix.platform }}
+    timeout-minutes: 75
+    env:
+      DESKTOP_BUILD: ${{ github.event_name != 'pull_request' || github.base_ref != 'dev' }}
+    steps:
+      - name: Skip the desktop build on a pull request to dev (it runs in the merge queue)
+        if: env.DESKTOP_BUILD != 'true'
+        shell: bash
+        run: echo "::notice::The desktop build runs in the merge queue, not on a pull request to dev (SPEED-782)."
+
+      - if: env.DESKTOP_BUILD == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch release/* branches
+        if: env.DESKTOP_BUILD == 'true'
+        shell: bash
+        run: git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Use a short cargo target dir (Windows)
+        if: env.DESKTOP_BUILD == 'true' && matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          echo 'CARGO_TARGET_DIR=D:\st' >> "$GITHUB_ENV"
+
+      - name: Setup toolchain (Node + Rust + cache)
+        if: env.DESKTOP_BUILD == 'true'
+        uses: ./.github/actions/setup-toolchain
+        with:
+          rust-targets: ${{ matrix.rust-targets }}
+          rust-cache-workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+          rust-cache-shared-key: desktop-bundle
+          rust-cache-directories: ${{ matrix.platform == 'windows-latest' && 'D:\st' || '' }}
+
+      - name: Install frontend dependencies
+        if: env.DESKTOP_BUILD == 'true'
+        run: npm ci
+        working-directory: desktop/src
+
+      - name: Compute app version
+        if: env.DESKTOP_BUILD == 'true'
+        id: version
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          APP_VERSION="$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --branch "$BRANCH")"
+          echo "SPEEDWAVE_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+      - name: Prepare desktop bundle
+        if: env.DESKTOP_BUILD == 'true'
+        uses: ./.github/actions/prepare-desktop-bundle
+        with:
+          platform: ${{ matrix.platform }}
+          args: ${{ matrix.args }}
+
+      - name: Build Tauri app
+        if: env.DESKTOP_BUILD == 'true'
+        working-directory: desktop/src-tauri
+        shell: bash
+        env:
+          CI: true
+          MATRIX_ARGS: ${{ matrix.args }}
+        run: |
+          read -ra ARGS <<< "$MATRIX_ARGS"
+          CONFIG="{\"version\":\"$SPEEDWAVE_VERSION\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
+          npx --prefix ../src tauri build "${ARGS[@]}" --config "$CONFIG"
+
+      - name: Check an NSIS /UPDATE install removes files the release no longer ships (Windows)
+        if: env.DESKTOP_BUILD == 'true' && matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/check-nsis-update-reset.ps1 -BundleDir "$env:CARGO_TARGET_DIR\release\bundle\nsis"
+
+      - name: Check the build did not modify a tracked file
+        if: env.DESKTOP_BUILD == 'true'
+        shell: bash
+        run: git diff --exit-code

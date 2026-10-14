@@ -1,22 +1,35 @@
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import { contextTokensFrom, type SessionStats } from '../../models/chat';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  computed,
+  effect,
+  input,
+  output,
+  signal,
+  viewChild,
+} from '@angular/core';
+import { contextTokensFrom, type RateLimitInfo, type SessionStats } from '../../models/chat';
 import { formatContextLabel } from '../../models/llm';
+import type { PlanLimits } from '../../models/plan-limits';
 import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { formatTokens, formatUsd } from '../../shared/format-number';
+import { UsagePopoverComponent } from './usage-popover.component';
+import { usageColor } from './usage-color';
 
-/** Shared bar segment indices — module-level constant to avoid per-instance allocation. */
-const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
+const LIMIT_ALERT_STATUSES: readonly string[] = ['allowed_warning', 'rejected'];
 
-/** Terminal-minimal session stats strip — a single mono line below the composer. */
+/**
+ * Terminal-minimal session stats strip below the composer: in, out, a context ring that opens the
+ * context and plan-limits popover, git branch and conversation cost.
+ */
 @Component({
   selector: 'app-session-stats',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [TooltipDirective, IconComponent],
-  host: { class: 'block' },
+  imports: [TooltipDirective, IconComponent, UsagePopoverComponent],
+  host: { class: 'block', '(document:keydown.escape)': 'close()' },
   template: `
-    <!-- One row, always rendered; every segment defaults to 0 so new/resumed/live
-         sessions share one shape, filled in as stream data arrives. -->
     <div
       data-testid="session-stats"
       class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-3 text-[10px] text-[var(--ink-mute)]"
@@ -37,55 +50,75 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
         <span class="text-[var(--accent)]">{{ formatNum(stats()?.total_output_tokens ?? 0) }}</span>
       </span>
 
-      <!-- ctx + limit are cloud-session meters: shown (at 0% until data arrives)
-           when the context window is known, hidden for local models (ADR-041). -->
       @if (hasKnownWindow()) {
-        <span
-          class="hidden items-center gap-1.5 whitespace-nowrap sm:inline-flex"
-          [appTooltip]="
-            'Context window: ' +
-            ctxPct() +
-            '% used' +
-            (ctxUsedMax() ? ' (' + ctxUsedMax() + ')' : '')
-          "
-          placement="top"
-        >
-          ctx
-          <span class="flex gap-px" [attr.aria-label]="'Context: ' + ctxPct() + '% used'">
-            @for (i of barIndices; track i) {
+        <span class="relative hidden items-center sm:inline-flex">
+          <button
+            #ring
+            type="button"
+            data-testid="usage-ring"
+            class="relative inline-flex h-4 w-4 items-center justify-center rounded-full focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--teal)]"
+            aria-haspopup="dialog"
+            [attr.aria-expanded]="open()"
+            [attr.aria-label]="ringLabel()"
+            [attr.title]="ringLabel()"
+            (click)="toggle()"
+          >
+            <svg viewBox="0 0 16 16" class="h-3.5 w-3.5 -rotate-90" aria-hidden="true">
+              <circle
+                cx="8"
+                cy="8"
+                r="6"
+                fill="none"
+                stroke="var(--line-strong)"
+                stroke-width="2.5"
+              />
+              <circle
+                data-testid="usage-ring-fill"
+                cx="8"
+                cy="8"
+                r="6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+                pathLength="100"
+                [attr.stroke-dasharray]="(ctxPct() ?? 0) + ' 100'"
+                [attr.class]="ringColor()"
+              />
+            </svg>
+            @if (limitAlert(); as alert) {
               <span
-                class="inline-block h-1.5 w-1.5"
-                [class]="i < ctxFilled() ? ctxBarColor() : 'bg-[var(--line-strong)]'"
+                data-testid="usage-ring-warning"
+                [attr.data-status]="alert"
+                class="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full"
+                [class]="alert === 'rejected' ? 'bg-red-500' : 'bg-[var(--amber)]'"
               ></span>
             }
-          </span>
-          <span class="text-[var(--ink-dim)]">{{ ctxPct() }}%</span>
-          @if (ctxUsedMax(); as um) {
-            <span>· {{ um }}</span>
-          }
-        </span>
-        <span
-          class="hidden items-center gap-1.5 whitespace-nowrap md:inline-flex"
-          [appTooltip]="
-            'Rate limit: ' +
-            rlPct() +
-            '% used' +
-            (rlResetTime() ? ' · resets ' + rlResetTime() : '')
-          "
-          placement="top"
-        >
-          limit
-          <span class="flex gap-px" [attr.aria-label]="'Rate limit: ' + rlPct() + '% used'">
-            @for (i of barIndices; track i) {
-              <span
-                class="inline-block h-1.5 w-1.5"
-                [class]="i < rlFilled() ? rlBarColor() : 'bg-[var(--line-strong)]'"
-              ></span>
-            }
-          </span>
-          <span class="text-[var(--ink-dim)]">{{ rlPct() }}%</span>
-          @if (rlResetTime()) {
-            <span>· resets {{ rlResetTime() }}</span>
+          </button>
+          @if (open()) {
+            <button
+              type="button"
+              data-testid="usage-popover-backdrop"
+              aria-label="Close usage details"
+              tabindex="-1"
+              class="fixed inset-0 z-30 cursor-default"
+              (click)="close()"
+            ></button>
+            <div
+              #popover
+              data-testid="usage-popover"
+              role="dialog"
+              aria-label="Context window and plan usage limits"
+              tabindex="-1"
+              class="absolute bottom-full left-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)] focus:outline-none"
+            >
+              <app-usage-popover
+                [used]="ctxTotal()"
+                [max]="stats()?.context_window_size ?? null"
+                [categories]="stats()?.context?.categories ?? []"
+                [limits]="limits()"
+                [now]="now()"
+              />
+            </div>
           }
         </span>
       }
@@ -115,14 +148,33 @@ const BAR_INDICES: readonly number[] = [0, 1, 2, 3, 4];
   `,
 })
 export class SessionStatsComponent {
-  /** Shared segment indices exposed to the template. */
-  readonly barIndices = BAR_INDICES;
-
   /** Stats input (signal). */
   readonly stats = input<SessionStats | null>(null);
 
   /** Current git branch of the active project's working tree, or `null` when not a git repo. */
   readonly branch = input<string | null>(null);
+
+  /** Plan usage limits for the popover; `null` for API-key users and when no data exists. */
+  readonly limits = input<PlanLimits | null>(null);
+
+  /** Latest `rate_limit_event`; a warning or rejected status marks the ring. */
+  readonly limitSignal = input<RateLimitInfo | null>(null);
+
+  /** Time the limits were last evaluated at, in epoch milliseconds. */
+  readonly now = input(0);
+
+  /** Fires when the popover opens, so the owner re-reads the limits. */
+  readonly usageOpened = output<void>();
+
+  protected readonly open = signal(false);
+
+  private readonly ring = viewChild<ElementRef<HTMLButtonElement>>('ring');
+  private readonly popover = viewChild<ElementRef<HTMLElement>>('popover');
+
+  /** Moves focus into the popover as soon as it renders. */
+  constructor() {
+    effect(() => this.popover()?.nativeElement.focus());
+  }
 
   /** Project cost label: `$X.XXXX` when priced, `—` when unpriced (subscription/local). */
   readonly costLabel = computed<string>(() => {
@@ -134,17 +186,18 @@ export class SessionStatsComponent {
   readonly inboundTokens = computed<number>(() => this.stats()?.usage?.input_tokens ?? 0);
 
   /**
-   * Tokens occupying the context window, from the last main-chain API call only — the per-turn `usage`
-   * sums cache reads across calls and must never feed this meter (exceeds the window on tool-use turns).
+   * Tokens occupying the context window: Claude Code's own count when it answered, else the last
+   * main-chain API call (never the per-turn `usage`, which sums cache reads across calls).
    */
   readonly ctxTotal = computed<number>(() => {
-    const usage = this.stats()?.context_usage;
-    return usage ? contextTokensFrom(usage) : 0;
+    const stats = this.stats();
+    if (stats?.context) return stats.context.total_tokens;
+    return stats?.context_usage ? contextTokensFrom(stats.context_usage) : 0;
   });
 
   /**
-   * Context usage as integer percent (0–100); `null` when window unknown (local model, ADR-041 —
-   * segment hidden, not fabricated), 0 when known but unused.
+   * Context usage as integer percent (0–100); `null` when the window is unknown (ring hidden,
+   * never fabricated), 0 when known but unused.
    */
   readonly ctxPct = computed<number | null>(() => {
     const windowSize = this.stats()?.context_window_size;
@@ -154,20 +207,14 @@ export class SessionStatsComponent {
     return Math.min(100, Math.round((total / windowSize) * 100));
   });
 
-  /**
-   * True for a cloud session (context window known) — gates the ctx + limit
-   * meters, which are meaningless for a local model with an unknown window.
-   */
+  /** True when the context window is known; the ring is meaningless without one. */
   readonly hasKnownWindow = computed<boolean>(() => {
     const windowSize = this.stats()?.context_window_size;
     return !!windowSize && windowSize > 0;
   });
 
-  /** Filled segments (0–5) for the context bar; 0 when window is unknown. */
-  readonly ctxFilled = computed<number>(() => bucketFilled(this.ctxPct() ?? 0));
-
-  /** Tailwind class for filled context-bar segments. */
-  readonly ctxBarColor = computed<string>(() => barColor(this.ctxPct() ?? 0));
+  /** Stroke colour class of the ring fill, by the usage thresholds. */
+  readonly ringColor = computed<string>(() => usageColor(this.ctxPct() ?? 0).text);
 
   /** `used/max` label (e.g. `116k/200k`); empty when usage or window is unknown. */
   readonly ctxUsedMax = computed<string>(() => {
@@ -177,25 +224,39 @@ export class SessionStatsComponent {
     return `${formatContextLabel(total)}/${formatContextLabel(windowSize)}`;
   });
 
-  /** Rate-limit utilisation as an integer percentage (0–100). */
-  readonly rlPct = computed<number>(() => {
-    const stats = this.stats();
-    return Math.round(stats?.rate_limit?.utilization ?? 0);
+  /** `allowed_warning` or `rejected` while the signalled window has not reset yet, else `null`. */
+  readonly limitAlert = computed<string | null>(() => {
+    const signalled = this.limitSignal();
+    if (!signalled || !LIMIT_ALERT_STATUSES.includes(signalled.status)) return null;
+    if (signalled.resets_at !== null && signalled.resets_at * 1000 <= this.now()) return null;
+    return signalled.status;
   });
 
-  /** Filled segments (0–5) for the rate-limit bar. */
-  readonly rlFilled = computed<number>(() => bucketFilled(this.rlPct()));
-
-  /** Tailwind class for filled rate-limit-bar segments. */
-  readonly rlBarColor = computed<string>(() => barColor(this.rlPct()));
-
-  /** Reset time for rate limit formatted as HH:MM (local), or empty string. */
-  readonly rlResetTime = computed<string>(() => {
-    const epoch = this.stats()?.rate_limit?.resets_at;
-    if (!epoch) return '';
-    const d = new Date(epoch * 1000);
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  /** Accessible name and tooltip of the ring. */
+  readonly ringLabel = computed<string>(() => {
+    const used = this.ctxUsedMax();
+    const context = `Context window ${this.ctxPct() ?? 0}% used${used ? ` (${used})` : ''}`;
+    const alert = this.limitAlert();
+    if (alert === 'rejected') return `${context}. Plan usage limit reached`;
+    return alert ? `${context}. Plan usage limit warning` : context;
   });
+
+  /** Opens the popover (announcing it to the owner) or closes it. */
+  protected toggle(): void {
+    if (this.open()) {
+      this.close();
+      return;
+    }
+    this.open.set(true);
+    this.usageOpened.emit();
+  }
+
+  /** Closes the popover and hands focus back to the ring. */
+  protected close(): void {
+    if (!this.open()) return;
+    this.open.set(false);
+    this.ring()?.nativeElement.focus();
+  }
 
   /**
    * Formats an integer with thousands separators.
@@ -204,22 +265,4 @@ export class SessionStatsComponent {
   formatNum(n: number): string {
     return formatTokens(n);
   }
-}
-
-/**
- * Bucket the percentage into one of three Tailwind bar-segment colors.
- * @param pct - Percentage in the range 0–100.
- */
-function barColor(pct: number): string {
-  if (pct >= 77) return 'bg-red-500';
-  if (pct >= 50) return 'bg-[var(--amber)]';
-  return 'bg-[var(--green)]';
-}
-
-/**
- * Converts a percentage (0–100) to the number of filled segments (0–5), rounded.
- * @param pct - Percentage in the range 0–100.
- */
-function bucketFilled(pct: number): number {
-  return Math.min(5, Math.round((pct / 100) * 5));
 }

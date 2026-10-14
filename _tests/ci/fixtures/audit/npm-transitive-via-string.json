@@ -1,0 +1,43 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "semver": {
+      "name": "semver",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1101092,
+          "name": "semver",
+          "dependency": "semver",
+          "title": "semver vulnerable to Regular Expression Denial of Service",
+          "url": "https://github.com/advisories/GHSA-c2qf-rxjj-qqgw",
+          "severity": "high",
+          "range": "<7.5.2"
+        }
+      ],
+      "effects": ["some-tool"],
+      "range": "<7.5.2",
+      "nodes": ["node_modules/semver"]
+    },
+    "some-tool": {
+      "name": "some-tool",
+      "severity": "high",
+      "isDirect": true,
+      "via": ["semver"],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/some-tool"]
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 2,
+      "critical": 0,
+      "total": 2
+    }
+  }
+}

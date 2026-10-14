@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.267";
+pub const CLAUDE_VERSION: &str = "2.1.295";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -42,6 +42,68 @@ pub struct ModelPricing {
     pub output: f64,
 }
 
+/// A second price list that applies once a request's prompt tokens (input +
+/// cache read + cache write) exceed `threshold_tokens`. A request at exactly
+/// the threshold still bills at the model's base `pricing`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct LongPromptPricing {
+    /// Prompt-token count above which this pricing applies.
+    pub threshold_tokens: u64,
+    /// Rates for a prompt over `threshold_tokens`.
+    pub pricing: ModelPricing,
+}
+
+/// How a model's 1M window reaches the wire: native on the bare id, `<id>[1m]` by plan,
+/// or not at all. Decides `<id>[1m]` vs. the bare id in `anthropic_wire_model_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OneMillionContext {
+    /// 1M on every plan on the bare id; Claude Code 2.1.285+ gives it behind the proxy's
+    /// custom `ANTHROPIC_BASE_URL`.
+    Native,
+    /// Included on Max, Team, Enterprise and API billing; needs usage credits on Pro.
+    PaidPlansAndApi,
+    /// Included on API billing only; needs usage credits on every subscription.
+    ApiOnly,
+    /// The model has no 1M window.
+    Never,
+}
+
+/// Billing plan of the signed-in Anthropic account, as Claude Code reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnthropicPlan {
+    /// Claude Pro subscription.
+    Pro,
+    /// Claude Max subscription.
+    Max,
+    /// Claude Team subscription.
+    Team,
+    /// Claude Enterprise subscription.
+    Enterprise,
+    /// API key or pay-as-you-go billing.
+    Api,
+    /// Claude Code reported nothing, or a plan this build does not know.
+    Unknown,
+}
+
+impl AnthropicPlan {
+    /// Parses `initialize`'s `account.subscriptionType` label (`Claude Max`) or
+    /// `get_usage`'s `subscription_type` id (`max`); anything else is `Unknown`.
+    pub fn from_claude_code(reported: Option<&str>) -> Self {
+        let Some(reported) = reported else {
+            return Self::Unknown;
+        };
+        match reported.trim().to_ascii_lowercase().as_str() {
+            "claude pro" | "pro" => Self::Pro,
+            "claude max" | "max" => Self::Max,
+            "claude team" | "team" => Self::Team,
+            "claude enterprise" | "enterprise" => Self::Enterprise,
+            "claude api" => Self::Api,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Single source of truth for the Anthropic models surfaced in the
 /// Settings → LLM Provider dropdown and the Desktop cost meter.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,42 +123,102 @@ pub struct AnthropicModelInfo {
     pub pricing: ModelPricing,
     /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
     pub pricing_1m: Option<ModelPricing>,
-    /// Offered by the composer selector; legacy entries stay for pricing history.
-    pub selectable: bool,
+    /// Higher rates for a prompt over a token threshold (Haiku 5.5); `None` for
+    /// every other model, which bills `pricing`/`pricing_1m` regardless of size.
+    pub long_prompt: Option<LongPromptPricing>,
+    /// Plans that include this model's 1M window; input of `anthropic_wire_model_id`.
+    pub one_million_context: OneMillionContext,
     /// Effort levels this model accepts, a subset of `EFFORT_LEVELS` in `low`→`max`
     /// order; empty when unsupported (Haiku 4.5). Never deserialized from JSON.
     #[serde(skip_deserializing)]
     pub effort_levels: &'static [&'static str],
-    /// Default effort with no pin set; `None` exactly when `effort_levels` is
-    /// empty. `high` on every model that supports effort, except Opus 4.7 (`xhigh`).
+    /// Default effort with no pin set; `None` exactly when `effort_levels` is empty.
+    /// `high` on every model that supports effort, except Opus 4.7 (`xhigh`) and
+    /// Opus 5.5, Sonnet 5.5, Haiku 5.5 (`medium`).
     pub default_effort: Option<&'static str>,
 }
 
 impl AnthropicModelInfo {
-    /// True when a priced `[1m]` alias exists (`pricing_1m.is_some()`) — the
-    /// SSOT for whether the composer should offer the `[1m]` option.
+    /// True when a priced `[1m]` alias exists (`pricing_1m.is_some()`).
     pub fn has_1m(&self) -> bool {
         self.pricing_1m.is_some()
     }
 }
 
-/// or its `[1m]` alias where `has_1m()`. Validation SSOT for `--model` overrides.
+/// Suffix Claude Code appends to a model id to select its 1M context window.
+pub const ONE_MILLION_SUFFIX: &str = "[1m]";
+
+/// A catalog id, or its `[1m]` form where the model has a 1M window: every id
+/// `anthropic_wire_model_id` can produce. Validation SSOT for the model pin.
 pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
-    let base = id.strip_suffix("[1m]");
-    ANTHROPIC_MODELS.iter().any(|m| {
-        m.selectable
-            && match base {
-                Some(b) => m.id == b && m.has_1m(),
-                None => m.id == id,
-            }
+    let base = id.strip_suffix(ONE_MILLION_SUFFIX);
+    ANTHROPIC_MODELS.iter().any(|m| match base {
+        Some(b) => m.id == b && m.one_million_context != OneMillionContext::Never,
+        None => m.id == id,
     })
 }
+
+/// A wire model id without its `[1m]` suffixes and without a `-YYYYMMDD` snapshot
+/// date: the identity one picker row and one display label stand for.
+pub fn canonical_anthropic_model_id(id: &str) -> &str {
+    let mut base = id.trim();
+    while let Some(stripped) = base.strip_suffix(ONE_MILLION_SUFFIX) {
+        base = stripped;
+    }
+    match base.rsplit_once('-') {
+        Some((head, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => base,
+    }
+}
+
+/// The id Speedwave pins and sends for a catalog model: `<id>[1m]` where the plan buys
+/// the 1M window, the bare id otherwise. A non-catalog id passes through.
+pub fn anthropic_wire_model_id(catalog_id: &str, plan: AnthropicPlan) -> String {
+    let Some(model) = ANTHROPIC_MODELS.iter().find(|m| m.id == catalog_id) else {
+        return catalog_id.to_string();
+    };
+    let needs_suffix = match model.one_million_context {
+        OneMillionContext::Native | OneMillionContext::Never => false,
+        OneMillionContext::PaidPlansAndApi => matches!(
+            plan,
+            AnthropicPlan::Max
+                | AnthropicPlan::Team
+                | AnthropicPlan::Enterprise
+                | AnthropicPlan::Api
+        ),
+        OneMillionContext::ApiOnly => plan == AnthropicPlan::Api,
+    };
+    if needs_suffix {
+        format!("{}{ONE_MILLION_SUFFIX}", model.id)
+    } else {
+        model.id.to_string()
+    }
+}
+
+/// Claude Code's `--model` alias for the account default model.
+pub const DEFAULT_MODEL_ALIAS: &str = "default";
 
 /// Claude Code's built-in `--model` aliases, in the order Claude Code's docs list them;
 /// `containers/entrypoint.sh`'s settings.json foreign-model guard mirrors this list.
 pub const CLAUDE_CODE_MODEL_ALIASES: &[&str] = &[
-    "default", "best", "fable", "sonnet", "opus", "haiku", "opusplan",
+    DEFAULT_MODEL_ALIAS,
+    "best",
+    "fable",
+    "sonnet",
+    "opus",
+    "haiku",
+    "opusplan",
 ];
+
+/// A settings.json `model` value `containers/entrypoint.sh`'s foreign-model guard keeps: a
+/// `claude-*` id, or a Claude Code alias with an optional `[1m]`.
+pub fn is_claude_code_model_setting(value: &str) -> bool {
+    let claude_id = value.strip_prefix("claude-").is_some_and(|rest| {
+        !rest.is_empty() && !rest.contains(['\n', '\r', '\u{2028}', '\u{2029}'])
+    });
+    let alias = value.strip_suffix(ONE_MILLION_SUFFIX).unwrap_or(value);
+    claude_id || CLAUDE_CODE_MODEL_ALIASES.contains(&alias)
+}
 
 const CLAUDE_CODE_FAMILY_ALIASES: &[(&str, &str)] = &[
     ("opus", "Opus"),
@@ -138,11 +260,23 @@ const FABLE_5_1_PRICING: ModelPricing = ModelPricing {
     cache_write: 12.5,
     output: 50.0,
 };
+const OPUS_5_5_PRICING: ModelPricing = ModelPricing {
+    input: 4.0,
+    cached_input: 0.2,
+    cache_write: 5.0,
+    output: 20.0,
+};
 const OPUS_PRICING: ModelPricing = ModelPricing {
     input: 5.0,
     cached_input: 0.5,
     cache_write: 6.25,
     output: 25.0,
+};
+const SONNET_5_5_PRICING: ModelPricing = ModelPricing {
+    input: 2.0,
+    cached_input: 0.1,
+    cache_write: 2.5,
+    output: 10.0,
 };
 const SONNET_5_PRICING: ModelPricing = ModelPricing {
     input: 2.0,
@@ -156,6 +290,19 @@ const SONNET_46_PRICING: ModelPricing = ModelPricing {
     cache_write: 3.75,
     output: 15.0,
 };
+const HAIKU_5_5_PRICING: ModelPricing = ModelPricing {
+    input: 0.10,
+    cached_input: 0.01,
+    cache_write: 0.125,
+    output: 0.50,
+};
+const HAIKU_5_5_LONG_PROMPT_PRICING: ModelPricing = ModelPricing {
+    input: 0.50,
+    cached_input: 0.05,
+    cache_write: 0.625,
+    output: 2.50,
+};
+const HAIKU_5_5_LONG_PROMPT_THRESHOLD_TOKENS: u64 = 100_000;
 const HAIKU_PRICING: ModelPricing = ModelPricing {
     input: 1.0,
     cached_input: 0.1,
@@ -174,31 +321,63 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: FABLE_5_1_PRICING,
         pricing_1m: Some(FABLE_5_1_PRICING),
-        selectable: true,
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
     AnthropicModelInfo {
-        id: "claude-opus-5",
-        family: "Opus 5",
+        id: "claude-opus-5-5",
+        family: "Opus 5.5",
         context_tokens: 1_000_000,
         latest: true,
         premium: true,
-        pricing: OPUS_PRICING,
-        pricing_1m: Some(OPUS_PRICING),
-        selectable: true,
+        pricing: OPUS_5_5_PRICING,
+        pricing_1m: Some(OPUS_5_5_PRICING),
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
-        default_effort: Some("high"),
+        default_effort: Some("medium"),
+    },
+    AnthropicModelInfo {
+        id: "claude-sonnet-5-5",
+        family: "Sonnet 5.5",
+        context_tokens: 1_000_000,
+        latest: true,
+        premium: false,
+        pricing: SONNET_5_5_PRICING,
+        pricing_1m: Some(SONNET_5_5_PRICING),
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("medium"),
+    },
+    AnthropicModelInfo {
+        id: "claude-haiku-5-5",
+        family: "Haiku 5.5",
+        context_tokens: 1_000_000,
+        latest: true,
+        premium: false,
+        pricing: HAIKU_5_5_PRICING,
+        pricing_1m: Some(HAIKU_5_5_PRICING),
+        long_prompt: Some(LongPromptPricing {
+            threshold_tokens: HAIKU_5_5_LONG_PROMPT_THRESHOLD_TOKENS,
+            pricing: HAIKU_5_5_LONG_PROMPT_PRICING,
+        }),
+        one_million_context: OneMillionContext::Native,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("medium"),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-5",
         family: "Sonnet 5",
         context_tokens: 1_000_000,
-        latest: true,
+        latest: false,
         premium: false,
         pricing: SONNET_5_PRICING,
         pricing_1m: Some(SONNET_5_PRICING),
-        selectable: true,
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -206,13 +385,27 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         id: "claude-haiku-4-5",
         family: "Haiku 4.5",
         context_tokens: 200_000,
-        latest: true,
+        latest: false,
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
-        selectable: true,
+        long_prompt: None,
+        one_million_context: OneMillionContext::Never,
         effort_levels: NO_EFFORT_LEVELS,
         default_effort: None,
+    },
+    AnthropicModelInfo {
+        id: "claude-opus-5",
+        family: "Opus 5",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-fable-5",
@@ -222,7 +415,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
-        selectable: true,
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -234,7 +428,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
-        selectable: false,
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("high"),
     },
@@ -246,7 +441,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
-        selectable: false,
+        long_prompt: None,
+        one_million_context: OneMillionContext::Native,
         effort_levels: EFFORT_LEVELS,
         default_effort: Some("xhigh"),
     },
@@ -258,7 +454,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
-        selectable: false,
+        long_prompt: None,
+        one_million_context: OneMillionContext::PaidPlansAndApi,
         effort_levels: EFFORT_LEVELS_NO_XHIGH,
         default_effort: Some("high"),
     },
@@ -270,7 +467,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: SONNET_46_PRICING,
         pricing_1m: Some(SONNET_46_PRICING),
-        selectable: false,
+        long_prompt: None,
+        one_million_context: OneMillionContext::ApiOnly,
         effort_levels: EFFORT_LEVELS_NO_XHIGH,
         default_effort: Some("high"),
     },
@@ -299,6 +497,10 @@ pub fn base_env() -> HashMap<String, String> {
         "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".into(),
         MCP_TOOL_IDLE_TIMEOUT_MS.to_string(),
     );
+    env.insert(
+        MCP_DESCRIPTION_LENGTH_ENV.into(),
+        MCP_DESCRIPTION_MAX_LENGTH.to_string(),
+    );
     env
 }
 
@@ -306,25 +508,35 @@ pub fn base_env() -> HashMap<String, String> {
 /// worker timeout `STALE_CHUNK_TIMEOUT_MS` in `mcp-servers/shared/src/timeouts.ts`.
 pub const MCP_TOOL_IDLE_TIMEOUT_MS: u64 = 1_800_000;
 
-/// Anthropic-branch alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from the
-/// `ANTHROPIC_MODELS` SSOT (`[1m]` where supported). Fable omitted — resolves natively.
+pub(crate) const MCP_DESCRIPTION_LENGTH_ENV: &str = "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH";
+
+pub(crate) const MCP_DESCRIPTION_MAX_LENGTH: usize = 8192;
+
+/// Alias pins `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` from `ANTHROPIC_MODELS` (Fable resolves
+/// natively), always the bare id: a native model runs its 1M window on the bare id already, and a
+/// plan-dependent one is not pinned at all (pinning it would force a window off the account's plan).
 pub fn anthropic_default_models_env() -> HashMap<String, String> {
+    default_models_env_from(ANTHROPIC_MODELS)
+}
+
+fn default_models_env_from(catalog: &[AnthropicModelInfo]) -> HashMap<String, String> {
     let mut env = HashMap::new();
     for (alias, family_prefix) in [("OPUS", "Opus"), ("SONNET", "Sonnet"), ("HAIKU", "Haiku")] {
-        let Some(latest) = ANTHROPIC_MODELS
+        let Some(latest) = catalog
             .iter()
             .find(|m| m.family.starts_with(family_prefix) && m.latest)
         else {
             continue;
         };
-        let suffix = if latest.context_tokens >= 1_000_000 {
-            "[1m]"
-        } else {
-            ""
-        };
+        if matches!(
+            latest.one_million_context,
+            OneMillionContext::PaidPlansAndApi | OneMillionContext::ApiOnly
+        ) {
+            continue;
+        }
         env.insert(
             format!("ANTHROPIC_DEFAULT_{alias}_MODEL"),
-            format!("{}{suffix}", latest.id),
+            latest.id.to_string(),
         );
     }
     env
@@ -492,6 +704,49 @@ mod tests {
     }
 
     #[test]
+    fn base_env_lets_claude_code_keep_whole_mcp_descriptions() {
+        let env = base_env();
+        assert_eq!(
+            env.get("CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH")
+                .map(String::as_str),
+            Some(MCP_DESCRIPTION_MAX_LENGTH.to_string().as_str())
+        );
+        assert_eq!(
+            MCP_DESCRIPTION_LENGTH_ENV,
+            "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH"
+        );
+    }
+
+    fn hub_meta_tool_description_budget() -> usize {
+        let src = include_str!("../../../mcp-servers/hub/src/meta-tools.ts");
+        let re = regex::Regex::new(r"export const MAX_META_TOOL_DESCRIPTION_LENGTH = ([0-9_]+);")
+            .unwrap();
+        re.captures(src)
+            .expect("meta-tools.ts must declare MAX_META_TOOL_DESCRIPTION_LENGTH as a literal")
+            .get(1)
+            .unwrap()
+            .as_str()
+            .replace('_', "")
+            .parse()
+            .expect("MAX_META_TOOL_DESCRIPTION_LENGTH must be an integer")
+    }
+
+    #[test]
+    fn mcp_description_limit_covers_the_hub_meta_tool_budget() {
+        let budget = hub_meta_tool_description_budget();
+        assert!(
+            budget > 2048,
+            "the budget exists because execute_code does not fit Claude Code's default 2048"
+        );
+        assert!(
+            MCP_DESCRIPTION_MAX_LENGTH >= budget,
+            "MCP_DESCRIPTION_MAX_LENGTH ({MCP_DESCRIPTION_MAX_LENGTH}) must be >= the hub's \
+             MAX_META_TOOL_DESCRIPTION_LENGTH ({budget}) from meta-tools.ts, or Claude Code cuts \
+             a hub meta-tool description"
+        );
+    }
+
+    #[test]
     fn mcp_config_path_points_to_claude_dir() {
         assert_eq!(MCP_CONFIG_PATH, "/home/speedwave/.claude/mcp-config.json");
     }
@@ -519,8 +774,50 @@ mod tests {
         );
     }
 
+    fn latest_opus_with(one_million_context: OneMillionContext) -> Vec<AnthropicModelInfo> {
+        let mut catalog = ANTHROPIC_MODELS.to_vec();
+        let opus = catalog
+            .iter_mut()
+            .find(|m| m.family.starts_with("Opus") && m.latest)
+            .expect("the catalog has a latest Opus");
+        opus.one_million_context = one_million_context;
+        catalog
+    }
+
     #[test]
-    fn anthropic_default_models_env_appends_1m_suffix_for_million_token_models() {
+    fn a_plan_dependent_1m_window_is_never_pinned_to_an_alias() {
+        for policy in [
+            OneMillionContext::PaidPlansAndApi,
+            OneMillionContext::ApiOnly,
+        ] {
+            let env = default_models_env_from(&latest_opus_with(policy));
+
+            assert!(
+                !env.contains_key("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+                "a pinned `[1m]` alias forces a plan without the window onto usage credits: {env:?}"
+            );
+            assert!(env.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL"));
+        }
+    }
+
+    #[test]
+    fn a_model_without_a_1m_window_is_pinned_bare() {
+        let catalog = latest_opus_with(OneMillionContext::Never);
+        let opus = catalog
+            .iter()
+            .find(|m| m.family.starts_with("Opus") && m.latest)
+            .expect("the catalog has a latest Opus");
+
+        let env = default_models_env_from(&catalog);
+
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").map(String::as_str),
+            Some(opus.id)
+        );
+    }
+
+    #[test]
+    fn anthropic_default_models_env_pins_bare_ids_for_every_plan_independent_alias() {
         let env = anthropic_default_models_env();
         for (var, value) in &env {
             let alias = var
@@ -533,23 +830,20 @@ mod tests {
                 "HAIKU" => "Haiku",
                 other => panic!("unexpected alias {other}"),
             };
-            let model_id = value.trim_end_matches("[1m]");
             let entry = ANTHROPIC_MODELS
                 .iter()
-                .find(|m| m.id == model_id)
-                .unwrap_or_else(|| panic!("model id {model_id} not in SSOT"));
+                .find(|m| m.id == value.as_str())
+                .unwrap_or_else(|| panic!("model id {value} not in SSOT"));
             assert!(
                 entry.family.starts_with(prefix),
-                "{var}={value}: id {model_id} (family {}) does not match alias {alias}",
+                "{var}={value}: family {} does not match alias {alias}",
                 entry.family
             );
             assert!(entry.latest, "{var} must point at a `latest: true` entry");
-            let has_suffix = value.ends_with("[1m]");
-            let expected_suffix = entry.context_tokens >= 1_000_000;
-            assert_eq!(
-                has_suffix, expected_suffix,
-                "{var}={value}: [1m] suffix must mirror context_tokens >= 1M (was {})",
-                entry.context_tokens
+            assert!(
+                !value.ends_with("[1m]"),
+                "{var}={value}: a pin must be the bare id. Claude Code 2.1.285+ runs a \
+                 native model's 1M window on the bare id behind a custom ANTHROPIC_BASE_URL"
             );
         }
     }
@@ -558,17 +852,40 @@ mod tests {
     fn anthropic_default_models_env_covers_every_latest_family() {
         let env = anthropic_default_models_env();
         for prefix in ["Opus", "Sonnet", "Haiku"] {
-            let has_latest = ANTHROPIC_MODELS
-                .iter()
-                .any(|m| m.family.starts_with(prefix) && m.latest);
+            let pinnable = ANTHROPIC_MODELS.iter().any(|m| {
+                m.family.starts_with(prefix)
+                    && m.latest
+                    && matches!(
+                        m.one_million_context,
+                        OneMillionContext::Native | OneMillionContext::Never
+                    )
+            });
             let alias = prefix.to_uppercase();
             let var = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
             assert_eq!(
                 env.contains_key(&var),
-                has_latest,
-                "{var} presence must mirror SSOT having a `latest: true` {prefix} entry"
+                pinnable,
+                "{var} presence must mirror a `latest: true` {prefix} entry with a plan-independent window"
             );
         }
+    }
+
+    #[test]
+    fn anthropic_default_models_env_pins_opus_sonnet_and_haiku_to_their_latest_bare_ids() {
+        let env = anthropic_default_models_env();
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").map(String::as_str),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").map(String::as_str),
+            Some("claude-haiku-5-5")
+        );
     }
 
     #[test]
@@ -620,29 +937,208 @@ mod tests {
     }
 
     #[test]
-    fn legacy_entries_are_not_selectable() {
-        for id in [
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
-        ] {
-            let m = ANTHROPIC_MODELS.iter().find(|m| m.id == id).unwrap();
-            assert!(!m.selectable, "{id} must not be selectable");
+    fn one_million_context_table_matches_the_plan_decisions() {
+        let expected = [
+            ("claude-fable-5-1", OneMillionContext::Native),
+            ("claude-opus-5-5", OneMillionContext::Native),
+            ("claude-sonnet-5-5", OneMillionContext::Native),
+            ("claude-haiku-5-5", OneMillionContext::Native),
+            ("claude-sonnet-5", OneMillionContext::Native),
+            ("claude-haiku-4-5", OneMillionContext::Never),
+            ("claude-opus-5", OneMillionContext::Native),
+            ("claude-fable-5", OneMillionContext::Native),
+            ("claude-opus-4-8", OneMillionContext::Native),
+            ("claude-opus-4-7", OneMillionContext::Native),
+            ("claude-opus-4-6", OneMillionContext::PaidPlansAndApi),
+            ("claude-sonnet-4-6", OneMillionContext::ApiOnly),
+        ];
+        let actual: Vec<(&str, OneMillionContext)> = ANTHROPIC_MODELS
+            .iter()
+            .map(|m| (m.id, m.one_million_context))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn one_million_context_is_never_exactly_when_no_1m_alias_is_priced() {
+        for m in ANTHROPIC_MODELS {
+            assert_eq!(
+                m.one_million_context == OneMillionContext::Never,
+                !m.has_1m(),
+                "{}",
+                m.id
+            );
         }
     }
 
     #[test]
-    fn current_entries_are_selectable() {
+    fn wire_model_id_gives_native_opus_models_their_bare_id_on_every_plan() {
+        for opus in [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            for plan in [
+                AnthropicPlan::Pro,
+                AnthropicPlan::Max,
+                AnthropicPlan::Team,
+                AnthropicPlan::Enterprise,
+                AnthropicPlan::Api,
+                AnthropicPlan::Unknown,
+            ] {
+                assert_eq!(anthropic_wire_model_id(opus, plan), opus, "{plan:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn wire_model_id_gives_opus_4_6_1m_only_where_the_plan_includes_it() {
+        let opus = "claude-opus-4-6";
+        for plan in [
+            AnthropicPlan::Max,
+            AnthropicPlan::Team,
+            AnthropicPlan::Enterprise,
+            AnthropicPlan::Api,
+        ] {
+            assert_eq!(
+                anthropic_wire_model_id(opus, plan),
+                format!("{opus}[1m]"),
+                "{plan:?}"
+            );
+        }
+        assert_eq!(anthropic_wire_model_id(opus, AnthropicPlan::Pro), opus);
+        assert_eq!(anthropic_wire_model_id(opus, AnthropicPlan::Unknown), opus);
+    }
+
+    #[test]
+    fn wire_model_id_gives_native_models_their_bare_id_on_every_plan() {
         for id in [
+            "claude-sonnet-5-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
             "claude-fable-5-1",
             "claude-fable-5",
-            "claude-opus-5",
-            "claude-sonnet-5",
-            "claude-haiku-4-5",
         ] {
-            let m = ANTHROPIC_MODELS.iter().find(|m| m.id == id).unwrap();
-            assert!(m.selectable, "{id} must be selectable");
+            for plan in [
+                AnthropicPlan::Pro,
+                AnthropicPlan::Max,
+                AnthropicPlan::Team,
+                AnthropicPlan::Enterprise,
+                AnthropicPlan::Api,
+                AnthropicPlan::Unknown,
+            ] {
+                assert_eq!(anthropic_wire_model_id(id, plan), id, "{plan:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn wire_model_id_gives_sonnet_4_6_1m_on_api_billing_only() {
+        let id = "claude-sonnet-4-6";
+        for plan in [
+            AnthropicPlan::Pro,
+            AnthropicPlan::Max,
+            AnthropicPlan::Team,
+            AnthropicPlan::Enterprise,
+            AnthropicPlan::Unknown,
+        ] {
+            assert_eq!(anthropic_wire_model_id(id, plan), id, "{plan:?}");
+        }
+        assert_eq!(
+            anthropic_wire_model_id(id, AnthropicPlan::Api),
+            "claude-sonnet-4-6[1m]"
+        );
+    }
+
+    #[test]
+    fn wire_model_id_never_gives_haiku_4_5_1m_and_passes_foreign_ids_through() {
+        for plan in [AnthropicPlan::Max, AnthropicPlan::Api] {
+            assert_eq!(
+                anthropic_wire_model_id("claude-haiku-4-5", plan),
+                "claude-haiku-4-5"
+            );
+        }
+        assert_eq!(
+            anthropic_wire_model_id("claude-opus-9", AnthropicPlan::Max),
+            "claude-opus-9"
+        );
+        assert_eq!(anthropic_wire_model_id("", AnthropicPlan::Max), "");
+    }
+
+    #[test]
+    fn every_wire_model_id_the_policy_produces_is_selectable() {
+        for m in ANTHROPIC_MODELS {
+            for plan in [
+                AnthropicPlan::Pro,
+                AnthropicPlan::Max,
+                AnthropicPlan::Team,
+                AnthropicPlan::Enterprise,
+                AnthropicPlan::Api,
+                AnthropicPlan::Unknown,
+            ] {
+                let wire = anthropic_wire_model_id(m.id, plan);
+                assert!(is_selectable_anthropic_model_id(&wire), "{wire} ({plan:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn plan_parses_claude_codes_labels_and_ids() {
+        for (reported, plan) in [
+            ("Claude Pro", AnthropicPlan::Pro),
+            ("Claude Max", AnthropicPlan::Max),
+            ("Claude Team", AnthropicPlan::Team),
+            ("Claude Enterprise", AnthropicPlan::Enterprise),
+            ("Claude API", AnthropicPlan::Api),
+            ("pro", AnthropicPlan::Pro),
+            ("max", AnthropicPlan::Max),
+            ("team", AnthropicPlan::Team),
+            ("enterprise", AnthropicPlan::Enterprise),
+            (" claude max ", AnthropicPlan::Max),
+        ] {
+            assert_eq!(
+                AnthropicPlan::from_claude_code(Some(reported)),
+                plan,
+                "{reported}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_is_unknown_for_missing_empty_and_unrecognised_reports() {
+        assert_eq!(
+            AnthropicPlan::from_claude_code(None),
+            AnthropicPlan::Unknown
+        );
+        for reported in ["", "Claude Ultra", "free", "Claude", "api"] {
+            assert_eq!(
+                AnthropicPlan::from_claude_code(Some(reported)),
+                AnthropicPlan::Unknown,
+                "{reported}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_model_id_drops_the_1m_suffix_and_the_snapshot_date() {
+        for (wire, canonical) in [
+            ("claude-opus-5", "claude-opus-5"),
+            ("claude-opus-5[1m]", "claude-opus-5"),
+            ("claude-opus-5[1m][1m]", "claude-opus-5"),
+            ("claude-opus-5-5[1m]", "claude-opus-5-5"),
+            ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+            ("claude-haiku-4-5-20251001[1m]", "claude-haiku-4-5"),
+            (" claude-sonnet-5[1m] ", "claude-sonnet-5"),
+            ("claude-fable-5-1", "claude-fable-5-1"),
+            ("default", "default"),
+            ("opus[1m]", "opus"),
+            ("local/qwen3", "local/qwen3"),
+            ("claude-opus-4-8-2025100", "claude-opus-4-8-2025100"),
+            ("", ""),
+            ("[1m]", ""),
+        ] {
+            assert_eq!(canonical_anthropic_model_id(wire), canonical, "{wire:?}");
         }
     }
 
@@ -657,20 +1153,138 @@ mod tests {
     }
 
     #[test]
-    fn opus_5_is_the_latest_opus_entry() {
+    fn opus_5_5_is_the_latest_opus_entry_at_its_own_rates() {
+        let opus_5_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-opus-5-5")
+            .expect("claude-opus-5-5 must be in the catalog");
+        assert!(opus_5_5.latest, "Opus 5.5 must be in the Latest group");
+        assert!(opus_5_5.premium);
+        assert_eq!(opus_5_5.family, "Opus 5.5");
+        assert_eq!(opus_5_5.context_tokens, 1_000_000);
+        assert_eq!(
+            opus_5_5.pricing,
+            ModelPricing {
+                input: 4.0,
+                cached_input: 0.2,
+                cache_write: 5.0,
+                output: 20.0,
+            }
+        );
+        assert_eq!(opus_5_5.pricing_1m, Some(opus_5_5.pricing));
+    }
+
+    #[test]
+    fn opus_5_is_demoted_to_legacy_at_its_own_rates() {
         let opus_5 = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-opus-5")
-            .expect("claude-opus-5 must be in the catalog");
-        assert!(opus_5.latest, "Opus 5 must be in the Latest group");
+            .expect("claude-opus-5 must remain in the catalog");
+        assert!(!opus_5.latest, "Opus 5 must be demoted to Legacy");
         assert!(opus_5.premium);
         assert_eq!(opus_5.context_tokens, 1_000_000);
         assert_eq!(opus_5.pricing.input, 5.0);
         assert_eq!(opus_5.pricing.output, 25.0);
+        assert_eq!(opus_5.one_million_context, OneMillionContext::Native);
+    }
+
+    #[test]
+    fn sonnet_5_5_is_the_latest_sonnet_entry_at_its_own_rates() {
+        let sonnet_5_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-5-5")
+            .expect("claude-sonnet-5-5 must be in the catalog");
+        assert!(sonnet_5_5.latest, "Sonnet 5.5 must be in the Latest group");
+        assert!(!sonnet_5_5.premium);
+        assert_eq!(sonnet_5_5.family, "Sonnet 5.5");
+        assert_eq!(sonnet_5_5.context_tokens, 1_000_000);
         assert_eq!(
-            anthropic_default_models_env().get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
-            Some(&"claude-opus-5[1m]".to_string())
+            sonnet_5_5.pricing,
+            ModelPricing {
+                input: 2.0,
+                cached_input: 0.1,
+                cache_write: 2.5,
+                output: 10.0,
+            }
         );
+        assert_eq!(sonnet_5_5.pricing_1m, Some(sonnet_5_5.pricing));
+        assert!(sonnet_5_5.long_prompt.is_none());
+        assert_eq!(sonnet_5_5.default_effort, Some("medium"));
+    }
+
+    #[test]
+    fn sonnet_5_is_demoted_to_legacy_at_its_own_rates() {
+        let sonnet_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-5")
+            .expect("claude-sonnet-5 must remain in the catalog");
+        assert!(!sonnet_5.latest, "Sonnet 5 must be demoted to Legacy");
+        assert!(!sonnet_5.premium);
+        assert_eq!(sonnet_5.context_tokens, 1_000_000);
+        assert_eq!(sonnet_5.pricing.input, 2.0);
+        assert_eq!(sonnet_5.pricing.cached_input, 0.2);
+        assert_eq!(sonnet_5.one_million_context, OneMillionContext::Native);
+    }
+
+    #[test]
+    fn haiku_5_5_is_the_latest_haiku_entry_with_tiered_pricing() {
+        let haiku_5_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-haiku-5-5")
+            .expect("claude-haiku-5-5 must be in the catalog");
+        assert!(haiku_5_5.latest, "Haiku 5.5 must be in the Latest group");
+        assert!(!haiku_5_5.premium);
+        assert_eq!(haiku_5_5.family, "Haiku 5.5");
+        assert_eq!(haiku_5_5.context_tokens, 1_000_000);
+        assert_eq!(
+            haiku_5_5.pricing,
+            ModelPricing {
+                input: 0.10,
+                cached_input: 0.01,
+                cache_write: 0.125,
+                output: 0.50,
+            }
+        );
+        assert_eq!(haiku_5_5.pricing_1m, Some(haiku_5_5.pricing));
+        assert_eq!(haiku_5_5.one_million_context, OneMillionContext::Native);
+        assert_eq!(haiku_5_5.default_effort, Some("medium"));
+
+        let long_prompt = haiku_5_5
+            .long_prompt
+            .expect("claude-haiku-5-5 must carry a long-prompt tier");
+        assert_eq!(long_prompt.threshold_tokens, 100_000);
+        assert_eq!(
+            long_prompt.pricing,
+            ModelPricing {
+                input: 0.50,
+                cached_input: 0.05,
+                cache_write: 0.625,
+                output: 2.50,
+            }
+        );
+    }
+
+    #[test]
+    fn haiku_4_5_is_demoted_to_legacy_and_keeps_no_long_prompt_tier() {
+        let haiku_4_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-haiku-4-5")
+            .expect("claude-haiku-4-5 must remain in the catalog");
+        assert!(!haiku_4_5.latest, "Haiku 4.5 must be demoted to Legacy");
+        assert!(haiku_4_5.long_prompt.is_none());
+        assert_eq!(haiku_4_5.one_million_context, OneMillionContext::Never);
+    }
+
+    #[test]
+    fn only_haiku_5_5_carries_a_long_prompt_tier() {
+        for m in ANTHROPIC_MODELS {
+            assert_eq!(
+                m.long_prompt.is_some(),
+                m.id == "claude-haiku-5-5",
+                "{}: long_prompt must be set only for claude-haiku-5-5",
+                m.id
+            );
+        }
     }
 
     #[test]
@@ -819,6 +1433,9 @@ mod tests {
             if let Some(p) = &m.pricing_1m {
                 check(m.id, p);
             }
+            if let Some(tiered) = &m.long_prompt {
+                check(m.id, &tiered.pricing);
+            }
         }
     }
 
@@ -870,7 +1487,7 @@ mod tests {
 
     #[test]
     fn is_selectable_anthropic_model_id_accepts_every_selector_shape() {
-        for m in ANTHROPIC_MODELS.iter().filter(|m| m.selectable) {
+        for m in ANTHROPIC_MODELS {
             assert!(is_selectable_anthropic_model_id(m.id), "{} must pass", m.id);
             assert_eq!(
                 is_selectable_anthropic_model_id(&format!("{}[1m]", m.id)),
@@ -882,35 +1499,50 @@ mod tests {
     }
 
     #[test]
-    fn is_selectable_anthropic_model_id_rejects_foreign_and_legacy_shapes() {
-        assert!(!is_selectable_anthropic_model_id(""));
-        assert!(!is_selectable_anthropic_model_id("gpt-4o-mini"));
-        assert!(!is_selectable_anthropic_model_id("unsloth/Qwen3.6-35B-A3B"));
-        assert!(!is_selectable_anthropic_model_id("claude-fable-5[2m]"));
-        assert!(!is_selectable_anthropic_model_id("[1m]"));
-        for m in ANTHROPIC_MODELS.iter().filter(|m| !m.selectable) {
-            assert!(
-                !is_selectable_anthropic_model_id(m.id),
-                "legacy {} must be rejected",
-                m.id
-            );
+    fn is_selectable_anthropic_model_id_rejects_ids_outside_the_catalog() {
+        for foreign in [
+            "",
+            "gpt-4o-mini",
+            "unsloth/Qwen3.6-35B-A3B",
+            "claude-fable-5[2m]",
+            "[1m]",
+            "claude-opus-9",
+            "claude-opus-5[1m][1m]",
+            "claude-haiku-4-5-20251001",
+            "opus",
+            "default",
+        ] {
+            assert!(!is_selectable_anthropic_model_id(foreign), "{foreign:?}");
+        }
+    }
+
+    #[test]
+    fn is_selectable_anthropic_model_id_accepts_the_legacy_rows() {
+        for id in [
+            "claude-opus-4-8",
+            "claude-opus-4-7[1m]",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6[1m]",
+        ] {
+            assert!(is_selectable_anthropic_model_id(id), "{id}");
         }
     }
 
     #[test]
     fn resolve_model_alias_maps_each_documented_alias_to_its_latest_entry() {
-        assert_eq!(resolve_model_alias("opus"), "claude-opus-5");
-        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-5");
-        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-5-5");
+        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-5-5");
+        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-5-5");
         assert_eq!(resolve_model_alias("fable"), "claude-fable-5-1");
     }
 
     #[test]
     fn resolve_model_alias_preserves_the_1m_suffix() {
-        assert_eq!(resolve_model_alias("opus[1m]"), "claude-opus-5[1m]");
-        assert_eq!(resolve_model_alias("sonnet[1m]"), "claude-sonnet-5[1m]");
+        assert_eq!(resolve_model_alias("opus[1m]"), "claude-opus-5-5[1m]");
+        assert_eq!(resolve_model_alias("sonnet[1m]"), "claude-sonnet-5-5[1m]");
         assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
-        assert_eq!(resolve_model_alias("haiku[1m]"), "claude-haiku-4-5[1m]");
+        assert_eq!(resolve_model_alias("haiku[1m]"), "claude-haiku-5-5[1m]");
     }
 
     #[test]
@@ -938,10 +1570,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_alias_haiku_1m_resolves_even_though_haiku_has_no_1m_price() {
+    fn resolve_model_alias_haiku_1m_resolves_to_a_selectable_price() {
         let resolved = resolve_model_alias("haiku[1m]");
-        assert_eq!(resolved, "claude-haiku-4-5[1m]");
-        assert!(!is_selectable_anthropic_model_id(&resolved));
+        assert_eq!(resolved, "claude-haiku-5-5[1m]");
+        assert!(is_selectable_anthropic_model_id(&resolved));
     }
 
     #[test]
@@ -962,6 +1594,35 @@ mod tests {
             "entrypoint.sh's foreign-model guard must read {expected} — \
              rebuild it from CLAUDE_CODE_MODEL_ALIASES"
         );
+    }
+
+    #[test]
+    fn claude_code_model_setting_keeps_what_the_entrypoint_guard_keeps() {
+        for alias in CLAUDE_CODE_MODEL_ALIASES {
+            assert!(is_claude_code_model_setting(alias), "{alias}");
+            assert!(
+                is_claude_code_model_setting(&format!("{alias}[1m]")),
+                "{alias}[1m]"
+            );
+        }
+        for kept in [
+            "claude-fable-5",
+            "claude-opus-4-8[1m]",
+            "claude-opus-4-1-20250805",
+        ] {
+            assert!(is_claude_code_model_setting(kept), "{kept}");
+        }
+        for foreign in [
+            "",
+            "claude-",
+            "claude-a\nb",
+            "Opus",
+            "opus[1m][1m]",
+            "gpt-5",
+            "llama3.3",
+        ] {
+            assert!(!is_claude_code_model_setting(foreign), "{foreign:?}");
+        }
     }
 
     #[test]
@@ -1011,8 +1672,11 @@ mod tests {
         for id in [
             "claude-fable-5-1",
             "claude-fable-5",
+            "claude-opus-5-5",
             "claude-opus-5",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
+            "claude-haiku-5-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
         ] {
@@ -1037,15 +1701,15 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_models_default_effort_is_high_except_opus_4_7() {
+    fn anthropic_models_default_effort_is_high_except_opus_4_7_and_the_5_5_tier() {
         for m in ANTHROPIC_MODELS {
             if m.effort_levels.is_empty() {
                 continue;
             }
-            let expected = if m.id == "claude-opus-4-7" {
-                "xhigh"
-            } else {
-                "high"
+            let expected = match m.id {
+                "claude-opus-4-7" => "xhigh",
+                "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5" => "medium",
+                _ => "high",
             };
             assert_eq!(
                 m.default_effort,

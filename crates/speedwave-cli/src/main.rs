@@ -7,6 +7,7 @@ use speedwave_runtime::engine_path;
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
+use speedwave_runtime::update_channel::{self, UpdateChannel};
 use speedwave_runtime::validation;
 use strum::IntoEnumIterator;
 
@@ -63,6 +64,7 @@ enum CliAction {
     Update(Option<String>),
     Run(Option<String>),
     Help,
+    Version,
 }
 
 fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, String> {
@@ -109,6 +111,7 @@ fn reject_extra_args(args: &[String], expected_len: usize, usage: &str) -> Resul
 fn parse_action(args: &[String]) -> Result<CliAction, String> {
     match args.get(1).map(|s| s.as_str()) {
         Some("--help" | "-h" | "help") => Ok(CliAction::Help),
+        Some("--version" | "-V") => Ok(CliAction::Version),
         Some("plugin") => match args.get(2).map(|s| s.as_str()) {
             Some("install") => {
                 let path = args
@@ -250,7 +253,7 @@ fn maybe_print_update_hint() {
         return;
     }
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = env!("SPEEDWAVE_VERSION");
 
     if let Some(cache) = read_update_cache() {
         let elapsed = now_secs().saturating_sub(cache.last_check);
@@ -272,23 +275,14 @@ fn maybe_print_update_hint() {
     }
 
     std::thread::spawn(move || {
-        let latest = match self_update::backends::github::Update::configure()
-            .repo_owner(REPO_OWNER)
-            .repo_name(REPO_NAME)
-            .bin_name(consts::CLI_BINARY)
-            .current_version(current)
-            .build()
-        {
-            Ok(updater) => match updater.get_latest_release() {
-                Ok(release) => release.version,
-                Err(_) => return,
-            },
-            Err(_) => return,
+        let channel = update_channel::read_update_channel();
+        let Ok(target_tag) = target_release_tag(channel) else {
+            return;
         };
 
         write_update_cache(&UpdateCheckCache {
             last_check: now_secs(),
-            latest_version: latest,
+            latest_version: target_tag.trim_start_matches('v').to_string(),
         });
     });
 }
@@ -318,9 +312,23 @@ fn run_self_update() -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to locate current binary: {e}"))?;
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = env!("SPEEDWAVE_VERSION");
     out!("Current version: {}", current);
+
+    let channel = update_channel::read_update_channel();
+    out!("Update channel: {}", channel);
     out!("Checking for updates...");
+
+    let target_tag = target_release_tag(channel)?;
+
+    if !tag_is_newer_than(current, &target_tag)? {
+        out!("Already up to date ({}).", current);
+        write_update_cache(&UpdateCheckCache {
+            last_check: now_secs(),
+            latest_version: target_tag.trim_start_matches('v').to_string(),
+        });
+        return Ok(());
+    }
 
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
@@ -328,6 +336,7 @@ fn run_self_update() -> anyhow::Result<()> {
         .bin_name(consts::CLI_BINARY)
         .show_download_progress(true)
         .current_version(current)
+        .release_tag(&target_tag)
         .build()?
         .update()?;
 
@@ -336,7 +345,7 @@ fn run_self_update() -> anyhow::Result<()> {
         latest_version: status.version().to_string(),
     });
 
-    if status.updated() {
+    if status.is_updated() {
         out!("Updated to version {}.", status.version());
         let resources_version = speedwave_runtime::build::resolve_build_root()
             .ok()
@@ -364,6 +373,20 @@ fn run_self_update() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn target_release_tag(channel: UpdateChannel) -> anyhow::Result<String> {
+    update_channel::fetch_release_tag(channel).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `true` when `tag` is a strictly newer release than `current` (full `Ord`, build metadata included).
+fn tag_is_newer_than(current: &str, tag: &str) -> anyhow::Result<bool> {
+    let current_version = semver::Version::parse(current)
+        .map_err(|e| anyhow::anyhow!("Cannot parse current version {current}: {e}"))?;
+    let candidate = tag.trim_start_matches('v');
+    let candidate_version = semver::Version::parse(candidate)
+        .map_err(|e| anyhow::anyhow!("Cannot parse release tag {tag}: {e}"))?;
+    Ok(candidate_version > current_version)
 }
 
 fn validate_project_name(name: &str) -> Result<(), String> {
@@ -425,7 +448,8 @@ USAGE:
     speedwave plugin enable  <id> --project <project>   Enable a plugin per-project
     speedwave plugin disable <id> --project <project>   Disable a plugin per-project
 
-    speedwave --help | -h | help      Show this help and exit
+    speedwave --help | -h | help       Show this help and exit
+    speedwave --version | -V           Show the version and exit
 
 The active project is the one selected in Speedwave Desktop; `--project <p>`
 overrides it. The working directory does not select the project.
@@ -494,6 +518,11 @@ fn main() -> anyhow::Result<()> {
 
     if action == CliAction::Help {
         print_help();
+        std::process::exit(0);
+    }
+
+    if action == CliAction::Version {
+        out!("speedwave {}", env!("SPEEDWAVE_VERSION"));
         std::process::exit(0);
     }
 
@@ -1049,16 +1078,21 @@ fn reap_instance(
     container: &str,
     instance_id: &str,
 ) {
-    let argv = speedwave_runtime::session::kill_by_instance_command(instance_id);
-    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    match runtime.container_exec_piped(container, &argv_refs) {
-        Ok(mut cmd) => {
-            if let Err(e) = cmd.output() {
-                log::debug!("session reap failed: {e}");
-            }
-        }
-        Err(e) => log::debug!("session reap unavailable: {e}"),
+    if let Some(warning) = reap_warning(runtime, container, instance_id) {
+        err!("{warning}");
     }
+}
+
+fn reap_warning(
+    runtime: &speedwave_runtime::runtime::LockedRuntime,
+    container: &str,
+    instance_id: &str,
+) -> Option<String> {
+    let e = speedwave_runtime::session::reap_instance(runtime, container, instance_id).err()?;
+    Some(format!(
+        "Warning: Claude Code may still be running in '{container}': {}",
+        redact_err(&e)
+    ))
 }
 
 fn resolve_action_project(
@@ -1281,6 +1315,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_action_version_long_flag() {
+        let args = vec!["speedwave".to_string(), "--version".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
+    }
+
+    #[test]
+    fn parse_action_version_short_flag() {
+        let args = vec!["speedwave".to_string(), "-V".to_string()];
+        assert_eq!(parse_action(&args).unwrap(), CliAction::Version);
+    }
+
+    #[test]
     fn main_handles_help_before_runtime_check() {
         let source = include_str!("main.rs");
         let main_start = source
@@ -1297,6 +1343,27 @@ mod tests {
             help_idx < runtime_idx,
             "CliAction::Help must be handled BEFORE any runtime_not_available \
              call site inside main() — otherwise `speedwave --help` fails \
+             when Desktop is not running"
+        );
+    }
+
+    #[test]
+    fn main_handles_version_before_runtime_check() {
+        let source = include_str!("main.rs");
+        let main_start = source
+            .find("\nfn main() -> anyhow::Result<()>")
+            .expect("main.rs must define fn main()");
+        let main_body = &source[main_start..];
+        let version_idx = main_body
+            .find("if action == CliAction::Version")
+            .expect("main() must handle CliAction::Version");
+        let runtime_idx = main_body
+            .find("runtime_not_available()")
+            .expect("main() must have at least one runtime_not_available call site");
+        assert!(
+            version_idx < runtime_idx,
+            "CliAction::Version must be handled BEFORE any runtime_not_available \
+             call site inside main() — otherwise `speedwave --version` fails \
              when Desktop is not running"
         );
     }
@@ -1413,6 +1480,16 @@ mod tests {
         assert!(
             err.contains("unknown command") && err.contains("updatte"),
             "expected unknown-command error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_action_unknown_flag_yields_unexpected_argument() {
+        let args = vec!["speedwave".to_string(), "-x".to_string()];
+        let err = parse_action(&args).unwrap_err();
+        assert!(
+            err.contains("unexpected argument") && err.contains("-x"),
+            "expected unexpected argument error for unknown flag, got: {err}"
         );
     }
 
@@ -1634,6 +1711,22 @@ mod tests {
         assert!(
             body.contains("speedwave logout"),
             "print_help must document `logout` subcommand"
+        );
+    }
+
+    #[test]
+    fn print_help_lists_version_flag() {
+        let source = include_str!("main.rs");
+        let help_start = source
+            .find("fn print_help() {")
+            .expect("print_help must exist");
+        let help_end = source[help_start..]
+            .find("\n}")
+            .expect("print_help must end with `}`");
+        let body = &source[help_start..help_start + help_end];
+        assert!(
+            body.contains("speedwave --version | -V"),
+            "print_help must document `--version | -V` flag"
         );
     }
 
@@ -1913,6 +2006,83 @@ mod tests {
             .find("run_rebuild(")
             .expect("run_self_update must call run_rebuild()");
         assert!(probe < rebuild, "version gate must precede the rebuild");
+    }
+
+    #[test]
+    fn run_self_update_resolves_target_tag_before_building() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let channel_read = fn_body
+            .find("read_update_channel()")
+            .expect("run_self_update must read the installation channel");
+        let tag_resolution = fn_body
+            .find("target_release_tag(")
+            .expect("run_self_update must resolve a target release tag");
+        let release_tag_call = fn_body
+            .find(".release_tag(")
+            .expect("run_self_update must pass release_tag to self_update");
+        let build_call = fn_body
+            .find(".build()?")
+            .expect("run_self_update must call .build()");
+        assert!(
+            channel_read < tag_resolution,
+            "the channel must be read before resolving a tag"
+        );
+        assert!(
+            tag_resolution < release_tag_call,
+            "the resolved tag must be passed to release_tag"
+        );
+        assert!(
+            release_tag_call < build_call,
+            "release_tag must be set before build()"
+        );
+    }
+
+    #[test]
+    fn run_self_update_blocks_downgrade_before_configuring_self_update() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn run_self_update(");
+        let newer_check = fn_body
+            .find("tag_is_newer_than(")
+            .expect("run_self_update must gate on tag_is_newer_than before installing");
+        let configure_call = fn_body
+            .find("self_update::backends::github::Update::configure()")
+            .expect("run_self_update must configure self_update");
+        assert!(
+            newer_check < configure_call,
+            "the no-downgrade check must run before self_update is configured"
+        );
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_a_higher_version_tag_as_newer() {
+        assert!(tag_is_newer_than("0.21.0", "v0.22.0+41").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_the_same_version_as_not_newer() {
+        assert!(!tag_is_newer_than("0.21.0+37", "v0.21.0+37").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_reports_a_lower_version_tag_as_not_newer() {
+        assert!(!tag_is_newer_than("0.21.1", "v0.21.0").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_compares_build_metadata() {
+        assert!(tag_is_newer_than("0.21.0+37", "v0.21.0+38").unwrap());
+        assert!(!tag_is_newer_than("0.21.0+38", "v0.21.0+37").unwrap());
+    }
+
+    #[test]
+    fn tag_is_newer_than_errors_on_unparsable_current_version() {
+        assert!(tag_is_newer_than("not-a-version", "v0.21.0").is_err());
+    }
+
+    #[test]
+    fn tag_is_newer_than_errors_on_unparsable_tag() {
+        assert!(tag_is_newer_than("0.21.0", "not-a-tag").is_err());
     }
 
     #[test]
@@ -2289,6 +2459,24 @@ mod tests {
     }
 
     #[test]
+    fn maybe_print_update_hint_resolves_tag_by_channel() {
+        let source = include_str!("main.rs");
+        let fn_body = extract_fn_body(source, "fn maybe_print_update_hint(");
+        assert!(
+            fn_body.contains("read_update_channel()"),
+            "the background hint must read the installation channel"
+        );
+        assert!(
+            fn_body.contains("target_release_tag("),
+            "the background hint must resolve the same tag self-update would"
+        );
+        assert!(
+            !fn_body.contains("get_latest_release()"),
+            "the hint must not use self_update's own channel-blind release lookup"
+        );
+    }
+
+    #[test]
     fn now_secs_is_nonzero() {
         assert!(now_secs() > 0);
     }
@@ -2612,11 +2800,11 @@ mod tests {
         let fn_body = extract_fn_body(source, "fn run_self_update(");
 
         let updated_check = fn_body
-            .find("status.updated()")
-            .expect("must check status.updated()");
+            .find("status.is_updated()")
+            .expect("must check status.is_updated()");
         let rebuild_call = fn_body.find("run_rebuild(").expect("must call run_rebuild");
         let already_up_to_date = fn_body
-            .find("Already up to date")
+            .rfind("Already up to date")
             .expect("must have 'Already up to date' branch");
 
         assert!(
@@ -2676,6 +2864,65 @@ mod tests {
     fn emit_output_line_passes_normal_text_through() {
         let out = sanitize_output_line("Project 'demo' registered at /workspace");
         assert_eq!(out, "Project 'demo' registered at /workspace");
+    }
+
+    #[test]
+    fn a_reap_that_fails_in_a_running_container_warns_that_claude_code_may_still_run() {
+        let container = "cli-reap-fails_claude";
+        let (runtime, _handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+                .push_exec_piped_failure("container is not responding")
+                .build();
+
+        let warning = reap_warning(&runtime, container, "abc-123").expect("a warning");
+
+        assert!(
+            warning.starts_with(&format!(
+                "Warning: Claude Code may still be running in '{container}': "
+            )),
+            "{warning}"
+        );
+        assert!(warning.contains("container is not responding"), "{warning}");
+    }
+
+    #[test]
+    fn a_reap_that_finds_no_container_or_a_stopped_one_stays_quiet() {
+        for (container, stderr) in [
+            (
+                "cli-reap-missing_claude",
+                "Error: No such container: cli-reap-missing_claude",
+            ),
+            (
+                "cli-reap-stopped_claude",
+                "level=fatal msg=\"cannot exec in a stopped state\"",
+            ),
+        ] {
+            let (runtime, handles) =
+                speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new()
+                    .push_exec_piped_failure(stderr)
+                    .build();
+
+            let warning = reap_warning(&runtime, container, "abc-123");
+
+            assert_eq!(warning, None, "{stderr}");
+            assert_eq!(handles.exec_calls.lock().unwrap().len(), 1, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn a_reap_that_succeeds_stays_quiet() {
+        let (runtime, handles) =
+            speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder::new().build();
+
+        let warning = reap_warning(&runtime, "cli-reap-ok_claude", "abc-123");
+
+        assert_eq!(warning, None);
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].argv,
+            speedwave_runtime::session::kill_by_instance_command("abc-123")
+        );
     }
 
     #[test]

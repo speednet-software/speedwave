@@ -58,6 +58,7 @@ describe('Chat Controls', function () {
 
   it('queues a message sent while streaming', async function () {
     this.timeout(180_000);
+    await startNewConversation();
     await sendMessageNoWait(LONG_STREAM_PROMPT);
     await waitForTurnStart();
 

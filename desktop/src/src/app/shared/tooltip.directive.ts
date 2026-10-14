@@ -209,7 +209,7 @@ export class TooltipDirective implements OnDestroy {
       const positionStrategy = this.positionBuilder
         .flexibleConnectedTo(this.host)
         .withPositions(this.positions())
-        .withPush(false)
+        .withPush(true)
         .withFlexibleDimensions(false)
         .withViewportMargin(4);
 

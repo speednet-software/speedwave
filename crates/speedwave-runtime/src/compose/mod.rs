@@ -49,7 +49,7 @@ pub(crate) use llm::apply_llm_config_in;
 use llm::provider_display_label;
 pub use llm::{
     anthropic_login_unset_keys, canonicalize_local_base_url, default_base_url,
-    read_local_llm_token_opt, read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
+    read_local_llm_token_opt_in, strip_trailing_v1, validate_base_url,
 };
 
 use plugins::apply_plugins_from_verified;
@@ -244,7 +244,7 @@ pub fn render_compose_in(
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
-    let verified_plugins = plugin::list_verified_from_dir(&data_dir.join("plugins"))?;
+    let verified_plugins = plugin::list_verified_from_dir(&plugin::plugins_base_dir_in(data_dir))?;
     let plugin_manifests: Vec<PluginManifest> = verified_plugins
         .iter()
         .map(|vp| vp.manifest().clone())
@@ -273,7 +273,9 @@ pub fn render_compose_in(
         yaml = yaml.replace(placeholder, &bundle_manifest.image_tag(image_name)?);
     }
 
-    std::fs::create_dir_all(claude_home.join(".claude").join("ide"))?;
+    std::fs::create_dir_all(
+        crate::claude_home::claude_config_dir(data_dir, project_name).join("ide"),
+    )?;
 
     let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
@@ -330,7 +332,10 @@ pub fn render_compose_in(
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
 
-    yaml = apply_container_resources(&yaml);
+    yaml = apply_container_resources(
+        &yaml,
+        &crate::resources::claude_resources(crate::resources::resolved_vm_memory_gib()),
+    );
 
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
 
@@ -487,8 +492,8 @@ fn format_cpus(cpus: f32) -> String {
     format!("{cpus:.1}")
 }
 
-fn apply_container_resources(yaml: &str) -> String {
-    use crate::resources::{ContainerResources, CLAUDE_RESOURCES, HUB_RESOURCES, PROXY_RESOURCES};
+fn apply_container_resources(yaml: &str, claude: &crate::resources::ContainerResources) -> String {
+    use crate::resources::{ContainerResources, HUB_RESOURCES, PROXY_RESOURCES};
 
     fn apply(out: &mut String, prefix: &str, r: &ContainerResources) {
         *out = out.replace(&format!("${{{prefix}_MEM}}"), &format_mib(r.mem_mib));
@@ -501,8 +506,8 @@ fn apply_container_resources(yaml: &str) -> String {
 
     let mut out = yaml.to_string();
 
-    out = out.replace("${CLAUDE_MEMORY}", &format_mib(CLAUDE_RESOURCES.mem_mib));
-    apply(&mut out, "CLAUDE", &CLAUDE_RESOURCES);
+    out = out.replace("${CLAUDE_MEMORY}", &format_mib(claude.mem_mib));
+    apply(&mut out, "CLAUDE", claude);
     apply(&mut out, "MCP_HUB", &HUB_RESOURCES);
     apply(&mut out, "PROXY", &PROXY_RESOURCES);
 
@@ -527,6 +532,30 @@ pub fn compose_output_path_in(
 ) -> anyhow::Result<PathBuf> {
     crate::validation::validate_project_name(project)?;
     Ok(data_dir.join("compose").join(project).join("compose.yml"))
+}
+
+/// `key` of `service`'s environment in the project's last rendered compose, if it is there.
+pub fn rendered_service_env_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    key: &str,
+) -> Option<String> {
+    let path = compose_output_path_in(data_dir, project).ok()?;
+    let yaml = std::fs::read_to_string(path).ok()?;
+    rendered_env_value(&yaml, service, key)
+}
+
+fn rendered_env_value(yaml: &str, service: &str, key: &str) -> Option<String> {
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).ok()?;
+    match doc.get("services")?.get(service)?.get("environment")? {
+        serde_yaml_ng::Value::Sequence(entries) => entries.iter().find_map(|entry| {
+            let (name, value) = entry.as_str()?.split_once('=')?;
+            (name == key).then(|| value.to_string())
+        }),
+        serde_yaml_ng::Value::Mapping(entries) => entries.get(key)?.as_str().map(str::to_string),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -909,7 +938,7 @@ pub fn oauth_consumer_service_ids(
         .collect();
     for m in enabled_plugins {
         if m.oauth.is_some() {
-            let sid = m.service_id.as_deref().unwrap_or(&m.slug);
+            let sid = m.config_key();
             if resolved.is_plugin_enabled(sid) {
                 out.push(sid.to_string());
             }
@@ -1403,9 +1432,7 @@ mod tests {
         )
         .expect("render must succeed");
 
-        let nested = crate::claude_home::claude_home_dir(data_dir.path(), &project)
-            .join(".claude")
-            .join("ide");
+        let nested = crate::claude_home::claude_config_dir(data_dir.path(), &project).join("ide");
         assert!(
             nested.is_dir(),
             "render_compose must pre-create {nested:?} host-side"
@@ -1630,7 +1657,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn render_compose_quotes_bracketed_model_env_and_round_trips() {
+    fn render_compose_quotes_bracketed_env_values_and_round_trips() {
         let data_dir = tempfile::tempdir().unwrap();
         let project = format!("render-1m-suffix-{}", std::process::id());
         let tmp = tempfile::tempdir().unwrap();
@@ -1647,8 +1674,13 @@ mod tests {
             ..Default::default()
         };
         crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        let mut env = crate::defaults::base_env();
+        env.insert(
+            "SPEEDWAVE_TEST_BRACKETED_VALUE".to_string(),
+            "claude-opus-4-6[1m]".to_string(),
+        );
         let resolved = ResolvedClaudeConfig {
-            env: crate::defaults::base_env(),
+            env,
             flags: default_flags(),
             llm,
             ..Default::default()
@@ -1670,14 +1702,14 @@ mod tests {
         let env = doc["services"]["claude"]["environment"]
             .as_sequence()
             .expect("claude.environment must be a sequence");
-        let opus = env
+        let bracketed = env
             .iter()
             .filter_map(|v| v.as_str())
-            .find(|s| s.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL="))
-            .expect("ANTHROPIC_DEFAULT_OPUS_MODEL must be present");
+            .find(|s| s.starts_with("SPEEDWAVE_TEST_BRACKETED_VALUE="))
+            .expect("SPEEDWAVE_TEST_BRACKETED_VALUE must be present");
         assert!(
-            opus.ends_with("[1m]"),
-            "1M-context suffix must survive intact, got: {opus:?}"
+            bracketed.ends_with("[1m]"),
+            "a bracketed env value must survive intact, got: {bracketed:?}"
         );
 
         let services = doc["services"].as_mapping().expect("services mapping");
@@ -2365,6 +2397,134 @@ services:
                     .iter()
                     .any(|v| v.rule == SecurityRule::NoTokensClaude),
                 "{env} must stay forbidden on claude"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn a_routed_render_carries_the_wire_model_that_rendered_service_env_reads_back() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "my-ollama".into(),
+                kind: crate::config::LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:11434".into()),
+                model: Some("llama4".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "my-ollama".into(),
+                model: Some("llama4".into()),
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let path = compose_output_path_in(data_dir.path(), "test-project").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &yaml).unwrap();
+
+        assert_eq!(
+            rendered_service_env_in(data_dir.path(), "test-project", "claude", "ANTHROPIC_MODEL"),
+            Some(crate::model_id::wire_model_id(
+                crate::config::LlmProviderKind::Local,
+                "my-ollama",
+                "llama4"
+            ))
+        );
+        assert_eq!(
+            rendered_service_env_in(data_dir.path(), "test-project", "claude", "NO_SUCH_KEY"),
+            None
+        );
+        assert_eq!(
+            rendered_service_env_in(
+                data_dir.path(),
+                "other-project",
+                "claude",
+                "ANTHROPIC_MODEL"
+            ),
+            None,
+            "a project with no rendered compose has no rendered env"
+        );
+    }
+
+    #[test]
+    fn rendered_env_value_reads_list_and_map_environments_and_nothing_else() {
+        let list = "services:\n  claude:\n    environment:\n      - A=1\n      - ANTHROPIC_MODEL=local/m=x\n";
+        let map = "services:\n  claude:\n    environment:\n      ANTHROPIC_MODEL: local/m\n";
+        assert_eq!(
+            rendered_env_value(list, "claude", "ANTHROPIC_MODEL"),
+            Some("local/m=x".to_string())
+        );
+        assert_eq!(
+            rendered_env_value(map, "claude", "ANTHROPIC_MODEL"),
+            Some("local/m".to_string())
+        );
+        assert_eq!(rendered_env_value(list, "proxy", "ANTHROPIC_MODEL"), None);
+        assert_eq!(rendered_env_value("services: [", "claude", "A"), None);
+        assert_eq!(
+            rendered_env_value("services:\n  claude:\n    environment: 7\n", "claude", "A"),
+            None
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn the_rendered_claude_service_keeps_whole_mcp_descriptions() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut resolved = resolved_with_telemetry(None, None);
+        resolved.env = crate::defaults::base_env();
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "mcp-desc",
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        let expected = crate::defaults::MCP_DESCRIPTION_MAX_LENGTH.to_string();
+        assert_eq!(
+            find_env_value(&env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").as_deref(),
+            Some(expected.as_str())
+        );
+        let services = doc["services"].as_mapping().unwrap();
+        assert!(services.len() > 1);
+        for (name, _) in services {
+            let name = name.as_str().unwrap();
+            if name == "claude" {
+                continue;
+            }
+            let service_env = get_service_env_seq(&doc, name);
+            assert!(
+                find_env_value(&service_env, "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=").is_none(),
+                "{name} must not get the MCP description limit"
             );
         }
     }
@@ -4160,10 +4320,17 @@ services:
                     || e.starts_with("ANTHROPIC_API_KEY=")),
             "oauth sessions must carry no auth env (it disables OAuth): {env:?}"
         );
+        for (key, value) in crate::defaults::anthropic_default_models_env() {
+            let pin = format!("{key}={value}");
+            assert!(
+                env.contains(&pin),
+                "alias pin {pin} must be rendered: {env:?}"
+            );
+        }
         assert!(
             env.iter()
-                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_OPUS_MODEL=")),
-            "alias pins must be present: {env:?}"
+                .any(|e| e == "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5"),
+            "the opus alias must run its native 1M window on the bare id: {env:?}"
         );
     }
 
@@ -5022,7 +5189,8 @@ services:
             );
         }
         let yaml =
-            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+            apply_container_resources(COMPOSE_TEMPLATE, &crate::resources::claude_resources(8))
+                .replace("${HOST_GATEWAY}", "127.0.0.1");
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let violations = SecurityCheck::check_no_tokens_in_hub(&doc);
         assert!(
@@ -5076,22 +5244,25 @@ services:
 
     #[test]
     fn resources_render_from_ssot() {
-        let yaml =
-            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
-        let doc: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&yaml).expect("rendered template must be valid YAML");
+        for vm_gib in [8u32, 16] {
+            let claude = crate::resources::claude_resources(vm_gib);
+            let yaml = apply_container_resources(COMPOSE_TEMPLATE, &claude)
+                .replace("${HOST_GATEWAY}", "127.0.0.1");
+            let doc: serde_yaml_ng::Value =
+                serde_yaml_ng::from_str(&yaml).expect("rendered template must be valid YAML");
 
-        assert_resources_from_ssot(&doc, "claude", &crate::resources::CLAUDE_RESOURCES);
-        assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
-        assert_resources_from_ssot(&doc, "proxy", &crate::resources::PROXY_RESOURCES);
-        for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
-            assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
-        }
-        for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
-            assert!(
-                !yaml.contains(marker),
-                "unsubstituted resource placeholder containing {marker}"
-            );
+            assert_resources_from_ssot(&doc, "claude", &claude);
+            assert_resources_from_ssot(&doc, "mcp-hub", &crate::resources::HUB_RESOURCES);
+            assert_resources_from_ssot(&doc, "proxy", &crate::resources::PROXY_RESOURCES);
+            for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
+                assert_resources_from_ssot(&doc, svc.compose_name, &svc.resources);
+            }
+            for marker in ["_MEM}", "_CPUS}", "_TMPFS}", "_SHM}", "${CLAUDE_MEMORY}"] {
+                assert!(
+                    !yaml.contains(marker),
+                    "unsubstituted resource placeholder containing {marker}"
+                );
+            }
         }
 
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
@@ -11560,7 +11731,7 @@ services:
         let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
         let env = get_service_env_seq(&doc, &plugin::derive_compose_name("verplug"));
-        let expected = format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"));
+        let expected = format!("SPEEDWAVE_VERSION={}", env!("SPEEDWAVE_VERSION"));
         assert!(
             env.iter().any(|v| v == &expected),
             "plugin service must receive the app version. Got: {env:?}"

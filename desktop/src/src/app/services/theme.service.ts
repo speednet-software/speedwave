@@ -23,6 +23,9 @@ export type ThemeMode = 'light' | 'dark' | 'auto';
 /** Display order for the MODE picker in Appearance. */
 export const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'auto'] as const;
 
+/** First-run mode; the anti-FOUC script in index.html mirrors it (pinned by a unit test). */
+export const DEFAULT_THEME_MODE: ThemeMode = 'auto';
+
 /** localStorage key for the accent theme. Exported so tests assert the real key (no drift). */
 export const THEME_STORAGE_KEY = 'speedwave-theme';
 /** localStorage key for the appearance mode. Exported so tests assert the real key (no drift). */
@@ -115,7 +118,7 @@ export class ThemeService implements OnDestroy {
     readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'ember')
   );
   private readonly modeSignal = signal<ThemeMode>(
-    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, 'dark')
+    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, DEFAULT_THEME_MODE)
   );
 
   /** Read-only signal of the current accent theme id. */
@@ -180,14 +183,14 @@ export class ThemeService implements OnDestroy {
   }
 
   /**
-   * Resolves effective mode, applies DOM class, syncs native chrome.
-   * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
+   * Resolves effective mode, applies DOM class, pins the native chrome to an explicit mode or
+   * lets it follow the OS in auto. Does NOT persist; see {@link setMode}.
    * @param mode - Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {
     const effective = resolveEffectiveMode(mode);
     applyModeClass(effective);
-    this.native.syncWindowTheme(effective);
+    this.native.syncWindowTheme(mode === 'auto' ? null : effective);
   }
 }
 

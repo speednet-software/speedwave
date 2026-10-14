@@ -1,0 +1,372 @@
+name: Release
+
+on:
+  push:
+    branches: ['release/**']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      minor: ${{ steps.line.outputs.minor }}
+      has_stable: ${{ steps.stable.outputs.has_stable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch release lines and tags
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/release/*:refs/remotes/origin/release/*' --no-tags
+          git fetch origin --tags --force
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: speedwave-version
+
+      - name: Parse the release line minor and refuse anything but the highest line
+        id: line
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          MINOR="${REF_NAME#release/0.}"
+          if [ "$MINOR" = "$REF_NAME" ] || ! [[ "$MINOR" =~ ^[0-9]+$ ]]; then
+            echo "::error::$REF_NAME is not a release/0.<minor> branch"
+            exit 1
+          fi
+          HIGHEST=$(git for-each-ref --format='%(refname)' refs/heads/release refs/remotes |
+            sed -nE 's#.*/release/0\.([0-9]+)$#\1#p' | sort -n | tail -1)
+          if [ "$MINOR" != "$HIGHEST" ]; then
+            echo "::error::release/0.${MINOR} is not the highest release line (0.${HIGHEST} is); promote and hotfix only apply to the newest line"
+            exit 1
+          fi
+          echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+
+      - name: Decide promote vs hotfix
+        id: stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          MINOR: ${{ steps.line.outputs.minor }}
+        run: |
+          set -euo pipefail
+          HAS_STABLE=false
+          if STABLE_TAG=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- stable-tag --repo "$PWD" --minor "$MINOR" 2>/dev/null); then
+            STATE=$(gh release view "$STABLE_TAG" --repo "$REPO" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"' 2>/dev/null || true)
+            if [ -n "$STATE" ]; then
+              read -r IS_DRAFT IS_PRERELEASE <<< "$STATE"
+              if [ "$IS_DRAFT" = "false" ] && [ "$IS_PRERELEASE" = "false" ]; then
+                HAS_STABLE=true
+              fi
+            fi
+          fi
+          echo "has_stable=$HAS_STABLE" >> "$GITHUB_OUTPUT"
+
+  promote:
+    needs: route
+    if: needs.route.outputs.has_stable != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/release-preflight
+
+      - name: Refuse a promotion older than the previous release line
+        env:
+          MINOR: ${{ needs.route.outputs.minor }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- \
+            validate-promotion --repo "$PWD" --candidate "$HEAD_SHA" --new-minor "$MINOR"
+
+      - name: Find the beta release built from this commit
+        id: beta
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          REPO: ${{ github.repository }}
+          MINOR: ${{ needs.route.outputs.minor }}
+        run: |
+          set -euo pipefail
+          mapfile -t TAGS < <(git tag --points-at HEAD --list "v0.${MINOR}.0" "v0.${MINOR}.0+*")
+          if [ "${#TAGS[@]}" -eq 0 ]; then
+            echo "::error::no beta tag found on this commit for release line 0.${MINOR}. The beta build may still be running — re-run this job (Re-run jobs) once it publishes, without deleting the branch."
+            exit 1
+          fi
+          if [ "${#TAGS[@]}" -gt 1 ]; then
+            echo "::error::ambiguous beta tags on this commit: ${TAGS[*]}"
+            exit 1
+          fi
+          TAG="${TAGS[0]}"
+          VERSION="${TAG#v}"
+          RELEASE_JSON=$(gh release view "$TAG" --repo "$REPO" --json databaseId,isDraft 2>/dev/null || true)
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "::error::tag $TAG exists but has no GitHub Release yet — re-run this job (Re-run jobs) once the beta build publishes."
+            exit 1
+          fi
+          RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.databaseId')
+          IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "::error::the beta release for $TAG is still a draft (build in progress) — re-run this job (Re-run jobs) once it publishes."
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "release_id=$RELEASE_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute the stable notes range
+        id: range
+        run: |
+          set -euo pipefail
+          mapfile -t LINES < <(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- notes-range --repo "$PWD")
+          RANGE="${LINES[0]}"
+          SINCE="${RANGE%%..*}"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
+          SKIP_ARGS=()
+          for sha in "${LINES[@]:1}"; do
+            if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+              echo "::error::notes-range returned a non-SHA skip commit: $sha"
+              exit 1
+            fi
+            SKIP_ARGS+=(--skip-commit "$sha")
+          done
+          printf -v SKIP_ARGS_STR '%s ' ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"}
+          echo "skip_args=${SKIP_ARGS_STR}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate the stable release notes
+        id: cliff
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff
+        with:
+          config: cliff.toml
+          args: --no-exec ${{ steps.range.outputs.range }} ${{ steps.range.outputs.skip_args }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rewrite the release notes and flip prerelease/make_latest
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          REPO: ${{ github.repository }}
+          RID: ${{ steps.beta.outputs.release_id }}
+          TAG: ${{ steps.beta.outputs.tag }}
+          SINCE: ${{ steps.range.outputs.since }}
+          CONTENT: ${{ steps.cliff.outputs.content }}
+        run: |
+          set -euo pipefail
+          COMPARE_URL="https://github.com/${REPO}/compare/${SINCE}...${TAG}"
+          BODY_FILE="$(mktemp)"
+          {
+            printf '%s\n' "$CONTENT"
+            echo
+            echo "**Full Changelog**: $COMPARE_URL"
+          } > "$BODY_FILE"
+          gh api --method PATCH "repos/$REPO/releases/$RID" \
+            -f prerelease=false \
+            -f make_latest=true \
+            -F body=@"$BODY_FILE"
+          echo "compare_url=$COMPARE_URL" >> "$GITHUB_ENV"
+
+      - name: Open the changelog PR to dev
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          REPO: ${{ github.repository }}
+          MINOR: ${{ needs.route.outputs.minor }}
+          VERSION: ${{ steps.beta.outputs.version }}
+          CONTENT: ${{ steps.cliff.outputs.content }}
+          COMPARE_URL: ${{ env.compare_url }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BASE_VERSION="0.${MINOR}.0"
+          BRANCH="changelog/0.${MINOR}"
+
+          git fetch origin dev
+          git checkout -B "$BRANCH" origin/dev
+
+          printf '%s\n' "$CONTENT" | bash scripts/prepend-changelog-entry.sh "$BASE_VERSION" "$COMPARE_URL"
+
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "$BRANCH" --force
+
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --base dev --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Reusing existing changelog PR #$EXISTING_PR"
+            exit 0
+          fi
+          gh pr create \
+            --repo "$REPO" \
+            --head "$BRANCH" \
+            --base dev \
+            --title "chore(release): changelog ${BASE_VERSION}" \
+            --body "Adds the ${BASE_VERSION} section to CHANGELOG.md after promoting release/0.${MINOR}."
+
+  hotfix:
+    needs: route
+    if: needs.route.outputs.has_stable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      notes: ${{ steps.notes.outputs.body }}
+      prev_tag: ${{ steps.prev.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/release-preflight
+
+      - name: Compute the hotfix version and tag
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- version --repo "$PWD")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the previous tag for the backport changelog
+        id: prev
+        env:
+          MINOR: ${{ needs.route.outputs.minor }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          STABLE_TAG=$(cargo run --quiet -p speedwave-version --bin speedwave-version --features cli -- stable-tag --repo "$PWD" --minor "$MINOR")
+          Z="${VERSION##*.}"
+          if [ "$Z" = "1" ]; then
+            PREV_TAG="$STABLE_TAG"
+          else
+            PREV_TAG="v0.${MINOR}.$((Z - 1))"
+          fi
+          echo "tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the hotfix commit
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GH_AUTOMATION_PAT: ${{ secrets.GH_AUTOMATION_PAT }}
+        run: bash scripts/tag-release-commit.sh "$TAG"
+
+      - name: Generate hotfix release notes
+        id: cliff
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff
+        with:
+          config: cliff.toml
+          args: --no-exec HEAD~1..HEAD
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture release notes as a job output
+        id: notes
+        env:
+          BODY: ${{ steps.cliff.outputs.content }}
+        run: |
+          {
+            echo "body<<SPEEDWAVE_NOTES_EOF"
+            printf '%s\n' "$BODY"
+            echo "SPEEDWAVE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: hotfix
+    if: needs.hotfix.result == 'success'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/build-publish.yml
+    with:
+      environment: release
+      version: ${{ needs.hotfix.outputs.version }}
+      tag: ${{ needs.hotfix.outputs.tag }}
+      prerelease: false
+      notes: ${{ needs.hotfix.outputs.notes }}
+    secrets: inherit
+
+  backport:
+    needs: [hotfix, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Open the backport PR to dev
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_PAT }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.hotfix.outputs.version }}
+          TAG: ${{ needs.hotfix.outputs.tag }}
+          PREV_TAG: ${{ needs.hotfix.outputs.prev_tag }}
+          NOTES: ${{ needs.hotfix.outputs.notes }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          MINOR="${REF_NAME#release/0.}"
+          BRANCH="merge/release-0.${MINOR}-into-dev"
+          COMPARE_URL="https://github.com/${REPO}/compare/${PREV_TAG}...${TAG}"
+
+          git checkout -b "$BRANCH"
+
+          printf '%s\n' "$NOTES" | bash scripts/prepend-changelog-entry.sh "$VERSION" "$COMPARE_URL"
+
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "$BRANCH" --force
+
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --base dev --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING_PR" ]; then
+            PR_NUMBER="$EXISTING_PR"
+            echo "Reusing existing backport PR #$PR_NUMBER"
+          else
+            PR_URL=$(gh pr create \
+              --repo "$REPO" \
+              --head "$BRANCH" \
+              --base dev \
+              --title "chore(release): backport release/0.${MINOR} into dev" \
+              --body "Backports $TAG into dev and adds its CHANGELOG.md section. Resolve any conflicts on $BRANCH; this workflow only opens the PR and enables auto-merge." \
+              --assignee "$ACTOR")
+            PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+          fi
+
+          if ! gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --auto; then
+            echo "::notice::could not enable auto-merge on backport PR #$PR_NUMBER; merge it manually once green"
+          fi

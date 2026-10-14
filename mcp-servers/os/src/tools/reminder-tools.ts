@@ -269,7 +269,7 @@ const createReminderTool: Tool = {
   },
   keywords: ['os', 'reminder', 'create', 'new', 'add', 'task', 'todo'],
   example:
-    'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2025-01-15T10:00:00Z", priority: 1 })',
+    'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2026-01-15T10:00:00", priority: 1 })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -319,7 +319,7 @@ const createReminderTool: Tool = {
       input: {
         name: 'Review PR #42',
         list_id: 'work-list',
-        due_date: '2025-01-15T10:00:00Z',
+        due_date: '2026-01-15T10:00:00',
         priority: 1,
         notes: 'Check test coverage',
         tags: ['work', 'code-review'],

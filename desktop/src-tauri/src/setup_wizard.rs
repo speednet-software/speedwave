@@ -1016,6 +1016,11 @@ fn link_cli_from(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use speedwave_runtime::config::{
@@ -1828,15 +1833,9 @@ mod tests {
                 .expect("make dir read-only");
         }
         #[cfg(windows)]
-        {
-            let file_path = locked_dir.join("file.txt");
-            let mut perms = std::fs::metadata(&file_path)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(&file_path, perms).expect("set readonly");
-        }
+        let lock_guard = hold_open_no_share(&locked_dir.join("file.txt"));
 
+        #[cfg(unix)]
         let unlock_dir = locked_dir.clone();
         let unlocker = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(700));
@@ -1847,14 +1846,7 @@ mod tests {
                     .expect("restore dir permissions");
             }
             #[cfg(windows)]
-            {
-                let file_path = unlock_dir.join("file.txt");
-                let mut perms = std::fs::metadata(&file_path)
-                    .expect("stat file")
-                    .permissions();
-                perms.set_readonly(false);
-                std::fs::set_permissions(&file_path, perms).expect("clear readonly");
-            }
+            drop(lock_guard);
         });
 
         let result = wipe_data_dir(&data_dir);

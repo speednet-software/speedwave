@@ -1,7 +1,8 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
 import type { ChatMessage } from '../../models/chat';
 import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number';
-import { AnthropicModelsService } from '../../services/anthropic-models.service';
+import { ModelPickerService } from '../../services/model-picker.service';
+import { ProjectStateService } from '../../services/project-state.service';
 
 /**
  * Mono metadata line below each assistant message (`opus-4.7 · edited · 1,243 tok · cache: 4,012 · $0.018`).
@@ -40,20 +41,15 @@ import { AnthropicModelsService } from '../../services/anthropic-models.service'
   `,
 })
 export class MessageMetadataComponent {
-  private readonly models = inject(AnthropicModelsService);
+  private readonly labels = inject(ModelPickerService);
+  private readonly projectState = inject(ProjectStateService);
 
   readonly entry = input.required<ChatMessage>();
   readonly precedingEdited = input(false);
 
-  readonly modelLabel = computed<string>(() => {
-    const raw = this.entry().meta?.model;
-    if (!raw) return '';
-    const fromCatalog = this.models.familyLabelFor(raw);
-    if (fromCatalog) return raw.endsWith('[1m]') ? `${fromCatalog} [1m]` : fromCatalog;
-    const stripped = raw.replace(/^claude-/, '');
-    const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
-    return dedup.replace(/-(\d+)-(\d+)(\[1m\])?$/, '-$1.$2$3');
-  });
+  readonly modelLabel = computed<string>(() =>
+    this.labels.label(this.entry().meta?.model ?? '', this.projectState.activeProject())
+  );
 
   /**
    * Per-turn total tokens (input + output). Returns `null` when usage is

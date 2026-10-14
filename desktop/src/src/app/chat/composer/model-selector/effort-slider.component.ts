@@ -17,8 +17,8 @@ export function capitalizeLevel(level: string): string {
 }
 
 /**
- * Discrete effort slider over the caller's stops (the active model's `effort_levels`, low
- * to max); a stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
+ * Discrete effort slider over the caller's stops (low to max); an unknown level hides the handle until
+ * keyboard focus. A stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
  */
 @Component({
   selector: 'app-effort-slider',
@@ -34,7 +34,7 @@ export function capitalizeLevel(level: string): string {
           <button
             type="button"
             [attr.data-testid]="'effort-stop-' + level"
-            [attr.aria-label]="level"
+            [attr.aria-label]="'Effort ' + capitalize(level)"
             class="absolute h-2 w-2 -translate-x-1/2 rounded-full"
             [class]="i <= displayedIndex() ? 'bg-[var(--teal)]' : 'bg-[var(--line-strong)]'"
             [style.left.%]="stopPercent(i)"
@@ -45,13 +45,16 @@ export function capitalizeLevel(level: string): string {
           data-testid="effort-slider"
           role="slider"
           tabindex="0"
-          class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)]"
-          [class.opacity-40]="!pinned()"
-          [style.left.%]="stopPercent(displayedIndex())"
+          aria-label="Effort"
+          class="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[var(--teal)] bg-[var(--bg-1)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--teal)]"
+          [class.opacity-40]="!pinned() && hasPosition()"
+          [class.opacity-0]="!hasPosition()"
+          [class.pointer-events-none]="!hasPosition()"
+          [style.left.%]="stopPercent(handleIndex())"
           [attr.aria-valuemin]="0"
           [attr.aria-valuemax]="stops().length - 1"
-          [attr.aria-valuenow]="displayedIndex()"
-          [attr.aria-valuetext]="capitalizedDisplayedLevel()"
+          [attr.aria-valuenow]="handleIndex()"
+          [attr.aria-valuetext]="hasPosition() ? capitalizedDisplayedLevel() : 'Default'"
           (keydown)="onKeydown($event)"
           (pointerdown)="onHandlePointerDown($event)"
           (pointermove)="onHandlePointerMove($event, track)"
@@ -85,12 +88,15 @@ export class EffortSliderComponent {
     });
   }
 
-  private readonly committedIndex = computed(() => {
-    const i = this.stops().indexOf(this.activeLevel());
-    return i === -1 ? 0 : i;
-  });
+  private readonly committedIndex = computed(() => this.stops().indexOf(this.activeLevel()));
 
   protected readonly displayedIndex = computed(() => this.pending() ?? this.committedIndex());
+
+  protected readonly hasPosition = computed(() => this.displayedIndex() >= 0);
+
+  protected readonly handleIndex = computed(() => Math.max(0, this.displayedIndex()));
+
+  protected readonly capitalize = capitalizeLevel;
 
   protected readonly headerLevel = computed(() =>
     this.pinned() ? this.capitalizedDisplayedLevel() : 'Default'
@@ -115,12 +121,19 @@ export class EffortSliderComponent {
 
   protected onKeydown(event: KeyboardEvent): void {
     const max = this.stops().length - 1;
+    const current = this.displayedIndex();
     if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
       event.preventDefault();
-      this.pending.set(Math.min(max, this.displayedIndex() + 1));
+      this.pending.set(current < 0 ? 0 : Math.min(max, current + 1));
     } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
       event.preventDefault();
-      this.pending.set(Math.max(0, this.displayedIndex() - 1));
+      this.pending.set(Math.max(0, current - 1));
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      this.pending.set(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      this.pending.set(max);
     } else if (event.key === 'Enter') {
       event.preventDefault();
       this.applyIndex(this.displayedIndex());

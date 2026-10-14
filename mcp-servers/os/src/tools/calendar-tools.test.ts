@@ -253,6 +253,44 @@ describe('calendar-tools', () => {
       expect(items?.properties?.calendar_name).toBeDefined();
       expect(items?.properties?.notes).toBeDefined();
     });
+
+    it('date examples teach local dates, never UTC', () => {
+      const localDate = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/;
+      const dates = createCalendarTools().flatMap(({ tool }) => [
+        ...(tool.inputExamples ?? []).flatMap((e) =>
+          [e.input.start, e.input.end].filter((d): d is string => typeof d === 'string')
+        ),
+        ...[...(tool.example ?? '').matchAll(/(?:start|end): "([^"]*)"/g)].map((m) => m[1]),
+      ]);
+
+      expect(dates).toContain('2026-01-12');
+      expect(dates.length).toBeGreaterThanOrEqual(12);
+      for (const date of dates) {
+        expect(date).toMatch(localDate);
+      }
+    });
+
+    it('start and end inputs document the local forms; outputs document UTC', () => {
+      const tools = createCalendarTools();
+      const schema = (name: string) => tools.find((t) => t.tool.name === name)!.tool as any;
+
+      for (const name of ['listEvents', 'createEvent', 'updateEvent']) {
+        for (const field of ['start', 'end']) {
+          const description: string = schema(name).inputSchema.properties[field].description;
+          expect(description, `${name}.${field}`).toContain('YYYY-MM-DD (local midnight)');
+          expect(description, `${name}.${field}`).toContain('YYYY-MM-DDTHH:MM:SS (local time)');
+        }
+      }
+      expect(schema('createEvent').inputSchema.properties.all_day.description).toContain(
+        'start 2026-06-15 and end 2026-06-16 is June 15 only'
+      );
+      const listed = schema('listEvents').outputSchema.properties.events.items.properties;
+      const got = schema('getEvent').outputSchema.properties;
+      for (const props of [listed, got]) {
+        expect(props.start.description).toContain('UTC');
+        expect(props.end.description).toContain('UTC');
+      }
+    });
   });
 
   describe('parameter forwarding', () => {

@@ -298,18 +298,45 @@ pub fn sign_plugin(plugin_dir: &Path, private_key_bytes: &[u8]) -> anyhow::Resul
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub(crate) fn unsigned_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) struct UnsignedBypassGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl UnsignedBypassGuard {
+        pub(crate) fn new() -> Self {
+            let lock = unsigned_env_lock();
+            std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for UnsignedBypassGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
+        }
+    }
+}
+
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "test code asserts via unwrap/expect"
 )]
 mod tests {
+    use super::test_support::unsigned_env_lock;
     use super::*;
     use base64::Engine;
-    use std::sync::Mutex;
-
-    /// Serializes tests that modify environment variables to prevent data races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_production_public_key_is_valid_ed25519_key() {
@@ -399,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_missing_signature_file_errors() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = unsigned_env_lock();
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -417,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_allow_unsigned_env_skips_verification() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = unsigned_env_lock();
 
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
@@ -461,7 +488,7 @@ mod tests {
     /// Verifies that in debug builds, SPEEDWAVE_ALLOW_UNSIGNED is NOT set by default.
     #[test]
     fn test_allow_unsigned_not_set_by_default() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = unsigned_env_lock();
 
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
@@ -719,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_cache_invalidates_on_content_change() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = unsigned_env_lock();
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
         invalidate_cache_all();
 
@@ -752,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_invalidate_cache_drops_entry() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = unsigned_env_lock();
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
         invalidate_cache_all();
 

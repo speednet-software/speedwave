@@ -1,0 +1,49 @@
+[remote.github]
+owner = "speednet-software"
+repo = "speedwave"
+
+[changelog]
+trim = true
+postprocessors = []
+body = """
+{%- set section_order = ["Breaking changes", "Security", "Features", "Bug Fixes", "Performance"] -%}
+{%- set security_commits = commits | filter(attribute="group", value="Security") -%}
+{%- if security_commits %}
+[SECURITY]
+{% endif -%}
+{%- for section in section_order -%}
+{%- set section_commits = commits | filter(attribute="group", value=section) -%}
+{%- if section_commits %}
+### {{ section }}
+{% for commit in section_commits -%}
+- {{ commit.message | upper_first }}
+{% endfor -%}
+{% endif -%}
+{%- endfor -%}
+"""
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+commit_preprocessors = []
+commit_parsers = [
+  { message = "^[a-z]+(\\(.+\\))?!:", group = "Breaking changes" },
+  { footer = "^BREAKING CHANGE", group = "Breaking changes" },
+  { field = "github.pr_labels", pattern = "^security$", group = "Security" },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", skip = true },
+  { message = "^docs", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^test", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^style", skip = true },
+  { message = "^build", skip = true },
+  { message = "^revert", skip = true },
+]
+filter_commits = false
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "oldest"

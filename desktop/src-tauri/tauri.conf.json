@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-docs/v2/packages/api/config-schema.json",
   "productName": "Speedwave",
-  "version": "0.18.1",
+  "version": "0.0.0",
   "identifier": "pl.speedwave.desktop",
   "build": {
     "frontendDist": "../src/dist/browser",
@@ -52,7 +52,7 @@
       "app",
       "dmg"
     ],
-    "createUpdaterArtifacts": "v1Compatible",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

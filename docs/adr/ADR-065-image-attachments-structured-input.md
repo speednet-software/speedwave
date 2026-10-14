@@ -31,7 +31,7 @@ Pasted and dropped images are **never inlined as base64 on the wire**. The compo
 
 ## Queue stays text-only
 
-- The one-slot queue (ADR-045) carries `QueuedMessage.text: String` only, capped by `MAX_QUEUED_LEN = 1_000_000` (`desktop/src-tauri/src/queue_cmd.rs`). Image attachments are mutually exclusive with queuing: while a turn is streaming, the composer's `canSubmit()` returns false for any input carrying attachments and `submit()` refuses to enqueue them (`desktop/src/src/app/chat/composer/composer.component.ts`), surfacing "Poczekaj na zakończenie odpowiedzi przed wysłaniem obrazka." Text-only submits still queue through the existing path.
+- The one-slot queue (ADR-045) carries `QueuedMessage.text: String` only, capped by `MAX_QUEUED_LEN = 1_000_000` (`desktop/src-tauri/src/queue_cmd.rs`). Image attachments are mutually exclusive with queuing: while a turn is streaming, the composer's `canSubmit()` returns false for any input carrying attachments and `submit()` refuses to enqueue them (`desktop/src/src/app/chat/composer/composer.component.ts`), leaving the send button disabled without a message. Text-only submits still queue through the existing path.
 
 ## No client-side capability gate
 

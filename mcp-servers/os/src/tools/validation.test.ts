@@ -935,7 +935,7 @@ describe('validation', () => {
         expect(result.error.error?.message).toContain('Invalid start');
         expect(result.error.error?.message).toContain('"Feb 20, 2026"');
         expect(result.error.error?.message).toContain(
-          'Pass start as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".'
+          'Pass start as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00".'
         );
       }
     });

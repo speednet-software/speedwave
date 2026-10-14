@@ -14,8 +14,6 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
-    selectable: true,
-    has_1m: true,
     effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
     default_effort: 'high',
   },
@@ -331,22 +329,20 @@ describe('MessageMetadataComponent', () => {
     expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
   });
 
-  it('keeps a single [1m] suffix when the raw id ends with one', () => {
-    setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m]' } }));
+  it('never shows the 1M suffix of a raw id', () => {
+    for (const model of ['claude-opus-4-7[1m]', 'claude-opus-4-7[1m][1m]']) {
+      setEntry(baseAssistant({ meta: { model } }));
 
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
-      'opus-4.7[1m]'
-    );
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('opus-4.7');
+    }
   });
 
-  it('collapses repeated [1m] suffixes (regression: opus-4-7[1m][1m])', () => {
-    setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m][1m]' } }));
+  it('drops the snapshot date of a raw id', () => {
+    setEntry(baseAssistant({ meta: { model: 'claude-haiku-4-5-20251001' } }));
 
     const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
-      'opus-4.7[1m]'
-    );
+    expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('haiku-4.5');
   });
 
   describe('with the catalog loaded', () => {
@@ -370,6 +366,17 @@ describe('MessageMetadataComponent', () => {
 
       const el = fixture.nativeElement as HTMLElement;
       expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('Opus 4.8');
+    });
+
+    it('renders a 1M session and a 200k session of one model with the same label', () => {
+      const labels = ['claude-opus-4-8[1m]', 'claude-opus-4-8'].map((model) => {
+        setEntry(baseAssistant({ meta: { model } }));
+        return (fixture.nativeElement as HTMLElement)
+          .querySelector('[data-testid="meta-model"]')
+          ?.textContent?.trim();
+      });
+
+      expect(labels).toEqual(['Opus 4.8', 'Opus 4.8']);
     });
 
     it('falls back to the regex formatting for non-catalog ids', () => {

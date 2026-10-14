@@ -459,8 +459,7 @@ pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test-only module: unwraps/expects assert setup succeeded"
+    reason = "test-only module: unwraps assert setup succeeded"
 )]
 mod credentials_digest_tests {
     use super::*;
@@ -538,6 +537,10 @@ mod credentials_digest_tests {
 
     #[test]
     #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "test-only: expect asserts the render succeeded"
+    )]
     fn transient_unreadable_dir_skips_worker_not_whole_render() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();

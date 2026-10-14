@@ -13,7 +13,7 @@
  */
 
 import { switchToProject, activeProjectSlug, containersRunning } from '../helpers/projects';
-import { confirmRestartAndWait, requestBackendRestart } from '../helpers/shell';
+import { confirmRestartAndWait, requestBackendRestart, RESTART_WAIT_MS } from '../helpers/shell';
 import { openIntegrations, toggleIntegration, rowStatus } from '../helpers/llm';
 
 const LLM_PROJECT = 'e2e-test';
@@ -50,7 +50,7 @@ describe('Restart Deferral', function () {
   });
 
   it('applies the deferred change on a palette-requested restart', async function () {
-    this.timeout(300_000);
+    this.timeout(RESTART_WAIT_MS + 120_000);
     await requestBackendRestart();
 
     await openIntegrations();
@@ -62,7 +62,7 @@ describe('Restart Deferral', function () {
   });
 
   it('cleans up: disables the integration again', async function () {
-    this.timeout(300_000);
+    this.timeout(RESTART_WAIT_MS + 120_000);
     await toggleIntegration(SERVICE);
     await confirmRestartAndWait();
     await openIntegrations();

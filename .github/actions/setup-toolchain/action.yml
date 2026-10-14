@@ -1,31 +1,54 @@
 name: 'Setup Toolchain'
-description: 'Sets up Node.js (version from .node-version) + Rust stable + swatinem/rust-cache. Shared by desktop-build.yml and desktop-release.yml so the pinned action SHAs live in one place.'
+description: 'Sets up Node.js (version from .node-version) + Rust stable + optional Rust cache, saved only by runs on dev and release/** so every run restores the cache written there. Shared by every test.yml lane and by build-publish.yml so the pinned action SHAs live in one place.'
 inputs:
-  rust-targets:
-    description: 'Comma-separated rustup targets to install with the toolchain (empty for none)'
+  node:
+    description: 'Whether to set up Node.js at all'
     required: false
-    default: ''
-  rust-cache-workspaces:
-    description: 'swatinem/rust-cache `workspaces` value (newline-separated dir -> cache-dir entries)'
-    required: true
+    default: 'true'
+  node-cache:
+    description: 'Whether setup-node caches the npm store'
+    required: false
+    default: 'true'
   node-cache-dependency-path:
     description: 'setup-node cache-dependency-path (lockfiles that key the npm cache)'
     required: false
     default: 'desktop/src/package-lock.json'
+  rust-targets:
+    description: 'Comma-separated rustup targets to install with the toolchain (empty for none)'
+    required: false
+    default: ''
+  rust-components:
+    description: 'Comma-separated rustup components to install with the toolchain (empty for none)'
+    required: false
+    default: ''
+  rust-cache-workspaces:
+    description: 'swatinem/rust-cache `workspaces` value (newline-separated dir -> cache-dir entries); empty skips the Rust cache'
+    required: false
+    default: ''
+  rust-cache-shared-key:
+    description: 'swatinem/rust-cache `shared-key`: one cache shared by every job that passes the same value (empty keys the cache by job id)'
+    required: false
+    default: ''
+  rust-cache-directories:
+    description: 'swatinem/rust-cache `cache-directories`: extra directories outside the workspaces, such as an absolute CARGO_TARGET_DIR'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
     - name: Setup Node.js
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      if: inputs.node == 'true'
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
       with:
         node-version-file: .node-version
-        cache: npm
+        cache: ${{ inputs.node-cache == 'true' && 'npm' || '' }}
         cache-dependency-path: ${{ inputs.node-cache-dependency-path }}
 
     - name: Install Rust stable
       uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
       with:
         targets: ${{ inputs.rust-targets }}
+        components: ${{ inputs.rust-components }}
 
     - name: Ensure cross-compile target is installed
       if: inputs.rust-targets != ''
@@ -33,14 +56,22 @@ runs:
       env:
         RUST_TARGETS: ${{ inputs.rust-targets }}
       run: |
-        # rust-toolchain's `targets` is best-effort; add explicitly so a cache
-        # hit that skipped the toolchain install still has the targets.
         IFS=',' read -ra _targets <<< "$RUST_TARGETS"
         for t in "${_targets[@]}"; do
           [ -n "$t" ] && rustup target add "$t"
         done
 
+    - name: Capture runner image version
+      if: inputs.rust-cache-workspaces != ''
+      shell: bash
+      run: echo "SETUP_TOOLCHAIN_IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
     - name: Rust cache
+      if: inputs.rust-cache-workspaces != ''
       uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       with:
         workspaces: ${{ inputs.rust-cache-workspaces }}
+        shared-key: ${{ inputs.rust-cache-shared-key }}
+        cache-directories: ${{ inputs.rust-cache-directories }}
+        key: ${{ env.SETUP_TOOLCHAIN_IMAGE_VERSION }}-${{ hashFiles('.github/workflows/lane-*.yml', '.github/workflows/build-publish.yml', '.github/actions/*/action.yml') }}
+        save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/') }}

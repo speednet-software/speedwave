@@ -7,6 +7,7 @@ pub mod build;
 pub mod bundle;
 pub mod claude_home;
 pub mod claude_managed;
+pub mod claude_settings;
 pub mod cloudstorage;
 pub mod compose;
 pub mod config;
@@ -48,10 +49,18 @@ pub mod telemetry_env;
 pub mod transcription;
 pub mod tz;
 pub mod update;
+pub mod update_channel;
 pub mod url_validation;
 pub mod usage;
 pub mod usage_cost;
 pub mod validation;
+
+/// Test-only re-export of the host build-output dir names.
+#[cfg(any(test, feature = "test-support"))]
+pub mod bundle_test_support {
+    /// Host build-output dir names that tests walking the repo must skip.
+    pub const HOST_BUILD_OUTPUT_DIRS: &[&str] = crate::bundle::HOST_BUILD_OUTPUT_DIRS;
+}
 
 /// Test-only re-exports of internal transaction helpers.
 #[cfg(any(test, feature = "test-support"))]

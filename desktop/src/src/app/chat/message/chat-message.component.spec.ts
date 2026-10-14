@@ -50,7 +50,7 @@ describe('ChatMessageComponent', () => {
     const el = fixture.nativeElement as HTMLElement;
     const chip = el.querySelector('[data-testid="control-chip"]');
     expect(chip).not.toBeNull();
-    expect(chip?.textContent?.trim()).toBe('model -> claude-sonnet-5');
+    expect(chip?.textContent?.trim()).toBe('model -> sonnet-5');
   });
 
   it('renders thinking block collapsed', () => {

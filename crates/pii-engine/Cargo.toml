@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-pii-engine"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 description = "AI platform connecting Claude Code with external services"
 authors = ["Speednet"]

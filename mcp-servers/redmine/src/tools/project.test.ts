@@ -5,18 +5,23 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createProjectTools } from './project-tools.js';
+import { expectEmittedKeysDeclared } from './test-helpers.js';
 import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listProjects: Mock;
   showProject: Mock;
   searchProjects: Mock;
+  listVersions: Mock;
+  getProjectScope: Mock;
 };
 
 const createMockClient = (): MockClient => ({
   listProjects: vi.fn(),
   showProject: vi.fn(),
   searchProjects: vi.fn(),
+  listVersions: vi.fn(),
+  getProjectScope: vi.fn().mockReturnValue(null),
 });
 
 describe('Project Tools', () => {
@@ -492,6 +497,122 @@ describe('Project Tools', () => {
         isError: true,
         content: [{ type: 'text', text: 'Error: Search failed' }],
       });
+    });
+  });
+
+  describe('listVersions', () => {
+    const version = {
+      id: 87,
+      project: { id: 1972, name: 'Auditor' },
+      name: '[W10] Week 10',
+      description: '',
+      status: 'open',
+      due_date: null,
+      sharing: 'none',
+      wiki_page_title: null,
+      custom_fields: [{ id: 4, name: 'Sprint goal', value: 'Reports' }],
+      created_on: '2026-02-20T09:00:00Z',
+      updated_on: '2026-02-20T09:00:00Z',
+    };
+
+    const listVersions = () =>
+      createProjectTools(mockClient as unknown as RedmineClient).find(
+        (t) => t.tool.name === 'listVersions'
+      )!;
+
+    it('returns unconfigured error when client is null', async () => {
+      const tool = createProjectTools(null).find((t) => t.tool.name === 'listVersions')!;
+
+      const result = await tool.handler({});
+
+      expect(result).toEqual({
+        isError: true,
+        content: [{ type: 'text', text: `Error: ${notConfiguredMessage('Redmine')}` }],
+      });
+    });
+
+    it('declares every key of a version as Redmine returns it', async () => {
+      mockClient.listVersions.mockResolvedValue({ versions: [version], total_count: 1 });
+      const def = listVersions();
+
+      const emitted = expectEmittedKeysDeclared(
+        def.tool,
+        await def.handler({ project_id: 'auditor-rpe' })
+      );
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
+      expect(emitted).toEqual({ versions: [version], total_count: 1 });
+      const itemProps = (
+        def.tool.outputSchema!.properties as Record<
+          string,
+          { items: { properties: Record<string, unknown> } }
+        >
+      ).versions.items.properties;
+      expect(Object.keys(itemProps)).toEqual(expect.arrayContaining(Object.keys(version)));
+    });
+
+    it('passes a numeric project id through unchanged', async () => {
+      mockClient.listVersions.mockResolvedValue({ versions: [], total_count: 0 });
+
+      await listVersions().handler({ project_id: 1972 });
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith(1972);
+    });
+
+    it('defaults to the configured project when project_id is omitted', async () => {
+      mockClient.getProjectScope.mockReturnValue('auditor-rpe');
+      mockClient.listVersions.mockResolvedValue({ versions: [], total_count: 0 });
+
+      await listVersions().handler({});
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
+    });
+
+    it('treats an empty project_id like an omitted one', async () => {
+      mockClient.getProjectScope.mockReturnValue('auditor-rpe');
+      mockClient.listVersions.mockResolvedValue({ versions: [], total_count: 0 });
+
+      await listVersions().handler({ project_id: '' });
+
+      expect(mockClient.listVersions).toHaveBeenCalledWith('auditor-rpe');
+    });
+
+    it('returns a teaching error when no project_id is given and none is configured', async () => {
+      const result = await listVersions().handler({});
+
+      expect(mockClient.listVersions).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text:
+              'Error: Invalid project_id (received: undefined). Get a valid value from listProjectIds. ' +
+              'No default project is configured, so pass project_id explicitly.',
+          },
+        ],
+      });
+    });
+
+    it('passes project_id as formatError context on failure', async () => {
+      mockClient.listVersions.mockRejectedValue(new Error('404'));
+
+      await listVersions().handler({ project_id: 'missing' });
+
+      expect(RedmineClient.formatError).toHaveBeenCalledWith(expect.any(Error), {
+        project_id: 'missing',
+      });
+    });
+
+    it('surfaces a ProjectScopeError for a project outside the configured scope', async () => {
+      mockClient.listVersions.mockRejectedValue(
+        new ProjectScopeError('my-project', 'other-project')
+      );
+
+      const result = await listVersions().handler({ project_id: 'other-project' });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain('Project scope violation');
     });
   });
 

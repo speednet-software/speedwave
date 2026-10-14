@@ -3,9 +3,7 @@ import {
   Component,
   OnDestroy,
   OnInit,
-  ViewChild,
   computed,
-  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -13,19 +11,31 @@ import { RouterLink } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
-import type { CaptureWarning, TranscriptSession } from '../models/transcript';
+import { IconComponent } from '../shared/icon.component';
+import { formatBytes } from '../shared/format-bytes';
+import type { CaptureWarning, TranscriptSession, TranscriptSummary } from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
+import { RecordingBarComponent } from './recording-bar/recording-bar.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
 import { SessionListComponent } from './session-list/session-list.component';
 
 /**
- * Meeting transcription tab (beta-gated): recordings list + controls/live transcript. Transcription
- * is local; only sending the transcript to chat uses the network. No model yet → gate points to Settings.
+ * Meeting transcription tab (beta-gated): Record in the header, the recording bar while a
+ * recording captures or waits paused, the recordings list, and the open recording. Transcription
+ * is local; only sending the transcript to chat uses the network. Without a model the view offers
+ * the one download it needs.
  */
 @Component({
   selector: 'app-meeting-transcription',
   standalone: true,
-  imports: [RouterLink, RecordingControlsComponent, LiveTranscriptComponent, SessionListComponent],
+  imports: [
+    RouterLink,
+    IconComponent,
+    RecordingControlsComponent,
+    RecordingBarComponent,
+    LiveTranscriptComponent,
+    SessionListComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-1 flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
@@ -34,35 +44,113 @@ import { SessionListComponent } from './session-list/session-list.component';
           class="flex flex-1 flex-col items-center justify-center bg-[var(--bg)] p-8"
           data-testid="model-required-gate"
         >
-          <div class="mono max-w-md text-center text-[12.5px] text-[var(--ink-dim)]">
-            <p class="text-[var(--amber)]">⬇ model required</p>
-            <p class="mt-2">
-              Download the local speech-recognition model to start transcribing. It runs entirely on
-              this machine.
+          <div class="w-[32rem] rounded-xl border border-[var(--line-strong)] bg-[var(--bg-1)] p-6">
+            <h2 class="text-[16px] font-semibold">One download before your first recording</h2>
+            <p class="mt-2 text-[13px] leading-relaxed text-[var(--ink-dim)]">
+              Speedwave needs its speech recognition model. It is downloaded once; after that,
+              recording and transcription work on this machine, also offline.
             </p>
-            <a
-              routerLink="/settings"
-              fragment="section-transcription"
-              class="mono mt-4 inline-block text-[var(--accent)] hover:underline"
-              data-testid="download-model-link"
-              >download model in settings →</a
-            >
+            @if (gateDownloading()) {
+              <div class="mt-4" data-testid="gate-progress">
+                <div
+                  class="mb-1.5 flex justify-between text-[12px] tabular-nums text-[var(--ink-dim)]"
+                >
+                  <span>Downloading {{ gatePct() }}%</span>
+                  <span>{{ gateBytes() }}</span>
+                </div>
+                <div class="h-1 overflow-hidden rounded bg-[var(--bg-2)]">
+                  <div class="h-full bg-[var(--accent)]" [style.width.%]="gatePct()"></div>
+                </div>
+              </div>
+            } @else {
+              <div class="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  class="mono rounded-md bg-[var(--accent)] px-3.5 py-1.5 text-[12.5px] font-semibold text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+                  data-testid="gate-download"
+                  [disabled]="!transcription.highQualityModel()"
+                  (click)="downloadFromGate()"
+                >
+                  {{ gateDownloadLabel() }}
+                </button>
+                <a
+                  routerLink="/settings"
+                  fragment="section-transcription"
+                  class="text-[12px] text-[var(--ink-dim)] hover:underline"
+                  data-testid="download-model-link"
+                  >Transcription settings</a
+                >
+              </div>
+            }
+            @if (error()) {
+              <p class="mt-3 text-[12px] text-red-300" role="alert" data-testid="gate-error">
+                {{ error() }}
+              </p>
+            }
           </div>
         </section>
       } @else {
-        <header class="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
-          <div>
+        <header
+          class="flex items-start justify-between gap-6 border-b border-[var(--line)] px-6 pb-3.5 pt-4"
+        >
+          <div class="min-w-0">
             <h1 class="text-lg font-semibold">Meeting transcription</h1>
-            <p class="text-sm text-[var(--ink-mute)]">
-              Audio is transcribed locally on this machine. Sending the transcript to chat uses the
-              network.
+            <p class="mt-0.5 text-[13px] text-[var(--ink-mute)]">
+              Records and transcribes on this machine. Nothing leaves your computer until you attach
+              a transcript to a chat and press Send.
             </p>
-            <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
-              Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
-              spontaneous meeting speech is ~25-30% across all open models (industry-wide limit).
-            </p>
+            <div class="mt-1.5 flex items-start gap-5 text-[12px] text-[var(--ink-dim)]">
+              <details class="text-[var(--ink-mute)]" data-testid="how-it-works">
+                <summary
+                  class="cursor-pointer select-none text-[var(--ink-dim)] hover:text-[var(--ink)]"
+                >
+                  How it works
+                </summary>
+                <ul class="mt-2 max-w-2xl list-disc space-y-1 pl-5">
+                  <li>
+                    Record captures system audio and your microphone; the audio stays on this
+                    machine.
+                  </li>
+                  <li>
+                    Pause turns the microphone off; Resume adds to the same recording. Stop
+                    transcribes it here, which takes a few minutes for a long meeting.
+                  </li>
+                  <li>
+                    You can start the next recording while the last one is still being transcribed.
+                  </li>
+                  <li>
+                    Attach to new chat opens a chat with the transcript attached; nothing is sent
+                    until you press Send.
+                  </li>
+                  <li data-testid="quality-disclaimer">
+                    Recognition quality depends on the speech: dictation reaches about 5% word error
+                    rate, spontaneous meeting speech about 25-30% with every open model.
+                  </li>
+                </ul>
+              </details>
+              <a
+                routerLink="/settings"
+                fragment="section-transcription"
+                class="inline-flex items-center gap-1 hover:text-[var(--ink)]"
+                data-testid="transcription-settings-link"
+              >
+                <app-icon name="settings" class="h-3.5 w-3.5" />
+                Transcription settings
+              </a>
+            </div>
           </div>
+          @if (!transcription.captureOpen()) {
+            <app-recording-controls (started)="onStarted()" (errorOccurred)="onError($event)" />
+          }
         </header>
+
+        @if (transcription.captureOpen()) {
+          <app-recording-bar
+            (opened)="onOpenById($event)"
+            (stopped)="onStopped()"
+            (errorOccurred)="onError($event)"
+          />
+        }
 
         @if (error()) {
           <div
@@ -102,21 +190,12 @@ import { SessionListComponent } from './session-list/session-list.component';
             }
           </div>
         }
-        <div class="flex flex-1 gap-4 overflow-hidden p-6">
-          <aside class="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
+        <div class="flex min-h-0 flex-1 overflow-hidden">
+          <aside class="flex w-80 shrink-0 flex-col border-r border-[var(--line)] xl:w-96">
             <app-session-list (opened)="onOpenSession($event)" (errorOccurred)="onError($event)" />
           </aside>
-          <main class="flex flex-1 flex-col gap-4 overflow-hidden">
-            <app-recording-controls
-              (started)="onStarted($event)"
-              (stopped)="onStopped($event)"
-              (errorOccurred)="onError($event)"
-            />
-            <div
-              class="flex-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--bg-1)] p-3"
-            >
-              <app-live-transcript [session]="active()" (errorOccurred)="onError($event)" />
-            </div>
+          <main class="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <app-live-transcript [session]="active()" (errorOccurred)="onError($event)" />
           </main>
         </div>
       }
@@ -125,16 +204,39 @@ import { SessionListComponent } from './session-list/session-list.component';
   host: { class: 'flex h-full flex-1' },
 })
 export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
-  /** Left pane's recordings list (refreshed after start/stop/delete). */
-  @ViewChild(SessionListComponent) private sessionList?: SessionListComponent;
-
   /** Latest error string (rendered in a banner). */
   readonly error = signal('');
   /** `null` while loading, `true` if the model is downloaded, `false` shows the gate. */
   readonly modelReady = signal<boolean | null>(null);
 
-  private readonly transcription = inject(TranscriptionService);
+  protected readonly transcription = inject(TranscriptionService);
   private readonly log = inject(LoggerService);
+
+  /** The gate's download of the high-quality model is running. */
+  readonly gateDownloading = computed(() => {
+    const key = this.transcription.highQualityModel()?.key;
+    return key !== undefined && this.transcription.downloadingModelKey() === key;
+  });
+
+  /** Gate download progress, 0-100. */
+  readonly gatePct = computed(() => {
+    const p = this.transcription.downloadProgress();
+    return p?.total_bytes ? Math.round((p.downloaded_bytes / p.total_bytes) * 100) : 0;
+  });
+
+  /** "680 MB of 1.6 GB" while the gate downloads. */
+  readonly gateBytes = computed(() => {
+    const p = this.transcription.downloadProgress();
+    if (!p) return '';
+    const done = formatBytes(p.downloaded_bytes);
+    return p.total_bytes ? `${done} of ${formatBytes(p.total_bytes)}` : done;
+  });
+
+  /** Gate button text, with the download size. */
+  readonly gateDownloadLabel = computed(() => {
+    const best = this.transcription.highQualityModel();
+    return best ? `Download (${formatBytes(best.size_bytes)})` : 'Download';
+  });
 
   /** The active session (live snapshot from the service). */
   readonly active = computed<TranscriptSession | null>(() => this.transcription.active());
@@ -165,18 +267,6 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */
-  constructor() {
-    let last: string | undefined;
-    effect(() => {
-      const state = this.transcription.active()?.status.state;
-      if (state && state !== last && (state === 'done' || state === 'failed')) {
-        void this.sessionList?.refresh();
-      }
-      last = state;
-    });
-  }
-
   /** Re-checks model availability when the window/tab regains focus. */
   private readonly onActivate = (): void => {
     void this.refreshModelReady();
@@ -186,7 +276,7 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   async ngOnInit(): Promise<void> {
     window.addEventListener('focus', this.onActivate);
     document.addEventListener('visibilitychange', this.onActivate);
-    await this.refreshModelReady();
+    await Promise.all([this.refreshModelReady(), this.transcription.loadRecommendedModel()]);
     try {
       await this.transcription.resumeActiveRecording();
     } catch (err) {
@@ -194,11 +284,11 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Detaches the live-stream listener unless a recording still needs it. */
+  /** Detaches the live-stream listener unless a recording or its offline pass still needs it. */
   async ngOnDestroy(): Promise<void> {
     window.removeEventListener('focus', this.onActivate);
     document.removeEventListener('visibilitychange', this.onActivate);
-    if (!this.transcription.recording()) await this.transcription.detach();
+    if (!this.transcription.liveStreamNeeded()) await this.transcription.detach();
   }
 
   /**
@@ -225,10 +315,10 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Opens a session in the right pane (subscribes to its live stream).
-   * @param s - the session.
+   * Opens a recording in the right pane (subscribes to its live stream).
+   * @param s - the recording's list row.
    */
-  async onOpenSession(s: TranscriptSession): Promise<void> {
+  async onOpenSession(s: TranscriptSummary): Promise<void> {
     this.error.set('');
     try {
       await this.transcription.subscribeToTranscript(s.id);
@@ -238,20 +328,40 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * After recording starts: clear the banner and refresh the recordings list.
-   * @param _sessionId - the new session id (unused — the controls own the stream).
+   * Opens a recording by id (the recording bar's name).
+   * @param id - the recording to open.
    */
-  onStarted(_sessionId: string): void {
+  async onOpenById(id: string): Promise<void> {
+    if (this.active()?.id === id) return;
     this.error.set('');
-    void this.sessionList?.refresh();
+    try {
+      await this.transcription.subscribeToTranscript(id);
+    } catch (err: unknown) {
+      this.error.set(err instanceof Error ? err.message : String(err));
+    }
   }
 
-  /**
-   * After recording stops: refresh the list (status moved to Finalizing/Done).
-   * @param _sessionId - the stopped session id (unused — the offline pass is server-side).
-   */
-  onStopped(_sessionId: string): void {
-    void this.sessionList?.refresh();
+  /** Downloads the high-quality model from the gate, then lifts the gate. */
+  async downloadFromGate(): Promise<void> {
+    const best = this.transcription.highQualityModel();
+    if (!best) return;
+    this.error.set('');
+    try {
+      await this.transcription.downloadModel(best.key);
+      await this.refreshModelReady();
+    } catch (err: unknown) {
+      this.error.set(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** After recording starts: clear the banner (the list highlights the new recording on its own). */
+  onStarted(): void {
+    this.error.set('');
+  }
+
+  /** After recording stops: the list follows on its own (status events), so only the banner clears. */
+  onStopped(): void {
+    this.error.set('');
   }
 
   /** Deep-links to the macOS Microphone / Audio Recording privacy panes. */

@@ -54,10 +54,21 @@ async function resolveAssignedTo(
   return undefined;
 }
 
+const NAMED_REF = {
+  type: 'object',
+  properties: { id: { type: 'number' }, name: { type: 'string' } },
+};
+
+function versionContext(params: Record<string, unknown>): { fixed_version_id: number } | undefined {
+  return typeof params.fixed_version_id === 'number'
+    ? { fixed_version_id: params.fixed_version_id }
+    : undefined;
+}
+
 const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
   description:
-    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user.',
+    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user. Omitting status returns open issues only; pass status: "*" to count closed ones too, e.g. for every issue in a target version or every subtask.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: false,
@@ -70,11 +81,28 @@ const listIssueIdsTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: 'string', description: 'Project identifier or key' },
-      status: { type: 'string', description: 'Status: open, closed, * (all)' },
+      status: {
+        type: 'string',
+        description: 'open (default), closed, * (all), or a status name from getMappings',
+      },
+      status_id: {
+        type: ['number', 'string'],
+        description: 'Status ID, or open / closed / *; use for a status getMappings does not map',
+      },
       assigned_to: { type: 'string', description: 'Assignee: me, user_id, or username' },
+      assigned_to_id: { type: 'number', description: 'Assignee user ID' },
       tracker_id: { type: 'number', description: 'Tracker ID' },
       priority_id: { type: 'number', description: 'Priority ID' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      fixed_version_id: {
+        type: 'number',
+        description:
+          'Target version ID — obtained from listVersions; add status: "*" for closed ones',
+      },
+      parent_id: {
+        type: 'number',
+        description: 'Parent issue ID (lists its subtasks); add status: "*" for closed ones',
+      },
+      limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       offset: { type: 'number', description: 'Pagination offset' },
     },
   },
@@ -128,59 +156,51 @@ const getIssueFullTool: Tool = {
     },
     required: ['issue_id'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      issue: {
+  outputSchema: successResultSchema({
+    id: { type: 'number' },
+    project: NAMED_REF,
+    tracker: NAMED_REF,
+    status: NAMED_REF,
+    priority: NAMED_REF,
+    author: NAMED_REF,
+    assigned_to: { ...NAMED_REF, description: 'Absent when unassigned' },
+    category: { ...NAMED_REF, description: 'Absent when none is set' },
+    fixed_version: { ...NAMED_REF, description: 'Target version; absent when none is set' },
+    parent: { type: 'object', properties: { id: { type: 'number' } } },
+    subject: { type: 'string' },
+    description: { type: 'string' },
+    start_date: { type: ['string', 'null'] },
+    due_date: { type: ['string', 'null'] },
+    done_ratio: { type: 'number' },
+    is_private: { type: 'boolean' },
+    estimated_hours: { type: ['number', 'null'] },
+    total_estimated_hours: { type: ['number', 'null'] },
+    spent_hours: { type: 'number' },
+    total_spent_hours: { type: 'number' },
+    custom_fields: { type: 'array', items: { type: 'object' } },
+    created_on: { type: 'string', description: 'ISO 8601 timestamp' },
+    updated_on: { type: 'string', description: 'ISO 8601 timestamp' },
+    closed_on: { type: ['string', 'null'] },
+    journals: {
+      type: 'array',
+      description: 'Only with include: ["journals"]',
+      items: {
         type: 'object',
         properties: {
           id: { type: 'number' },
-          subject: { type: 'string' },
-          description: { type: 'string' },
-          status: {
-            type: 'object',
-            properties: { id: { type: 'number' }, name: { type: 'string' } },
-          },
-          priority: {
-            type: 'object',
-            properties: { id: { type: 'number' }, name: { type: 'string' } },
-          },
-          tracker: {
-            type: 'object',
-            properties: { id: { type: 'number' }, name: { type: 'string' } },
-          },
-          assigned_to: {
-            type: 'object',
-            properties: { id: { type: 'number' }, name: { type: 'string' } },
-          },
-          project: {
-            type: 'object',
-            properties: { id: { type: 'number' }, name: { type: 'string' } },
-          },
-          created_on: { type: 'string', description: 'ISO 8601 timestamp' },
-          updated_on: { type: 'string', description: 'ISO 8601 timestamp' },
-          journals: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                id: { type: 'number' },
-                user: {
-                  type: 'object',
-                  properties: { id: { type: 'number' }, name: { type: 'string' } },
-                },
-                notes: { type: 'string' },
-                created_on: { type: 'string' },
-              },
-            },
-          },
+          user: NAMED_REF,
+          notes: { type: 'string' },
+          created_on: { type: 'string' },
         },
       },
-      error: { type: 'string' },
     },
-    required: ['success'],
-  },
+    attachments: { type: 'array', description: 'Only with include: ["attachments"]' },
+    relations: { type: 'array', description: 'Only with include: ["relations"]' },
+    children: { type: 'array', description: 'Only with include: ["children"]' },
+    watchers: { type: 'array', description: 'Only with include: ["watchers"]' },
+    changesets: { type: 'array', description: 'Only with include: ["changesets"]' },
+    allowed_statuses: { type: 'array', description: 'Only with include: ["allowed_statuses"]' },
+  }),
   inputExamples: [
     {
       description: 'Minimal: get basic issue details',
@@ -257,6 +277,10 @@ const createIssueTool: Tool = {
       },
       parent_issue_id: { type: 'number', description: 'Parent issue ID' },
       estimated_hours: { type: 'number', description: 'Estimated hours' },
+      fixed_version_id: {
+        type: 'number',
+        description: 'Target version ID — obtained from listVersions',
+      },
     },
     required: ['project_id', 'subject'],
   },
@@ -312,7 +336,8 @@ const createIssueTool: Tool = {
 
 const updateIssueTool: Tool = {
   name: 'updateIssue',
-  description: 'Update an existing Redmine issue',
+  description:
+    "Update an existing Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values.",
   annotations: WRITE_ANNOTATIONS,
   _meta: {
     [META_KEYS.DEFER_LOADING]: true,
@@ -332,15 +357,25 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
         type: 'number',
         description: 'Issue ID to update — obtained from listIssueIds or searchIssueIds',
       },
+      project_id: { type: 'string', description: 'Move the issue to this project' },
       subject: { type: 'string', description: 'New subject' },
       description: { type: 'string', description: 'New description' },
+      tracker_id: { type: 'number', description: 'Tracker ID' },
+      tracker: { type: 'string', description: 'Tracker name' },
       status_id: { type: 'number', description: 'Status ID' },
       status: { type: 'string', description: 'Status name' },
       priority_id: { type: 'number', description: 'Priority ID' },
+      priority: { type: 'string', description: 'Priority name' },
       assigned_to_id: { type: 'number', description: 'Assigned user ID' },
       assigned_to: {
         type: 'string',
         description: "Assignee name, or 'me' to assign to the current authenticated user",
+      },
+      parent_issue_id: { type: 'number', description: 'Parent issue ID' },
+      estimated_hours: { type: 'number', description: 'Estimated hours' },
+      fixed_version_id: {
+        type: 'number',
+        description: 'Target version ID — obtained from listVersions; only an open version',
       },
       notes: { type: 'string', description: 'Update notes/comment' },
     },
@@ -349,23 +384,22 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
   outputSchema: {
     type: 'object',
     description:
-      'Returns the updated issue - ALWAYS verify assigned_to/status match your request (Redmine may silently ignore changes for closed issues)',
+      'Returns the issue as Redmine holds it after the update - ALWAYS compare every field you changed with your request (Redmine may silently ignore changes, e.g. on closed issues or a tracker the user may not set)',
     properties: {
       id: { type: 'number', description: 'Issue ID' },
       subject: { type: 'string', description: 'Issue subject' },
-      status: {
+      project: NAMED_REF,
+      tracker: NAMED_REF,
+      status: NAMED_REF,
+      priority: NAMED_REF,
+      assigned_to: { ...NAMED_REF, description: 'Assigned user; absent when unassigned' },
+      fixed_version: { ...NAMED_REF, description: 'Target version; absent when none is set' },
+      parent: {
         type: 'object',
-        properties: { id: { type: 'number' }, name: { type: 'string' } },
+        description: 'Parent issue; absent when none is set',
+        properties: { id: { type: 'number' } },
       },
-      assigned_to: {
-        type: 'object',
-        description: 'Assigned user (null if Redmine rejected assignment)',
-        properties: { id: { type: 'number' }, name: { type: 'string' } },
-      },
-      project: {
-        type: 'object',
-        properties: { id: { type: 'number' }, name: { type: 'string' } },
-      },
+      estimated_hours: { type: ['number', 'null'] },
     },
   },
   inputExamples: [
@@ -380,6 +414,10 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
         assigned_to_id: 42,
         notes: 'Reassigning for code review',
       },
+    },
+    {
+      description: 'Partial: plan into a target version (id from listVersions)',
+      input: { issue_id: 12345, fixed_version_id: 87 },
     },
     {
       description: 'Full: update multiple fields',
@@ -505,14 +543,10 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
     {
       tool: createIssueTool,
       handler: async (params) =>
-        withRedmineErrors(undefined, async () => {
+        withRedmineErrors(versionContext(params), async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
-          if (resolved.parent_id !== undefined && resolved.parent_issue_id === undefined) {
-            resolved.parent_issue_id = resolved.parent_id;
-            delete resolved.parent_id;
-          }
           const result = await client.createIssue(
             resolved as Parameters<typeof client.createIssue>[0]
           );
@@ -523,7 +557,7 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
       tool: updateIssueTool,
       handler: async (params) => {
         const { issue_id } = params as { issue_id: number };
-        return withRedmineErrors({ issue_id }, async () => {
+        return withRedmineErrors({ issue_id, ...versionContext(params) }, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const assignError = await resolveAssignedTo(client, resolved);
           if (assignError) return assignError;
@@ -534,7 +568,14 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           return jsonResult({
             id: updatedIssue.id,
             subject: updatedIssue.subject,
+            project: updatedIssue.project,
+            tracker: updatedIssue.tracker,
             status: updatedIssue.status,
+            priority: updatedIssue.priority,
+            assigned_to: updatedIssue.assigned_to,
+            fixed_version: updatedIssue.fixed_version,
+            parent: updatedIssue.parent,
+            estimated_hours: updatedIssue.estimated_hours,
           });
         });
       },

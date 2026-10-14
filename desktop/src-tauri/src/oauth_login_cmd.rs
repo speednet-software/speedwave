@@ -248,8 +248,14 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    target_os = "macos",
+    expect(
+        clippy::unwrap_used,
+        reason = "the macOS-only AppleScript tests unwrap results"
+    )
+)]
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     reason = "unwrap/expect are fine in test assertions"
 )]

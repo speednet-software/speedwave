@@ -1,0 +1,34 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "example-pkg": {
+      "name": "example-pkg",
+      "severity": "moderate",
+      "isDirect": true,
+      "via": [
+        {
+          "source": 1200000,
+          "name": "example-pkg",
+          "dependency": "example-pkg",
+          "title": "example-pkg prototype pollution",
+          "url": "https://github.com/advisories/GHSA-moda-tex4-test",
+          "severity": "moderate",
+          "range": "<2.0.0"
+        }
+      ],
+      "effects": [],
+      "range": "<2.0.0",
+      "nodes": ["node_modules/example-pkg"]
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 1,
+      "high": 0,
+      "critical": 0,
+      "total": 1
+    }
+  }
+}

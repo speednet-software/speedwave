@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-desktop"
-version = "0.18.1"
+version = "0.0.0"
 edition = "2021"
 publish = false
 description = "Speedwave desktop application — Tauri backend"
@@ -58,6 +58,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
     "Win32_Foundation",
 ] }
 
@@ -73,6 +75,7 @@ speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audi
 [build-dependencies]
 serde_json = "1"
 speedwave-runtime = { path = "../../crates/speedwave-runtime" }
+speedwave-version = { path = "../../crates/speedwave-version" }
 tauri-build = { version = "2", features = [] }
 
 [lints.clippy]

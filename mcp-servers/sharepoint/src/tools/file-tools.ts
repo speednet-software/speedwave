@@ -57,7 +57,11 @@ const listFileIdsTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Folder path (default: /)' },
+      path: {
+        type: 'string',
+        description:
+          'Folder path relative to the drive root, e.g. documents/reports; omit for the root',
+      },
     },
   },
   annotations: READ_ONLY_ANNOTATIONS,

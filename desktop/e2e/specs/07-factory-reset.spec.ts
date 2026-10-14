@@ -13,6 +13,7 @@
 import * as http from 'node:http';
 
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
+import { invokeOr } from '../helpers/tauri-invoke';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 
@@ -120,13 +121,7 @@ describe('Factory Reset', function () {
   it('should wipe state and restart the app', async function () {
     this.timeout(180_000);
 
-    const stateExists: boolean = await browser.executeAsync((done: (result: boolean) => void) => {
-      (window as any).__TAURI_INTERNALS__
-        .invoke('is_setup_complete')
-        .then((result: boolean) => done(result))
-        .catch(() => done(false));
-    });
-    expect(stateExists).toBe(true);
+    expect(await invokeOr<boolean>(false, 'is_setup_complete')).toBe(true);
 
     const resetBtn = await $('[data-testid="settings-reset-btn"]');
     await resetBtn.click();

@@ -1,26 +1,17 @@
+import { invokeOr } from './tauri-invoke';
+
 export interface AnthropicCatalogEntry {
   id: string;
   family: string;
   context_tokens: number;
   latest: boolean;
   premium: boolean;
-  selectable: boolean;
-  has_1m: boolean;
   effort_levels: string[];
   default_effort: string | null;
 }
 
 export async function anthropicCatalog(): Promise<AnthropicCatalogEntry[]> {
-  return browser.executeAsync((done: (rows: AnthropicCatalogEntry[]) => void) => {
-    (
-      window as unknown as {
-        __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<AnthropicCatalogEntry[]> };
-      }
-    ).__TAURI_INTERNALS__
-      .invoke('list_anthropic_models')
-      .then((rows) => done(rows))
-      .catch(() => done([]));
-  });
+  return invokeOr<AnthropicCatalogEntry[]>([], 'list_anthropic_models');
 }
 
 export async function latestAnthropicModelIds(): Promise<string[]> {
@@ -28,10 +19,27 @@ export async function latestAnthropicModelIds(): Promise<string[]> {
   return rows.filter((r) => r.latest).map((r) => r.id);
 }
 
+export async function modelPickerRowIds(project: string): Promise<string[] | null> {
+  const picker = await invokeOr<{ rows: { id: string }[] } | null>(null, 'list_model_picker', {
+    project,
+  });
+  return picker ? picker.rows.map((r) => r.id) : null;
+}
+
+export async function defaultModelPickerRowId(project: string): Promise<string | null> {
+  const picker = await invokeOr<{ rows: { id: string; is_default: boolean }[] } | null>(
+    null,
+    'list_model_picker',
+    { project }
+  );
+  return picker?.rows.find((r) => r.is_default)?.id ?? null;
+}
+
 export function catalogEntryForBadgeLabel(
   catalog: AnthropicCatalogEntry[],
   label: string
 ): AnthropicCatalogEntry | null {
-  const bare = label.replace(/ \[1m\]$/, '').trim();
-  return catalog.find((m) => m.family === bare) ?? null;
+  return catalog.find((m) => m.family === label.trim()) ?? null;
 }
+
+export const ONE_MILLION_MARKER = /\[1m\]|\(1M\)/i;

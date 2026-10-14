@@ -1664,7 +1664,7 @@ impl SecurityCheck {
                 remediation: "Re-render compose; plugin claude-resources mounts are read-only.",
             });
         }
-        let plugin_dir = data_dir.join("plugins").join(slug);
+        let plugin_dir = plugin::plugins_base_dir_in(data_dir).join(slug);
         let resources_dir = plugin::plugin_claude_resources_dir(&plugin_dir);
         let expected_source = match to_engine_path(&resources_dir) {
             Ok(p) => p,

@@ -3,24 +3,17 @@ import {
   openSettings,
   openChat,
   configureOpenRouter,
-  pickComposerModel,
   requireOpenrouterKey,
-  requireOpenrouterModel,
+  useCheapOpenRouterModel,
 } from '../helpers/llm';
-import { waitForShellReady } from '../helpers/shell';
+import { waitForShellReady, RESTART_WAIT_MS } from '../helpers/shell';
+import { invokeOr } from '../helpers/tauri-invoke';
 
 const E2E_PROJECT_NAME = 'e2e-test';
 const E2E_PROJECT_DIR = process.env.E2E_PROJECT_DIR || '/tmp/speedwave-e2e-project';
 
 async function isSetupComplete(): Promise<boolean> {
-  return browser.executeAsync((done: (result: boolean) => void) => {
-    (
-      window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<boolean> } }
-    ).__TAURI_INTERNALS__
-      .invoke('is_setup_complete')
-      .then((result: boolean) => done(result))
-      .catch(() => done(false));
-  });
+  return invokeOr<boolean>(false, 'is_setup_complete');
 }
 
 async function waitForStepTerminal(index: number, timeout: number): Promise<string> {
@@ -189,11 +182,11 @@ describe('Setup Wizard — Full Flow', function () {
   });
 
   it('should configure an OpenRouter provider so containers can start', async function () {
-    this.timeout(180_000);
+    this.timeout(RESTART_WAIT_MS + 180_000);
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
     await waitForShellReady(150_000);
     await openChat();
-    await pickComposerModel(requireOpenrouterModel());
+    await useCheapOpenRouterModel();
   });
 });

@@ -182,7 +182,10 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe GET {url} failed on host transport: {e}");
+                log::warn!(
+                    "LLM probe GET {url} failed on host transport: {}",
+                    crate::http_util::error_chain(&e)
+                );
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -208,7 +211,10 @@ impl ProbeTransport for HostProbe {
             .send()
             .await
             .map_err(|e| {
-                log::warn!("LLM probe POST {url} failed on host transport: {e}");
+                log::warn!(
+                    "LLM probe POST {url} failed on host transport: {}",
+                    crate::http_util::error_chain(&e)
+                );
                 format!("LLM model discovery: request failed: {e}")
             })?;
         let status = resp.status().as_u16();
@@ -548,6 +554,12 @@ fn parse_openai_models_with_context(body: &[u8]) -> Result<Vec<DiscoveredModel>,
                     .get("max_context_length")
                     .and_then(|n| n.as_u64())
                     .and_then(non_zero_u32)
+            })
+            .or_else(|| {
+                entry
+                    .get("max_input_tokens")
+                    .and_then(|n| n.as_u64())
+                    .and_then(non_zero_u32)
             });
         out.push(DiscoveredModel {
             id,
@@ -599,14 +611,35 @@ async fn discover_openrouter(
     parse_openrouter_models(&resp.body)
 }
 
+fn stored_credential(provider: &str, project: Option<&str>, file: &str) -> Option<String> {
+    stored_credential_in(
+        speedwave_runtime::consts::data_dir(),
+        provider,
+        project,
+        file,
+    )
+}
+
+fn stored_credential_in(
+    data_dir: &std::path::Path,
+    provider: &str,
+    project: Option<&str>,
+    file: &str,
+) -> Option<String> {
+    if !speedwave_runtime::config::is_local_provider(Some(provider)) {
+        return None;
+    }
+    project.and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt_in(data_dir, p, file))
+}
+
 fn resolve_transient_credential(
     field: Option<&Option<String>>,
-    active_project: Option<&str>,
+    provider: &str,
+    project: Option<&str>,
     file: &str,
 ) -> Option<String> {
     match field {
-        None => active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, file)),
+        None => stored_credential(provider, project, file),
         Some(None) => None,
         Some(Some(s)) if s.is_empty() => None,
         Some(Some(s)) => strip_bearer_prefix(s),
@@ -700,6 +733,32 @@ pub struct DiscoverLlmModelsArgs {
     pub api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub custom_headers: Option<Option<String>>,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+fn credential_project(args: &DiscoverLlmModelsArgs, active: Option<String>) -> Option<String> {
+    args.project.clone().or(active)
+}
+
+/// Discovers over the VM transport; when that fails, logs the VM error with its cause at info
+/// (expected for a server on the host's loopback) and retries over the host transport.
+async fn discover_via_vm_then_host<H: ProbeTransport>(
+    provider: &str,
+    base_url: &str,
+    vm: &dyn ProbeTransport,
+    host: impl FnOnce() -> Result<H, String>,
+) -> Result<DiscoverResult, String> {
+    match do_discover_llm_models(provider, base_url, vm).await {
+        Ok(result) => Ok(result),
+        Err(vm_err) => {
+            log::info!(
+                "VM probe for LLM model discovery failed, retrying via host transport: {vm_err}"
+            );
+            let host_transport = host()?;
+            do_discover_llm_models(provider, base_url, &host_transport).await
+        }
+    }
 }
 
 pub(crate) async fn discover_llm_models_with_fallback(
@@ -709,28 +768,22 @@ pub(crate) async fn discover_llm_models_with_fallback(
     custom_headers: Option<&str>,
     active_project: Option<&str>,
 ) -> Result<DiscoverResult, String> {
-    let bearer = api_key.and_then(strip_bearer_prefix).or_else(|| {
-        active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, "api_key"))
-    });
-    let headers = custom_headers.map(str::to_string).or_else(|| {
-        active_project
-            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, "custom_headers"))
-    });
+    let bearer = api_key
+        .and_then(strip_bearer_prefix)
+        .or_else(|| stored_credential(provider, active_project, "api_key"));
+    let headers = custom_headers
+        .map(str::to_string)
+        .or_else(|| stored_credential(provider, active_project, "custom_headers"));
     let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
     let runtime = speedwave_runtime::runtime::detect_runtime();
     let vm_available = runtime.is_available();
     let result = if vm_available {
         let vm_transport = VmProbe::new(bearer.clone(), headers.clone(), timeout);
-        let vm_res = do_discover_llm_models(provider, base_url, &vm_transport).await;
-        if vm_res.is_ok() {
-            vm_res
-        } else {
-            log::info!("VM probe failed for LLM model discovery, retrying via host transport");
+        discover_via_vm_then_host(provider, base_url, &vm_transport, || {
             let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
-            let host_transport = HostProbe::new(client, timeout);
-            do_discover_llm_models(provider, base_url, &host_transport).await
-        }
+            Ok(HostProbe::new(client, timeout))
+        })
+        .await
     } else {
         let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
         let host_transport = HostProbe::new(client, timeout);
@@ -759,10 +812,17 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
-    let bearer = resolve_transient_credential(args.api_key.as_ref(), active.as_deref(), "api_key");
+    let project = credential_project(&args, active);
+    let bearer = resolve_transient_credential(
+        args.api_key.as_ref(),
+        &args.provider,
+        project.as_deref(),
+        "api_key",
+    );
     let headers = resolve_transient_credential(
         args.custom_headers.as_ref(),
-        active.as_deref(),
+        &args.provider,
+        project.as_deref(),
         "custom_headers",
     );
     discover_llm_models_with_fallback(
@@ -1568,6 +1628,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_models_with_context_extracts_litellm_shape() {
+        let body = br#"{"data":[
+            {"id":"gemma-4-26b-a4b","object":"model","max_input_tokens":262144,"max_output_tokens":32768},
+            {"id":"small-model","object":"model","max_input_tokens":32768,"max_output_tokens":8192},
+            {"id":"qwen3-coder-30b","object":"model"},
+            {"id":"zero-window","object":"model","max_input_tokens":0}
+        ]}"#;
+        let out = parse_openai_models_with_context(body).unwrap();
+        assert_eq!(out[0].context_tokens, Some(262_144));
+        assert_eq!(out[1].context_tokens, Some(32_768));
+        assert_eq!(out[2].context_tokens, None);
+        assert_eq!(out[3].context_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_models_with_context_prefers_the_server_context_over_litellm_model_info() {
+        let body = br#"{"data":[
+            {"id":"llama","meta":{"n_ctx_train":8192},"max_input_tokens":262144},
+            {"id":"qwen","max_context_length":32768,"max_input_tokens":262144}
+        ]}"#;
+        let out = parse_openai_models_with_context(body).unwrap();
+        assert_eq!(out[0].context_tokens, Some(8192));
+        assert_eq!(out[1].context_tokens, Some(32_768));
+    }
+
+    #[test]
     fn parse_openai_models_with_context_handles_mixed_dialect() {
         let body = br#"{"data":[
             {"id":"llama","meta":{"n_ctx_train":8192}},
@@ -1815,6 +1901,7 @@ mod tests {
     fn resolve_credential_some_some_strips_bearer_prefix() {
         let r = resolve_transient_credential(
             Some(&Some("Bearer sk-test".to_string())),
+            "local",
             None,
             "api_key",
         );
@@ -1823,14 +1910,71 @@ mod tests {
 
     #[test]
     fn resolve_credential_some_none_means_no_auth() {
-        let r = resolve_transient_credential(Some(&None), None, "api_key");
+        let r = resolve_transient_credential(Some(&None), "local", None, "api_key");
         assert_eq!(r, None, "Some(None) explicitly means no auth");
     }
 
     #[test]
     fn resolve_credential_some_empty_string_means_no_auth() {
-        let r = resolve_transient_credential(Some(&Some(String::new())), None, "api_key");
+        let r = resolve_transient_credential(Some(&Some(String::new())), "local", None, "api_key");
         assert_eq!(r, None, "Some(Some(\"\")) means no auth");
+    }
+
+    fn discover_args(provider: &str, project: Option<&str>) -> DiscoverLlmModelsArgs {
+        DiscoverLlmModelsArgs {
+            provider: provider.to_string(),
+            base_url: String::new(),
+            api_key: None,
+            custom_headers: None,
+            project: project.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_probe_reads_the_stored_credentials_of_the_forms_project_else_the_active_one() {
+        let active = || Some("alpha".to_string());
+
+        let named = credential_project(&discover_args("local", Some("beta")), active());
+        let unnamed = credential_project(&discover_args("local", None), active());
+
+        assert_eq!(named.as_deref(), Some("beta"));
+        assert_eq!(unnamed.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn only_a_local_provider_reads_the_stored_local_server_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (file, value) in [
+            ("api_key", "sk-local-server"),
+            ("custom_headers", "X-Team: a"),
+        ] {
+            let path =
+                speedwave_runtime::compose::tokens_path_in(tmp.path(), "alpha", "local-llm", file)
+                    .expect("token path");
+            std::fs::create_dir_all(path.parent().expect("token dir")).expect("create token dir");
+            std::fs::write(&path, format!("{value}\n")).expect("write token");
+        }
+
+        for (file, value) in [
+            ("api_key", "sk-local-server"),
+            ("custom_headers", "X-Team: a"),
+        ] {
+            assert_eq!(
+                stored_credential_in(tmp.path(), "local", Some("alpha"), file).as_deref(),
+                Some(value)
+            );
+            for provider in ["openrouter", "anthropic"] {
+                assert_eq!(
+                    stored_credential_in(tmp.path(), provider, Some("alpha"), file),
+                    None,
+                    "{provider} {file}"
+                );
+            }
+        }
+        assert_eq!(
+            stored_credential_in(tmp.path(), "local", None, "api_key"),
+            None
+        );
     }
 
     const OPENROUTER_CATALOG: &[u8] = br#"{"data":[
@@ -1908,5 +2052,106 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "empty");
+    }
+
+    struct FailingTransport(&'static str);
+
+    #[async_trait::async_trait]
+    impl ProbeTransport for FailingTransport {
+        async fn get(&self, _url: &str) -> Result<ProbeResponse, String> {
+            Err(self.0.to_string())
+        }
+        async fn post(
+            &self,
+            _url: &str,
+            _body: &serde_json::Value,
+        ) -> Result<ProbeResponse, String> {
+            Err(self.0.to_string())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn vm_probe_failure_is_logged_with_its_cause_before_the_host_retry() {
+        let logger = test_logger();
+        let _ = logger.take();
+        let vm = FailingTransport(
+            "LLM model discovery: curl in VM failed: curl: (6) Could not resolve host: llm.example",
+        );
+        let res = discover_via_vm_then_host("openrouter", "", &vm, || {
+            Ok(CatalogTransport(OPENROUTER_CATALOG.to_vec()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            res.models.len(),
+            3,
+            "the host transport answers after the VM"
+        );
+        let records = logger.take();
+        assert!(
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Info
+                    && msg.contains("retrying via host transport")
+                    && msg.contains("Could not resolve host: llm.example")
+            }),
+            "the VM error must be logged at info before the host retry; got: {records:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn vm_probe_success_never_builds_the_host_transport() {
+        let vm = CatalogTransport(OPENROUTER_CATALOG.to_vec());
+        let mut host_built = false;
+        let res = discover_via_vm_then_host("openrouter", "", &vm, || {
+            host_built = true;
+            Err::<CatalogTransport, String>("unused".into())
+        })
+        .await
+        .unwrap();
+        assert_eq!(res.models.len(), 3);
+        assert!(!host_built);
+    }
+
+    #[tokio::test]
+    async fn host_transport_build_error_is_returned_after_a_vm_failure() {
+        let vm = FailingTransport("VM probe failed: no route to host");
+        let err = discover_via_vm_then_host("openrouter", "", &vm, || {
+            Err::<CatalogTransport, String>("Failed to build HTTP client: boom".into())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Failed to build HTTP client: boom");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn host_probe_logs_the_cause_of_a_refused_connection() {
+        let logger = test_logger();
+        let _ = logger.take();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let transport = HostProbe::new(
+            crate::http_util::build_hardened_client(None).unwrap(),
+            Duration::from_secs(5),
+        );
+        let err = transport
+            .get(&format!("http://127.0.0.1:{port}/v1/models"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("LLM model discovery: request failed:"),
+            "the user-facing error keeps its shape: {err}"
+        );
+        let records = logger.take();
+        let address = format!("127.0.0.1:{port}");
+        assert!(
+            records.iter().any(|(level, msg)| {
+                *level == log::Level::Warn && msg.contains(&address) && msg.contains("os error")
+            }),
+            "one host probe warning must name both the address and the refused connection; \
+             got: {records:?}"
+        );
     }
 }
