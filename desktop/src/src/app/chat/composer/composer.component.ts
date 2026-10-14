@@ -31,6 +31,7 @@ import {
   type ModelSelection,
 } from './model-selector/model-selector.component';
 import {
+  ERROR_UNSUPPORTED_TYPE,
   ImagePreprocessorService,
   type ModelClass,
 } from '../../services/image-preprocessor.service';
@@ -628,11 +629,12 @@ export class ComposerComponent implements AfterViewInit {
 
   private async ingest(files: File[]): Promise<void> {
     const images = files.filter((f) => f.type.startsWith('image/'));
+    const draft = this.attachmentDraft();
     if (images.length === 0) {
+      draft.error.set(ERROR_UNSUPPORTED_TYPE);
       return;
     }
     const project = this.projectState.activeProject();
-    const draft = this.attachmentDraft();
     if (!project) {
       draft.error.set('Select a project before attaching an image.');
       return;
