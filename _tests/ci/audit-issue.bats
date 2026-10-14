@@ -4,7 +4,7 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
 _init_audit_root() {
   FIXTURE="$BATS_TEST_TMPDIR/repo"
-  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri"
+  mkdir -p "$FIXTURE/scripts" "$FIXTURE/mcp-servers" "$FIXTURE/desktop/src" "$FIXTURE/desktop/src-tauri" "$FIXTURE/desktop/e2e" "$FIXTURE/mcp-servers/playwright"
   cp "$REPO_ROOT/scripts/audit-issue.sh" "$REPO_ROOT/scripts/audit-run.sh" "$REPO_ROOT/scripts/audit-gate.py" \
     "$FIXTURE/scripts/"
   chmod +x "$FIXTURE"/scripts/*.sh
@@ -12,6 +12,9 @@ _init_audit_root() {
   echo '{}' >"$FIXTURE/desktop/src-tauri/Cargo.lock"
   echo '{}' >"$FIXTURE/mcp-servers/package-lock.json"
   echo '{}' >"$FIXTURE/desktop/src/package-lock.json"
+  echo '{}' >"$FIXTURE/package-lock.json"
+  echo '{}' >"$FIXTURE/desktop/e2e/package-lock.json"
+  echo '{}' >"$FIXTURE/mcp-servers/playwright/package-lock.json"
   echo '[]' >"$FIXTURE/scripts/audit-exceptions.json"
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
@@ -106,4 +109,42 @@ EOF
   grep -q "issue edit 10" "$GH_LOG"
   grep -q "issue close 55" "$GH_LOG"
   ! grep -q "issue create" "$GH_LOG"
+}
+
+@test "the scheduled audit runs npm audit in all five npm lockfile directories" {
+  _init_audit_root
+  _stub_clean_tools
+  _stub_gh '[]'
+  NPM_LOG="$BATS_TEST_TMPDIR/npm.log"
+  cat >"$FAKE_BIN/npm" <<EOF
+#!/usr/bin/env bash
+echo "\$PWD \$*" >>"$NPM_LOG"
+echo '{"vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}'
+EOF
+  chmod +x "$FAKE_BIN/npm"
+
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
+  [ "$status" -eq 0 ]
+  for suffix in "" /mcp-servers /mcp-servers/playwright /desktop/src /desktop/e2e; do
+    [ "$(grep -c "^$FIXTURE$suffix audit" "$NPM_LOG")" -eq 1 ]
+  done
+}
+
+@test "the scheduled audit reports an advisory found only in desktop/e2e" {
+  _init_audit_root
+  _stub_clean_tools
+  _stub_gh '[]'
+  cp "$REPO_ROOT/_tests/ci/fixtures/audit/npm-minimatch.json" "$BATS_TEST_TMPDIR/npm-vuln.json"
+  cat >"$FAKE_BIN/npm" <<EOF
+#!/usr/bin/env bash
+case "\$PWD" in
+  */desktop/e2e) cat "$BATS_TEST_TMPDIR/npm-vuln.json" ;;
+  *) echo '{"vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}' ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/npm"
+
+  run bash -c "cd '$FIXTURE' && PATH='$FAKE_BIN:$PATH' GH_REPO='test/test' ./scripts/audit-issue.sh"
+  [ "$status" -eq 0 ]
+  grep -q "issue create" "$GH_LOG"
 }

@@ -105,7 +105,7 @@ dev-config: guard-dev-instance
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
-        audit audit-rust audit-mcp audit-desktop \
+        audit audit-rust audit-npm audit-root audit-mcp audit-playwright audit-desktop audit-e2e \
         fmt lint status \
         download-lima clean-lima \
         download-nodejs clean-nodejs \
@@ -742,7 +742,7 @@ check-angular-lint:
 	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
-audit: audit-rust audit-mcp audit-desktop
+audit: audit-rust audit-npm
 	@echo "\n✅ No known vulnerabilities without a valid exception"
 
 AUDIT_EXCEPTIONS := scripts/audit-exceptions.json
@@ -763,6 +763,15 @@ audit-rust:
 	  --report cargo:$(AUDIT_TMP)/cargo-root.json --report cargo:$(AUDIT_TMP)/cargo-desktop.json
 	@echo "✅ Rust dependencies: no vulnerabilities without a valid exception"
 
+audit-npm: audit-root audit-mcp audit-playwright audit-desktop audit-e2e
+
+audit-root:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-root $(AUDIT_TMP)/npm-root.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-root.json
+	@echo "✅ Root dependencies: no vulnerabilities without a valid exception"
+
 audit-mcp:
 	@mkdir -p $(AUDIT_TMP)
 	scripts/audit-run.sh npm-mcp $(AUDIT_TMP)/npm-mcp.json
@@ -770,12 +779,26 @@ audit-mcp:
 	  --report npm:$(AUDIT_TMP)/npm-mcp.json
 	@echo "✅ MCP dependencies: no vulnerabilities without a valid exception"
 
+audit-playwright:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-playwright $(AUDIT_TMP)/npm-playwright.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-playwright.json
+	@echo "✅ Playwright MCP dependencies: no vulnerabilities without a valid exception"
+
 audit-desktop:
 	@mkdir -p $(AUDIT_TMP)
 	scripts/audit-run.sh npm-desktop $(AUDIT_TMP)/npm-desktop.json
 	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
 	  --report npm:$(AUDIT_TMP)/npm-desktop.json
 	@echo "✅ Desktop dependencies: no vulnerabilities without a valid exception"
+
+audit-e2e:
+	@mkdir -p $(AUDIT_TMP)
+	scripts/audit-run.sh npm-e2e $(AUDIT_TMP)/npm-e2e.json
+	python3 scripts/audit-gate.py absolute --exceptions $(AUDIT_EXCEPTIONS) \
+	  --report npm:$(AUDIT_TMP)/npm-e2e.json
+	@echo "✅ Desktop e2e dependencies: no vulnerabilities without a valid exception"
 
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"

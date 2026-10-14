@@ -158,7 +158,16 @@ setup() {
   [ "$output" = "false" ]
 }
 
-@test "lockfiles-touched: false for a package-lock.json/Cargo.lock outside the four audited lockfiles" {
+@test "lockfiles-touched: true for each of the new npm lockfiles on its own" {
+  for path in package-lock.json desktop/e2e/package-lock.json mcp-servers/playwright/package-lock.json; do
+    printf '["%s"]' "$path" >"$BATS_TEST_TMPDIR/changed.json"
+    run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$BATS_TEST_TMPDIR/changed.json"
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+  done
+}
+
+@test "lockfiles-touched: false for a package-lock.json/Cargo.lock outside the audited lockfiles" {
   run "$PYTHON" "$SCRIPT" lockfiles-touched --changed "$FIXTURES/changed-with-unaudited-lockfile.json"
   [ "$status" -eq 0 ]
   [ "$output" = "false" ]

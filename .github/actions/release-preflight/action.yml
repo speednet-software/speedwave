@@ -23,9 +23,9 @@ runs:
       with:
         shared-key: speedwave-version
 
-    - name: npm audit (both workspaces)
+    - name: npm audit (all lockfiles)
       shell: bash
-      run: make audit-mcp audit-desktop
+      run: make audit-npm
 
     - name: Install cargo-audit
       shell: bash
