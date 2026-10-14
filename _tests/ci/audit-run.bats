@@ -149,3 +149,21 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$(cat "$NPM_LOG")" =~ "audit --audit-level=high --package-lock-only --json" ]]
 }
+
+@test "--list prints one target, kind and lockfile path per line" {
+  run "$SCRIPT" --list
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "cargo-root cargo Cargo.lock" ]
+  [[ "$output" =~ "npm-e2e npm desktop/e2e/package-lock.json" ]]
+  [ "${#lines[@]}" -eq 7 ]
+}
+
+@test "every listed target runs against its listed lockfile directory" {
+  _stub_npm_recording
+  _stub_cargo_ok
+  while read -r target kind lockfile; do
+    PATH="$FAKE_BIN:$PATH" run "$SCRIPT" "$target" "$BATS_TEST_TMPDIR/$target.json" "$ROOT"
+    [ "$status" -eq 0 ]
+  done < <("$SCRIPT" --list)
+  [ "$(cut -d' ' -f1 "$NPM_LOG" | sort)" = "$(printf '%s\n' "$ROOT" "$ROOT/desktop/e2e" "$ROOT/desktop/src" "$ROOT/mcp-servers" "$ROOT/mcp-servers/playwright" | sort)" ]
+}

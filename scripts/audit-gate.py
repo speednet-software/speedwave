@@ -9,20 +9,6 @@ from datetime import date
 GHSA_RE = re.compile(r"GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}")
 NPM_SEVERITY_RANK = {"info": 0, "low": 1, "moderate": 2, "high": 3, "critical": 4}
 DEFAULT_NPM_MIN_SEVERITY = "high"
-# The exact lockfiles scripts/audit-run.sh audits (cargo-root, cargo-desktop,
-# npm-root, npm-mcp, npm-playwright, npm-desktop, npm-e2e) -- not every
-# package-lock.json/Cargo.lock in the repo. A change to, say,
-# containers/proxy/Cargo.lock touches no audited file, so it must not trigger
-# the PR audit lane.
-AUDITED_LOCKFILES = {
-    "Cargo.lock",
-    "desktop/src-tauri/Cargo.lock",
-    "package-lock.json",
-    "mcp-servers/package-lock.json",
-    "mcp-servers/playwright/package-lock.json",
-    "desktop/src/package-lock.json",
-    "desktop/e2e/package-lock.json",
-}
 
 
 def npm_severity_at_least(severity, min_severity):
@@ -115,6 +101,7 @@ def build_parser():
 
     p_touched = sub.add_parser("lockfiles-touched")
     p_touched.add_argument("--changed", required=True)
+    p_touched.add_argument("lockfiles", nargs="*")
     p_touched.set_defaults(func=cmd_lockfiles_touched)
 
     p_issue = sub.add_parser("issue-plan")
@@ -157,7 +144,7 @@ def cmd_absolute(args):
 def cmd_lockfiles_touched(args):
     with open(args.changed) as f:
         changed = json.load(f)
-    touched = any(path in AUDITED_LOCKFILES for path in changed)
+    touched = bool(set(changed) & set(args.lockfiles))
     print("true" if touched else "false")
     return 0
 

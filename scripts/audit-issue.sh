@@ -16,18 +16,11 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 cd "$REPO_ROOT"
 
-CARGO_TARGETS=(cargo-root cargo-desktop)
-NPM_TARGETS=(npm-root npm-mcp npm-playwright npm-desktop npm-e2e)
-
 REPORT_ARGS=()
-for target in "${CARGO_TARGETS[@]}"; do
+while read -r target kind _; do
     "$AUDIT_RUN" "$target" "$WORKDIR/$target.json"
-    REPORT_ARGS+=(--report "cargo:$WORKDIR/$target.json")
-done
-for target in "${NPM_TARGETS[@]}"; do
-    "$AUDIT_RUN" "$target" "$WORKDIR/$target.json"
-    REPORT_ARGS+=(--report "npm:$WORKDIR/$target.json")
-done
+    REPORT_ARGS+=(--report "$kind:$WORKDIR/$target.json")
+done < <("$AUDIT_RUN" --list)
 
 set +e
 python3 "$GATE" absolute \
