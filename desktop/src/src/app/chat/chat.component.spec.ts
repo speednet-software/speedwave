@@ -410,6 +410,32 @@ describe('ChatComponent', () => {
         fixture.nativeElement.querySelector('[data-testid="composer-transcript"]')
       ).toBeTruthy();
     });
+
+    it('a mount-time tab-draft restore does not clobber a staged transcript prompt (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      const transcription = await stage();
+      const stagedPrompt = transcription.chatPromptDraft();
+      expect(stagedPrompt).not.toBe('');
+
+      fixture.destroy();
+
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+
+      const composer2 = fixture2.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+      expect(composer2.text.value).toBe(stagedPrompt);
+
+      fixture2.destroy();
+    });
   });
 
   describe('composer integration', () => {
@@ -1659,6 +1685,120 @@ describe('ChatComponent', () => {
 
       expect(composer.text.value).toBe('draft on tab one');
       expect(el.scrollTop).toBe(250);
+    });
+
+    it('persists the draft and plan mode across the component being destroyed and recreated (nav-rail switch, SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('half-written thought');
+      composer.togglePlanMode();
+      fixture.detectChanges();
+
+      const tabId = chatState.activeTabId();
+      fixture.destroy();
+      expect(chatState.tabs().get(tabId)!.composerDraft()).toBe('half-written thought');
+      expect(chatState.tabs().get(tabId)!.composerPlanMode()).toBe(true);
+
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+
+      const composer2 = fixture2.debugElement.query(By.directive(ComposerComponent))
+        .componentInstance as ComposerComponent;
+      expect(composer2.text.value).toBe('half-written thought');
+      expect(composer2.planMode()).toBe(true);
+
+      fixture2.destroy();
+    });
+
+    it('applies a tab switch synchronously, with no window where a fast send could reach the wrong tab (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('alpha');
+
+      const tab1 = chatState.activeTabId();
+      await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      composer.setText('beta');
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      chatState.activateTab(tab1);
+      fixture.detectChanges();
+      expect(composer.text.value).toBe('alpha');
+    });
+
+    it('ngOnDestroy does not clobber the stored draft when the composer is not rendered (SPEED-557)', async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const composer = composerInstance();
+      composer.setText('saved before auth hiccup');
+      fixture.detectChanges();
+
+      const tabId = chatState.activeTabId();
+      const store = chatState.tabs().get(tabId)!;
+      fixture.destroy();
+      expect(store.composerDraft()).toBe('saved before auth hiccup');
+
+      projectState.status.set('auth_required');
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      fixture2.destroy();
+
+      expect(store.composerDraft()).toBe('saved before auth hiccup');
+    });
+
+    it("keeps each tab's draft independent across a destroy/recreate round trip (SPEED-557)", async () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      const tab1 = chatState.activeTabId();
+      composerInstance().setText('draft on tab one');
+
+      const tab2 = await chatState.openTab();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      composerInstance().setText('draft on tab two');
+      fixture.detectChanges();
+
+      fixture.destroy();
+
+      const fixture2 = TestBed.createComponent(ChatComponent);
+      const component2 = fixture2.componentInstance;
+      await component2.ngOnInit();
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+      const composer2 = () =>
+        fixture2.debugElement.query(By.directive(ComposerComponent))
+          .componentInstance as ComposerComponent;
+
+      expect(chatState.activeTabId()).toBe(tab2);
+      expect(composer2().text.value).toBe('draft on tab two');
+
+      chatState.activateTab(tab1);
+      fixture2.detectChanges();
+      await fixture2.whenStable();
+      expect(composer2().text.value).toBe('draft on tab one');
+
+      fixture2.destroy();
     });
 
     it('does not snap a restored mid-scroll tab to the bottom when new content streams into it', async () => {

@@ -371,6 +371,7 @@ export class ComposerComponent implements AfterViewInit {
   readonly slashOpen = signal<boolean>(false);
   readonly slashQuery = signal<string>('');
 
+  /** Restored/snapshotted by `ChatComponent` via {@link setPlanMode} across a tab switch or a nav-rail remount. */
   readonly planMode = signal<boolean>(false);
 
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
@@ -653,7 +654,15 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Toggles plan mode on/off. Persists across messages until toggled again. */
   togglePlanMode(): void {
-    this.planMode.update((v) => !v);
+    this.setPlanMode(!this.planMode());
+  }
+
+  /**
+   * Sets plan mode to an explicit value (tab restore).
+   * @param value - Plan mode flag to apply.
+   */
+  setPlanMode(value: boolean): void {
+    this.planMode.set(value);
   }
 
   /**

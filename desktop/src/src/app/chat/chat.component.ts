@@ -150,7 +150,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       untracked(() => {
         const outgoingId = this.previousTabId;
         this.previousTabId = activeId;
-        if (outgoingId === null || outgoingId === activeId) return;
+        if (outgoingId === activeId) return;
         this.saveOutgoingTabState(outgoingId);
         this.restoreIncomingTabState(activeId);
       });
@@ -165,9 +165,13 @@ export class ChatComponent implements OnInit, OnDestroy {
         void this.newConversation();
       });
     });
+
+    this.restoreIncomingTabState(this.previousTabId);
   }
 
-  private previousTabId: string | null = null;
+  private previousTabId: string = this.chat.activeTabId();
+  /** Tab id whose composer restore is still queued; guards against saving its stale pre-restore content. */
+  private pendingRestoreTabId: string | null = null;
   /**
    * Last seen value of `UiStateService.restartRequested`; `null` until the first effect run so a
    * component (re)mount never replays a request bumped before it existed (shell's ⌘R channel).
@@ -175,28 +179,44 @@ export class ChatComponent implements OnInit, OnDestroy {
   private previousRestartRequest: number | null = null;
 
   /**
-   * Snapshots the outgoing tab's composer draft and scroll offset before the view rebinds.
-   * @param tabId - Id of the tab being switched away from.
+   * Snapshots the outgoing tab's draft, plan mode and scroll offset before the view rebinds.
+   * @param tabId - Id of the tab being switched or navigated away from.
    */
   private saveOutgoingTabState(tabId: string): void {
+    if (tabId === this.pendingRestoreTabId) return;
     const store = this.chat.tabs().get(tabId);
-    if (!store) return;
-    store.composerDraft.set(this.composer?.text.value ?? '');
+    if (!store || !this.composer) return;
+    store.composerDraft.set(this.composer.text.value);
+    store.composerPlanMode.set(this.composer.planMode());
     const el = this.messageList?.scrollContainer?.nativeElement;
     store.scrollPosition = el ? el.scrollTop : null;
   }
 
   /**
-   * Restores the incoming tab's composer draft immediately and its scroll offset via
-   * `afterNextRender`, after the view has rebound, so the list's auto-scroll cannot overwrite it.
-   * @param tabId - Id of the tab being switched to.
+   * Restores the incoming tab's draft, plan mode and scroll offset after the view has rebound.
+   * @param tabId - Id of the tab being switched or navigated to.
    */
   private restoreIncomingTabState(tabId: string): void {
     const store = this.chat.tabs().get(tabId);
     if (!store) return;
-    this.composer?.setText(store.composerDraft());
+    const transcriptPending = this.transcription.chatPromptDraft() !== '';
+    const applyDraft = (): void => {
+      if (this.pendingRestoreTabId === tabId) this.pendingRestoreTabId = null;
+      if (!this.composer || this.chat.activeTabId() !== tabId) return;
+      if (!transcriptPending) {
+        this.composer.setText(store.composerDraft());
+      }
+      this.composer.setPlanMode(store.composerPlanMode());
+    };
+    if (this.composer) {
+      applyDraft();
+    } else {
+      this.pendingRestoreTabId = tabId;
+      afterNextRender(applyDraft, { injector: this.injector });
+    }
     afterNextRender(
       () => {
+        if (this.chat.activeTabId() !== tabId) return;
         const el = this.messageList?.scrollContainer?.nativeElement;
         if (!el) return;
         el.scrollTop = store.scrollPosition ?? el.scrollHeight;
@@ -509,8 +529,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Tears down project-lifecycle subscriptions registered in ngOnInit. */
+  /** Tears down project-lifecycle subscriptions and saves the active tab's composer state. */
   ngOnDestroy(): void {
+    this.saveOutgoingTabState(this.chat.activeTabId());
     if (this.unsubProjectReady) {
       this.unsubProjectReady();
       this.unsubProjectReady = null;
