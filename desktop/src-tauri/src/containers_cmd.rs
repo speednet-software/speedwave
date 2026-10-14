@@ -845,6 +845,50 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) -> bool {
     true
 }
 
+fn container_runs(rows: &[serde_json::Value], name: &str) -> bool {
+    rows.iter().any(|r| {
+        r.get("Name").and_then(|v| v.as_str()) == Some(name)
+            && r.get("State").and_then(|v| v.as_str()).map_or_else(
+                || {
+                    r.get("Status")
+                        .and_then(|v| v.as_str())
+                        .is_none_or(|s| s.starts_with("Up"))
+                },
+                |s| s == "running",
+            )
+    })
+}
+
+/// Under an MDM `llm_egress` policy no OAuth probe brings the containers back after a restart:
+/// starts them, rendered from the current policy, while Claude's container is down.
+pub(crate) fn start_policy_project_if_down(project: &str) -> bool {
+    if !llm_locked_by_policy() {
+        return false;
+    }
+    let rt = speedwave_runtime::runtime::detect_runtime();
+    if !rt.is_available() || !speedwave_runtime::runtime::project_has_compose_file(project) {
+        return false;
+    }
+    match rt.compose_ps(project) {
+        Ok(rows) if container_runs(&rows, &crate::chat::claude_container_name(project)) => {
+            return false
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log::debug!("compose_ps failed ({e}) — not starting '{project}'");
+            return false;
+        }
+    }
+    log::info!("project '{project}': Claude's container is down — starting it under the organisation's policy");
+    match setup_wizard::start_containers(project) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("failed to start containers for '{project}': {e:#}");
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -5237,6 +5281,36 @@ mod tests {
             fn_body.contains("tray::refresh_tray_menu"),
             "start_containers must call crate::tray::refresh_tray_menu so the \
              ADR-058 beta toggle appears after the wizard's final step"
+        );
+    }
+
+    #[test]
+    fn container_runs_needs_the_named_container_up() {
+        let rows = vec![
+            serde_json::json!({"Name": "speedwave_p_proxy", "State": "running"}),
+            serde_json::json!({"Name": "speedwave_p_claude", "State": "created"}),
+        ];
+        assert!(!container_runs(&rows, "speedwave_p_claude"));
+        assert!(container_runs(&rows, "speedwave_p_proxy"));
+        let ps = vec![serde_json::json!({"Name": "speedwave_p_claude", "Status": "Up 2 minutes"})];
+        assert!(container_runs(&ps, "speedwave_p_claude"));
+        assert!(!container_runs(&[], "speedwave_p_claude"));
+    }
+
+    #[test]
+    fn a_policy_project_is_started_before_its_chat() {
+        let source = include_str!("chat_session_cmd.rs");
+        let start = source
+            .find("fn start_session_inner(")
+            .expect("start_session_inner must exist");
+        let body = &source[start..];
+        let lock = body
+            .find("acquiring compose lock")
+            .expect("start_session_inner must take the compose lock");
+        assert!(
+            body[..lock].contains("start_policy_project_if_down(project)"),
+            "under an llm_egress policy the chat must start a project whose Claude container is \
+             down, outside the compose lock, before the session starts"
         );
     }
 

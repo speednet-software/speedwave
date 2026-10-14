@@ -43,8 +43,9 @@ fn start_session_inner(
 
     containers_cmd::ensure_images_ready().map_err(kept_session_error)?;
 
-    let recreated =
-        oauth_just_started && containers_cmd::recreate_project_containers_if_running(project);
+    let recreated = (oauth_just_started
+        && containers_cmd::recreate_project_containers_if_running(project))
+        || containers_cmd::start_policy_project_if_down(project);
 
     log::info!("acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
