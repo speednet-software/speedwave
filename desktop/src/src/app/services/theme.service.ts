@@ -23,6 +23,9 @@ export type ThemeMode = 'light' | 'dark' | 'auto';
 /** Display order for the MODE picker in Appearance. */
 export const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'auto'] as const;
 
+/** First-run mode; the anti-FOUC script in index.html mirrors it (pinned by a unit test). */
+export const DEFAULT_THEME_MODE: ThemeMode = 'auto';
+
 /** localStorage key for the accent theme. Exported so tests assert the real key (no drift). */
 export const THEME_STORAGE_KEY = 'speedwave-theme';
 /** localStorage key for the appearance mode. Exported so tests assert the real key (no drift). */
@@ -115,7 +118,7 @@ export class ThemeService implements OnDestroy {
     readStoredChoice(THEME_STORAGE_KEY, THEME_IDS, 'ember')
   );
   private readonly modeSignal = signal<ThemeMode>(
-    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, 'dark')
+    readStoredChoice(MODE_STORAGE_KEY, THEME_MODES, DEFAULT_THEME_MODE)
   );
 
   /** Read-only signal of the current accent theme id. */
