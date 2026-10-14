@@ -28,32 +28,32 @@ fetch_base_file() {
     git show "${AUDIT_BASE_SHA}:${ref_path}" >"$out"
 }
 
+NPM_TARGETS=(npm-root npm-mcp npm-playwright npm-desktop npm-e2e)
+CARGO_TARGETS=(cargo-root cargo-desktop)
+NPM_DIRS=("." mcp-servers mcp-servers/playwright desktop/src desktop/e2e)
+
 BASE_ROOT="$WORKDIR/base"
 fetch_base_file "Cargo.lock" "$BASE_ROOT/Cargo.lock"
 fetch_base_file "desktop/src-tauri/Cargo.lock" "$BASE_ROOT/desktop/src-tauri/Cargo.lock"
-fetch_base_file "mcp-servers/package.json" "$BASE_ROOT/mcp-servers/package.json"
-fetch_base_file "mcp-servers/package-lock.json" "$BASE_ROOT/mcp-servers/package-lock.json"
-fetch_base_file "desktop/src/package.json" "$BASE_ROOT/desktop/src/package.json"
-fetch_base_file "desktop/src/package-lock.json" "$BASE_ROOT/desktop/src/package-lock.json"
+for dir in "${NPM_DIRS[@]}"; do
+    fetch_base_file "${dir#./}/package.json" "$BASE_ROOT/${dir#./}/package.json"
+    fetch_base_file "${dir#./}/package-lock.json" "$BASE_ROOT/${dir#./}/package-lock.json"
+done
 
-"$AUDIT_RUN" cargo-root "$WORKDIR/base-cargo-root.json" "$BASE_ROOT"
-"$AUDIT_RUN" cargo-desktop "$WORKDIR/base-cargo-desktop.json" "$BASE_ROOT"
-"$AUDIT_RUN" npm-mcp "$WORKDIR/base-npm-mcp.json" "$BASE_ROOT"
-"$AUDIT_RUN" npm-desktop "$WORKDIR/base-npm-desktop.json" "$BASE_ROOT"
+GATE_ARGS=()
+for target in "${CARGO_TARGETS[@]}" "${NPM_TARGETS[@]}"; do
+    "$AUDIT_RUN" "$target" "$WORKDIR/base-$target.json" "$BASE_ROOT"
+    "$AUDIT_RUN" "$target" "$WORKDIR/head-$target.json"
+done
 
-"$AUDIT_RUN" cargo-root "$WORKDIR/head-cargo-root.json"
-"$AUDIT_RUN" cargo-desktop "$WORKDIR/head-cargo-desktop.json"
-"$AUDIT_RUN" npm-mcp "$WORKDIR/head-npm-mcp.json"
-"$AUDIT_RUN" npm-desktop "$WORKDIR/head-npm-desktop.json"
+for target in "${CARGO_TARGETS[@]}"; do
+    GATE_ARGS+=(--base "cargo:$WORKDIR/base-$target.json" --head "cargo:$WORKDIR/head-$target.json")
+done
+for target in "${NPM_TARGETS[@]}"; do
+    GATE_ARGS+=(--base "npm:$WORKDIR/base-$target.json" --head "npm:$WORKDIR/head-$target.json")
+done
 
 python3 "$GATE" diff \
     --exceptions "$EXCEPTIONS" \
     --npm-min-severity "$NPM_AUDIT_LEVEL" \
-    --base "cargo:$WORKDIR/base-cargo-root.json" \
-    --base "cargo:$WORKDIR/base-cargo-desktop.json" \
-    --base "npm:$WORKDIR/base-npm-mcp.json" \
-    --base "npm:$WORKDIR/base-npm-desktop.json" \
-    --head "cargo:$WORKDIR/head-cargo-root.json" \
-    --head "cargo:$WORKDIR/head-cargo-desktop.json" \
-    --head "npm:$WORKDIR/head-npm-mcp.json" \
-    --head "npm:$WORKDIR/head-npm-desktop.json"
+    "${GATE_ARGS[@]}"

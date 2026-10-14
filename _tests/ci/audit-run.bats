@@ -7,11 +7,14 @@ setup() {
   FAKE_BIN="$BATS_TEST_TMPDIR/fakebin"
   mkdir -p "$FAKE_BIN"
   ROOT="$BATS_TEST_TMPDIR/root"
-  mkdir -p "$ROOT/desktop/src-tauri" "$ROOT/mcp-servers" "$ROOT/desktop/src"
+  mkdir -p "$ROOT/desktop/src-tauri" "$ROOT/mcp-servers" "$ROOT/desktop/src" "$ROOT/desktop/e2e" "$ROOT/mcp-servers/playwright"
   : >"$ROOT/Cargo.lock"
   : >"$ROOT/desktop/src-tauri/Cargo.lock"
   : >"$ROOT/mcp-servers/package-lock.json"
   : >"$ROOT/desktop/src/package-lock.json"
+  : >"$ROOT/package-lock.json"
+  : >"$ROOT/desktop/e2e/package-lock.json"
+  : >"$ROOT/mcp-servers/playwright/package-lock.json"
 }
 
 _stub_cargo_ok() {
@@ -34,6 +37,17 @@ EOF
 _stub_npm_ok() {
   cat >"$FAKE_BIN/npm" <<'EOF'
 #!/usr/bin/env bash
+echo '{"vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}'
+EOF
+  chmod +x "$FAKE_BIN/npm"
+}
+
+_stub_npm_recording() {
+  NPM_LOG="$BATS_TEST_TMPDIR/npm.log"
+  : >"$NPM_LOG"
+  cat >"$FAKE_BIN/npm" <<EOF
+#!/usr/bin/env bash
+echo "\$PWD \$*" >>"$NPM_LOG"
 echo '{"vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}'
 EOF
   chmod +x "$FAKE_BIN/npm"
@@ -95,4 +109,43 @@ EOF
   PATH="$FAKE_BIN:$PATH" run "$SCRIPT" npm-mcp "$out"
   [ "$status" -eq 0 ]
   grep -q '"vulnerabilities"' "$out"
+}
+
+@test "npm-root: audits the repository root lockfile directory" {
+  _stub_npm_recording
+  PATH="$FAKE_BIN:$PATH" run "$SCRIPT" npm-root "$BATS_TEST_TMPDIR/out.json" "$ROOT"
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$NPM_LOG")" = "$ROOT" ]
+}
+
+@test "npm-e2e: audits desktop/e2e" {
+  _stub_npm_recording
+  PATH="$FAKE_BIN:$PATH" run "$SCRIPT" npm-e2e "$BATS_TEST_TMPDIR/out.json" "$ROOT"
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$NPM_LOG")" = "$ROOT/desktop/e2e" ]
+}
+
+@test "npm-playwright: audits mcp-servers/playwright" {
+  _stub_npm_recording
+  PATH="$FAKE_BIN:$PATH" run "$SCRIPT" npm-playwright "$BATS_TEST_TMPDIR/out.json" "$ROOT"
+  [ "$status" -eq 0 ]
+  [ "$(cut -d' ' -f1 "$NPM_LOG")" = "$ROOT/mcp-servers/playwright" ]
+}
+
+@test "every npm target audits devDependencies too, never passing --omit=dev" {
+  _stub_npm_recording
+  for target in npm-root npm-mcp npm-desktop npm-e2e npm-playwright; do
+    PATH="$FAKE_BIN:$PATH" run "$SCRIPT" "$target" "$BATS_TEST_TMPDIR/$target.json" "$ROOT"
+    [ "$status" -eq 0 ]
+  done
+  [ "$(wc -l <"$NPM_LOG")" -eq 5 ]
+  run grep -c -e '--omit' "$NPM_LOG"
+  [ "$output" = "0" ]
+}
+
+@test "npm targets keep the high threshold and lockfile-only mode" {
+  _stub_npm_recording
+  PATH="$FAKE_BIN:$PATH" run "$SCRIPT" npm-e2e "$BATS_TEST_TMPDIR/out.json" "$ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$NPM_LOG")" =~ "audit --audit-level=high --package-lock-only --json" ]]
 }
