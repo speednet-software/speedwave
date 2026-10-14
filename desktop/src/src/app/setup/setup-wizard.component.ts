@@ -328,10 +328,13 @@ export class SetupWizardComponent {
           await this.tauri.invoke('build_images');
           this.setStep(2, 'done');
           break;
-        case 4:
-          await this.tauri.invoke('defer_container_start', { project: this.projectName() });
-          this.setStep(4, 'done', 'Deferred until a provider is chosen');
+        case 4: {
+          const started = await this.tauri.invoke<boolean>('defer_container_start', {
+            project: this.projectName(),
+          });
+          this.setStep(4, 'done', started ? 'Started' : 'Deferred until a provider is chosen');
           break;
+        }
         case 5:
           this.setStep(5, 'active', 'Linking CLI...');
           this.cdr.markForCheck();
@@ -356,7 +359,7 @@ export class SetupWizardComponent {
       case 2:
         return 'Building container images for enabled integrations (this may take a few minutes)...';
       case 4:
-        return 'Deferring container start...';
+        return 'Preparing containers...';
       case 5:
         return 'Finalizing setup...';
       default:

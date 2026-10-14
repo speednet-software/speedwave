@@ -101,6 +101,18 @@ describe('SetupWizardComponent', () => {
     expect(component.steps[4].detail).toBe('Deferred until a provider is chosen');
   });
 
+  it('starts the containers when the organisation policy already set the provider', async () => {
+    const base = mockTauri.invokeHandler;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) =>
+      cmd === 'defer_container_start' ? true : base(cmd, args);
+
+    await component.startSetup();
+    await component.onProjectCreated({ name: 'test-proj', dir: '/tmp/test' });
+
+    expect(component.steps[4].status).toBe('done');
+    expect(component.steps[4].detail).toBe('Started');
+  });
+
   it('should navigate with replaceUrl on completion', async () => {
     vi.useFakeTimers();
     const navigateSpy = vi.spyOn(router, 'navigate').mockResolvedValue(true);

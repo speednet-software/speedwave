@@ -727,10 +727,31 @@ pub async fn start_containers(
     Ok(())
 }
 
+/// Defers the container start while the project has no LLM provider; starts the containers once
+/// it has one (an MDM `llm_egress` policy sets it at the first setup). Returns whether they started.
 #[tauri::command]
-pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn defer_container_start(
+    project: String,
+    app: tauri::AppHandle,
+    mcp_os: tauri::State<'_, SharedMcpOs>,
+    ide_bridge: tauri::State<'_, SharedIdeBridge>,
+) -> Result<bool, String> {
+    let name = project.clone();
+    let unconfigured = tokio::task::spawn_blocking(move || {
+        check_project(&name)?;
+        project_llm_is_unconfigured(&name)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if !unconfigured {
+        log::info!(
+            "project '{project}' has an LLM provider — starting containers instead of deferring"
+        );
+        start_containers(project, app, mcp_os, ide_bridge).await?;
+        return Ok(true);
+    }
+
     tokio::task::spawn_blocking(move || {
-        check_project(&project)?;
         setup_wizard::defer_container_start(&project).map_err(|e| {
             log::error!("failed to defer container start: {e}");
             e.to_string()
@@ -740,7 +761,7 @@ pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Re
     .map_err(|e| e.to_string())??;
 
     crate::tray::refresh_tray_menu(&app);
-    Ok(())
+    Ok(false)
 }
 
 #[tauri::command]
@@ -5216,6 +5237,26 @@ mod tests {
             fn_body.contains("tray::refresh_tray_menu"),
             "start_containers must call crate::tray::refresh_tray_menu so the \
              ADR-058 beta toggle appears after the wizard's final step"
+        );
+    }
+
+    #[test]
+    fn defer_container_start_starts_containers_once_a_provider_is_set() {
+        let source = include_str!("containers_cmd.rs");
+        let fn_start = source
+            .find("pub async fn defer_container_start(")
+            .expect("defer_container_start function must exist");
+        let fn_body = &source[fn_start..];
+        let next_fn = fn_body[1..]
+            .find("\npub ")
+            .map(|i| i + 1)
+            .unwrap_or(fn_body.len());
+        let fn_body = &fn_body[..next_fn];
+        assert!(
+            fn_body.contains("project_llm_is_unconfigured(")
+                && fn_body.contains("start_containers(project, app, mcp_os, ide_bridge)"),
+            "the wizard's container step must start the containers when an MDM llm_egress \
+             policy already set the provider, instead of failing the first setup"
         );
     }
 
