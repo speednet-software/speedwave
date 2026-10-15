@@ -5,11 +5,11 @@
 
 ## Decision
 
-The repo-level `.cargo/config.toml` sets `GGML_NATIVE = "OFF"` under `[env]`. whisper-rs-sys forwards every `GGML_*` environment variable to CMake as a define[^1], so the pin reaches ggml without patching the crate. With `GGML_NATIVE` off, ggml enables SSE4.2, AVX, AVX2, BMI2, FMA and F16C and leaves AVX-512 off[^2]; MSVC gets `/arch:AVX2`[^3][^5]. On aarch64 macOS the build drops `-mcpu=native` and uses the compiler's default for the target[^3]; x86_64 macOS builds are cross-compiled and were never native.
+The repo-level `.cargo/config.toml` sets `GGML_NATIVE = { value = "OFF", force = true }` under `[env]`; `force` makes the value win over a `GGML_NATIVE` already exported by a shell or CI step[^8]. whisper-rs-sys forwards every `GGML_*` environment variable to CMake as a define[^1], so the pin reaches ggml without patching the crate. With `GGML_NATIVE` off, ggml enables SSE4.2, AVX, AVX2, BMI2, FMA and F16C and leaves AVX-512 off[^2]; MSVC gets `/arch:AVX2`[^3][^5]. On aarch64 macOS the build drops `-mcpu=native` and uses the compiler's default for the target[^3]; x86_64 macOS builds are cross-compiled and were never native.
 
-`crates/speedwave-runtime/tests/cargo_env_ggml_portable_guard.rs` checks that the pin is present, that no `GGML_AVX512*` is set, and that `GGML_NATIVE=OFF` reaches processes cargo starts.
+`crates/speedwave-runtime/tests/cargo_env_ggml_portable_guard.rs` checks that the forced pin is present, that `.cargo/config.toml` sets no `GGML_AVX512*`, that no file under `.github/workflows` or `.github/actions` sets any `GGML_*` variable, that `GGML_NATIVE=OFF` reaches processes cargo starts, that both desktop-bundle cache keys hash `.cargo/config.toml`, and that both lockfiles carry the whisper-rs-sys version whose `GGML_*` forwarding was checked (0.15.0)[^1].
 
-The desktop bundle's Rust cache key (`rust-cache-shared-key` in `lane-build.yml` and `build-publish.yml`) is renamed whenever a `GGML_*` flag changes. whisper-rs-sys declares no `rerun-if-env-changed` for `GGML_*`, so cargo does not rerun its build script when the flag changes[^1][^6]. swatinem/rust-cache drops the `key` input when `shared-key` is set and keeps the `.cargo/config.toml` hash out of its restore key[^7], so a cache written before the change would restore the old ggml objects through the restore-key prefix match.
+The desktop bundle's Rust cache key (`rust-cache-shared-key` in `lane-build.yml` and `build-publish.yml`) is `desktop-bundle-${{ hashFiles('.cargo/config.toml') }}`, so any change to a `GGML_*` pin gives a new key and a new restore prefix. whisper-rs-sys declares no `rerun-if-env-changed` for `GGML_*`, so cargo does not rerun its build script when the flag changes[^1][^6]. swatinem/rust-cache drops the `key` input when `shared-key` is set and keeps the `.cargo/config.toml` hash out of its restore key[^7], so with a fixed shared key a cache written before the change would restore the old ggml objects through the restore-key prefix match. `.gitattributes` checks the file out with LF on every runner, so the hash is the same for the lane and the release build of one tree.
 
 ## Why
 
@@ -20,7 +20,9 @@ The desktop bundle's Rust cache key (`rust-cache-shared-key` in `lane-build.yml`
 ## Known limitations
 
 - Hosts with AVX-512 run the AVX2 kernels; ggml has no runtime dispatch in this build.
-- `GGML_NATIVE` is not forced: a `GGML_NATIVE` exported in the build environment overrides the config value[^8]. The guard test catches this for `cargo test` runs only.
+- A `GGML_AVX512*` or other `GGML_*` variable exported in a developer shell still reaches CMake; the guard test covers only `.cargo/config.toml` and the files under `.github`.
+- Any edit to `.cargo/config.toml`, `SPEEDWAVE_DATA_DIR` included, starts the desktop bundle from an empty Rust cache.
+- A whisper-rs-sys bump fails the guard test until its `build.rs` is checked again and the audited version is moved.
 - A local target dir that already built whisper-rs-sys keeps the old objects until `cargo clean -p whisper-rs-sys`.
 
 [^1]: whisper-rs-sys 0.15.0 `build.rs`: `.define("BUILD_SHARED_LIBS", "OFF")`, the loop forwarding `WHISPER_*`, `GGML_*` and `CMAKE_*` env vars to CMake, and the `rerun-if-env-changed` lines (none for `GGML_*`): <https://docs.rs/crate/whisper-rs-sys/0.15.0/source/build.rs>.

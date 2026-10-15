@@ -52,7 +52,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             desktop/src-tauri -> target
-          rust-cache-shared-key: desktop-bundle-ggml-portable
+          rust-cache-shared-key: desktop-bundle-${{ hashFiles('.cargo/config.toml') }}
           rust-cache-directories: ${{ matrix.platform == 'windows-latest' && 'D:\st' || '' }}
 
       - name: Install frontend dependencies
