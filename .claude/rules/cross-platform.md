@@ -72,7 +72,7 @@ Every change must work on **both** platforms. `make check` compiles the host tar
 - MSVC linker resolution on Git Bash:
   - MSVC `link.exe` must win over Git's `/usr/bin/link` on `PATH` (symptoms: `link: extra operand`, `LNK1146`-class failures).
   - Sole mechanism: `PATH` prepend in generated `~/msvc-env.sh`.
-  - No `[target.x86_64-pc-windows-msvc] linker` pin in committed `<repo>/.cargo/config.toml` (repo policy, guards `SPEEDWAVE_DATA_DIR`).
+  - No `[target.x86_64-pc-windows-msvc] linker` pin in committed `<repo>/.cargo/config.toml` (repo policy, guards `SPEEDWAVE_DATA_DIR` and `GGML_NATIVE`).
 - Windows MSVC links the dynamic CRT (`/MD`) everywhere — never set `-C target-feature=+crt-static` or `CMAKE_MSVC_RUNTIME_LIBRARY`. Any new native prebuilt dependency must ship an MD/dynamic-CRT variant; an `/MT` static-lib in the link is a hard LNK2038 failure, invisible from a macOS host until Windows CI runs (it kept the Windows CI matrix failing; sherpa-onnx removal, ADR-075, eliminated the last CRT workaround).
 - Desktop UI runs on two engines: WebView2 (Chromium — strict CSP; `blob:`/`data:` images need explicit `img-src`) vs WKWebView (lenient CSP, own SVG/CSS quirks). A feature verified on macOS is not verified on Windows.
 - nerdctl versions move in lockstep (macOS via `.lima-version`, Windows via `consts::NERDCTL_FULL_VERSION`) — but they are NOT string-equal (e.g. Lima 2.1.2 ships nerdctl 2.2.2); alignment is via the known lima→nerdctl table in `consts.rs`, test-guarded. The SHA256 values stay manual.

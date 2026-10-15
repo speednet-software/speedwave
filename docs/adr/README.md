@@ -98,6 +98,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-090](ADR-090-tab-keyed-chat-sessions.md)                          | Tab-keyed chat session registry replacing the single-session singleton                                                      | Accepted                                                                           |
 | [ADR-091](ADR-091-tab-aware-claude-memory-ceiling.md)                  | Tab-aware Claude memory ceiling: a formula over tab capacity and VM size                                                    | Accepted                                                                           |
 | [ADR-092](ADR-092-per-tab-model-selection.md)                          | Per-tab model selection with a settings.json-backed project default                                                         | Accepted                                                                           |
+| [ADR-093](ADR-093-portable-ggml-cpu-baseline.md)                       | Portable ggml CPU baseline for whisper builds: `GGML_NATIVE` off, no build-host instruction sets                            | Accepted                                                                           |
 
 ## Creating a New ADR
 
