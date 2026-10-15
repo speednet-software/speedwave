@@ -117,7 +117,7 @@ jobs:
           rust-cache-workspaces: |
             . -> target
             desktop/src-tauri -> target
-          rust-cache-shared-key: desktop-bundle
+          rust-cache-shared-key: desktop-bundle-ggml-portable
           rust-cache-directories: ${{ matrix.platform == 'windows-latest' && 'D:\st' || '' }}
 
       - name: Install frontend dependencies
