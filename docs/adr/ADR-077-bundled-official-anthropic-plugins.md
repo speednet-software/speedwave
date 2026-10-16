@@ -14,7 +14,7 @@
 
 Claude Code supports a plugin system whose components (skills, commands, agents, hooks, LSP servers) install from marketplaces.[^1] Anthropic publishes a first-party marketplace, `claude-plugins-official`, from which plugins install via `claude plugin install <name>@<marketplace>`.[^2] We want a curated set of these official plugins available and enabled by default the moment a user launches Speedwave, while leaving the user free to disable any (or add their own).
 
-The Speedwave claude container is hardened (read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, UID 1000) but **has outbound internet egress by design** — only the `office` worker runs on an egress-less `internal: true` network (ADR-055). Verified live: `curl https://github.com` returns 200 from inside the container. The `~/.claude` home is a per-project host bind mount, so plugin installs and enable/disable state persist across restarts.
+The Speedwave claude container is hardened (read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, UID 1000) but **has outbound internet egress by design** — only the `office` worker runs on an egress-less network (ADR-055). Verified live: `curl https://github.com` returns 200 from inside the container. The `~/.claude` home is a per-project host bind mount, so plugin installs and enable/disable state persist across restarts.
 
 ## Decision
 

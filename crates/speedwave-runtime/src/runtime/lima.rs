@@ -127,11 +127,26 @@ impl LimaRuntime {
         }
     }
 
-    fn require_running(&self) -> anyhow::Result<()> {
-        if self.is_available() {
-            Ok(())
+    fn network_command(&self, args: &[&str]) -> anyhow::Result<String> {
+        let mut argv = vec!["shell", consts::lima_vm_name(), "--", "sudo", "nerdctl"];
+        argv.extend_from_slice(args);
+        let run = || {
+            self.runner
+                .run_bounded("limactl", &argv, consts::CONTAINER_EXEC_PROBE_TIMEOUT)
+        };
+        if network_command_is_retryable(args) {
+            retry_on_eof("nerdctl network", run)
         } else {
-            anyhow::bail!("Lima VM '{}' is not running.", consts::lima_vm_name())
+            run()
+        }
+    }
+
+    fn require_running(&self) -> anyhow::Result<()> {
+        let vm = consts::lima_vm_name();
+        match self.read_vm_status() {
+            Ok(status) if status.trim() == "Running" => Ok(()),
+            Ok(_) => anyhow::bail!("Lima VM '{vm}' is not running."),
+            Err(e) => Err(unreadable_vm_status(vm, &e)),
         }
     }
 
@@ -284,6 +299,12 @@ fn retry_on_eof_with_delays<T>(
             Err(e) => return Err(e),
         }
     }
+}
+
+/// `true` for the network subcommands a transient EOF may repeat: the reads, and `rm`, whose
+/// repeat after a removal that landed answers not-found, which `remove_network_with` accepts.
+fn network_command_is_retryable(args: &[&str]) -> bool {
+    matches!(args, ["network", "inspect" | "ls" | "rm", ..])
 }
 
 /// Lima-flavoured `compose down + cleanup` with `retry_on_eof` on each step.
@@ -675,6 +696,23 @@ impl ContainerRuntime for LimaRuntime {
         self.require_running()?;
         let compose_file = self.compose_file_path(project)?;
         self.up_with_heal(project, &compose_file, super::UpMode::Service(service))
+    }
+
+    fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()> {
+        self.require_running()?;
+        super::networks::ensure_internal_network_with(name, project, &|args| {
+            self.network_command(args)
+        })
+    }
+
+    fn remove_network(&self, name: &str) -> anyhow::Result<()> {
+        self.require_running()?;
+        super::networks::remove_network_with(name, &|args| self.network_command(args))
+    }
+
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool> {
+        self.require_running()?;
+        super::networks::network_exists_with(name, &|args| self.network_command(args))
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -2376,15 +2414,17 @@ mod tests {
 
     #[test]
     fn test_container_exec_piped_fails_when_limactl_missing() {
-        let runner = MockRunner::new().with_error("limactl --version", "command not found");
+        let runner = MockRunner::new().with_error(&vm_status_key(), "command not found");
         let rt = LimaRuntime::with_runner(Box::new(runner));
         let err = rt
             .container_exec_piped("test_container", &["claude", "-p"])
             .unwrap_err();
         assert!(
-            err.to_string().contains("not running"),
-            "should report VM not running when limactl missing, got: {err}"
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a limactl that cannot run must not read as a stopped VM, got: {err}"
         );
+        assert!(err.to_string().contains("command not found"), "{err}");
     }
 
     #[test]
@@ -2408,13 +2448,43 @@ mod tests {
 
     #[test]
     fn test_require_running_fails_when_limactl_missing() {
-        let runner = MockRunner::new().with_error("limactl --version", "command not found");
+        let runner = MockRunner::new().with_error(&vm_status_key(), "command not found");
         let rt = LimaRuntime::with_runner(Box::new(runner));
         let err = rt.compose_down("testproject").unwrap_err();
         assert!(
-            err.to_string().contains("not running"),
-            "should report VM not running when limactl missing, got: {err}"
+            err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                .is_some(),
+            "a limactl that cannot run must not read as a stopped VM, got: {err}"
         );
+        assert!(!err.to_string().contains("is not running"), "{err}");
+    }
+
+    #[test]
+    fn test_require_running_reports_a_deleted_vm_as_not_running() {
+        let runner = MockRunner::new()
+            .with_error(&vm_status_key(), "level=fatal msg=\"unmatched instances\"");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt.compose_ps("testproject").unwrap_err();
+        assert!(err.to_string().contains("is not running"), "{err}");
+        assert!(err
+            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
+            .is_none());
+    }
+
+    #[test]
+    fn test_require_running_never_spawns_limactl_version() {
+        let runner = MockRunner::new()
+            .with_error("limactl --version", "must not be called")
+            .with_response(&vm_status_key(), "Running")
+            .with_response(
+                &format!(
+                    "limactl shell {} -- sudo nerdctl network rm n",
+                    consts::lima_vm_name()
+                ),
+                "n",
+            );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        rt.remove_network("n").unwrap();
     }
 
     #[test]
@@ -3726,5 +3796,213 @@ mod tests {
             msg.contains("limactl stop --force"),
             "error message must include the recovery hint, got: {msg}"
         );
+    }
+
+    fn network_script(
+        answers: &[Result<&str, &str>],
+    ) -> (LimaRuntime, crate::runtime::networks::tests::ScriptedCalls) {
+        let (runner, calls) =
+            crate::runtime::networks::tests::ScriptedRunner::new(answers, |key| {
+                key.contains("list --format").then(|| "Running".to_string())
+            });
+        (LimaRuntime::with_runner(Box::new(runner)), calls)
+    }
+
+    #[test]
+    fn a_network_command_on_an_unreadable_vm_status_is_retryable_never_a_stopped_vm() {
+        let runner = MockRunner::new().with_error(
+            &vm_status_key(),
+            "limactl failed: open lima/speedwave/ha.pid: resource temporarily unavailable",
+        );
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let errors = [
+            rt.ensure_internal_network("speedwave_acme_network_office", "acme")
+                .unwrap_err(),
+            rt.network_exists("acme_speedwave_acme_network_office")
+                .unwrap_err(),
+            rt.remove_network("speedwave_acme_network_office")
+                .unwrap_err(),
+        ];
+        for err in errors {
+            assert!(
+                err.downcast_ref::<crate::runtime::VmStatusUnreadable>()
+                    .is_some(),
+                "{err}"
+            );
+            assert!(!err.to_string().contains("is not running"), "{err}");
+            assert!(
+                err.to_string().contains("resource temporarily unavailable"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_network_command_on_a_stopped_vm_reports_it_not_running() {
+        let runner = MockRunner::new().with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let err = rt
+            .remove_network("speedwave_acme_network_office")
+            .unwrap_err();
+        assert!(err.to_string().contains("is not running"), "{err}");
+        assert!(err
+            .downcast_ref::<crate::runtime::VmStatusUnreadable>()
+            .is_none());
+    }
+
+    #[test]
+    fn ensure_internal_network_creates_it_through_sudo_nerdctl_bounded() {
+        use crate::runtime::networks::tests::{INTERNAL_INSPECT, NOT_FOUND};
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Ok(name), Ok(INTERNAL_INSPECT)]);
+        rt.ensure_internal_network(name, "acme").unwrap();
+        let vm = consts::lima_vm_name();
+        let calls = calls.lock().unwrap();
+        let keys: Vec<&str> = calls.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                format!("limactl shell {vm} -- sudo nerdctl network inspect --mode=native {name}"),
+                format!(
+                    "limactl shell {vm} -- sudo nerdctl network create --internal \
+                     --label com.docker.compose.project=acme \
+                     --label com.docker.compose.network={name} {name}"
+                ),
+                format!("limactl shell {vm} -- sudo nerdctl network inspect --mode=native {name}"),
+            ]
+        );
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn ensure_internal_network_fails_when_the_vm_is_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt
+            .ensure_internal_network("speedwave_acme_network_office", "acme")
+            .is_err());
+    }
+
+    #[test]
+    fn network_exists_inspects_through_sudo_nerdctl_bounded() {
+        use crate::runtime::networks::tests::{BRIDGED_INSPECT, NOT_FOUND};
+        let name = "acme_speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(BRIDGED_INSPECT), Err(NOT_FOUND)]);
+        assert!(rt.network_exists(name).unwrap());
+        assert!(!rt.network_exists(name).unwrap());
+        let calls = calls.lock().unwrap();
+        let inspect = format!(
+            "limactl shell {} -- sudo nerdctl network inspect --mode=native {name}",
+            consts::lima_vm_name()
+        );
+        assert_eq!(
+            calls.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            vec![inspect.clone(), inspect]
+        );
+        assert!(calls
+            .iter()
+            .all(|(_, t)| *t == consts::CONTAINER_EXEC_PROBE_TIMEOUT));
+    }
+
+    #[test]
+    fn network_exists_fails_when_the_vm_is_stopped() {
+        let runner = MockRunner::new()
+            .with_response("limactl --version", "limactl version 1.0.0")
+            .with_response(&vm_status_key(), "Stopped");
+        let rt = LimaRuntime::with_runner(Box::new(runner));
+        assert!(rt
+            .network_exists("acme_speedwave_acme_network_office")
+            .is_err());
+    }
+
+    #[test]
+    fn remove_network_runs_sudo_nerdctl_network_rm() {
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Ok(name)]);
+        rt.remove_network(name).unwrap();
+        assert_eq!(
+            calls.lock().unwrap()[0].0,
+            format!(
+                "limactl shell {} -- sudo nerdctl network rm {name}",
+                consts::lima_vm_name()
+            )
+        );
+    }
+
+    const NETWORK_EOF: &str = "time=\"2026-10-12T10:00:00Z\" level=fatal msg=EOF";
+
+    #[test]
+    fn network_command_retries_only_reads_and_rm() {
+        for args in [
+            &["network", "inspect", "--mode=native", "n"][..],
+            &["network", "ls"][..],
+            &["network", "rm", "n"][..],
+        ] {
+            assert!(network_command_is_retryable(args), "{args:?}");
+        }
+        for args in [
+            &["network", "create", "--internal", "n"][..],
+            &["network"][..],
+            &[][..],
+            &["inspect", "n"][..],
+        ] {
+            assert!(!network_command_is_retryable(args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_create_cut_by_eof_is_never_repeated_and_stands_once_inspected_isolated() {
+        use crate::runtime::networks::tests::{INTERNAL_INSPECT, NOT_FOUND};
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Err(NETWORK_EOF), Ok(INTERNAL_INSPECT)]);
+        rt.ensure_internal_network(name, "acme").unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(k, _)| k.contains("network create"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_create_cut_by_eof_without_the_network_fails_without_a_second_create() {
+        use crate::runtime::networks::tests::NOT_FOUND;
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NOT_FOUND), Err(NETWORK_EOF), Err(NOT_FOUND)]);
+        let err = rt.ensure_internal_network(name, "acme").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("failed to create egress-less network"),
+            "{err:#}"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_inspect_cut_by_eof_is_retried() {
+        use crate::runtime::networks::tests::BRIDGED_INSPECT;
+        let name = "acme_speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NETWORK_EOF), Ok(BRIDGED_INSPECT)]);
+        assert!(rt.network_exists(name).unwrap());
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_rm_retried_after_eof_accepts_the_network_already_gone() {
+        use crate::runtime::networks::tests::NOT_FOUND;
+        let name = "speedwave_acme_network_office";
+        let (rt, calls) = network_script(&[Err(NETWORK_EOF), Err(NOT_FOUND)]);
+        rt.remove_network(name).unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|(k, _)| k.ends_with(&format!("network rm {name}"))));
     }
 }

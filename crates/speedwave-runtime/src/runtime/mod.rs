@@ -12,6 +12,7 @@ pub(crate) mod lima;
 pub mod locked;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_runtime;
+pub(crate) mod networks;
 pub(crate) mod wsl;
 
 pub use locked::LockedRuntime;
@@ -98,6 +99,17 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// Recreates ONE compose service (`--force-recreate`, no orphan removal),
     /// e.g. restart `proxy` mid-session (ADR-073). `service` must be built-in; impls validate.
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()>;
+
+    /// Makes `name` exist as an isolated network of `project`, created with `--internal` and
+    /// verified by a live inspect; recreates one that has egress. Every impl MUST do all three.
+    fn ensure_internal_network(&self, name: &str, project: &str) -> anyhow::Result<()>;
+
+    /// Removes the network `name`; a network that does not exist is not an error.
+    fn remove_network(&self, name: &str) -> anyhow::Result<()>;
+
+    /// `Ok(true)` if the network `name` exists; `Ok(false)` only when the engine answers that it
+    /// does not, while an engine that cannot answer is `Err`.
+    fn network_exists(&self, name: &str) -> anyhow::Result<bool>;
 
     /// Validates compose.yml as the engine sees it. Every impl MUST run the engine's
     /// `compose config` so a silent no-op cannot mask a torn/invalid file.
@@ -757,6 +769,22 @@ impl std::fmt::Display for EngineTearingDown {
 }
 
 impl std::error::Error for EngineTearingDown {}
+
+/// A single-service up met a network an earlier release created with egress; only a full start
+/// moves every container off it, so the running stack is left as it is.
+#[derive(Debug)]
+pub(crate) struct NetworkMigrationPending;
+
+impl std::fmt::Display for NetworkMigrationPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The project network is being migrated to an isolated network; restart the project \
+             to finish it.",
+        )
+    }
+}
+
+impl std::error::Error for NetworkMigrationPending {}
 
 /// POSIX-shell-quotes each arg (via `shlex::try_quote`) and joins with spaces —
 /// for transports re-evaluating the line through a remote shell (`ssh`, `wsl.exe`).
@@ -4990,6 +5018,15 @@ impl ContainerRuntime for NoopRuntime {
     }
     fn compose_up_service(&self, _: &str, _: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn ensure_internal_network(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn remove_network(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn network_exists(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(false)
     }
     fn compose_validate(&self, _: &str) -> anyhow::Result<()> {
         Ok(())
