@@ -1,4 +1,4 @@
-import { Directive, ElementRef, HostListener, inject, input, output, signal } from '@angular/core';
+import { Directive, HostListener, input, output, signal } from '@angular/core';
 
 /** Drop-target. `dragDepth` counter fixes the child-boundary flicker. */
 @Directive({
@@ -8,10 +8,11 @@ import { Directive, ElementRef, HostListener, inject, input, output, signal } fr
 export class FileDropDirective {
   readonly disabled = input<boolean>(false);
   readonly filesDropped = output<File[]>();
+  /** Names of dropped directories, which the composer cannot attach. */
+  readonly foldersDropped = output<string[]>();
   readonly isDragging = signal<boolean>(false);
 
   private dragDepth = 0;
-  private readonly host = inject(ElementRef<HTMLElement>);
 
   /**
    * Starts a drag session; increments `dragDepth` so child boundaries don't flicker.
@@ -55,7 +56,7 @@ export class FileDropDirective {
   }
 
   /**
-   * Emits `filesDropped` with the dropped File list.
+   * Emits `filesDropped` with the dropped files and `foldersDropped` with the dropped directories.
    * @param event - Native drop event.
    */
   @HostListener('drop', ['$event'])
@@ -64,9 +65,12 @@ export class FileDropDirective {
     event.preventDefault();
     this.dragDepth = 0;
     this.isDragging.set(false);
-    const files = Array.from(event.dataTransfer?.files ?? []);
+    const { files, folders } = partitionDrop(event.dataTransfer);
     if (files.length > 0) {
       this.filesDropped.emit(files);
+    }
+    if (folders.length > 0) {
+      this.foldersDropped.emit(folders);
     }
   }
 }
@@ -78,4 +82,25 @@ function hasFiles(event: DragEvent): boolean {
     if (types[i] === 'Files') return true;
   }
   return false;
+}
+
+function partitionDrop(dataTransfer: DataTransfer | null): { files: File[]; folders: string[] } {
+  const files: File[] = [];
+  const folders: string[] = [];
+  const items = dataTransfer?.items;
+  if (!items) {
+    return { files: Array.from(dataTransfer?.files ?? []), folders };
+  }
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== 'file') continue;
+    const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+    const file = item.getAsFile();
+    if (entry?.isDirectory) {
+      folders.push(entry.name || file?.name || 'folder');
+      continue;
+    }
+    if (file) files.push(file);
+  }
+  return { files, folders };
 }

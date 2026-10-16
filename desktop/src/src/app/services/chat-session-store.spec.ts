@@ -243,8 +243,10 @@ describe('ChatSessionStore', () => {
     it('revokes a staged attachment preview URL (SPEED-785)', async () => {
       await store.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
+        'image',
         async () => ({
           attachment: {
+            kind: 'image',
             filename: 'a.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/a.png',
@@ -755,6 +757,40 @@ describe('ChatSessionStore', () => {
       });
     });
 
+    it('inlines file attachments as @/workspace/... and shows a file pill in the bubble (ADR-094)', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      await store.sendMessage({
+        text: 'Summarize this',
+        attachments: [
+          {
+            kind: 'file',
+            filename: 'raport końcowy.xlsx',
+            mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            sizeBytes: 734_003_200,
+            containerPath: '/workspace/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
+            hostPath: '/Users/x/proj/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
+          },
+        ],
+      });
+
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [
+          {
+            type: 'text',
+            text: 'Summarize this\n\n@/workspace/.speedwave/pastes/paste-1-0001-raport_końcowy.xlsx',
+          },
+        ],
+        displayText: 'Summarize this',
+        tabId: store.tabId,
+      });
+      expect(store.messages[0].blocks).toEqual([
+        { type: 'text', content: 'Summarize this' },
+        { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
+    });
+
     it('inlines image attachments as @/workspace/... in the wire text (ADR-065)', async () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockResolvedValue(undefined);
@@ -763,6 +799,7 @@ describe('ChatSessionStore', () => {
         text: 'Co tu widać?',
         attachments: [
           {
+            kind: 'image',
             filename: 'paste-1.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/paste-1.png',
@@ -795,6 +832,7 @@ describe('ChatSessionStore', () => {
         text: '',
         attachments: [
           {
+            kind: 'image',
             filename: 'paste-2.jpg',
             mediaType: 'image/jpeg',
             containerPath: '/workspace/.speedwave/pastes/paste-2.jpg',
@@ -5733,6 +5771,24 @@ describe('ChatSessionStore', () => {
         answer: 'A, B',
         tabId: store.tabId,
       });
+    });
+  });
+
+  describe('file block persistence round-trip (ADR-094)', () => {
+    it('messageBlocksToState keeps a file pill so a kept conversation view restores it', () => {
+      const state = messageBlocksToState([
+        { type: 'text', content: 'see attached' },
+        { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
+
+      expect(state).toEqual([
+        { kind: 'text', content: 'see attached' },
+        { kind: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
+      expect(stateBlocksToMessageBlocks(state)).toEqual([
+        { type: 'text', content: 'see attached' },
+        { type: 'file', filename: 'raport końcowy.xlsx', size_bytes: 734_003_200 },
+      ]);
     });
   });
 

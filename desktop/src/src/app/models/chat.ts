@@ -171,7 +171,8 @@ export type MessageBlock =
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
   | { type: 'chip'; command: string; argument: string }
-  | { type: 'image'; media_type: string; alt?: string };
+  | { type: 'image'; media_type: string; alt?: string }
+  | { type: 'file'; filename: string; size_bytes: number };
 
 /**
  * State for an interactive AskUserQuestion block: up to 4 questions; renderer shows only
@@ -305,15 +306,34 @@ export interface WireTextBlock {
 /** One content block crossing the wire to Claude. */
 export type WireContentBlock = WireTextBlock;
 
-/** Image attachment persisted to `<project>/.speedwave/pastes/`. */
-export interface ChatAttachment {
+/** MIME of an image the composer resamples before saving (ADR-065). */
+export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+
+/** Image attachment persisted to `<project>/.speedwave/pastes/` after resampling. */
+export interface ImageAttachment {
+  kind: 'image';
   filename: string;
-  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  mediaType: ImageMediaType;
   containerPath: string;
   hostPath: string;
 }
 
-/** Composer-collected user input bundled with image attachments. */
+/** Any other file, streamed to `<project>/.speedwave/pastes/` in chunks (ADR-094). */
+export interface FileAttachment {
+  kind: 'file';
+  /** Original name as the user attached it; the on-disk name is generated. */
+  filename: string;
+  /** Browser-reported MIME, empty when unknown. */
+  mediaType: string;
+  sizeBytes: number;
+  containerPath: string;
+  hostPath: string;
+}
+
+/** One attachment the composer ships with a message, referenced on the wire by path. */
+export type ChatAttachment = ImageAttachment | FileAttachment;
+
+/** Composer-collected user input bundled with attachments. */
 export interface ChatInput {
   text: string;
   attachments: ChatAttachment[];

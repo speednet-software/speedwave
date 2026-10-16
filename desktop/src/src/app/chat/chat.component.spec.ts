@@ -1857,8 +1857,10 @@ describe('ChatComponent', () => {
       const store1 = chatState.tabs().get(tab1)!;
       await store1.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
+        'image',
         async () => ({
           attachment: {
+            kind: 'image',
             filename: 'a.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/a.png',
@@ -1898,8 +1900,10 @@ describe('ChatComponent', () => {
       const store1 = chatState.tabs().get(tab1)!;
       await store1.composerAttachments.add(
         new File(['x'], 'a.png', { type: 'image/png' }),
+        'image',
         async () => ({
           attachment: {
+            kind: 'image',
             filename: 'a.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/a.png',

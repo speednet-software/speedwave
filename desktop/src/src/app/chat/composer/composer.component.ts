@@ -31,12 +31,13 @@ import {
   type ModelSelection,
 } from './model-selector/model-selector.component';
 import {
-  ERROR_UNSUPPORTED_TYPE,
   ImagePreprocessorService,
+  isSupportedImageType,
   type ModelClass,
 } from '../../services/image-preprocessor.service';
+import { FileAttachmentService } from '../../services/file-attachment.service';
 import type { ChatAttachment } from '../../models/chat';
-import { ComposerAttachments } from './composer-attachments';
+import { ComposerAttachments, type AttachmentKind } from './composer-attachments';
 
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
@@ -132,6 +133,7 @@ const PLAN_MODE_PREFIX =
       #fileDrop="appFileDrop"
       [disabled]="disabled()"
       (filesDropped)="onFilesDropped($event)"
+      (foldersDropped)="onFoldersDropped($event)"
       class="relative rounded border border-[var(--line)] bg-[var(--bg-1)] focus-within:border-[var(--accent)]"
       [class.ring-2]="fileDrop.isDragging()"
       [class.ring-[var(--accent)]]="fileDrop.isDragging()"
@@ -140,7 +142,7 @@ const PLAN_MODE_PREFIX =
         <div
           class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded bg-[var(--accent)]/10 text-[12px] font-medium text-[var(--accent)]"
         >
-          Drop image to attach
+          Drop files to attach
         </div>
       }
       <div
@@ -366,6 +368,7 @@ export class ComposerComponent implements AfterViewInit {
   readonly slashService = inject(SlashService);
   protected readonly projectState = inject(ProjectStateService);
   private readonly preprocessor = inject(ImagePreprocessorService);
+  private readonly fileAttachments = inject(FileAttachmentService);
 
   readonly text = new FormControl<string>('', { nonNullable: true });
 
@@ -565,7 +568,7 @@ export class ComposerComponent implements AfterViewInit {
   }
 
   /**
-   * preventDefault only when an image was captured, so text paste keeps working.
+   * preventDefault only when a file was captured, so text paste keeps working.
    * @param event - Native paste event.
    */
   onPaste(event: ClipboardEvent): void {
@@ -575,10 +578,9 @@ export class ComposerComponent implements AfterViewInit {
     const files: File[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const f = item.getAsFile();
-        if (f) files.push(f);
-      }
+      if (item.kind !== 'file') continue;
+      const f = item.getAsFile();
+      if (f) files.push(f);
     }
     if (files.length === 0) return;
     event.preventDefault();
@@ -586,11 +588,19 @@ export class ComposerComponent implements AfterViewInit {
   }
 
   /**
-   * Drop handler — emits from `FileDropDirective`, validates MIME.
+   * Drop handler — emits from `FileDropDirective`; every file type is accepted.
    * @param files - Dropped files (any MIME).
    */
   onFilesDropped(files: File[]): void {
     void this.ingest(files);
+  }
+
+  /**
+   * A dropped directory has no bytes to stream, so it is reported instead of silently skipped.
+   * @param names - Directory names from the drop.
+   */
+  onFoldersDropped(names: string[]): void {
+    this.attachmentDraft().error.set(`Folders cannot be attached: ${names.join(', ')}`);
   }
 
   /**
@@ -601,7 +611,8 @@ export class ComposerComponent implements AfterViewInit {
     const draft = this.attachmentDraft();
     const removed = draft.remove(id);
     if (removed) {
-      draft.announcement.set(`Image removed: ${removed.filename}`);
+      const label = removed.kind === 'image' ? 'Image' : 'File';
+      draft.announcement.set(`${label} removed: ${removed.filename}`);
     }
   }
 
@@ -611,38 +622,39 @@ export class ComposerComponent implements AfterViewInit {
       .map((a) => ({
         id: a.id,
         filename: a.filename,
+        kind: a.kind,
         previewUrl: a.previewUrl,
-        encodedSizeBytes: a.preprocessed?.sizeBytes ?? 0,
-        preprocessing: a.preprocessed === null,
+        encodedSizeBytes: a.sizeBytes,
+        preprocessing: a.staged === null,
       }))
   );
 
   readonly submitBlockedReason = computed<string>(() => {
     if (this.disabled()) return '';
     const draft = this.attachmentDraft();
-    if (draft.anyPreprocessing()) return 'Preparing image…';
+    if (draft.anyPreprocessing()) return 'Preparing attachment…';
     if (draft.records().length > 0 && this.streaming()) {
-      return 'Wait for the response to finish before sending an image.';
+      return 'Wait for the response to finish before sending an attachment.';
     }
     return '';
   });
 
   private async ingest(files: File[]): Promise<void> {
-    const images = files.filter((f) => f.type.startsWith('image/'));
     const draft = this.attachmentDraft();
-    if (images.length === 0) {
-      draft.error.set(ERROR_UNSUPPORTED_TYPE);
-      return;
-    }
     const project = this.projectState.activeProject();
     if (!project) {
-      draft.error.set('Select a project before attaching an image.');
+      draft.error.set('Select a project before attaching a file.');
       return;
     }
 
     const modelClass = this.modelClass();
-    for (const file of images) {
-      await draft.add(file, (f) => this.preprocessor.preprocess(f, modelClass, project));
+    for (const file of files) {
+      const kind: AttachmentKind = isSupportedImageType(file.type) ? 'image' : 'file';
+      if (kind === 'image') {
+        await draft.add(file, kind, (f) => this.preprocessor.preprocess(f, modelClass, project));
+      } else {
+        await draft.add(file, kind, (f, signal) => this.fileAttachments.stage(f, project, signal));
+      }
     }
   }
 

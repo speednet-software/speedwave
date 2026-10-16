@@ -8,12 +8,31 @@ import { ComposerAttachments } from './composer-attachments';
 import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+import {
+  FileAttachmentService,
+  type StagedAttachment,
+} from '../../services/file-attachment.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { makeMockLogger } from '../../testing/mock-logger';
 import { SlashService } from '../slash/slash.service';
 
 class ProjectStateStub {
   readonly activeProject = signal<string | null>(null);
+}
+
+class FileAttachmentStub {
+  stage = vi.fn(async (file: File): Promise<StagedAttachment> => ({
+    attachment: {
+      kind: 'file',
+      filename: file.name,
+      mediaType: file.type,
+      sizeBytes: file.size,
+      containerPath: `/workspace/.speedwave/pastes/${file.name}`,
+      hostPath: `/tmp/${file.name}`,
+    },
+    previewUrl: '',
+    sizeBytes: file.size,
+  }));
 }
 
 class SlashServiceStub {
@@ -40,6 +59,7 @@ describe('ComposerComponent', () => {
       providers: [
         { provide: ProjectStateService, useClass: ProjectStateStub },
         { provide: SlashService, useClass: SlashServiceStub },
+        { provide: FileAttachmentService, useClass: FileAttachmentStub },
       ],
     }).compileComponents();
 
@@ -196,8 +216,9 @@ describe('ComposerComponent', () => {
       component.text.setValue('/');
       await component
         .attachmentDraft()
-        .add(new File(['x'], 'img.png', { type: 'image/png' }), async () => ({
+        .add(new File(['x'], 'img.png', { type: 'image/png' }), 'image', async () => ({
           attachment: {
+            kind: 'image',
             filename: 'img.png',
             mediaType: 'image/png',
             containerPath: '/workspace/.speedwave/pastes/img.png',
@@ -898,11 +919,11 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
 
       expect(attachmentErrorEl()?.textContent?.trim()).toBe(
-        'Select a project before attaching an image.'
+        'Select a project before attaching a file.'
       );
     });
 
-    it('shows an unsupported-type error when a non-image file is dropped', () => {
+    it('shows the same error when a non-image file is dropped with no active project', () => {
       const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
       const file = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
 
@@ -910,8 +931,170 @@ describe('ComposerComponent', () => {
       fixture.detectChanges();
 
       expect(attachmentErrorEl()?.textContent?.trim()).toBe(
-        'Supported image formats: JPEG, PNG, GIF, WebP.'
+        'Select a project before attaching a file.'
       );
+    });
+
+    it('names dropped folders instead of attaching them', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const dataTransfer = {
+        types: ['Files'],
+        files: [],
+        items: [
+          {
+            kind: 'file',
+            type: '',
+            getAsFile: () => null,
+            webkitGetAsEntry: () => ({ isDirectory: true, isFile: false, name: 'docs' }),
+          },
+        ],
+        dropEffect: 'none',
+      };
+      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
+
+      dropTarget.dispatchEvent(ev);
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe('Folders cannot be attached: docs');
+    });
+  });
+
+  describe('non-image attachments (SPEED-801)', () => {
+    let uploads: FileAttachmentStub;
+
+    function flush(): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    function makeDropEvent(files: File[]): DragEvent {
+      const dataTransfer = { types: ['Files'], files, dropEffect: 'none' };
+      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
+      return ev;
+    }
+
+    function makePasteEvent(files: File[]): ClipboardEvent {
+      const items = files.map((file) => ({
+        kind: 'file',
+        type: file.type,
+        getAsFile: () => file,
+      }));
+      const ev = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(ev, 'clipboardData', { value: { items }, configurable: true });
+      return ev;
+    }
+
+    beforeEach(() => {
+      (TestBed.inject(ProjectStateService) as unknown as ProjectStateStub).activeProject.set(
+        'acme'
+      );
+      uploads = TestBed.inject(FileAttachmentService) as unknown as FileAttachmentStub;
+    });
+
+    it('stages a dropped PDF through the upload service and renders a file pill', async () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['%PDF-1.7'], 'notes.pdf', { type: 'application/pdf' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      await flush();
+      fixture.detectChanges();
+
+      expect(uploads.stage).toHaveBeenCalledWith(file, 'acme', expect.any(AbortSignal));
+      const pill = rootEl.querySelector('[data-testid="composer-attachment-file"]');
+      expect(pill?.textContent).toContain('notes.pdf');
+      expect(rootEl.querySelector('[data-testid="composer-attachment-error"]')).toBeNull();
+      expect(component.attachmentDraft().ready()).toEqual([
+        {
+          kind: 'file',
+          filename: 'notes.pdf',
+          mediaType: 'application/pdf',
+          sizeBytes: 8,
+          containerPath: '/workspace/.speedwave/pastes/notes.pdf',
+          hostPath: '/tmp/notes.pdf',
+        },
+      ]);
+    });
+
+    it('stages a file without a MIME type too', async () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'Makefile', { type: '' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      await flush();
+
+      expect(uploads.stage).toHaveBeenCalledWith(file, 'acme', expect.any(AbortSignal));
+    });
+
+    it('captures a pasted non-image file and suppresses the default text paste', async () => {
+      const file = new File(['a,b\n1,2'], 'data.csv', { type: 'text/csv' });
+      const ev = makePasteEvent([file]);
+      const preventSpy = vi.spyOn(ev, 'preventDefault');
+
+      textarea().dispatchEvent(ev);
+      await flush();
+
+      expect(preventSpy).toHaveBeenCalled();
+      expect(uploads.stage).toHaveBeenCalledWith(file, 'acme', expect.any(AbortSignal));
+    });
+
+    it('leaves a paste without file items to the browser', () => {
+      const ev = makePasteEvent([]);
+      const preventSpy = vi.spyOn(ev, 'preventDefault');
+
+      textarea().dispatchEvent(ev);
+
+      expect(preventSpy).not.toHaveBeenCalled();
+      expect(uploads.stage).not.toHaveBeenCalled();
+    });
+
+    it('surfaces an upload failure in the attachment error and keeps the strip empty', async () => {
+      uploads.stage.mockRejectedValueOnce(
+        new Error('failed to write x.part: No space left on device')
+      );
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+
+      dropTarget.dispatchEvent(makeDropEvent([new File(['x'], 'big.iso', { type: '' })]));
+      await flush();
+      fixture.detectChanges();
+
+      expect(
+        rootEl.querySelector('[data-testid="composer-attachment-error"]')?.textContent?.trim()
+      ).toContain('No space left on device');
+      expect(rootEl.querySelector('[data-testid="composer-attachment-strip"]')).toBeNull();
+    });
+
+    it('submits the staged file with the message and announces removal as a file', async () => {
+      const emitted: { attachments: { kind: string }[] }[] = [];
+      component.submitted.subscribe((v) => emitted.push(v));
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      dropTarget.dispatchEvent(
+        makeDropEvent([new File(['x'], 'notes.pdf', { type: 'application/pdf' })])
+      );
+      await flush();
+      component.text.setValue('read this');
+      fixture.detectChanges();
+
+      component.submit();
+
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0].attachments.map((a) => a.kind)).toEqual(['file']);
+      expect(component.attachmentDraft().records()).toHaveLength(0);
+    });
+
+    it('announces a removed file as a file', async () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      dropTarget.dispatchEvent(
+        makeDropEvent([new File(['x'], 'notes.pdf', { type: 'application/pdf' })])
+      );
+      await flush();
+      fixture.detectChanges();
+
+      rootEl
+        .querySelector<HTMLButtonElement>('[data-testid="composer-attachment-remove"]')!
+        .click();
+
+      expect(component.attachmentDraft().announcement()).toBe('File removed: notes.pdf');
     });
   });
 
@@ -921,8 +1104,9 @@ describe('ComposerComponent', () => {
     }
 
     async function addReady(draft: ComposerAttachments, filename: string): Promise<void> {
-      await draft.add(new File(['x'], filename, { type: 'image/png' }), async () => ({
+      await draft.add(new File(['x'], filename, { type: 'image/png' }), 'image', async () => ({
         attachment: {
+          kind: 'image',
           filename,
           mediaType: 'image/png',
           containerPath: `/workspace/.speedwave/pastes/${filename}`,

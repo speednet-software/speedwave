@@ -1,8 +1,14 @@
 /** Shared mock for TauriService used across Angular test files. */
 export class MockTauriService {
-  /** Configurable handler for invoke calls — override in beforeEach per test suite. */
-  invokeHandler: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> = async () =>
-    undefined;
+  /**
+   * Configurable handler for invoke calls — override in beforeEach per test suite. A raw byte
+   * body arrives as a `Uint8Array` under the `args` slot; cast it in the suite that expects one.
+   */
+  invokeHandler: (
+    cmd: string,
+    args?: Record<string, unknown>,
+    options?: { headers: Record<string, string> }
+  ) => Promise<unknown> = async () => undefined;
 
   /**
    * Registered event listeners keyed by event name; each entry delivers to every listener of that
@@ -15,10 +21,20 @@ export class MockTauriService {
   /**
    * Mock invoke that delegates to invokeHandler.
    * @param cmd - The command name.
-   * @param args - Optional command arguments.
+   * @param args - Optional command arguments; a raw byte body lands here as a `Uint8Array` at runtime.
+   * @param options - Optional request options.
+   * @param options.headers - Request headers a `tauri::ipc::Request` command reads.
    */
-  async invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    return this.invokeHandler(cmd, args) as Promise<T>;
+  async invoke<T = unknown>(
+    cmd: string,
+    args?: Record<string, unknown>,
+    options?: { headers: Record<string, string> }
+  ): Promise<T> {
+    const result =
+      options === undefined
+        ? this.invokeHandler(cmd, args)
+        : this.invokeHandler(cmd, args, options);
+    return result as Promise<T>;
   }
 
   /**

@@ -92,4 +92,79 @@ describe('FileDropDirective', () => {
     dropTarget.dispatchEvent(makeDragEvent('drop', files));
     expect(host.dropped.map((f) => f.name)).toEqual(['one.png', 'two.jpg', 'three.gif']);
   });
+
+  describe('drops carrying DataTransfer items', () => {
+    interface ItemSpec {
+      file: File;
+      kind?: string;
+      directory?: boolean;
+      withoutEntryApi?: boolean;
+    }
+
+    function makeItemsDropEvent(specs: ItemSpec[]): DragEvent {
+      const items = specs.map(({ file, kind, directory, withoutEntryApi }) => ({
+        kind: kind ?? 'file',
+        type: file.type,
+        getAsFile: () => file,
+        ...(withoutEntryApi
+          ? {}
+          : {
+              webkitGetAsEntry: () => ({
+                isDirectory: directory === true,
+                isFile: directory !== true,
+                name: file.name,
+              }),
+            }),
+      }));
+      const dataTransfer = {
+        types: ['Files'],
+        files: specs.map((s) => s.file),
+        items,
+        dropEffect: 'none',
+      };
+      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
+      return ev;
+    }
+
+    it('routes directories to foldersDropped and files to filesDropped', () => {
+      const folders: string[][] = [];
+      fixture.debugElement
+        .query((de) => de.name === 'div')
+        .injector.get(FileDropDirective)
+        .foldersDropped.subscribe((names) => folders.push(names));
+      const file = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
+      const folder = new File([], 'docs', { type: '' });
+
+      dropTarget.dispatchEvent(makeItemsDropEvent([{ file }, { file: folder, directory: true }]));
+
+      expect(host.dropped.map((f) => f.name)).toEqual(['notes.pdf']);
+      expect(folders).toEqual([['docs']]);
+    });
+
+    it('emits nothing on filesDropped when only directories were dropped', () => {
+      const folder = new File([], 'docs', { type: '' });
+
+      dropTarget.dispatchEvent(makeItemsDropEvent([{ file: folder, directory: true }]));
+
+      expect(host.dropped).toEqual([]);
+    });
+
+    it('treats an item without the entry API as a file', () => {
+      const file = new File(['x'], 'legacy.bin', { type: '' });
+
+      dropTarget.dispatchEvent(makeItemsDropEvent([{ file, withoutEntryApi: true }]));
+
+      expect(host.dropped.map((f) => f.name)).toEqual(['legacy.bin']);
+    });
+
+    it('skips items that are not files', () => {
+      const file = new File(['x'], 'kept.txt', { type: 'text/plain' });
+      const text = new File(['y'], 'ignored.txt', { type: 'text/plain' });
+
+      dropTarget.dispatchEvent(makeItemsDropEvent([{ file: text, kind: 'string' }, { file }]));
+
+      expect(host.dropped.map((f) => f.name)).toEqual(['kept.txt']);
+    });
+  });
 });

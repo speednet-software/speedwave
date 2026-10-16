@@ -220,6 +220,13 @@ pub enum MessageBlock {
         #[serde(default)]
         alt: Option<String>,
     },
+    /// User-attached non-image file (metadata only; bytes live on disk per ADR-094).
+    File {
+        /// Original filename as the user attached it.
+        filename: String,
+        /// Size on disk in bytes.
+        size_bytes: u64,
+    },
 }
 
 /// Maximum questions per `AskUserQuestion` control_request; excess is
@@ -363,10 +370,45 @@ mod tests {
                 media_type: "image/png".into(),
                 alt: Some("screenshot.png".into()),
             },
+            MessageBlock::File {
+                filename: "raport końcowy.xlsx".into(),
+                size_bytes: 734_003_200,
+            },
         ];
         let encoded = serde_json::to_value(&blocks).unwrap();
         let decoded: Vec<MessageBlock> = serde_json::from_value(encoded).unwrap();
         assert_eq!(blocks, decoded);
+    }
+
+    #[test]
+    fn file_block_serializes_with_snake_case_kind_and_size() {
+        let block = MessageBlock::File {
+            filename: "notes.pdf".into(),
+            size_bytes: 0,
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "kind": "file",
+                "filename": "notes.pdf",
+                "size_bytes": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn file_block_requires_both_fields() {
+        let missing_size = serde_json::from_value::<MessageBlock>(json!({
+            "kind": "file",
+            "filename": "notes.pdf",
+        }));
+        assert!(missing_size.is_err());
+        let missing_name = serde_json::from_value::<MessageBlock>(json!({
+            "kind": "file",
+            "size_bytes": 12,
+        }));
+        assert!(missing_name.is_err());
     }
 
     #[test]

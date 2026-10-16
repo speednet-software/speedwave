@@ -168,6 +168,49 @@ describe('Chat Controls', function () {
     await waitForTurnComplete(180_000);
   });
 
+  it('attaches a pasted non-image file, streamed to disk, and sends it (SPEED-801)', async function () {
+    this.timeout(240_000);
+    const input = await $('[data-testid="chat-input"]');
+    await input.waitForExist({ timeout: 15_000 });
+
+    await browser.execute(() => {
+      const ta = document.querySelector('[data-testid="chat-input"]');
+      if (!ta) return;
+      const file = new File(['speedwave e2e file attachment\n'], 'e2e-note.txt', {
+        type: 'text/plain',
+      });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', { value: dt });
+      ta.dispatchEvent(ev);
+    });
+
+    await $('[data-testid="composer-attachment-file"]').waitForExist({
+      timeout: 20_000,
+      timeoutMsg: 'file pill never appeared after the synthetic paste',
+    });
+    await browser.waitUntil(
+      async () =>
+        (await $$('[data-testid="composer-attachment-strip"] [role="status"]').getElements())
+          .length === 0,
+      { timeout: 20_000, timeoutMsg: 'file upload never finished (spinner stayed on)' }
+    );
+    await browser.waitUntil(
+      async () =>
+        (await $$('[data-testid="composer-attachment-error"]').getElements()).length === 0,
+      { timeout: 1_000, timeoutMsg: 'file upload reported an error' }
+    );
+
+    await sendMessageNoWait('Reply with the single word RECEIVED.');
+    await $('[data-testid="user-message-file"]').waitForExist({
+      timeout: 15_000,
+      timeoutMsg: 'sent message did not render the file attachment pill',
+    });
+    await waitForTurnStart();
+    await waitForTurnComplete(180_000);
+  });
+
   it('deletes a conversation from history', async function () {
     this.timeout(60_000);
     await openHistory();

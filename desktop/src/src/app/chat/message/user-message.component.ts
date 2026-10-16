@@ -1,11 +1,13 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import type { MessageBlock } from '../../models/chat';
+import { formatBytes } from '../../shared/format-bytes';
+import { IconComponent } from '../../shared/icon.component';
 import { ControlChipComponent } from '../blocks/control-chip.component';
 
-/** Renders text + image + chip blocks; image is a placeholder pill (ADR-065). */
+/** Renders text + image + file + chip blocks; image and file are placeholder pills (ADR-065, ADR-094). */
 @Component({
   selector: 'app-user-message',
-  imports: [ControlChipComponent],
+  imports: [ControlChipComponent, IconComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex justify-end' },
   template: `
@@ -36,6 +38,18 @@ import { ControlChipComponent } from '../blocks/control-chip.component';
                 🖼 <span>{{ imageLabel(block) }}</span>
               </div>
             }
+            @case ('file') {
+              <div
+                data-testid="user-message-file"
+                class="mono mt-1 inline-flex max-w-full items-center gap-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-0.5 text-[11px] text-[var(--ink-mute,#888888)]"
+                [title]="block.filename + ' (' + formatBytes(block.size_bytes) + ')'"
+                aria-label="File attachment"
+              >
+                <app-icon name="document" class="h-3.5 w-3.5" />
+                <span class="min-w-0 truncate">{{ block.filename }}</span>
+                <span class="shrink-0">{{ formatBytes(block.size_bytes) }}</span>
+              </div>
+            }
             @case ('chip') {
               <app-control-chip [command]="block.command" [argument]="block.argument" />
             }
@@ -52,13 +66,17 @@ export class UserMessageComponent {
 
   readonly renderBlocks = computed<readonly RenderableUserBlock[]>(() =>
     this.blocks().filter(
-      (b): b is RenderableUserBlock => b.type === 'text' || b.type === 'image' || b.type === 'chip'
+      (b): b is RenderableUserBlock =>
+        b.type === 'text' || b.type === 'image' || b.type === 'file' || b.type === 'chip'
     )
   );
 
   readonly textBlocks = computed<readonly Extract<MessageBlock, { type: 'text' }>[]>(() =>
     this.blocks().filter((b): b is Extract<MessageBlock, { type: 'text' }> => b.type === 'text')
   );
+
+  /** Pretty-prints the size of a file pill (shared helper). */
+  readonly formatBytes = formatBytes;
 
   /**
    * Filename if known, else humanised MIME (e.g. `PNG`).
@@ -71,4 +89,4 @@ export class UserMessageComponent {
   }
 }
 
-type RenderableUserBlock = Extract<MessageBlock, { type: 'text' | 'image' | 'chip' }>;
+type RenderableUserBlock = Extract<MessageBlock, { type: 'text' | 'image' | 'file' | 'chip' }>;

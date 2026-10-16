@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { invoke, type InvokeArgs } from '@tauri-apps/api/core';
+import { invoke, type InvokeArgs, type InvokeOptions } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn, type Event } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
 
@@ -9,10 +9,11 @@ export class TauriService {
   /**
    * Invokes a Tauri command on the Rust backend.
    * @param cmd - The command name registered in the Tauri backend.
-   * @param args - Optional arguments passed to the command.
+   * @param args - Optional arguments passed to the command; a `Uint8Array` goes as a raw body.
+   * @param options - Optional request headers, read by commands that take `tauri::ipc::Request`.
    */
-  invoke<T = unknown>(cmd: string, args?: InvokeArgs): Promise<T> {
-    return invoke<T>(cmd, args);
+  invoke<T = unknown>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+    return invoke<T>(cmd, args, options);
   }
 
   /**

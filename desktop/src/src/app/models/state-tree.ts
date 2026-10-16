@@ -66,6 +66,7 @@ export type MessageBlockState =
     }
   | { kind: 'error'; content: string }
   | { kind: 'image'; media_type: string; alt: string | null }
+  | { kind: 'file'; filename: string; size_bytes: number }
   | { kind: 'chip'; command: string; argument: string };
 
 /** One entry in the conversation — user or assistant. */
