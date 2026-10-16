@@ -81,11 +81,6 @@ const LABELS: &[(Label, &str)] = &[
 ];
 
 impl Label {
-    /// Every label the model can emit, in catalogue order.
-    pub fn all() -> impl Iterator<Item = Label> {
-        LABELS.iter().map(|(label, _)| *label)
-    }
-
     /// The wire name of the label, e.g. `GIVEN_NAME`.
     pub fn as_str(self) -> &'static str {
         LABELS
@@ -185,12 +180,12 @@ mod tests {
 
     #[test]
     fn every_label_round_trips_through_its_name() {
-        for label in Label::all() {
+        for (label, _) in LABELS.iter().copied() {
             assert_eq!(label.as_str().parse::<Label>().unwrap(), label);
             let json = serde_json::to_string(&label).unwrap();
             assert_eq!(json, format!("\"{}\"", label.as_str()));
         }
-        assert_eq!(Label::all().count(), 22);
+        assert_eq!(LABELS.len(), 22);
     }
 
     #[test]

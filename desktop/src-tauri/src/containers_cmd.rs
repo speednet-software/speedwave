@@ -1266,12 +1266,11 @@ fn get_security_policy_in(
         .and_then(|m| m.pii_policy);
     let resolved =
         speedwave_runtime::pii_policy::resolve_pii_policy(policy.as_ref(), managed.as_ref())?;
-    let feature_enabled = speedwave_runtime::pii_policy::pii_feature_enabled(
+    let ner_enabled = speedwave_runtime::pii_policy::resolve_pii_ner(
         user_config.beta_enabled(),
         managed.as_ref(),
+        policy.as_ref(),
     );
-    let ner_enabled =
-        speedwave_runtime::pii_policy::resolve_pii_ner(feature_enabled, policy.as_ref());
     Ok(build_security_policy_response(
         &resolved,
         policy.as_ref(),

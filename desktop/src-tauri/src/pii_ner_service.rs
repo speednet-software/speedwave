@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 use crate::bridges::host_bridge::{
     bind_with_retry, constant_time_eq, load_or_create_persistent_token,
 };
+use crate::mirror_relay::RelayedPort;
 
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_QUEUED_REQUESTS: usize = 32;
@@ -97,6 +98,7 @@ pub(crate) struct PiiNerService {
     watchdog_stop: Option<std::sync::mpsc::Sender<()>>,
     server_thread: Option<JoinHandle<()>>,
     watchdog_thread: Option<JoinHandle<()>>,
+    relay: Option<Arc<RelayedPort>>,
     state: Arc<ServiceState>,
 }
 
@@ -245,16 +247,16 @@ impl PiiNerService {
             Err(e) => anyhow::bail!("PII NER detector server ready signal timed out: {e}"),
         }
 
-        crate::mirror_relay::ensure_relay_for_port(port);
+        let relay = Arc::new(RelayedPort::new(port));
         let lock = LockFile::new(LockService::PiiNer, std::process::id(), port, token);
         if let Err(e) = lock::write(&lock_path, &lock) {
             let _ = shutdown_tx.send(());
             let _ = server_thread.join();
-            crate::mirror_relay::remove_relay_for_port(port);
             return Err(e).context("writing the pii-ner lock; service rolled back");
         }
 
         let watchdog_lock_path = lock_path.clone();
+        let watchdog_relay = Arc::clone(&relay);
         let (watchdog_stop, watchdog_rx) = std::sync::mpsc::channel::<()>();
         let watchdog_thread = std::thread::Builder::new()
             .name("pii_ner::watchdog".into())
@@ -274,7 +276,7 @@ impl PiiNerService {
                         }
                     }
                     if ticks.is_multiple_of(6) {
-                        crate::mirror_relay::ensure_relay_for_port(port);
+                        watchdog_relay.ensure_relay();
                     }
                 }
             })?;
@@ -307,6 +309,7 @@ impl PiiNerService {
             watchdog_stop: Some(watchdog_stop),
             server_thread: Some(server_thread),
             watchdog_thread: Some(watchdog_thread),
+            relay: Some(relay),
             state,
         })
     }
@@ -333,7 +336,7 @@ impl PiiNerService {
         if let Some(h) = self.watchdog_thread.take() {
             let _ = h.join();
         }
-        crate::mirror_relay::remove_relay_for_port(self.port);
+        drop(self.relay.take());
         match std::fs::remove_file(&self.lock_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -461,6 +464,7 @@ fn unavailable(reason: &str) -> Response {
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::mirror_relay::recorder::{calls_for_port, RelayOp};
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
@@ -611,6 +615,12 @@ mod tests {
         assert_eq!(lock.auth_token, token.trim());
         assert!(uuid::Uuid::parse_str(token.trim()).is_ok());
         assert!(speedwave_runtime::compose::live_pii_ner_service_in(tmp.path()).is_some());
+        let port = service.port();
+        assert_eq!(
+            calls_for_port(port).last(),
+            Some(&RelayOp::Ensure),
+            "a started service ensures its relay"
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while service.state().ready().is_err() && std::time::Instant::now() < deadline {
@@ -624,7 +634,18 @@ mod tests {
         service.stop().unwrap();
         assert!(!lock_path.exists());
         assert!(tmp.path().join(consts::PII_NER_AUTH_TOKEN_FILE).exists());
+        let after_stop = calls_for_port(port);
+        assert_eq!(
+            after_stop.last(),
+            Some(&RelayOp::Remove),
+            "stop tears the relay down"
+        );
         service.stop().unwrap();
+        assert_eq!(
+            calls_for_port(port),
+            after_stop,
+            "a second stop touches no relay"
+        );
     }
 
     fn fake_loader() -> Loader {

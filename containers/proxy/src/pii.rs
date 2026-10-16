@@ -133,49 +133,33 @@ const NON_PROSE_LEAF_KEYS: &[&str] = &[
     "file_id",
 ];
 
-/// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then
-/// each `messages[].content`. Leaves the detector must not see (`system`) are blanked in place.
+/// Every string leaf [`scan_request_with_external`] scans, in its order; `system` and
+/// non-prose leaves are blanked so the detector does not see them.
 pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
     let mut leaves = Vec::new();
-    if let Some(system) = body.get("system") {
-        leaves.extend(collect_string_leaves(system).iter().map(|_| String::new()));
-    }
-    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-        for message in messages {
-            if let Some(content) = message.get("content") {
-                leaves.extend(
-                    collect_string_leaves_with_keys(content)
-                        .into_iter()
-                        .map(|leaf| match leaf.key {
-                            Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
-                            _ => leaf.text.to_string(),
-                        }),
-                );
+    for (root, pointer) in scan_roots(body) {
+        let Some(subtree) = body.pointer(&pointer) else {
+            continue;
+        };
+        match root {
+            ScanRoot::System => {
+                leaves.extend(collect_string_leaves(subtree).iter().map(|_| String::new()));
             }
+            ScanRoot::Content => leaves.extend(
+                collect_string_leaves_with_keys(subtree)
+                    .into_iter()
+                    .map(|leaf| match leaf.key {
+                        Some(key) if NON_PROSE_LEAF_KEYS.contains(&key) => String::new(),
+                        _ => leaf.text.to_string(),
+                    }),
+            ),
         }
     }
     leaves
 }
 
-/// [`scan_request_with_external`] without detector spans; the rule-only path the tests use.
-#[cfg(test)]
-pub fn scan_request(
-    policy: &CompiledPolicy,
-    key: &EngineKey,
-    body: &mut serde_json::Value,
-) -> Result<Vec<Detection>, ScanError> {
-    scan_request_with_external(policy, key, body, None).map(|report| report.detections)
-}
-
-/// Scans `system` and every `messages[].content` (tool results included); other protocol
-/// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
-///
-/// Each scanned subtree is then keyword-masked (design doc §7.3): masking runs strictly after
-/// tokenization so a keyword occurring inside a value that also matched a PII rule is already
-/// sealed behind a token span and cannot be re-exposed by the keyword pass.
-///
-/// `external` seals detector spans as well, one list per leaf in the order of
-/// [`collect_scan_leaves`]; a list count that does not match the leaves is an error.
+/// Scans, seals and keyword-masks `system` and every `messages[].content`, sealing `external`
+/// detector spans per leaf of [`collect_scan_leaves`]. An `Err` may leave `body` half-mutated.
 pub fn scan_request_with_external(
     policy: &CompiledPolicy,
     key: &EngineKey,
@@ -200,17 +184,33 @@ pub fn scan_request_with_external(
             mask_keywords(subtree, policy.keywords());
             Ok(())
         };
-    if let Some(system) = body.get_mut("system") {
-        scan_subtree(system, &mut report)?;
-    }
-    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        for message in messages.iter_mut() {
-            if let Some(content) = message.get_mut("content") {
-                scan_subtree(content, &mut report)?;
-            }
+    for (_, pointer) in scan_roots(body) {
+        if let Some(subtree) = body.pointer_mut(&pointer) {
+            scan_subtree(subtree, &mut report)?;
         }
     }
     Ok(report)
+}
+
+enum ScanRoot {
+    System,
+    Content,
+}
+
+/// JSON pointers of the scanned subtrees, in scan order: `system`, then each message's content.
+fn scan_roots(body: &serde_json::Value) -> Vec<(ScanRoot, String)> {
+    let mut roots = Vec::new();
+    if body.get("system").is_some() {
+        roots.push((ScanRoot::System, "/system".to_string()));
+    }
+    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+        for (index, message) in messages.iter().enumerate() {
+            if message.get("content").is_some() {
+                roots.push((ScanRoot::Content, format!("/messages/{index}/content")));
+            }
+        }
+    }
+    roots
 }
 
 /// Masks every configured keyword to its alias across `value`'s string leaves, case-pattern
@@ -407,6 +407,14 @@ mod tests {
     fn test_policy_and_key() -> (CompiledPolicy, EngineKey) {
         let policy = compile_policy_v3(&default_policy_json()).expect("default policy compiles");
         (policy, EngineKey::from_bytes([9u8; 32]))
+    }
+
+    fn scan_request(
+        policy: &CompiledPolicy,
+        key: &EngineKey,
+        body: &mut serde_json::Value,
+    ) -> Result<Vec<Detection>, ScanError> {
+        scan_request_with_external(policy, key, body, None).map(|report| report.detections)
     }
 
     #[test]

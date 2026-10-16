@@ -1,6 +1,5 @@
-//! PII detection audit writer: appends JSONL rows to `$AUDIT_DIR/audit-proxy.jsonl` (mirrors
-//! `consts::AUDIT_PROXY_FILE` / `audit-pii.ts`): one line per (category, action), never a data value.
-//! Rows from the host NER detector carry `source: "ner"`; rule rows carry no `source`.
+//! PII audit writer: JSONL rows in `$AUDIT_DIR/audit-proxy.jsonl` (`consts::AUDIT_PROXY_FILE`,
+//! `audit-pii.ts`), one per (category, action), no data value; NER rows carry `source: "ner"`.
 
 use serde::Serialize;
 use speedwave_pii_engine::{Detection, DetectionAction};

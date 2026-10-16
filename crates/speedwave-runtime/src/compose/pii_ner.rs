@@ -9,7 +9,7 @@ use crate::consts;
 use crate::host_mcp_process::lock::{self, LockService};
 
 /// Confidence below which the proxy drops a detected span.
-pub const DEFAULT_NER_MIN_CONFIDENCE: f32 = 0.6;
+const DEFAULT_NER_MIN_CONFIDENCE: f32 = 0.6;
 
 /// Model labels the proxy seals by default. `ORG`, `IMEI`, `URL` and `IP_ADDRESS` are left
 /// out: they are routine technical content in a coding assistant, not personal data.
@@ -101,7 +101,7 @@ pub(crate) fn ner_render_config(live: &LiveNerService) -> NerRenderConfig {
 }
 
 /// Accepts only `http://<HOST_GATEWAY_ALIAS>:<port>` with nothing else; returns the port.
-pub fn validate_ner_url(raw: &str) -> Result<u16, String> {
+pub(super) fn validate_ner_url(raw: &str) -> Result<u16, String> {
     let url = url::Url::parse(raw).map_err(|e| format!("not a URL: {e}"))?;
     if url.scheme() != "http" {
         return Err(format!("scheme must be http, got {}", url.scheme()));
@@ -252,25 +252,22 @@ mod tests {
         assert_eq!(ner_url_state("not json", None), NerUrlState::Stale);
     }
 
-    fn declared_confidence(src: &str, pattern: &str) -> f32 {
-        let re = regex::Regex::new(pattern).unwrap();
-        let cap = re
-            .captures(src)
-            .expect("source must declare the confidence default");
-        cap[1].parse().unwrap()
+    fn declared_confidence(src: &str, pattern: &str) -> Option<f32> {
+        let re = regex::Regex::new(pattern).ok()?;
+        re.captures(src)?[1].parse().ok()
     }
 
     #[test]
     fn min_confidence_matches_proxy_ner_rs() {
         let src = include_str!("../../../../containers/proxy/src/ner.rs");
         let proxy = declared_confidence(src, r"const DEFAULT_MIN_CONFIDENCE: f32 = ([0-9.]+);");
-        assert_eq!(proxy, DEFAULT_NER_MIN_CONFIDENCE);
+        assert_eq!(proxy, Some(DEFAULT_NER_MIN_CONFIDENCE));
     }
 
     #[test]
     fn min_confidence_matches_pii_ner_default_min_score() {
         let src = include_str!("../../../pii-ner/src/span.rs");
         let detector = declared_confidence(src, r"const DEFAULT_MIN_SCORE: f32 = ([0-9.]+);");
-        assert_eq!(detector, DEFAULT_NER_MIN_CONFIDENCE);
+        assert_eq!(detector, Some(DEFAULT_NER_MIN_CONFIDENCE));
     }
 }

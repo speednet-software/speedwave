@@ -1675,7 +1675,11 @@ pub(crate) fn resolve_project_config_in_with_managed(
     } else {
         Ok(crate::pii_policy::disabled_policy())
     };
-    let pii_ner_enabled = crate::pii_policy::resolve_pii_ner(pii_feature_enabled, project_policy);
+    let pii_ner_enabled = crate::pii_policy::resolve_pii_ner(
+        user_config.beta_enabled(),
+        managed_pii_policy,
+        project_policy,
+    );
 
     let claude = ResolvedClaudeConfig {
         env,

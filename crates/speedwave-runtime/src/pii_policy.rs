@@ -300,19 +300,19 @@ pub fn pii_feature_enabled(
 
 /// Resolves the detector switch: the user opt-in, under the PII feature gate.
 pub fn resolve_pii_ner(
-    feature_enabled: bool,
+    beta_enabled: bool,
+    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
     user: Option<&crate::config::PiiPolicyUserConfig>,
 ) -> bool {
-    feature_enabled && user.and_then(|u| u.ner).unwrap_or(false)
+    pii_feature_enabled(beta_enabled, managed) && user.and_then(|u| u.ner).unwrap_or(false)
 }
 
 /// Resolved detector switch for one project, read from the on-disk layers.
 pub fn pii_ner_enabled_for_project(project: &str) -> bool {
     let user_config = crate::config::load_user_config().unwrap_or_default();
-    let managed = managed_pii_policy_from_disk();
-    let feature_enabled = pii_feature_enabled(user_config.beta_enabled(), managed.as_ref());
     resolve_pii_ner(
-        feature_enabled,
+        user_config.beta_enabled(),
+        managed_pii_policy_from_disk().as_ref(),
         user_config
             .find_project(project)
             .and_then(|p| p.policy.as_ref()),
@@ -1393,17 +1393,28 @@ keywords: []
             ..Default::default()
         };
         let unset = PiiPolicyUserConfig::default();
+        let forced = ManagedPiiPolicyConfig {
+            forced_policies: vec!["gdpr-art32".to_string()],
+        };
 
-        assert!(resolve_pii_ner(true, Some(&user_on)));
-        assert!(!resolve_pii_ner(true, Some(&user_off)));
+        assert!(resolve_pii_ner(true, None, Some(&user_on)));
+        assert!(!resolve_pii_ner(true, None, Some(&user_off)));
         assert!(
-            !resolve_pii_ner(true, Some(&unset)),
+            !resolve_pii_ner(true, None, Some(&unset)),
             "an absent switch is off"
         );
-        assert!(!resolve_pii_ner(true, None));
+        assert!(!resolve_pii_ner(true, None, None));
         assert!(
-            !resolve_pii_ner(false, Some(&user_on)),
+            !resolve_pii_ner(false, None, Some(&user_on)),
             "the PII feature gate wins over the user opt-in"
+        );
+        assert!(
+            resolve_pii_ner(false, Some(&forced), Some(&user_on)),
+            "MDM-forced policies open the gate for the user opt-in with beta off"
+        );
+        assert!(
+            !resolve_pii_ner(false, Some(&forced), None),
+            "MDM-forced policies never turn the detector on by themselves"
         );
     }
 

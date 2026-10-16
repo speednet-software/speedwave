@@ -1,7 +1,5 @@
 """Reference fixtures for src/model_e2e_tests.rs and a numeric check of the converted weights.
-
-Dev-only: needs numpy, tokenizers and ai-edge-litert (tools/requirements-dev.txt).
-"""
+Dev-only: needs numpy, tokenizers and ai-edge-litert (tools/requirements-dev.txt)."""
 
 from __future__ import annotations
 

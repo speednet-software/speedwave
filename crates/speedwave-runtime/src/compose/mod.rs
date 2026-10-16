@@ -28,8 +28,8 @@ pub use proxy::{
 };
 
 pub use pii_ner::{
-    live_service_in as live_pii_ner_service_in, ner_url_state, validate_ner_url, LiveNerService,
-    NerUrlState, DEFAULT_NER_LABELS, DEFAULT_NER_MIN_CONFIDENCE,
+    live_service_in as live_pii_ner_service_in, ner_url_state, LiveNerService, NerUrlState,
+    DEFAULT_NER_LABELS,
 };
 
 pub use addressing::{

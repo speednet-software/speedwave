@@ -173,10 +173,8 @@ pub(crate) fn render_proxy_config_full(
     .unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
 
-/// Renders + atomically persists the config (0600 + fsync) under
-/// `<data_dir>/proxy/<project>/`. Trusts the resolved `has_api_key` flag. The `ner`
-/// section is rendered only when the project enables the detector and the host
-/// detector's lock names a live process.
+/// Renders + atomically persists the config (0600 + fsync) under `<data_dir>/proxy/<project>/`.
+/// `ner` is rendered only when `ner_enabled` and the detector's lock names a live process.
 pub fn write_proxy_config_in(
     data_dir: &Path,
     project: &str,
