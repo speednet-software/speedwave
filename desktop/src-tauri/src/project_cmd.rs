@@ -205,6 +205,7 @@ pub(crate) fn rollback_and_emit_failed(
         Ok(())
     })
     .err();
+    crate::pii_ner_service::stop_unless_active_wants();
 
     let mut parts = vec![error.to_string()];
     if let Some(ce) = cleanup_error {

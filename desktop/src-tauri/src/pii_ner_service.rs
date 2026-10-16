@@ -123,7 +123,7 @@ pub(crate) fn start_if_active_wants() {
 }
 
 /// Stops the detector when there is no active project or it resolves the detector off; never
-/// starts it. Call once a switch has succeeded and after a Settings save.
+/// starts it. Call after a switch, a Settings save and a beta toggle.
 pub(crate) fn stop_unless_active_wants() {
     apply_for_active_project(Transition::StopUnlessWanted);
 }
@@ -728,6 +728,8 @@ mod tests {
             fake_loader,
         );
         let port = running_port(&shared).unwrap();
+        let token_path = tmp.path().join(consts::PII_NER_AUTH_TOKEN_FILE);
+        let token = std::fs::read_to_string(&token_path).unwrap();
         apply_state(
             &shared,
             tmp.path(),
@@ -746,6 +748,8 @@ mod tests {
         );
         assert!(running_port(&shared).is_none());
         assert!(!lock_path.exists());
+        assert_eq!(calls_for_port(port).last(), Some(&RelayOp::Remove));
+        assert_eq!(std::fs::read_to_string(&token_path).unwrap(), token);
         apply_state(
             &shared,
             tmp.path(),
