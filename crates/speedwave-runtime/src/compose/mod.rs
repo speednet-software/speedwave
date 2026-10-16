@@ -28,8 +28,7 @@ pub use proxy::{
 };
 
 pub use pii_ner::{
-    live_service_in as live_pii_ner_service_in, ner_url_state, LiveNerService, NerUrlState,
-    DEFAULT_NER_LABELS,
+    live_service_in as live_pii_ner_service_in, ner_url_state, LiveNerService, DEFAULT_NER_LABELS,
 };
 
 pub use addressing::{
@@ -74,7 +73,7 @@ pub(crate) use workers::{
 use workers::{
     apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
 };
-pub use workers::{enabled_hub_service_ids, worker_os_url_state, WorkerOsUrlState};
+pub use workers::{enabled_hub_service_ids, worker_os_url_state, RenderedUrlState};
 
 const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.template.yml");
 

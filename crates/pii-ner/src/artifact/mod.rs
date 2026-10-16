@@ -74,7 +74,7 @@ fn read(path: &Path) -> Result<Vec<u8>, LoadError> {
     })
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher

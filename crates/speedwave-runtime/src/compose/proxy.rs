@@ -416,7 +416,7 @@ mod tests {
         assert!(!written.contains(r#""ner":"#));
         assert_eq!(
             super::super::pii_ner::ner_url_state(&written, None),
-            super::super::pii_ner::NerUrlState::Absent
+            super::super::workers::RenderedUrlState::Absent
         );
 
         let lock = LockFile::new(
@@ -437,7 +437,7 @@ mod tests {
         );
         assert_eq!(
             super::super::pii_ner::ner_url_state(&written, Some(50444)),
-            super::super::pii_ner::NerUrlState::Current
+            super::super::workers::RenderedUrlState::Current
         );
         assert!(written.contains(r#""caller_token":"#));
     }
@@ -460,7 +460,7 @@ mod tests {
         assert!(!written.contains(r#""ner":"#));
         assert_eq!(
             super::super::pii_ner::ner_url_state(&written, None),
-            super::super::pii_ner::NerUrlState::Absent,
+            super::super::workers::RenderedUrlState::Absent,
             "a disabled project must reconcile against no detector, not the live one"
         );
     }

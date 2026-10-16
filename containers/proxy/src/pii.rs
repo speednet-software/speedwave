@@ -133,6 +133,11 @@ const NON_PROSE_LEAF_KEYS: &[&str] = &[
     "file_id",
 ];
 
+enum ScanRoot {
+    System,
+    Content,
+}
+
 /// Every string leaf [`scan_request_with_external`] scans, in its order; `system` and
 /// non-prose leaves are blanked so the detector does not see them.
 pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
@@ -190,11 +195,6 @@ pub fn scan_request_with_external(
         }
     }
     Ok(report)
-}
-
-enum ScanRoot {
-    System,
-    Content,
 }
 
 /// JSON pointers of the scanned subtrees, in scan order: `system`, then each message's content.
@@ -1229,18 +1229,5 @@ mod tests {
         let err =
             scan_request_with_external(&policy, &key, &mut body, Some(vec![vec![]])).unwrap_err();
         assert!(matches!(err, ScanError::ExternalSpanCount { .. }), "{err}");
-    }
-
-    #[test]
-    fn scan_request_equals_scan_with_no_external_lists() {
-        let (policy, key) = test_policy_and_key();
-        let original = json!({"system": "someone@example.org", "messages": [{"role": "user", "content": "44051401359"}]});
-        let mut a = original.clone();
-        let mut b = original;
-        let plain = scan_request(&policy, &key, &mut a).unwrap();
-        let report = scan_request_with_external(&policy, &key, &mut b, None).unwrap();
-        assert_eq!(a, b);
-        assert_eq!(plain, report.detections);
-        assert!(report.external.is_empty());
     }
 }

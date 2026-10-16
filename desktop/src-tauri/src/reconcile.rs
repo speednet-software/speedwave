@@ -3,7 +3,7 @@ use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
 use speedwave_runtime::compose::{
     live_pii_ner_service_in, ner_url_state, proxy_config_path_in, worker_os_url_state,
-    HostBridgeRegistration, HostBridgesInfo, NerUrlState, WorkerOsUrlState,
+    HostBridgeRegistration, HostBridgesInfo, RenderedUrlState,
 };
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
@@ -862,13 +862,13 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
 
         let os_state = match mcp_os_port {
             Some(port) => worker_os_url_state(&compose_content, port),
-            None => WorkerOsUrlState::Absent,
+            None => RenderedUrlState::Absent,
         };
         let ner_state = match std::fs::read_to_string(proxy_config_path_in(data_dir, &project)) {
             Ok(proxy_json) => ner_url_state(&proxy_json, ner_port),
-            Err(_) => NerUrlState::Absent,
+            Err(_) => RenderedUrlState::Absent,
         };
-        if os_state != WorkerOsUrlState::Stale && ner_state != NerUrlState::Stale {
+        if os_state != RenderedUrlState::Stale && ner_state != RenderedUrlState::Stale {
             log::debug!(
                 "compose host URLs are current (mcp-os {os_state:?}, pii-ner {ner_state:?})"
             );

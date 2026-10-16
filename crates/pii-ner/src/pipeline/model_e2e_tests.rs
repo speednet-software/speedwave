@@ -11,7 +11,6 @@ use crate::backend::{CpuBackend, Device};
 use crate::label::Label;
 use crate::pipeline::{Detector, WindowPrediction};
 use crate::span::{DetectOptions, Span};
-use crate::Detect;
 
 #[derive(serde::Deserialize)]
 struct Fixture {

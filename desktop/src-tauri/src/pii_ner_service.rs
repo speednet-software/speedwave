@@ -128,6 +128,16 @@ pub(crate) fn stop_unless_active_wants() {
     apply_for_active_project(Transition::StopUnlessWanted);
 }
 
+/// Before a project's containers start: stops the detector for a project with no LLM
+/// provider, which starts no proxy, and otherwise starts it when the active project wants it.
+pub(crate) fn prepare_for_project_start(llm_unconfigured: bool) {
+    if llm_unconfigured {
+        stop_service();
+    } else {
+        start_if_active_wants();
+    }
+}
+
 /// Stops the detector regardless of the active project.
 pub(crate) fn stop_service() {
     apply_to_global(false, Transition::StopUnlessWanted);
@@ -430,25 +440,17 @@ async fn detect(
         detector.detect_batch(&refs)
     })
     .await;
-    match result {
-        Ok(Ok(spans)) => Json(DetectResponse { spans }).into_response(),
-        Ok(Err(e)) => {
-            log::error!("PII detector inference failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "detection failed" })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            log::error!("PII detector task panicked: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "detection failed" })),
-            )
-                .into_response()
-        }
-    }
+    let failure = match result {
+        Ok(Ok(spans)) => return Json(DetectResponse { spans }).into_response(),
+        Ok(Err(e)) => format!("inference failed: {e}"),
+        Err(e) => format!("task panicked: {e}"),
+    };
+    log::error!("PII detector {failure}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "detection failed" })),
+    )
+        .into_response()
 }
 
 fn unavailable(reason: &str) -> Response {

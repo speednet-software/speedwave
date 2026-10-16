@@ -37,20 +37,6 @@ pub enum DevicePreference {
     Gpu,
 }
 
-/// Initializes the default wgpu adapter on a helper thread; `None` when wgpu finds no adapter.
-fn gpu_device() -> Option<WgpuDevice> {
-    std::thread::Builder::new()
-        .name("pii-ner-gpu-probe".to_string())
-        .spawn(|| {
-            let device = WgpuDevice::DefaultDevice;
-            init_setup::<AutoGraphicsApi>(&device, RuntimeOptions::default());
-            device
-        })
-        .ok()?
-        .join()
-        .ok()
-}
-
 /// Loads the artifact on the preferred device, falling back to CPU under `Auto`.
 pub fn load_auto(
     artifact_dir: &Path,
@@ -78,6 +64,20 @@ fn load_cpu(artifact_dir: &Path) -> Result<Box<dyn Detect>, LoadError> {
         NdArrayDevice::Cpu,
         Device::Cpu,
     )?))
+}
+
+/// Initializes the default wgpu adapter on a helper thread; `None` when wgpu finds no adapter.
+fn gpu_device() -> Option<WgpuDevice> {
+    std::thread::Builder::new()
+        .name("pii-ner-gpu-probe".to_string())
+        .spawn(|| {
+            let device = WgpuDevice::DefaultDevice;
+            init_setup::<AutoGraphicsApi>(&device, RuntimeOptions::default());
+            device
+        })
+        .ok()?
+        .join()
+        .ok()
 }
 
 fn load_gpu(artifact_dir: &Path, device: WgpuDevice) -> Result<Box<dyn Detect>, LoadError> {

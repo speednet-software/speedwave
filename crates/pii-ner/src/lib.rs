@@ -15,8 +15,6 @@ pub use span::{DetectOptions, Span, MAX_CONTENT};
 
 /// A loaded detector, independent of the backend it runs on.
 pub trait Detect: Send + Sync {
-    /// Spans in one text.
-    fn detect(&self, text: &str, opts: &DetectOptions) -> Result<Vec<Span>, DetectError>;
     /// Spans per text, windows of all texts batched together.
     fn detect_batch(
         &self,
@@ -28,6 +26,3 @@ pub trait Detect: Send + Sync {
     /// Model name, version and size.
     fn description(&self) -> &str;
 }
-
-#[cfg(all(test, feature = "model-e2e"))]
-mod model_e2e_tests;

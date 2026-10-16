@@ -8,11 +8,12 @@ use serde::Serialize;
 use crate::consts;
 use crate::host_mcp_process::lock::{self, LockService};
 
+use super::workers::RenderedUrlState;
+
 /// Confidence below which the proxy drops a detected span.
 const DEFAULT_NER_MIN_CONFIDENCE: f32 = 0.6;
 
-/// Model labels the proxy seals by default. `ORG`, `IMEI`, `URL` and `IP_ADDRESS` are left
-/// out: they are routine technical content in a coding assistant, not personal data.
+/// Model labels the proxy seals by default.
 pub const DEFAULT_NER_LABELS: &[&str] = &[
     "SSN",
     "CREDIT_CARD",
@@ -43,13 +44,8 @@ pub struct LiveNerService {
 }
 
 impl LiveNerService {
-    /// Bearer secret the proxy must present.
-    pub fn token(&self) -> &str {
-        &self.token
-    }
-
     #[cfg(test)]
-    pub(crate) fn test_new(port: u16, token: &str) -> Self {
+    pub(super) fn test_new(port: u16, token: &str) -> Self {
         Self {
             port,
             token: token.to_string(),
@@ -119,34 +115,23 @@ pub(super) fn validate_ner_url(raw: &str) -> Result<u16, String> {
         .ok_or_else(|| "an explicit port is required".to_string())
 }
 
-/// Whether a rendered `proxy.json` still matches the detector that is live now.
-#[derive(Debug, PartialEq, Eq)]
-pub enum NerUrlState {
-    /// No `ner` section rendered and no live detector: nothing to reconcile.
-    Absent,
-    /// The rendered URL targets the live detector's container-facing port.
-    Current,
-    /// Rendered and live disagree (either side missing, another port, or unparsable JSON).
-    Stale,
-}
-
 /// Exact match between `ner.url` in `proxy_json` and the URL the renderer would write for
 /// `live_port`; an unparsable config never counts as current.
-pub fn ner_url_state(proxy_json: &str, live_port: Option<u16>) -> NerUrlState {
+pub fn ner_url_state(proxy_json: &str, live_port: Option<u16>) -> RenderedUrlState {
     let doc: serde_json::Value = match serde_json::from_str(proxy_json) {
         Ok(doc) => doc,
         Err(e) => {
             log::warn!("proxy.json is not parsable ({e}); treating the NER URL as stale");
-            return NerUrlState::Stale;
+            return RenderedUrlState::Stale;
         }
     };
     let rendered = doc.pointer("/ner/url").and_then(|v| v.as_str());
     match (rendered, live_port) {
-        (None, None) => NerUrlState::Absent,
+        (None, None) => RenderedUrlState::Absent,
         (Some(url), Some(port)) if url == super::workers::worker_gateway_url(port) => {
-            NerUrlState::Current
+            RenderedUrlState::Current
         }
-        _ => NerUrlState::Stale,
+        _ => RenderedUrlState::Stale,
     }
 }
 
@@ -169,7 +154,7 @@ mod tests {
         write_lock(tmp.path(), std::process::id(), 50111, "secret");
         let live = live_service_in(tmp.path()).unwrap();
         assert_eq!(live.port, 50111);
-        assert_eq!(live.token(), "secret");
+        assert_eq!(live.token, "secret");
         assert!(!format!("{live:?}").contains("secret"));
 
         write_lock(tmp.path(), std::process::id(), 50111, "");
@@ -241,15 +226,24 @@ mod tests {
     fn ner_url_state_matches_exactly() {
         let expected = super::super::workers::worker_gateway_url(50333);
         let rendered = format!(r#"{{"routes":[],"ner":{{"url":"{expected}","token":"t"}}}}"#);
-        assert_eq!(ner_url_state(&rendered, Some(50333)), NerUrlState::Current);
-        assert_eq!(ner_url_state(&rendered, Some(5033)), NerUrlState::Stale);
-        assert_eq!(ner_url_state(&rendered, None), NerUrlState::Stale);
+        assert_eq!(
+            ner_url_state(&rendered, Some(50333)),
+            RenderedUrlState::Current
+        );
+        assert_eq!(
+            ner_url_state(&rendered, Some(5033)),
+            RenderedUrlState::Stale
+        );
+        assert_eq!(ner_url_state(&rendered, None), RenderedUrlState::Stale);
         assert_eq!(
             ner_url_state(r#"{"routes":[]}"#, Some(50333)),
-            NerUrlState::Stale
+            RenderedUrlState::Stale
         );
-        assert_eq!(ner_url_state(r#"{"routes":[]}"#, None), NerUrlState::Absent);
-        assert_eq!(ner_url_state("not json", None), NerUrlState::Stale);
+        assert_eq!(
+            ner_url_state(r#"{"routes":[]}"#, None),
+            RenderedUrlState::Absent
+        );
+        assert_eq!(ner_url_state("not json", None), RenderedUrlState::Stale);
     }
 
     fn declared_confidence(src: &str, pattern: &str) -> Option<f32> {

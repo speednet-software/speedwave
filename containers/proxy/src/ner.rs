@@ -168,8 +168,7 @@ pub struct NerClient {
     client: reqwest::Client,
     last_warn: Mutex<Option<Instant>>,
     cache: SpanCache,
-    /// One detector call at a time: the host serialises inference anyway, so a queued caller
-    /// costs nothing extra and usually finds its leaves cached by the call ahead of it.
+    /// One detector call at a time.
     gate: tokio::sync::Semaphore,
 }
 
@@ -364,7 +363,7 @@ impl NerClient {
 }
 
 /// Accepts only `http://host.docker.internal:<port>` with nothing else.
-pub fn validate_base_url(raw: &str) -> Result<(), String> {
+fn validate_base_url(raw: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(raw).map_err(|e| format!("not a URL: {e}"))?;
     if url.scheme() != "http" {
         return Err(format!("scheme must be http, got {}", url.scheme()));
@@ -399,8 +398,7 @@ fn all_resolved(resolved: &[Option<Vec<ExternalSpan>>]) -> Option<Vec<Vec<Extern
     resolved.iter().cloned().collect()
 }
 
-/// The error and every cause below it, so a connection refusal, a reset or a connect
-/// timeout is named in the log instead of the generic "error sending request".
+/// The error and every cause below it.
 fn error_chain(error: &reqwest::Error) -> String {
     let mut parts = vec![error.to_string()];
     let mut source = std::error::Error::source(error);

@@ -6,6 +6,9 @@ pub(crate) mod snap;
 pub(crate) mod tokenize;
 pub(crate) mod windows;
 
+#[cfg(all(test, feature = "model-e2e"))]
+mod model_e2e_tests;
+
 use std::ops::Range;
 use std::path::Path;
 
@@ -40,10 +43,10 @@ pub(crate) struct Detector<B: Backend> {
 /// One token of the input with its UTF-8 byte offsets.
 #[cfg(all(test, feature = "model-e2e"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TokenInfo {
-    pub(crate) id: u32,
-    pub(crate) start: usize,
-    pub(crate) end: usize,
+struct TokenInfo {
+    id: u32,
+    start: usize,
+    end: usize,
 }
 
 /// Raw classifier output for one window, before BIOES decoding.
@@ -59,6 +62,27 @@ struct Job {
     text: usize,
     range: Range<usize>,
     window: Window,
+}
+
+impl<B: Backend> Detect for Detector<B>
+where
+    Self: Send + Sync,
+{
+    fn detect_batch(
+        &self,
+        texts: &[&str],
+        opts: &DetectOptions,
+    ) -> Result<Vec<Vec<Span>>, DetectError> {
+        self.detect_all(texts, opts)
+    }
+
+    fn device(&self) -> Device {
+        self.device_kind
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
 }
 
 impl<B: Backend> Detector<B> {
@@ -100,7 +124,7 @@ impl<B: Backend> Detector<B> {
 
     /// Tokens of `text` with byte offsets.
     #[cfg(all(test, feature = "model-e2e"))]
-    pub(crate) fn tokenize(&self, text: &str) -> Result<Vec<TokenInfo>, DetectError> {
+    fn tokenize(&self, text: &str) -> Result<Vec<TokenInfo>, DetectError> {
         Ok(self
             .tokenizer
             .encode(text)?
@@ -113,9 +137,15 @@ impl<B: Backend> Detector<B> {
             .collect())
     }
 
+    /// Spans in one text.
+    #[cfg(test)]
+    fn detect(&self, text: &str, opts: &DetectOptions) -> Result<Vec<Span>, DetectError> {
+        Ok(self.detect_all(&[text], opts)?.pop().unwrap_or_default())
+    }
+
     /// Raw per-window classifier output for one text; the diagnostic view behind `detect`.
     #[cfg(test)]
-    pub(crate) fn predict_windows(
+    fn predict_windows(
         &self,
         text: &str,
         opts: &DetectOptions,
@@ -127,7 +157,7 @@ impl<B: Backend> Detector<B> {
 
     /// Spans from classifier output for `text`, as produced by `predict_windows`.
     #[cfg(test)]
-    pub(crate) fn spans_from_windows(
+    fn spans_from_windows(
         &self,
         text: &str,
         windows: &[WindowPrediction],
@@ -322,37 +352,11 @@ impl<B: Backend> Detector<B> {
     }
 }
 
-impl<B: Backend> Detect for Detector<B>
-where
-    Self: Send + Sync,
-{
-    fn detect(&self, text: &str, opts: &DetectOptions) -> Result<Vec<Span>, DetectError> {
-        Ok(self.detect_all(&[text], opts)?.pop().unwrap_or_default())
-    }
-
-    fn detect_batch(
-        &self,
-        texts: &[&str],
-        opts: &DetectOptions,
-    ) -> Result<Vec<Vec<Span>>, DetectError> {
-        self.detect_all(texts, opts)
-    }
-
-    fn device(&self) -> Device {
-        self.device_kind
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::path::Path;
 
     use crate::artifact::manifest::sample_manifest_json;
-    use crate::artifact::sha256_hex;
     use crate::artifact::weights::test_support::serialize;
     use crate::model::build::test_support::{tiny_config, tiny_weights};
 
@@ -387,15 +391,23 @@ pub(crate) mod test_support {
         )
         .replace(
             "\"weights_sha256\": \"\"",
-            &format!("\"weights_sha256\": \"{}\"", sha256_hex(&weights)),
+            &format!("\"weights_sha256\": \"{}\"", hex_digest(&weights)),
         )
         .replace(
             "\"tokenizer_sha256\": \"\"",
-            &format!("\"tokenizer_sha256\": \"{}\"", sha256_hex(tokenizer)),
+            &format!("\"tokenizer_sha256\": \"{}\"", hex_digest(tokenizer)),
         );
         std::fs::write(dir.join("manifest.json"), manifest).unwrap();
         std::fs::write(dir.join("w.safetensors"), weights).unwrap();
         std::fs::write(dir.join("tokenizer.json"), tokenizer).unwrap();
+    }
+
+    fn hex_digest(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 }
 
