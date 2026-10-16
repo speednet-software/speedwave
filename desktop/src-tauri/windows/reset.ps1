@@ -34,7 +34,7 @@ if (Get-Process -Name $DesktopProcess -ErrorAction SilentlyContinue) {
   exit 12
 }
 
-$trees = @('build-context', 'mcp-os', 'oauth', 'THIRD-PARTY-LICENSES', 'host_exec')
+$trees = @('build-context', 'mcp-os', 'oauth', 'pii-ner', 'THIRD-PARTY-LICENSES', 'host_exec')
 $failed = 0
 foreach ($tree in $trees) {
   $path = [System.IO.Path]::Combine($instDir, $tree)

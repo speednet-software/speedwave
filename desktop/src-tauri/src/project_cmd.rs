@@ -125,6 +125,7 @@ pub(crate) async fn switch_project(
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
     }
+    crate::pii_ner_service::stop_unless_active_wants();
 
     let _ = app.emit(
         "project_switch_succeeded",
@@ -203,6 +204,7 @@ pub(crate) fn rollback_and_emit_failed(
         Ok(())
     })
     .err();
+    crate::pii_ner_service::stop_unless_active_wants();
 
     let mut parts = vec![error.to_string()];
     if let Some(ce) = cleanup_error {

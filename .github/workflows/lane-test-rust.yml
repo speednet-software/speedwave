@@ -37,3 +37,9 @@ jobs:
 
       - name: Audio transcription tests
         run: make test-transcription
+
+      - name: pii-ner model e2e (CPU)
+        run: make test-pii-ner-model
+
+      - name: pii-ner converter tests
+        run: make test-pii-ner-tools

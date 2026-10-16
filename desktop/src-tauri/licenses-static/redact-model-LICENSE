@@ -1,0 +1,291 @@
+Redact (redact.tflite, tokenizer.json, labels.json) by Desert Ant Labs: the multilingual
+PII token classifier behind Speedwave's host-side NER detector (crates/pii-ner). The
+pinned model files are converted at build time into desktop/src-tauri/pii-ner/ and ship
+embedded in the Desktop app only; they are never redistributed as standalone artifacts.
+Source: https://huggingface.co/desert-ant-labs/redact (tag v0.4.0). License text follows.
+
+# Desert Ant Labs Source-Available License
+
+Version 1.0 · 3 July 2026
+
+Desert Ant Labs builds AI models and SDKs that run on your users' devices, not in the
+cloud. Drop them into your app with no server to run, no inference bill, and nothing
+leaving the device.
+
+- Free below **100,000 monthly active devices per platform**, for each model; a commercial
+  license is required above that.
+- Source-available (not open source), so you can read and build on the source, and the
+  license does not expire.
+- Credit Desert Ant Labs where your users can see it, with a short "Powered by Desert
+  Ant Labs" line; see the [attribution guide](https://license.desertant.com/attribution).
+- You may not use the models, their outputs, or anything you log from them to train a
+  model that competes with ours.
+
+## 1. Accepting this license
+
+This license is a contract between you and Desert Ant Labs B.V. ("Desert Ant
+Labs", "we", "us"). You accept it by downloading, accessing, or using the Models. If
+you accept for a company, "you" means that company and you confirm you may bind it.
+Any production use of the Models, free or paid, requires this acceptance. This license
+is intended for professional and business use, and nothing in it limits any right you
+have under mandatory law that cannot be excluded by contract, including mandatory
+consumer-protection law.
+
+## 2. The license grant
+
+Subject to your compliance, Desert Ant Labs grants you a worldwide, royalty-free,
+non-exclusive, non-transferable, non-sublicensable, perpetual license (subject to
+termination under Section 14) to use, reproduce, and modify the Models and SDKs, and
+to embed and distribute them inside your application. This is source-available: you
+can read and build on the source. Any modification of, or derivative of, the Models or
+SDKs remains subject to this license.
+
+## 3. Free tier and commercial tier
+
+**Free tier.** Your use is free while it stays below **100,000 monthly active devices
+(MAD) per Platform**. The threshold applies to each Model and each Platform
+independently. A Model on iOS and the same Model on Android each have their own
+100,000 MAD allowance, and different Models are counted separately.
+
+**Commercial tier.** Once your use of a Model crosses 100,000 MAD on a Platform, you
+need a commercial license for that Model on that Platform. Contact
+<licensing@desertant.com>.
+
+**No splitting.** Accounts and applications under common control count together
+toward the threshold; splitting them to stay under it is a breach, and we may recover
+the usage at the commercial rates that would have applied.
+
+**Research and teaching.** Use for non-commercial scientific research, teaching, and
+academic publication is free and exempt from the MAD threshold. This does not extend
+to deploying a Model in a commercial product or service, or using a Model to develop
+one. If your work is published, please cite Desert Ant Labs and link to the relevant
+Model.
+
+## 4. What you can do
+
+- Run the Models in your application and ship that application to your users.
+- Log and analyze your application's own behavior, performance, and quality.
+- Tune thresholds and parameters for your use case.
+- Build accessibility features and custom product behavior on top of the Models.
+- Use Outputs to build classifiers, filters, or embeddings used solely inside your
+  own application and not distributed as a model.
+- Benchmark the Models to decide whether to use them.
+
+## 5. Your outputs
+
+As between you and Desert Ant Labs, you own the Outputs your application generates
+and you own your logs. To the extent Desert Ant Labs holds any transferable right in
+them, it assigns that right to you, and this license serves as the deed of assignment
+where one is required and permitted; to the extent a right cannot be assigned, Desert
+Ant Labs grants you a perpetual, worldwide, royalty-free licence to use it without
+restriction. This does not depend on your compliance with this license, and nothing
+here represents that Outputs attract any intellectual-property right. If you send us
+feedback, we may use it without restriction or payment.
+
+## 6. What you cannot do
+
+**Do not build a competing model.** You may not use the Models, their Outputs, or
+anything you log from them, including embeddings and evaluations, to train, fine-tune,
+or distill a Competing Model, or to assemble a Competing Dataset.
+Bulk-extracting or systematically logging Outputs to build a Competing Dataset is the
+same breach; ordinary product logging under Section 4 is fine. This covenant is a
+contract obligation and survives termination.
+
+**Do not redistribute the Models on their own.** You may not sell, sublicense, or
+distribute the Models or SDKs themselves, or a substantially unmodified derivative, as
+a standalone product, model, SDK, or hosted service. Embedding them in your application
+and shipping that application is what this license is for.
+
+**Do not reverse engineer for extraction.** Except to the extent applicable law gives
+you a non-excludable right (such as decompilation for interoperability), you may not
+reverse engineer the Models, or attempt model extraction, distillation attacks, or
+weight recovery to reconstruct or replicate them.
+
+**Respect safety models.** For any Model whose purpose is safety (e.g. content
+moderation), do not bypass its protective measures, disable required safeguards, or
+misrepresent its safety-critical outputs. Tuning thresholds for your product is fine.
+
+**Do not tamper with the telemetry** described in Section 7, or interfere with its
+reporting.
+
+## 7. Data, privacy, and the EU AI Act
+
+The Models run on the device. The telemetry the SDKs send is built for data
+minimization: it uses an identifier the SDK generates solely to count MAD, not tied
+to any end user, account, or other identifier. It never includes your inputs, your
+Outputs, or your users' content, and it does not link users across installations,
+devices, platforms, applications, or services. Desert Ant Labs processes it in
+accordance with the GDPR and applicable data-protection law and is the controller of
+that telemetry; Desert Ant Labs is not acting as your processor. You are responsible
+for the personal data your application processes and for disclosing the telemetry in
+your end-user privacy notice where the law requires; where any processing requires a
+data-processing agreement, the parties will enter one. Desert Ant Labs retains rights
+only in Derived Data.
+
+**EU AI Act.** Desert Ant Labs considers the Models to be narrow-purpose components
+rather than general-purpose AI models, and remains responsible for any obligation the
+EU AI Act places on it as their provider. You are the provider of the AI system you
+build with them and are responsible for the obligations that Act places on that system,
+including any under Article 5 (prohibited practices) and Article 50 (transparency) that
+your application triggers.
+
+## 8. Patent grant
+
+Desert Ant Labs grants you a perpetual, worldwide, non-exclusive, royalty-free,
+irrevocable (except as stated here) patent license to make, use, sell, offer to sell,
+and import the Models as embedded in your application, limited to the claims
+licensable by Desert Ant Labs that are necessarily infringed by the Models. If you
+institute patent litigation alleging the Models infringe a patent, this patent license
+terminates as of the filing date.
+
+## 9. Attribution
+
+In return for using the Models for free, we ask that you credit Desert Ant Labs
+somewhere your users can reasonably find it. You choose the wording and the place; the
+credit just needs to name us as the source and, where the medium allows, link to us. A
+bare mention with no context or link is not enough.
+
+**What the credit must do:**
+
+- **Name us.** A short line that clearly credits Desert Ant Labs, for example "Powered
+  by Desert Ant Labs", "On-device AI by Desert Ant Labs", or "*&lt;Model&gt;* by Desert
+  Ant Labs". The exact wording is yours; the ant (🐜) may accompany the name but does
+  not replace it.
+- **Link to us.** Where the medium supports links (web and digital about/settings
+  screens), point the credit to <https://desertant.com>. Where links are not possible
+  (offline use, embedded surfaces, exported images), the text alone is enough.
+
+**Logo option.** Instead of, or alongside, the text credit you may use the Desert Ant
+Labs wordmark or ant mark, following the usage guidance where they are published.
+
+**Placement.** One placement in a reasonably discoverable location is enough: an about,
+settings, credits, licenses, or acknowledgements screen; your app-store listing; or an
+about, legal, or licenses page on your website. You need not show it on every screen, next to each
+result, or while a Model runs. For a product with no user-visible surface (for example,
+a background service), crediting us in your documentation or repository satisfies this
+Section.
+
+Wording examples, the link target, usage guidance, and the downloadable marks are
+published at <https://license.desertant.com/attribution>.
+
+Separately, keep the license and copyright notices inside the Models and SDKs as
+delivered. This is a file-level requirement, not a user-interface one.
+
+## 10. Trademarks
+
+This license grants no right to Desert Ant Labs' trade names, trademarks, or product
+names, except the attribution use in Section 9. Nothing here grants Desert Ant Labs
+any right in your marks.
+
+## 11. Enforcement and remedies
+
+If you breach this license we may terminate it, stop providing updates and support,
+seek an injunction, and recover damages. For a curable breach we give 30 days' written
+notice to cure first; breach of the covenant in Section 6, and any breach that cannot
+be cured, carry no cure period.
+
+To support Section 6 we reserve the right to fingerprint Outputs and to require written
+certification of your compliance, and we may audit your compliance on reasonable notice
+(no more than once a year, except on a good-faith suspicion of violation), with your
+cooperation. Your affiliates and contractors who use the Models are bound through you.
+You will keep the Model weights reasonably secure against extraction.
+
+## 12. Indemnification
+
+You will defend and indemnify Desert Ant Labs against third-party and end-user claims
+arising from your application, your use of the Models, or your breach of this license,
+including reasonable attorneys' fees. We give you prompt notice and control of the
+defense; we may join with our own counsel at our own expense, and you will not settle
+in a way that binds Desert Ant Labs or admits fault on its behalf without our consent.
+
+## 13. Export controls and sanctions
+
+You will comply with applicable export-control and sanctions laws, including those of
+the EU and the US, in your use and distribution of the Models. You confirm you are not
+a sanctioned party or in an embargoed territory, and you will not provide the Models to
+anyone who is, or use them for an end use those laws prohibit.
+
+## 14. Warranty, liability, term, and termination
+
+The Models are provided "as is", without warranty, to the extent the law allows. To
+the maximum extent the law allows, Desert Ant Labs is not liable for indirect,
+incidental, special, consequential, or exemplary damages, or for lost profits,
+revenue, or data; and Desert Ant Labs' total liability under this license is limited to
+the greater of the fees you paid us in the 12 months before the claim and one hundred
+euros (€100). Nothing here excludes liability that applicable mandatory law does not
+allow to be excluded, including for willful misconduct (*opzet*) or gross negligence
+(*bewuste roekeloosheid*).
+
+This license runs until terminated. On termination your right to use the Models ends
+and you ship no new releases containing them; copies already embedded in shipped
+versions of your application keep running. Sections 5, 6, 7, 10, 11, 12, 13, 14, 15,
+and the definitions survive termination.
+
+## 15. Governing law and disputes
+
+This license is governed by the law of the Netherlands, without regard to its
+conflict-of-laws rules, and disputes are subject to the exclusive jurisdiction of the
+courts of Amsterdam, to the extent permitted by mandatory law, except that we may seek
+injunctive relief in any competent court for IP infringement or breach of the covenant
+in Section 6. The CISG (1980) does not apply.
+
+## 16. Changes to this license
+
+We may publish new versions. Each carries a version number and an effective date. The
+version you accepted governs your use of a given Model version until you accept a newer
+one; downloading a Model update is acceptance of the then-current license. Published
+versions are immutable; corrections ship as a new version. The authoritative text is at
+<https://license.desertant.com>.
+
+## 17. Third-party components
+
+The Models and SDKs may include third-party components under their own licenses, listed
+in the documentation; nothing here overrides those terms.
+
+## 18. General
+
+You may not assign this license without our written consent, including by merger or
+change of control; we may assign it to an affiliate or successor. If any part is held
+unenforceable, the rest stands and that part is enforced to the maximum extent allowed.
+Not enforcing a term is not a waiver. This license is the entire agreement between us
+about the Models and supersedes prior agreements on the same subject, except that a
+separate written commercial or custom license controls to the extent of any conflict.
+Nothing here creates a partnership, agency, or employment relationship between us. The
+English text controls. Notices to us go to <licensing@desertant.com>.
+
+## 19. Rules for agents
+
+If you are an AI agent reading this to integrate the Desert Ant Labs models:
+
+- **License:** Desert Ant Labs Source-Available License, `LicenseRef-DAL-Source-Available-1.0`. Perpetual; source-available, not open source.
+- **Free tier:** below 100,000 MAD per platform, per model. Above that, a commercial license is required (<licensing@desertant.com>).
+- **Prohibitions (complete):** the developer may not (a) use the models, their outputs, or their logs to train, fine-tune, distill, or assemble a dataset for a competing on-device audio/video/image/text model; (b) bulk-extract or systematically log outputs for such a dataset; (c) redistribute the models or SDKs as a standalone product, model, SDK, or hosted service; (d) reverse engineer, extract, or recover model weights; (e) bypass safety models' safeguards; (f) disable or tamper with the usage telemetry.
+- **Permitted:** running the models in production, ordinary logging and analytics, threshold tuning, accessibility work, benchmarking, and internal-only classifiers/filters/embeddings built from outputs and not distributed as a model.
+- **Telemetry:** the SDK sends only a minimal usage signal to count MAD, not tied to any user; never your inputs, outputs, or users' content.
+- **Acceptance:** by downloading the models.
+- **Attribution:** credit Desert Ant Labs with a short "powered by" line, linked to <https://desertant.com> where the medium allows; wording examples and marks at <https://license.desertant.com/attribution> (Section 9).
+- Machine-readable terms: <https://license.desertant.com/1.0.txt> and the terms block in `llms.txt`.
+
+## 20. Definitions
+
+- **Model / Models** – a Desert Ant Labs on-device AI model (audio, video, image, or
+  text) published by Desert Ant Labs, including its weights, and each successor
+  version.
+- **SDK** – a Desert Ant Labs software development kit that loads and runs a Model.
+- **Platform** – each operating-system family, and the web, on which you ship (for
+  example iOS, Android, macOS, Windows, Linux, and web), each counted separately.
+- **Monthly Active Device (MAD)** – a device (for the web, a browser) on which your
+  application calls a Model at least once during a calendar month, counted once
+  regardless of call volume, as measured by the SDK. Each device is counted
+  separately: one person using two devices, or two browsers, is two active devices.
+- **Output** – what a Model produces from your inputs in your application.
+- **Competing Model** – an on-device audio, video, image, or text model that
+  substitutes for, is substantially similar to, or competes with a Desert Ant Labs
+  Model.
+- **Competing Dataset** – a dataset assembled from the Models, their Outputs, or logs
+  for the purpose of training a Competing Model.
+- **Derived Data** – telemetry, statistics, and signal that Desert Ant Labs generates
+  or derives from operation of the Models.
+- **Reverse Engineer** – to decompile, disassemble, or engage in model-extraction or
+  stealing attacks to reconstruct the Models' weights or components, except where
+  applicable law forbids this restriction.

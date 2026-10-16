@@ -99,6 +99,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-091](ADR-091-tab-aware-claude-memory-ceiling.md)                  | Tab-aware Claude memory ceiling: a formula over tab capacity and VM size                                                    | Accepted                                                                           |
 | [ADR-092](ADR-092-per-tab-model-selection.md)                          | Per-tab model selection with a settings.json-backed project default                                                         | Accepted                                                                           |
 | [ADR-093](ADR-093-portable-ggml-cpu-baseline.md)                       | Portable ggml CPU baseline for whisper builds: `GGML_NATIVE` off, no build-host instruction sets                            | Accepted                                                                           |
+| [ADR-094](ADR-094-pii-ner-redact-model-in-burn.md)                     | Neural PII detection: Redact model converted at build time and ported to burn (wgpu GPU, CPU fallback)                      | Accepted                                                                           |
+| [ADR-095](ADR-095-host-side-pii-ner-detector-for-the-proxy.md)         | Host-side PII NER detector served from the Desktop process; proxy seals its spans with the existing engine                  | Accepted                                                                           |
 
 ## Creating a New ADR
 
