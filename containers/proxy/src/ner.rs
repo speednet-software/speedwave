@@ -17,15 +17,14 @@ pub const NER_AUTH_HEADER: &str = "x-speedwave-pii-ner-auth";
 /// The only host a rendered `ner.url` may name; mirror of `consts::HOST_GATEWAY_ALIAS`.
 const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 
+const DEFAULT_MIN_CONFIDENCE: f32 = 0.6;
+
 /// Detector endpoint path appended to the configured base URL.
 const DETECT_PATH: &str = "/v1/detect";
 
 /// Largest total text volume sent to the detector; bigger requests skip NER (regex still runs).
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
-/// Generous by local-hop standards: a burst of parallel sessions opens several connections to
-/// the host gateway at once and a 500 ms budget lost that race, which silently degraded a
-/// request to rules only. A dead detector still refuses instantly.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const WARN_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -33,12 +32,9 @@ const WARN_INTERVAL: Duration = Duration::from_secs(60);
 const CACHE_GENERATION_ENTRIES: usize = 2048;
 
 fn default_min_confidence() -> f32 {
-    0.6
+    DEFAULT_MIN_CONFIDENCE
 }
 
-/// A first turn carrying a full context window is seconds of inference; cutting it off means
-/// forwarding that turn with rules only, so the client waits rather than leaks. Repeat turns
-/// hit the cache and never come near this.
 fn default_timeout_ms() -> u64 {
     15000
 }
@@ -99,13 +95,8 @@ struct WireSpan {
 /// Identifies a text without keeping it: its length plus two independently seeded hashes.
 type CacheKey = (usize, u64, u64);
 
-/// Spans already detected for a text, so a retried or continued conversation pays for new
-/// leaves only. The cache holds offsets, never request text, and is keyed by a hash seeded
-/// per process, so the key of a leaf cannot be computed outside the running proxy.
-///
-/// Two generations bound it: when the young one fills, it displaces the old one and starts
-/// over. A leaf that keeps being sent (the system prompt) is promoted back on every hit and
-/// survives; a burst of one-off leaves ages out without unbounded growth.
+/// Spans already detected per text: offsets only, keyed by a per-process seeded hash.
+/// Two generations bound it; a hit promotes the entry back to the young one.
 struct SpanCache {
     seed_a: RandomState,
     seed_b: RandomState,
@@ -190,54 +181,6 @@ impl std::fmt::Debug for NerClient {
     }
 }
 
-/// Accepts only `http://host.docker.internal:<port>` with nothing else.
-pub fn validate_base_url(raw: &str) -> Result<(), String> {
-    let url = reqwest::Url::parse(raw).map_err(|e| format!("not a URL: {e}"))?;
-    if url.scheme() != "http" {
-        return Err(format!("scheme must be http, got {}", url.scheme()));
-    }
-    if url.host_str() != Some(HOST_GATEWAY_ALIAS) {
-        return Err(format!("host must be {HOST_GATEWAY_ALIAS}"));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("userinfo is not allowed".to_string());
-    }
-    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
-        return Err("path, query and fragment are not allowed".to_string());
-    }
-    if url.port().is_none() {
-        return Err("an explicit port is required".to_string());
-    }
-    Ok(())
-}
-
-fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("building the detector client: {e}"))
-}
-
-/// The error and every cause below it, so a connection refusal, a reset or a connect
-/// timeout is named in the log instead of the generic "error sending request".
-fn error_chain(error: &reqwest::Error) -> String {
-    let mut parts = vec![error.to_string()];
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
-        parts.push(cause.to_string());
-        source = cause.source();
-    }
-    parts.join(": ")
-}
-
-/// The span lists once every slot is filled, else `None`.
-fn all_resolved(resolved: &[Option<Vec<ExternalSpan>>]) -> Option<Vec<Vec<ExternalSpan>>> {
-    resolved.iter().cloned().collect()
-}
-
 impl NerClient {
     /// Validates the URL shape and builds the client; an error is a fatal config error.
     pub fn from_config(cfg: NerConfig) -> Result<Self, String> {
@@ -267,9 +210,8 @@ impl NerClient {
         })
     }
 
-    /// Detects spans for every text; the result has exactly one list per input text, in the
-    /// same order, or is `Unavailable`. Blank texts and texts detected before never reach the
-    /// detector, so a retried request and a continued conversation pay for new leaves only.
+    /// Detects spans for every text: one list per input, in order, or `Unavailable`.
+    /// Blank and already-cached texts never reach the detector.
     pub async fn detect_batch(&self, texts: &[String]) -> NerOutcome {
         if texts.is_empty() {
             return NerOutcome::Spans(Vec::new());
@@ -349,10 +291,7 @@ impl NerClient {
         }
     }
 
-    /// `/v1/detect` is pure inference, so a send that never got an answer is safe to repeat
-    /// once: a connection the VM gateway dropped between two bursts costs a retry, not a
-    /// request forwarded with rules only. A timeout is not repeated, it would only double the
-    /// wait the caller already paid.
+    /// Repeats the POST once when it got no answer; a timeout is not repeated.
     async fn post_once_then_retry(&self, texts: &[String]) -> Result<DetectResponse, String> {
         match self.post(texts).await {
             Ok(parsed) => Ok(parsed),
@@ -422,6 +361,54 @@ impl NerClient {
             log::warn!("PII NER detector unavailable, scanning with rules only: {reason}");
         }
     }
+}
+
+/// Accepts only `http://host.docker.internal:<port>` with nothing else.
+pub fn validate_base_url(raw: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw).map_err(|e| format!("not a URL: {e}"))?;
+    if url.scheme() != "http" {
+        return Err(format!("scheme must be http, got {}", url.scheme()));
+    }
+    if url.host_str() != Some(HOST_GATEWAY_ALIAS) {
+        return Err(format!("host must be {HOST_GATEWAY_ALIAS}"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("userinfo is not allowed".to_string());
+    }
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err("path, query and fragment are not allowed".to_string());
+    }
+    if url.port().is_none() {
+        return Err("an explicit port is required".to_string());
+    }
+    Ok(())
+}
+
+fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("building the detector client: {e}"))
+}
+
+/// The span lists once every slot is filled, else `None`.
+fn all_resolved(resolved: &[Option<Vec<ExternalSpan>>]) -> Option<Vec<Vec<ExternalSpan>>> {
+    resolved.iter().cloned().collect()
+}
+
+/// The error and every cause below it, so a connection refusal, a reset or a connect
+/// timeout is named in the log instead of the generic "error sending request".
+fn error_chain(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    parts.join(": ")
 }
 
 #[cfg(test)]

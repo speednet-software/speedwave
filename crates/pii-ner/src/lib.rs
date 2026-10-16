@@ -1,6 +1,6 @@
 //! Host-side PII span detection: the Redact BERT token classifier on burn, no vendor runtime.
 
-pub mod artifact;
+mod artifact;
 mod backend;
 mod error;
 mod label;
@@ -8,15 +8,10 @@ mod model;
 mod pipeline;
 mod span;
 
-pub use backend::{
-    gpu_available, gpu_device, load_auto, CpuBackend, Device, DevicePreference, GpuBackend,
-};
+pub use backend::{load_auto, Device, DevicePreference};
 pub use error::{DetectError, LoadError};
-pub use label::{Label, LabelParseError};
-pub use pipeline::{Detector, TokenInfo, WindowPrediction};
-pub use span::{
-    DetectOptions, Span, DEFAULT_MIN_SCORE, LOW_SCORE, MAX_CONTENT, SEQ_LEN, STRIDE, WINDOW_STEP,
-};
+pub use label::Label;
+pub use span::{DetectOptions, Span, MAX_CONTENT};
 
 /// A loaded detector, independent of the backend it runs on.
 pub trait Detect: Send + Sync {
@@ -33,3 +28,6 @@ pub trait Detect: Send + Sync {
     /// Model name, version and size.
     fn description(&self) -> &str;
 }
+
+#[cfg(all(test, feature = "model-e2e"))]
+mod model_e2e_tests;

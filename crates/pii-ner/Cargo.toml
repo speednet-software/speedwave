@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-pii-ner"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 publish = false
 description = "Host-side PII span detection with the Redact BERT token classifier on burn"
@@ -30,10 +30,6 @@ model-e2e = []
 name = "pii-ner-bench"
 path = "src/bin/pii_ner_bench.rs"
 required-features = ["bench"]
-
-[[test]]
-name = "model_e2e"
-required-features = ["model-e2e"]
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 //! host address, writes the `pii-ner` lock the compose renderer reads, answers `POST /v1/detect`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -27,33 +27,19 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
 const RETRY_AFTER_SECS: &str = "5";
 
 /// Seam over the model so the handler and lifecycle are testable without weights.
-pub(crate) trait SpanDetector: Send + Sync {
+trait SpanDetector: Send + Sync {
     fn detect_batch(&self, texts: &[&str]) -> Result<Vec<Vec<Span>>, String>;
     fn description(&self) -> String;
 }
 
-struct ModelDetector(Box<dyn Detect>);
-
-impl SpanDetector for ModelDetector {
-    fn detect_batch(&self, texts: &[&str]) -> Result<Vec<Vec<Span>>, String> {
-        self.0
-            .detect_batch(texts, &DetectOptions::default())
-            .map_err(|e| e.to_string())
-    }
-
-    fn description(&self) -> String {
-        format!("{} on {:?}", self.0.description(), self.0.device())
-    }
-}
-
 /// Where the model is in its lifetime; the endpoint answers 503 until `Ready`.
-pub(crate) enum DetectorState {
+enum DetectorState {
     Loading,
     Ready(Arc<dyn SpanDetector>),
     Failed,
 }
 
-pub(crate) struct ServiceState {
+struct ServiceState {
     detector: RwLock<DetectorState>,
     token: String,
     inference: tokio::sync::Semaphore,
@@ -61,7 +47,7 @@ pub(crate) struct ServiceState {
 }
 
 impl ServiceState {
-    pub(crate) fn new(detector: DetectorState, token: String) -> Arc<Self> {
+    fn new(detector: DetectorState, token: String) -> Arc<Self> {
         Arc::new(Self {
             detector: RwLock::new(detector),
             token,
@@ -100,100 +86,8 @@ struct DetectResponse {
     spans: Vec<Vec<Span>>,
 }
 
-fn unavailable(reason: &str) -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(axum::http::header::RETRY_AFTER, RETRY_AFTER_SECS)],
-        Json(serde_json::json!({ "error": reason })),
-    )
-        .into_response()
-}
-
-async fn detect(
-    State(state): State<Arc<ServiceState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    let presented = headers
-        .get(consts::PII_NER_AUTH_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !constant_time_eq(presented, &state.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let request: DetectRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "body must be {\"texts\": [..]}" })),
-            )
-                .into_response();
-        }
-    };
-    let detector = match state.ready() {
-        Ok(d) => d,
-        Err(reason) => return unavailable(reason),
-    };
-    let Ok(_queued) = Arc::clone(&state.queue).try_acquire_owned() else {
-        return unavailable("PII detector queue is full");
-    };
-    let _turn = match state.inference.acquire().await {
-        Ok(permit) => permit,
-        Err(_) => return unavailable("PII detector is shutting down"),
-    };
-    let result = tokio::task::spawn_blocking(move || {
-        let refs: Vec<&str> = request.texts.iter().map(String::as_str).collect();
-        detector.detect_batch(&refs)
-    })
-    .await;
-    match result {
-        Ok(Ok(spans)) => Json(DetectResponse { spans }).into_response(),
-        Ok(Err(e)) => {
-            log::error!("PII detector inference failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "detection failed" })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            log::error!("PII detector task panicked: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "detection failed" })),
-            )
-                .into_response()
-        }
-    }
-}
-
-pub(crate) fn build_router(state: Arc<ServiceState>, max_body: usize) -> Router {
-    Router::new()
-        .route(
-            "/health",
-            get(|| async { ([("content-type", "application/json")], r#"{"status":"ok"}"#) }),
-        )
-        .route("/v1/detect", post(detect))
-        .layer(DefaultBodyLimit::max(max_body))
-        .with_state(state)
-}
-
 /// Loader used in production: bundled artifact, GPU when the transcription probe saw one.
-pub(crate) type Loader = Box<dyn FnOnce() -> Result<Arc<dyn SpanDetector>, String> + Send>;
-
-pub(crate) fn production_loader() -> Loader {
-    Box::new(|| {
-        let dir = speedwave_runtime::build::resolve_pii_ner_artifact_dir()
-            .ok_or_else(|| "PII NER artifact directory not found".to_string())?;
-        let preference = match speedwave_runtime::transcription::accel::gpu_class() {
-            speedwave_runtime::transcription::accel::GpuClass::None => DevicePreference::Cpu,
-            _ => DevicePreference::Auto,
-        };
-        let detector = speedwave_pii_ner::load_auto(&dir, preference).map_err(|e| e.to_string())?;
-        Ok(Arc::new(ModelDetector(detector)) as Arc<dyn SpanDetector>)
-    })
-}
+type Loader = Box<dyn FnOnce() -> Result<Arc<dyn SpanDetector>, String> + Send>;
 
 /// Running service: listener thread, lock watchdog and the model loading in the background.
 pub(crate) struct PiiNerService {
@@ -208,9 +102,95 @@ pub(crate) struct PiiNerService {
 
 pub(crate) type SharedPiiNer = Arc<Mutex<Option<PiiNerService>>>;
 
+static GLOBAL_PII_NER: OnceLock<SharedPiiNer> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+enum Transition {
+    StartIfWanted,
+    StopUnlessWanted,
+}
+
+pub(crate) fn set_global_pii_ner(handle: SharedPiiNer) {
+    let _ = GLOBAL_PII_NER.set(handle);
+}
+
+/// Starts the detector when the active project resolves it on; never stops it. Call before
+/// rendering a compose so the proxy picks the live port up.
+pub(crate) fn start_if_active_wants() {
+    apply_for_active_project(Transition::StartIfWanted);
+}
+
+/// Stops the detector when there is no active project or it resolves the detector off; never
+/// starts it. Call once a switch has succeeded and after a Settings save.
+pub(crate) fn stop_unless_active_wants() {
+    apply_for_active_project(Transition::StopUnlessWanted);
+}
+
+/// Stops the detector regardless of the active project.
+pub(crate) fn stop_service() {
+    apply_to_global(false, Transition::StopUnlessWanted);
+}
+
+fn apply_for_active_project(transition: Transition) {
+    let wanted = speedwave_runtime::config::load_user_config()
+        .ok()
+        .and_then(|c| c.active_project)
+        .is_some_and(|project| {
+            speedwave_runtime::pii_policy::pii_ner_enabled_for_project(&project)
+        });
+    apply_to_global(wanted, transition);
+}
+
+fn apply_to_global(wanted: bool, transition: Transition) {
+    if let Some(shared) = GLOBAL_PII_NER.get() {
+        apply_state(
+            shared,
+            consts::data_dir(),
+            wanted,
+            transition,
+            production_loader,
+        );
+    }
+}
+
+fn apply_state(
+    shared: &SharedPiiNer,
+    data_dir: &Path,
+    wanted: bool,
+    transition: Transition,
+    loader: fn() -> Loader,
+) {
+    let mut guard = match shared.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            log::warn!("pii-ner service state is poisoned, leaving the service untouched: {e}");
+            return;
+        }
+    };
+    match (transition, wanted, guard.is_some()) {
+        (Transition::StartIfWanted, true, false) => {
+            match PiiNerService::start(data_dir, loader()) {
+                Ok(service) => {
+                    log::info!(
+                        "PII NER detector service listening on port {}",
+                        service.port()
+                    );
+                    *guard = Some(service);
+                }
+                Err(e) => log::error!("PII NER detector service failed to start: {e}"),
+            }
+        }
+        (Transition::StopUnlessWanted, false, true) => {
+            *guard = None;
+            log::info!("PII NER detector service stopped");
+        }
+        _ => {}
+    }
+}
+
 impl PiiNerService {
     /// Binds, writes the lock, starts serving 503 and loads the model on a helper thread.
-    pub(crate) fn start(data_dir: &Path, loader: Loader) -> anyhow::Result<Self> {
+    fn start(data_dir: &Path, loader: Loader) -> anyhow::Result<Self> {
         crate::firewall::ensure_firewall_rule();
         let lock_path = data_dir.join(consts::PII_NER_LOCK_FILE);
         let preferred = lock::read(&lock_path, LockService::PiiNer).map(|l| l.port);
@@ -331,12 +311,12 @@ impl PiiNerService {
         })
     }
 
-    pub(crate) fn port(&self) -> u16 {
+    fn port(&self) -> u16 {
         self.port
     }
 
     #[cfg(test)]
-    pub(crate) fn state(&self) -> Arc<ServiceState> {
+    fn state(&self) -> Arc<ServiceState> {
         Arc::clone(&self.state)
     }
 
@@ -363,50 +343,118 @@ impl PiiNerService {
     }
 }
 
-/// Starts or stops the detector so the running state matches what the projects
-/// and the MDM policy ask for; logs and leaves the state alone on failure.
-pub(crate) fn apply_desired_state(shared: &SharedPiiNer, data_dir: &Path) {
-    apply_state(
-        shared,
-        data_dir,
-        speedwave_runtime::pii_policy::pii_ner_wanted_on_this_host(),
-        production_loader,
-    );
-}
-
-fn apply_state(shared: &SharedPiiNer, data_dir: &Path, wanted: bool, loader: fn() -> Loader) {
-    let mut guard = match shared.lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            log::warn!("pii-ner service state is poisoned, leaving the service untouched: {e}");
-            return;
-        }
-    };
-    match (wanted, guard.is_some()) {
-        (true, false) => match PiiNerService::start(data_dir, loader()) {
-            Ok(service) => {
-                log::info!(
-                    "PII NER detector service listening on port {}",
-                    service.port()
-                );
-                *guard = Some(service);
-            }
-            Err(e) => log::error!("PII NER detector service failed to start: {e}"),
-        },
-        (false, true) => {
-            *guard = None;
-            log::info!("PII NER detector service stopped: no project enables it");
-        }
-        _ => {}
-    }
-}
-
 impl Drop for PiiNerService {
     fn drop(&mut self) {
         if let Err(e) = self.stop() {
             log::warn!("pii-ner service stop on drop failed: {e}");
         }
     }
+}
+
+fn production_loader() -> Loader {
+    Box::new(|| {
+        let dir = speedwave_runtime::build::resolve_pii_ner_artifact_dir()
+            .ok_or_else(|| "PII NER artifact directory not found".to_string())?;
+        let preference = match speedwave_runtime::transcription::accel::gpu_class() {
+            speedwave_runtime::transcription::accel::GpuClass::None => DevicePreference::Cpu,
+            _ => DevicePreference::Auto,
+        };
+        let detector = speedwave_pii_ner::load_auto(&dir, preference).map_err(|e| e.to_string())?;
+        Ok(Arc::new(ModelDetector(detector)) as Arc<dyn SpanDetector>)
+    })
+}
+
+struct ModelDetector(Box<dyn Detect>);
+
+impl SpanDetector for ModelDetector {
+    fn detect_batch(&self, texts: &[&str]) -> Result<Vec<Vec<Span>>, String> {
+        self.0
+            .detect_batch(texts, &DetectOptions::default())
+            .map_err(|e| e.to_string())
+    }
+
+    fn description(&self) -> String {
+        format!("{} on {:?}", self.0.description(), self.0.device())
+    }
+}
+
+fn build_router(state: Arc<ServiceState>, max_body: usize) -> Router {
+    Router::new()
+        .route(
+            "/health",
+            get(|| async { ([("content-type", "application/json")], r#"{"status":"ok"}"#) }),
+        )
+        .route("/v1/detect", post(detect))
+        .layer(DefaultBodyLimit::max(max_body))
+        .with_state(state)
+}
+
+async fn detect(
+    State(state): State<Arc<ServiceState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let presented = headers
+        .get(consts::PII_NER_AUTH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !constant_time_eq(presented, &state.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: DetectRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "body must be {\"texts\": [..]}" })),
+            )
+                .into_response();
+        }
+    };
+    let detector = match state.ready() {
+        Ok(d) => d,
+        Err(reason) => return unavailable(reason),
+    };
+    let Ok(_queued) = Arc::clone(&state.queue).try_acquire_owned() else {
+        return unavailable("PII detector queue is full");
+    };
+    let _turn = match state.inference.acquire().await {
+        Ok(permit) => permit,
+        Err(_) => return unavailable("PII detector is shutting down"),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = request.texts.iter().map(String::as_str).collect();
+        detector.detect_batch(&refs)
+    })
+    .await;
+    match result {
+        Ok(Ok(spans)) => Json(DetectResponse { spans }).into_response(),
+        Ok(Err(e)) => {
+            log::error!("PII detector inference failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "detection failed" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            log::error!("PII detector task panicked: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "detection failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn unavailable(reason: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(axum::http::header::RETRY_AFTER, RETRY_AFTER_SECS)],
+        Json(serde_json::json!({ "error": reason })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -579,33 +627,186 @@ mod tests {
         service.stop().unwrap();
     }
 
+    fn fake_loader() -> Loader {
+        Box::new(|| Ok(Arc::new(FakeDetector) as Arc<dyn SpanDetector>))
+    }
+
+    fn running_port(shared: &SharedPiiNer) -> Option<u16> {
+        shared.lock().unwrap().as_ref().map(PiiNerService::port)
+    }
+
     #[test]
     #[serial_test::parallel(host_addressing)]
-    fn apply_state_starts_when_wanted_and_stops_when_no_project_wants_it() {
+    fn start_if_wanted_starts_once_and_never_stops() {
         let tmp = tempfile::tempdir().unwrap();
-        let loader =
-            || -> Loader { Box::new(|| Ok(Arc::new(FakeDetector) as Arc<dyn SpanDetector>)) };
-        let shared: SharedPiiNer = SharedPiiNer::default();
+        let shared = SharedPiiNer::default();
         let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
 
-        apply_state(&shared, tmp.path(), false, loader);
-        assert!(shared.lock().unwrap().is_none());
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        assert!(running_port(&shared).is_none());
         assert!(!lock_path.exists());
 
-        apply_state(&shared, tmp.path(), true, loader);
-        let port = shared.lock().unwrap().as_ref().unwrap().port();
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        let port = running_port(&shared).unwrap();
         assert!(lock_path.exists());
 
-        apply_state(&shared, tmp.path(), true, loader);
-        assert_eq!(
-            shared.lock().unwrap().as_ref().unwrap().port(),
-            port,
-            "a second apply must not restart a running service"
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StartIfWanted,
+            fake_loader,
         );
+        assert_eq!(running_port(&shared), Some(port));
 
-        apply_state(&shared, tmp.path(), false, loader);
-        assert!(shared.lock().unwrap().is_none());
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        assert_eq!(running_port(&shared), Some(port));
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn stop_unless_wanted_stops_when_unwanted_and_never_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = SharedPiiNer::default();
+        let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StopUnlessWanted,
+            fake_loader,
+        );
+        assert!(running_port(&shared).is_none());
         assert!(!lock_path.exists());
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        let port = running_port(&shared).unwrap();
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StopUnlessWanted,
+            fake_loader,
+        );
+        assert_eq!(running_port(&shared), Some(port));
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StopUnlessWanted,
+            fake_loader,
+        );
+        assert!(running_port(&shared).is_none());
+        assert!(!lock_path.exists());
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StopUnlessWanted,
+            fake_loader,
+        );
+        assert!(running_port(&shared).is_none());
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn a_failed_switch_to_a_detector_off_project_keeps_the_port_the_previous_proxy_uses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = SharedPiiNer::default();
+        let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        let port = running_port(&shared).unwrap();
+        let lock_before = std::fs::read_to_string(&lock_path).unwrap();
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        assert_eq!(running_port(&shared), Some(port));
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), lock_before);
+    }
+
+    #[test]
+    #[serial_test::parallel(host_addressing)]
+    fn a_successful_switch_to_a_detector_off_project_stops_the_service_and_a_later_start_reuses_the_token(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = SharedPiiNer::default();
+        let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
+        let token_path = tmp.path().join(consts::PII_NER_AUTH_TOKEN_FILE);
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        let first_token = std::fs::read_to_string(&token_path).unwrap();
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        apply_state(
+            &shared,
+            tmp.path(),
+            false,
+            Transition::StopUnlessWanted,
+            fake_loader,
+        );
+        assert!(running_port(&shared).is_none());
+        assert!(!lock_path.exists());
+
+        apply_state(
+            &shared,
+            tmp.path(),
+            true,
+            Transition::StartIfWanted,
+            fake_loader,
+        );
+        assert!(lock_path.exists());
+        assert_eq!(std::fs::read_to_string(&token_path).unwrap(), first_token);
     }
 
     #[test]

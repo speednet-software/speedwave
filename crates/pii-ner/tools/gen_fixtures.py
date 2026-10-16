@@ -1,4 +1,4 @@
-"""Reference fixtures for tests/model_e2e.rs and a numeric check of the converted weights.
+"""Reference fixtures for src/model_e2e_tests.rs and a numeric check of the converted weights.
 
 Dev-only: needs numpy, tokenizers and ai-edge-litert (tools/requirements-dev.txt).
 """
@@ -115,8 +115,7 @@ class NumpyPort:
         return x @ self.dequant(base).T + self.f32(f"{base}.bias")
 
     def layer_norm(self, x: np.ndarray, base: str) -> tuple[np.ndarray, np.ndarray]:
-        """Returns (normalized, affine): the exporter feeds the next linear layers with the
-        un-scaled normalization and keeps gamma/beta only on the residual stream."""
+        """Returns (normalized, affine) layer-norm outputs."""
         mean = x.mean(axis=-1, keepdims=True)
         var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
         normalized = (x - mean) / np.sqrt(var + self.cfg["layer_norm_eps"])

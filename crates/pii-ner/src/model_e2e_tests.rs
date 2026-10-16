@@ -1,12 +1,4 @@
-//! Compares the burn port against reference outputs of the original tflite model.
-//!
-//! Fixtures in `tests/fixtures/` are produced by `tools/gen_fixtures.py`; the artifact
-//! directory comes from `SPEEDWAVE_PII_NER_ARTIFACT` (see `make test-pii-ner-model`).
-//!
-//! Three gates per fixture: tokens are identical, classifier output is close (int8 weights
-//! and a different kernel order move probabilities by a few hundredths, so spans that sit
-//! on a threshold may flip), post-processing of the reference windows is identical, and
-//! `detect` equals `predict_windows` followed by `spans_from_windows`.
+//! Compares the burn port against the reference tflite outputs in `tests/fixtures/`.
 
 #![expect(
     clippy::expect_used,
@@ -15,9 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use speedwave_pii_ner::{
-    CpuBackend, Detect, DetectOptions, Detector, Device, Label, Span, WindowPrediction,
-};
+use crate::backend::{CpuBackend, Device};
+use crate::label::Label;
+use crate::pipeline::{Detector, WindowPrediction};
+use crate::span::{DetectOptions, Span};
+use crate::Detect;
 
 #[derive(serde::Deserialize)]
 struct Fixture {

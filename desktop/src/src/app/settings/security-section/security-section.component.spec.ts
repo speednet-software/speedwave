@@ -73,7 +73,6 @@ function baseResponse(overrides: Partial<SecurityPolicyResponse> = {}): Security
     effective_rules: effectiveRulesFrom(allCategories()),
     custom_policies: [],
     ner_enabled: false,
-    ner_forced: false,
     ...overrides,
   };
 }
@@ -175,7 +174,6 @@ describe('SecuritySectionComponent', () => {
       ) as HTMLInputElement;
       expect(checkbox.checked).toBe(true);
       expect(checkbox.disabled).toBe(false);
-      expect(fixture.nativeElement.querySelector('[data-testid="security-ner-forced"]')).toBeNull();
 
       component.toggleNer(checkboxEvent(false));
       const spy = vi.spyOn(mockTauri, 'invoke');
@@ -185,28 +183,47 @@ describe('SecuritySectionComponent', () => {
       expect(update.ner_enabled).toBe(false);
     });
 
-    it('an MDM-set switch is locked, badged, and never sent back', async () => {
-      setup(baseResponse({ ner_enabled: true, ner_forced: true }));
+    it('renders the Desert Ant Labs credit and opens it through open_url', async () => {
+      setup(baseResponse());
       await create();
       component.ngOnInit();
       await fixture.whenStable();
       fixture.detectChanges();
-      const checkbox = fixture.nativeElement.querySelector(
-        '[data-testid="security-ner-enabled"]'
-      ) as HTMLInputElement;
-      expect(checkbox.checked).toBe(true);
-      expect(checkbox.disabled).toBe(true);
+      const link = fixture.nativeElement.querySelector(
+        '[data-testid="security-ner-credit-link"]'
+      ) as HTMLAnchorElement;
+      expect(link.getAttribute('href')).toBe('https://desertant.com');
+      expect(link.textContent).toContain('Desert Ant Labs');
       expect(
-        fixture.nativeElement.querySelector('[data-testid="security-ner-forced"]')
-      ).not.toBeNull();
+        fixture.nativeElement.querySelector('[data-testid="security-ner-credit"]').textContent
+      ).toContain('Powered by');
 
-      component.toggleNer(checkboxEvent(false));
-      expect(component.nerEnabled()).toBe(true);
       const spy = vi.spyOn(mockTauri, 'invoke');
-      await component.save();
-      const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
-      const update = (call?.[1] as { update: SecurityPolicyUpdate }).update;
-      expect(update.ner_enabled).toBe(false);
+      link.click();
+      await fixture.whenStable();
+      expect(spy).toHaveBeenCalledWith('open_url', { url: 'https://desertant.com' });
+    });
+
+    it('surfaces an open_url failure from the Desert Ant Labs credit', async () => {
+      setup(baseResponse());
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      const emitted: string[] = [];
+      component.errorOccurred.subscribe((m) => emitted.push(m));
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd, args) => {
+        if (cmd === 'open_url') throw new Error('no browser');
+        return base ? base(cmd, args) : undefined;
+      };
+      const link = fixture.nativeElement.querySelector(
+        '[data-testid="security-ner-credit-link"]'
+      ) as HTMLAnchorElement;
+      link.click();
+      await fixture.whenStable();
+      expect(component.error()).toBe('no browser');
+      expect(emitted).toContain('no browser');
     });
   });
 

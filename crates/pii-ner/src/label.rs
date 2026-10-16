@@ -94,11 +94,6 @@ impl Label {
             .map(|(_, name)| *name)
             .unwrap_or("ORG")
     }
-
-    /// Labels that name a person; used by name-aware post-processing.
-    pub fn is_name_family(self) -> bool {
-        matches!(self, Label::GivenName | Label::Surname)
-    }
 }
 
 impl fmt::Display for Label {
@@ -228,13 +223,5 @@ mod tests {
             LabelSet::from_names(&bad),
             Err(LoadError::Labels(_))
         ));
-    }
-
-    #[test]
-    fn name_family_covers_given_and_surname_only() {
-        assert!(Label::GivenName.is_name_family());
-        assert!(Label::Surname.is_name_family());
-        assert!(!Label::Org.is_name_family());
-        assert!(!Label::Email.is_name_family());
     }
 }

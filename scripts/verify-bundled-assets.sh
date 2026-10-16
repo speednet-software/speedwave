@@ -80,6 +80,7 @@ require_non_empty_dir "$root/mcp-os/shared/node_modules"
 require_file "$root/pii-ner/manifest.json"
 require_file "$root/pii-ner/redact-bert.safetensors"
 require_file "$root/pii-ner/tokenizer.json"
+require_file "$root/pii-ner/THIRD_PARTY_NOTICES.md"
 require_non_empty_dir "$root/THIRD-PARTY-LICENSES"
 
 case "$platform" in

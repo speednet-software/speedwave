@@ -337,8 +337,7 @@ def layer_norm_affine(graph: Graph, rsqrt: tr.Operator, hidden: int) -> tuple[Op
 
 
 def check_affine_split(graph: Graph, gamma_mul: tr.Operator, beta_add: tr.Operator) -> None:
-    """The exporter folds gamma/beta into the following linear layers: those must read the
-    normalization before the affine step, and nothing linear may read the affine output."""
+    """Checks that linear layers read the normalization, never the affine output."""
     normalized = graph.dynamic_inputs(gamma_mul)[0]
     reads_plain = any(c.opcode == tr.OP_FULLY_CONNECTED for c in graph.consumers.get(normalized, []))
     reads_affine = any(

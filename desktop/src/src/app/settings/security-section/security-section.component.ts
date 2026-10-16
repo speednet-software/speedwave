@@ -26,6 +26,8 @@ import type {
   SecurityPolicyUpdate,
 } from '../../models/security-policy';
 
+const DESERT_ANT_URL = 'https://desertant.com';
+
 /** Editable row for a custom detection pattern (server derives the rule id). */
 interface CustomPatternRow {
   displayName: string;
@@ -95,21 +97,12 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
               type="checkbox"
               class="mt-0.5 accent-[var(--accent)]"
               [checked]="nerEnabled()"
-              [disabled]="nerForced()"
               (change)="toggleNer($event)"
               data-testid="security-ner-enabled"
             />
             <div class="min-w-0 flex-1">
               <div class="text-[12px] font-medium text-[var(--ink)]">
                 On-device name and address detection
-                @if (nerForced()) {
-                  <span
-                    class="mono ml-1 rounded bg-[var(--bg-3)] px-1.5 py-0.5 text-[10px] text-[var(--ink-dim)]"
-                    data-testid="security-ner-forced"
-                  >
-                    Enforced by organization
-                  </span>
-                }
               </div>
               <div class="text-[11px] text-[var(--ink-dim)]">
                 Catches names, addresses and ids the patterns miss. Message text is analysed by the
@@ -117,6 +110,16 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
               </div>
             </div>
           </label>
+          <div class="px-3 text-[11px] text-[var(--ink-dim)]" data-testid="security-ner-credit">
+            Powered by
+            <a
+              [href]="desertAntUrl"
+              class="text-[var(--accent)] hover:underline"
+              data-testid="security-ner-credit-link"
+              (click)="openDesertAnt($event)"
+              >Desert Ant Labs</a
+            >
+          </div>
 
           <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
             Policies
@@ -393,6 +396,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
+  readonly desertAntUrl = DESERT_ANT_URL;
   readonly templates = signal<SecurityPolicyTemplateInfo[]>([]);
   /** Every known PII rule id + label, fetched from the library (`list_pii_rules`). */
   readonly categories = signal<PiiRuleInfo[]>([]);
@@ -412,8 +416,6 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   readonly customPolicies = signal<CustomPolicyRow[]>([]);
   /** The on-device detector switch for the active project. */
   readonly nerEnabled = signal(false);
-  /** True when MDM set the detector switch: checkbox locked, badge shown. */
-  readonly nerForced = signal(false);
 
   private readonly loadedFormSnapshot = signal('');
   private nextRowKey = 0;
@@ -500,7 +502,6 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
 
   private applyPolicy(policy: SecurityPolicyResponse): void {
     this.nerEnabled.set(policy.ner_enabled);
-    this.nerForced.set(policy.ner_forced);
     this.forcedPolicies.set(new Set(policy.forced_policies));
     this.enabledPolicies.set(new Set(policy.enabled_policies));
     this.effectiveCategories.set(
@@ -562,12 +563,24 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Toggles the on-device detector; an MDM-forced switch ignores the event.
+   * Toggles the on-device detector.
    * @param ev - the checkbox change event.
    */
   toggleNer(ev: Event): void {
-    if (this.nerForced()) return;
     this.nerEnabled.set(eventChecked(ev));
+  }
+
+  /**
+   * Opens the Desert Ant Labs credit link in the system browser.
+   * @param ev - the click event, default navigation is suppressed.
+   */
+  async openDesertAnt(ev: Event): Promise<void> {
+    ev.preventDefault();
+    try {
+      await this.tauri.invoke('open_url', { url: DESERT_ANT_URL });
+    } catch (e: unknown) {
+      this.emitError(e);
+    }
   }
 
   /**
@@ -881,7 +894,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         caseSensitive: k.caseSensitive,
       })),
     }));
-    return { policies, custom_policies, ner_enabled: this.nerEnabled() && !this.nerForced() };
+    return { policies, custom_policies, ner_enabled: this.nerEnabled() };
   }
 
   /** Persists the enabled policies + custom definitions, then requests a restart. */

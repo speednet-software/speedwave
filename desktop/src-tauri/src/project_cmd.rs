@@ -81,6 +81,7 @@ pub(crate) async fn switch_project(
                 log::info!(
                     "switch_project: '{proj}' has no LLM provider — skipping container start"
                 );
+                crate::pii_ner_service::stop_service();
                 return Ok(());
             }
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
@@ -125,6 +126,7 @@ pub(crate) async fn switch_project(
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
     }
+    crate::pii_ner_service::stop_unless_active_wants();
 
     let _ = app.emit(
         "project_switch_succeeded",

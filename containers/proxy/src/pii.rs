@@ -120,11 +120,8 @@ pub struct ScanReport {
     pub external: Vec<Detection>,
 }
 
-/// Object keys whose string values are protocol plumbing or binary payloads, never prose:
-/// block ids and `type` discriminators carry no PII, and `data` / `signature` hold base64
-/// (an attached image is megabytes, which would be thousands of detector windows and, over
-/// the request cap, would drop the whole request back to rules only). The rule engine still
-/// scans them; only the neural detector skips them.
+/// Object keys holding protocol plumbing or base64 payloads; the neural detector skips them,
+/// the rule engine still scans them.
 const NON_PROSE_LEAF_KEYS: &[&str] = &[
     "type",
     "id",
@@ -136,17 +133,8 @@ const NON_PROSE_LEAF_KEYS: &[&str] = &[
     "file_id",
 ];
 
-/// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then each
-/// `messages[].content`. The detector receives exactly this list and answers per leaf; leaves it
-/// must not see are blanked, which keeps the indices aligned and costs no detection.
-///
-/// `system` is blanked whole. It is the client's own scaffolding, not anything a user typed, and
-/// rewriting it breaks the client: the detector reads "Claude" in "You are a Claude agent, built
-/// on Anthropic's Claude Agent SDK" as a GIVEN_NAME at 0.95, so every request went upstream with
-/// a sealed preamble and Anthropic answered `rate_limit_error` on the OAuth leg (SPEED-521,
-/// measured 2026-09-16: same session, same account, 429 on every attempt with the label on and
-/// 200 on every attempt with it off). The rule engine still scans `system`; its patterns match
-/// values, not words, so they leave the scaffolding intact.
+/// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then
+/// each `messages[].content`. Leaves the detector must not see (`system`) are blanked in place.
 pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
     let mut leaves = Vec::new();
     if let Some(system) = body.get("system") {

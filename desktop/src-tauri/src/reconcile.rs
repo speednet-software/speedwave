@@ -593,6 +593,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                             "stopping {} running project(s) before resources sync",
                             running.len()
                         );
+                        crate::pii_ner_service::stop_service();
                         if let Err(e) = stop_projects(&running, &rt) {
                             log::warn!("pre-sync project stop incomplete: {e}");
                         }
@@ -835,6 +836,8 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             log::debug!("no containers running, skipping compose port reconcile");
             return;
         }
+
+        crate::pii_ner_service::start_if_active_wants();
 
         let data_dir = speedwave_runtime::consts::data_dir();
         let lock_path = data_dir.join(speedwave_runtime::consts::MCP_OS_LOCK_FILE);

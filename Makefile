@@ -498,7 +498,7 @@ clean-pii-ner-model:
 
 test-pii-ner-model: guard-not-prod-data-dir prepare-pii-ner-model
 	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR) --verify
-	$(call RUN_CARGO_ISOLATED,env SPEEDWAVE_PII_NER_ARTIFACT="$(CURDIR)/$(PII_NER_ARTIFACT_DIR)" cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e)
+	$(call RUN_CARGO_ISOLATED,env SPEEDWAVE_PII_NER_ARTIFACT="$(CURDIR)/$(PII_NER_ARTIFACT_DIR)" cargo test -p speedwave-pii-ner --features model-e2e --lib model_e2e)
 	@echo "✅ pii-ner model e2e passed"
 
 bench-pii-ner: prepare-pii-ner-model

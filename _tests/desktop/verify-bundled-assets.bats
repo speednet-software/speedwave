@@ -41,6 +41,7 @@ populate_common() {
     write_file "$ROOT/pii-ner/manifest.json" "{}"
     write_file "$ROOT/pii-ner/redact-bert.safetensors"
     write_file "$ROOT/pii-ner/tokenizer.json" "{}"
+    write_file "$ROOT/pii-ner/THIRD_PARTY_NOTICES.md"
 }
 
 populate_macos() {

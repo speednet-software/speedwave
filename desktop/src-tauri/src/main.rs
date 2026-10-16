@@ -711,6 +711,7 @@ fn main() {
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
     reconcile::set_global_plugin_bridges(plugin_bridges.clone());
+    pii_ner_service::set_global_pii_ner(pii_ner.clone());
 
     let tray_available = Arc::new(AtomicBool::new(false));
     let tray_available_setup = tray_available.clone();
@@ -839,7 +840,6 @@ fn main() {
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
-        .manage(pii_ner.clone())
         .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(transcript_store.clone())
@@ -909,11 +909,6 @@ fn main() {
                 crate::bridges::plugin_bridge_manager::init_and_start(
                     &plugin_bridges,
                     app.handle(),
-                );
-
-                pii_ner_service::apply_desired_state(
-                    &pii_ner,
-                    speedwave_runtime::consts::data_dir(),
                 );
 
                 let script = speedwave_runtime::build::resolve_mcp_os_script();

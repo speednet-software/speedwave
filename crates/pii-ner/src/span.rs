@@ -5,17 +5,15 @@ use std::num::NonZeroUsize;
 use crate::label::Label;
 
 /// Model window length in tokens, including `<s>` and `</s>`.
-pub const SEQ_LEN: usize = 256;
+pub(crate) const SEQ_LEN: usize = 256;
 /// Content tokens per window.
 pub const MAX_CONTENT: usize = SEQ_LEN - 2;
 /// Token overlap between consecutive windows.
-pub const STRIDE: usize = 64;
+pub(crate) const STRIDE: usize = 64;
 /// Token distance between consecutive window starts.
-pub const WINDOW_STEP: usize = MAX_CONTENT - STRIDE;
+pub(crate) const WINDOW_STEP: usize = MAX_CONTENT - STRIDE;
 /// Default confidence a span needs to be reported.
-pub const DEFAULT_MIN_SCORE: f32 = 0.6;
-/// Tokens below this probability are treated as `O` before BIOES decoding.
-pub const LOW_SCORE: f32 = 0.3;
+pub(crate) const DEFAULT_MIN_SCORE: f32 = 0.6;
 
 /// A detected entity, with UTF-8 byte offsets into the input text (end exclusive).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

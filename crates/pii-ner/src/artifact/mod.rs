@@ -14,9 +14,9 @@ pub(crate) use weights::Weights;
 use crate::error::LoadError;
 
 /// Artifact layout version this crate reads.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub(crate) const ARTIFACT_FORMAT_VERSION: u32 = 1;
 /// SHA-256 of the `redact.tflite` release the converter pins (`tools/pins.json`).
-pub const SOURCE_TFLITE_SHA256: &str =
+pub(crate) const SOURCE_TFLITE_SHA256: &str =
     "ee36727f07e3237569e71427bfe661463a82e526f7e97e92b0fa583cad16ed27";
 
 /// A verified artifact directory with its manifest and weight bytes in memory.

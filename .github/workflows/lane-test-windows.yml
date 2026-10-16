@@ -35,7 +35,7 @@ jobs:
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner --verify
-          SPEEDWAVE_PII_NER_ARTIFACT="$GITHUB_WORKSPACE/desktop/src-tauri/pii-ner" cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e
+          SPEEDWAVE_PII_NER_ARTIFACT="$GITHUB_WORKSPACE/desktop/src-tauri/pii-ner" cargo test -p speedwave-pii-ner --features model-e2e --lib model_e2e
           "$PY" -m unittest discover -s crates/pii-ner/tools -p 'test_*.py'
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout

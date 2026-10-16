@@ -2945,6 +2945,19 @@ mod tests {
     }
 
     #[test]
+    fn host_gateway_alias_matches_proxy_ner_rs() {
+        let src = include_str!("../../../containers/proxy/src/ner.rs");
+        let re = regex::Regex::new(r#"const HOST_GATEWAY_ALIAS: &str = "([^"]+)";"#).unwrap();
+        let cap = re
+            .captures(src)
+            .expect("containers/proxy/src/ner.rs must declare `const HOST_GATEWAY_ALIAS`");
+        assert_eq!(
+            &cap[1], HOST_GATEWAY_ALIAS,
+            "proxy HOST_GATEWAY_ALIAS must match consts::HOST_GATEWAY_ALIAS"
+        );
+    }
+
+    #[test]
     fn plugin_settings_file_matches_mcp_shared_ts() {
         let src = include_str!("../../../mcp-servers/shared/src/security.ts");
         let re =

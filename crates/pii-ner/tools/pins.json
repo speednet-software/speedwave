@@ -15,6 +15,10 @@
     },
     "redact_meta.json": {
       "sha256": "9aba44b6d583f85322e8ebad22c8ff140003c1b462993b17c0fe4da9c8ca71e4"
+    },
+    "THIRD_PARTY_NOTICES.md": {
+      "sha256": "14348d2a1072f772267b91d13a2713cfa8dcf2a56add09774c3772a43230ac60",
+      "size": 2281
     }
   }
 }

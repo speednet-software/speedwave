@@ -1,8 +1,5 @@
 //! The BERT token classifier assembled from burn `nn` building blocks.
-//!
-//! Every LayerNorm is split like in the exported graph: gamma and beta are folded into the
-//! following linear layers, so those read the plain normalization while the residual stream
-//! keeps the affine output; the classifier reads the plain normalization of the last layer.
+//! Every LayerNorm is split as in the exported graph: gamma and beta fold into the next linears.
 
 mod attention;
 pub(crate) mod build;

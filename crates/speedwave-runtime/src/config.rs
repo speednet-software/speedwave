@@ -894,9 +894,6 @@ pub struct ManagedPiiPolicyConfig {
     /// Policy ids forced on regardless of the user's own selection.
     #[serde(default)]
     pub forced_policies: Vec<String>,
-    /// Forces the neural detector on or off; presence locks the setting in the UI.
-    #[serde(default)]
-    pub ner_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1678,9 +1675,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
     } else {
         Ok(crate::pii_policy::disabled_policy())
     };
-    let pii_ner_enabled =
-        crate::pii_policy::resolve_pii_ner(pii_feature_enabled, project_policy, managed_pii_policy)
-            .enabled;
+    let pii_ner_enabled = crate::pii_policy::resolve_pii_ner(pii_feature_enabled, project_policy);
 
     let claude = ResolvedClaudeConfig {
         env,
@@ -5969,15 +5964,13 @@ mod tests {
     }
 
     #[test]
-    fn managed_pii_policy_reads_the_detector_switch() {
-        let forced: ManagedPiiPolicyConfig =
-            serde_json::from_str(r#"{"ner_enabled":false}"#).unwrap();
-        assert_eq!(forced.ner_enabled, Some(false));
-        assert!(forced.forced_policies.is_empty());
+    fn managed_pii_policy_rejects_a_detector_switch() {
+        let rejected = serde_json::from_str::<ManagedPiiPolicyConfig>(r#"{"ner_enabled":false}"#);
+        assert!(rejected.is_err());
 
-        let absent: ManagedPiiPolicyConfig =
+        let forced: ManagedPiiPolicyConfig =
             serde_json::from_str(r#"{"forced_policies":["strict"]}"#).unwrap();
-        assert_eq!(absent.ner_enabled, None);
+        assert_eq!(forced.forced_policies, vec!["strict".to_string()]);
     }
 
     #[test]
@@ -6195,7 +6188,6 @@ mod tests {
         };
         let managed = ManagedPiiPolicyConfig {
             forced_policies: vec!["gdpr-art32".to_string()],
-            ner_enabled: None,
         };
         let (claude, _) = resolve_project_config_in_with_managed(
             tmp.path(),
@@ -6240,7 +6232,6 @@ mod tests {
         };
         let managed = ManagedPiiPolicyConfig {
             forced_policies: vec!["not-a-real-policy".to_string()],
-            ner_enabled: None,
         };
         let (claude, _) = resolve_project_config_in_with_managed(
             tmp.path(),

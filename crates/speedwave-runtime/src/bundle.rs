@@ -114,6 +114,10 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "pii-ner/tokenizer.json",
         kind: BundledAssetKind::File,
     },
+    BundledAssetSpec {
+        path: "pii-ner/THIRD_PARTY_NOTICES.md",
+        kind: BundledAssetKind::File,
+    },
 ];
 
 const MACOS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
@@ -1497,6 +1501,7 @@ mod tests {
         std::fs::write(root.join("pii-ner/manifest.json"), "{}").unwrap();
         std::fs::write(root.join("pii-ner/redact-bert.safetensors"), "binary").unwrap();
         std::fs::write(root.join("pii-ner/tokenizer.json"), "{}").unwrap();
+        std::fs::write(root.join("pii-ner/THIRD_PARTY_NOTICES.md"), "notices").unwrap();
         std::fs::write(
             root.join("mcp-os/shared/node_modules/pkg/index.js"),
             "module.exports = {};",
@@ -2069,6 +2074,7 @@ mod tests {
         std::fs::write(temp.path().join("pii-ner/manifest.json"), "").unwrap();
         std::fs::write(temp.path().join("pii-ner/redact-bert.safetensors"), "").unwrap();
         std::fs::write(temp.path().join("pii-ner/tokenizer.json"), "").unwrap();
+        std::fs::write(temp.path().join("pii-ner/THIRD_PARTY_NOTICES.md"), "").unwrap();
 
         validate_bundled_runtime_assets(temp.path(), "macos", true).unwrap();
     }

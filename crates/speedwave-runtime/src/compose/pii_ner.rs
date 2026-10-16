@@ -251,4 +251,26 @@ mod tests {
         assert_eq!(ner_url_state(r#"{"routes":[]}"#, None), NerUrlState::Absent);
         assert_eq!(ner_url_state("not json", None), NerUrlState::Stale);
     }
+
+    fn declared_confidence(src: &str, pattern: &str) -> f32 {
+        let re = regex::Regex::new(pattern).unwrap();
+        let cap = re
+            .captures(src)
+            .expect("source must declare the confidence default");
+        cap[1].parse().unwrap()
+    }
+
+    #[test]
+    fn min_confidence_matches_proxy_ner_rs() {
+        let src = include_str!("../../../../containers/proxy/src/ner.rs");
+        let proxy = declared_confidence(src, r"const DEFAULT_MIN_CONFIDENCE: f32 = ([0-9.]+);");
+        assert_eq!(proxy, DEFAULT_NER_MIN_CONFIDENCE);
+    }
+
+    #[test]
+    fn min_confidence_matches_pii_ner_default_min_score() {
+        let src = include_str!("../../../pii-ner/src/span.rs");
+        let detector = declared_confidence(src, r"const DEFAULT_MIN_SCORE: f32 = ([0-9.]+);");
+        assert_eq!(detector, DEFAULT_NER_MIN_CONFIDENCE);
+    }
 }

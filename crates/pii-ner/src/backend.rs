@@ -11,9 +11,9 @@ use crate::pipeline::Detector;
 use crate::Detect;
 
 /// CPU backend used for tests, CI and hosts without a usable GPU.
-pub type CpuBackend = burn::backend::NdArray<f32>;
+pub(crate) type CpuBackend = burn::backend::NdArray<f32>;
 /// GPU backend: Metal on macOS, Vulkan or DirectX 12 on Windows, chosen by wgpu.
-pub type GpuBackend = burn::backend::Wgpu<f32, i32>;
+type GpuBackend = burn::backend::Wgpu<f32, i32>;
 
 /// Where a detector runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -38,7 +38,7 @@ pub enum DevicePreference {
 }
 
 /// Initializes the default wgpu adapter on a helper thread; `None` when wgpu finds no adapter.
-pub fn gpu_device() -> Option<WgpuDevice> {
+fn gpu_device() -> Option<WgpuDevice> {
     std::thread::Builder::new()
         .name("pii-ner-gpu-probe".to_string())
         .spawn(|| {
@@ -49,11 +49,6 @@ pub fn gpu_device() -> Option<WgpuDevice> {
         .ok()?
         .join()
         .ok()
-}
-
-/// True when a GPU adapter can be initialized.
-pub fn gpu_available() -> bool {
-    gpu_device().is_some()
 }
 
 /// Loads the artifact on the preferred device, falling back to CPU under `Auto`.

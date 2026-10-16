@@ -21,6 +21,7 @@ ARTIFACT_FORMAT_VERSION = 1
 WEIGHTS_FILE = "redact-bert.safetensors"
 TOKENIZER_FILE = "tokenizer.json"
 MANIFEST_FILE = "manifest.json"
+NOTICES_FILE = "THIRD_PARTY_NOTICES.md"
 PIPELINE_DEFAULTS = {"max_content": 254, "stride": 64, "min_score": 0.6, "low_score": 0.3}
 EXPECTED_LABEL_COUNT = 89
 
@@ -106,7 +107,8 @@ def check_meta(path: Path) -> None:
 def artifact_is_current(out: Path, pins: dict) -> bool:
     manifest_path = out / MANIFEST_FILE
     weights_path = out / WEIGHTS_FILE
-    if not manifest_path.exists() or not weights_path.exists() or not (out / TOKENIZER_FILE).exists():
+    bundled = (weights_path, out / TOKENIZER_FILE, out / NOTICES_FILE)
+    if not manifest_path.exists() or not all(path.exists() for path in bundled):
         return False
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -114,6 +116,7 @@ def artifact_is_current(out: Path, pins: dict) -> bool:
         manifest.get("artifact_format_version") == ARTIFACT_FORMAT_VERSION
         and manifest.get("model", {}).get("source_tflite_sha256") == pins["files"]["redact.tflite"]["sha256"]
         and manifest.get("files", {}).get("weights_sha256") == sha256_of(weights_path)
+        and sha256_of(out / NOTICES_FILE) == pins["files"][NOTICES_FILE]["sha256"]
     )
 
 
@@ -131,6 +134,7 @@ def convert(pins: dict, sources: dict[str, Path], out: Path) -> dict:
         {"format": "speedwave-pii-ner", "format_version": str(ARTIFACT_FORMAT_VERSION), "linear_layout": "out_in"},
     )
     shutil.copyfile(sources["tokenizer.json"], out / TOKENIZER_FILE)
+    shutil.copyfile(sources[NOTICES_FILE], out / NOTICES_FILE)
     manifest = {
         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
         "model": {
@@ -174,6 +178,7 @@ def verify_artifact(out: Path, pins: dict) -> list[str]:
         problems.append("weights sha256 differs from manifest")
     if sha256_of(out / manifest["files"]["tokenizer"]) != manifest["files"]["tokenizer_sha256"]:
         problems.append("tokenizer sha256 differs from manifest")
+    problems.extend(verify_artifact_notices(out, pins))
     header = read_safetensors_header(weights_path)
     tensor_names = {k for k in header if k != "__metadata__"}
     cfg = manifest["config"]
@@ -208,6 +213,15 @@ def verify_artifact(out: Path, pins: dict) -> list[str]:
     if header["bert.embeddings.position_embeddings.weight"]["shape"] != [cfg["max_seq_len"], cfg["hidden_size"]]:
         problems.append("position embedding shape mismatch")
     return problems
+
+
+def verify_artifact_notices(out: Path, pins: dict) -> list[str]:
+    path = out / NOTICES_FILE
+    if not path.exists():
+        return [f"{NOTICES_FILE} missing"]
+    if sha256_of(path) != pins["files"][NOTICES_FILE]["sha256"]:
+        return [f"{NOTICES_FILE} sha256 differs from pins.json"]
+    return []
 
 
 def main(argv: list[str]) -> int:

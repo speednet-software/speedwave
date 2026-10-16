@@ -26,7 +26,7 @@ use tokenize::{Token, TokenizerWrapper};
 use windows::{encode_window, window_ranges, Window};
 
 /// A ready model on one backend.
-pub struct Detector<B: Backend> {
+pub(crate) struct Detector<B: Backend> {
     model: BertTokenClassifier<B>,
     tokenizer: TokenizerWrapper,
     labels: LabelSet,
@@ -38,27 +38,21 @@ pub struct Detector<B: Backend> {
 }
 
 /// One token of the input with its UTF-8 byte offsets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct TokenInfo {
-    /// Vocabulary id.
-    pub id: u32,
-    /// First byte in the input.
-    pub start: usize,
-    /// One past the last byte in the input.
-    pub end: usize,
+#[cfg(all(test, feature = "model-e2e"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TokenInfo {
+    pub(crate) id: u32,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 /// Raw classifier output for one window, before BIOES decoding.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct WindowPrediction {
-    /// Token indices this window covers.
-    pub token_range: Range<usize>,
-    /// Positions filled with real tokens, including `<s>` and `</s>`.
-    pub real_len: usize,
-    /// Best class per real position.
-    pub classes: Vec<usize>,
-    /// Softmax probability of the best class per real position.
-    pub probs: Vec<f32>,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WindowPrediction {
+    pub(crate) token_range: Range<usize>,
+    pub(crate) real_len: usize,
+    pub(crate) classes: Vec<usize>,
+    pub(crate) probs: Vec<f32>,
 }
 
 struct Job {
@@ -69,7 +63,7 @@ struct Job {
 
 impl<B: Backend> Detector<B> {
     /// Loads the artifact directory onto `device`.
-    pub fn load(
+    pub(crate) fn load(
         artifact_dir: &Path,
         device: B::Device,
         device_kind: Device,
@@ -104,18 +98,9 @@ impl<B: Backend> Detector<B> {
         })
     }
 
-    /// Model name, version and size, for logs and diagnostics.
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    /// Which device class runs this detector.
-    pub fn device_kind(&self) -> Device {
-        self.device_kind
-    }
-
     /// Tokens of `text` with byte offsets.
-    pub fn tokenize(&self, text: &str) -> Result<Vec<TokenInfo>, DetectError> {
+    #[cfg(all(test, feature = "model-e2e"))]
+    pub(crate) fn tokenize(&self, text: &str) -> Result<Vec<TokenInfo>, DetectError> {
         Ok(self
             .tokenizer
             .encode(text)?
@@ -129,7 +114,8 @@ impl<B: Backend> Detector<B> {
     }
 
     /// Raw per-window classifier output for one text; the diagnostic view behind `detect`.
-    pub fn predict_windows(
+    #[cfg(test)]
+    pub(crate) fn predict_windows(
         &self,
         text: &str,
         opts: &DetectOptions,
@@ -139,9 +125,9 @@ impl<B: Backend> Detector<B> {
         self.predict_jobs(&jobs, opts)
     }
 
-    /// Spans from classifier output for `text`, as produced by `predict_windows`; `detect` is
-    /// `predict_windows` followed by this step.
-    pub fn spans_from_windows(
+    /// Spans from classifier output for `text`, as produced by `predict_windows`.
+    #[cfg(test)]
+    pub(crate) fn spans_from_windows(
         &self,
         text: &str,
         windows: &[WindowPrediction],
@@ -432,7 +418,7 @@ mod tests {
     fn loads_tiny_artifact_and_reports_description() {
         let (_dir, detector) = detector();
         assert!(detector.description().starts_with("test 0"));
-        assert_eq!(detector.device_kind(), Device::Cpu);
+        assert_eq!(detector.device(), Device::Cpu);
     }
 
     #[test]
